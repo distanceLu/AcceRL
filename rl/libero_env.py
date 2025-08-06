@@ -51,9 +51,6 @@ class LiberoEnvWrapper(gym.Env):
     - 处理发送给模拟器的动作格式。
     - 管理每个 episode 的初始状态。
     """
-
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 10}
-
     def __init__(
         self,
         benchmark_name: str,
@@ -178,6 +175,7 @@ class LiberoEnvWrapper(gym.Env):
     def close(self):
         """关闭环境并释放资源。"""
         self.env.close()
+
 
 if __name__ == '__main__':
     # --- 这是一个演示如何使用 LiberoEnvWrapper 的示例 ---
