@@ -3,6 +3,7 @@ run_libero_eval.py
 
 Evaluates a trained policy in a LIBERO simulation benchmark task suite.
 """
+from rl.utils import my_get_action
 
 import json
 import logging
@@ -40,7 +41,6 @@ from experiments.robot.openvla_utils import (
 )
 from experiments.robot.robot_utils import (
     DATE_TIME,
-    get_action,
     get_image_resize_size,
     get_model,
     invert_gripper_action,
@@ -327,17 +327,8 @@ def run_episode(
             # If action queue is empty, requery model
             if len(action_queue) == 0:
                 # Query model to get action
-                actions = get_action(
-                    cfg,
-                    model,
-                    observation,
-                    task_description,
-                    processor=processor,
-                    action_head=action_head,
-                    proprio_projector=proprio_projector,
-                    noisy_action_projector=noisy_action_projector,
-                    use_film=cfg.use_film,
-                )
+                observation['task_description'] = task_description
+                actions = my_get_action(model, cfg, processor, observation, action_head, proprio_projector, model.dtype)
                 action_queue.extend(actions)
 
             # Get action from queue
