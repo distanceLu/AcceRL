@@ -206,6 +206,7 @@ if __name__ == '__main__':
 
     print("\n--- 环境信息 ---")
     print(f"任务 ID: {env.task_id}")
+    print(f"任务名称: {env.task.name}")
     print(f"任务描述: {env.task_description}")
     print(f"动作空间: {env.action_space}")
     print(f"观测空间: {env.observation_space}")

@@ -1,220 +1,284 @@
-import pickle
 import torch
 import torch.nn as nn
+from typing import Dict, Any, Tuple, List
+from contextlib import nullcontext
 import numpy as np
-from torch.distributions import Normal
-from typing import Any, Tuple, Dict
-from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
-from prismatic.models.action_heads import L1RegressionActionHead
-from prismatic.vla.constants import NUM_ACTIONS_CHUNK, PROPRIO_DIM
 
-# 假设这些辅助函数位于可访问的路径
-# 如果不在，您需要确保它们可以被导入
-from experiments.robot.libero.run_libero_eval import GenerateConfig
+from torch.distributions import Normal, TransformedDistribution
+from torch.distributions.transforms import TanhTransform
+
+# Core OpenVLA components
 from experiments.robot.openvla_utils import (
-    get_action_head, 
-    get_processor, 
-    get_proprio_projector, 
-    get_vla, 
-    prepare_images_for_vla,
-    normalize_proprio
+    get_action_head,
+    get_processor,
+    get_proprio_projector,
+    get_vla,
 )
 
+# Masks used to extract action-related hidden states
+from prismatic.training.train_utils import (
+    get_current_action_mask,
+    get_next_actions_mask,
+)
 
-class ActorCriticVLA(nn.Module):
+# Constants
+from prismatic.vla.constants import (
+    NUM_ACTIONS_CHUNK,
+    ACTION_DIM,
+    PROPRIO_DIM,
+    ACTION_PROPRIO_NORMALIZATION_TYPE,
+)
+from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
+
+
+class ActorCritic(nn.Module):
     """
-    一个封装了 OpenVLA 及其相关组件的 Actor-Critic 类，专为强化学习设计。
+    Actor-Critic for OpenVLA-based continuous control.
 
-    该类在内部处理模型的加载和初始化，并提供一个高级接口 `get_action` 
-    来从原始观测数据中获取动作及其相关 PPO 张量。
-
-    核心功能:
-    1. __init__ 方法通过一个配置对象 (cfg) 自动加载 VLA、处理器和动作头。
-    2. 使用预设的 L1RegressionActionHead 作为 Actor 来预测动作均值。
-    3. 使用一个新增的线性层作为 Critic 来预测状态价值。
-    4. 使用一个可学习的参数来定义策略的探索标准差。
-    5. 提供 get_action 方法，封装了从 observation 到 action 的所有预处理和前向传播步骤。
+    forward(inputs_batch) returns:
+      - actions_all: sampled actions in (-1, 1), shape (B, NUM_ACTIONS_CHUNK, ACTION_DIM)  [squashed Gaussian]
+      - mu_all: mean actions from action_head.predict_action(...), shape (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+      - log_std_all: condition-independent log-std broadcast to all chunks, shape (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+      - value: state value estimate, shape (B,)
     """
-    def __init__(self, cfg: GenerateConfig):
-        """
-        初始化函数。
 
-        Args:
-            cfg (GenerateConfig): 包含所有模型路径和配置参数的对象。
-        """
+    def __init__(self, cfg):
         super().__init__()
-        print("--> [ActorCriticVLA] Initializing components from configuration...")
         self.cfg = cfg
 
-        # 步骤 1: 根据配置加载所有必要的组件
-        self.vla: OpenVLAForActionPrediction = get_vla(self.cfg)
-        self.processor = get_processor(self.cfg)
-        self.action_mean_head: L1RegressionActionHead = get_action_head(self.cfg, llm_dim=self.vla.llm_dim)
-        
-        # 只有在使用 proprio 时才加载投影仪
-        if self.cfg.use_proprio:
-            self.proprio_projector = get_proprio_projector(
-                self.cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
-            )
-        else:
-            self.proprio_projector = None
+        # Device / dtype
+        self.vla = get_vla(cfg)
+        self.device = self.vla.device
+        self.model_dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
+        self.vla = self.vla.to(dtype=self.model_dtype)
 
-        # 步骤 2: 智能地获取设备和数据类型以初始化新层
-        try:
-            ref_param = next(self.vla.parameters())
-            device = ref_param.device
-            dtype = ref_param.dtype
-        except StopIteration:
-            device = "cpu"
-            dtype = torch.float32
-            print("[ActorCriticVLA WARNING] Could not determine device/dtype from VLA. Falling back to defaults.")
+        # Keep processor for external preparation (forward 接收已组装好的 batch，但依旧保留 processor)
+        self.processor = get_processor(cfg)
 
-        # 步骤 3: 初始化 Critic (价值头) 和可学习的标准差
-        self.value_head = nn.Linear(self.vla.llm_dim, 1).to(device=device, dtype=dtype)
+        # Heads
+        self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim)
+        self.action_head = self.action_head.to(self.device).to(dtype=self.model_dtype)
 
-        initial_log_std = torch.zeros(
-            1, NUM_ACTIONS_CHUNK, self.action_mean_head.action_dim, 
-            device=device, 
-            dtype=dtype
+        self.proprio_projector = get_proprio_projector(
+            cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
         )
-        self.action_log_std = nn.Parameter(initial_log_std)
-        print("--> [ActorCriticVLA] Initialization complete.")
+        self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
 
-    def forward(
-        self,
-        **predict_action_kwargs: Any
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Condition-independent log_std parameter (float32 for stability)
+        self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=torch.float32, device=self.device))
+
+        # Value head: mean-pool over text tokens from the last hidden layer -> scalar
+        self.value_head = nn.Sequential(
+            nn.LayerNorm(self.vla.llm_dim),
+            nn.Linear(self.vla.llm_dim, self.vla.llm_dim),
+            nn.Tanh(),
+            nn.Linear(self.vla.llm_dim, 1),
+        ).to(self.device).to(dtype=self.model_dtype)
+
+    def normalize_proprio(self, proprio: Any) -> np.ndarray:
         """
-        模型的核心前向传播。它接收 `vla.predict_action` 所需的所有参数。
-        这个方法主要被 get_action 调用。
+        Normalize proprioception data using self.vla.norm_stats[self.cfg.unnorm_key]["proprio"].
+        Accepts numpy array or torch tensor; returns numpy array in [-1, 1].
+        """
+        # Convert to numpy
+        if isinstance(proprio, torch.Tensor):
+            proprio = proprio.detach().cpu().numpy()
+        else:
+            proprio = np.asarray(proprio)
 
-        Args:
-            **predict_action_kwargs: 包含 `input_ids`, `pixel_values` 等的字典。
+        norm_stats = self.vla.norm_stats[self.cfg.unnorm_key]["proprio"]
 
+        if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
+            mask = norm_stats.get("mask", np.ones_like(norm_stats["min"], dtype=bool))
+            proprio_high, proprio_low = np.array(norm_stats["max"]), np.array(norm_stats["min"])
+        elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+            mask = norm_stats.get("mask", np.ones_like(norm_stats["q01"], dtype=bool))
+            proprio_high, proprio_low = np.array(norm_stats["q99"]), np.array(norm_stats["q01"])
+        else:
+            raise ValueError("Unsupported action/proprio normalization type detected!")
+
+        normalized_proprio = np.clip(
+            np.where(
+                mask,
+                2 * (proprio - proprio_low) / (proprio_high - proprio_low + 1e-8) - 1,
+                proprio,
+            ),
+            a_min=-1.0,
+            a_max=1.0,
+        )
+        return normalized_proprio
+
+    def batch_process_obs(self, inputs_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        """
+        Right-pad variable-length sequences across a list of samples and stack into a batch on self.vla.device.
+        Expects each item to contain: input_ids, attention_mask, labels, pixel_values, proprio, etc.
+        """
+        # 目标序列最大长度（对齐到同一个 max_len，确保各 key 同长）
+        max_len = max(it["input_ids"].size(1) for it in inputs_list)
+        pad_id = int(self.vla.pad_token_id)
+
+        # 对每条样本进行右侧 padding
+        for it in inputs_list:
+            cur_len = it["input_ids"].size(1)
+            if cur_len < max_len:
+                pad_amt = max_len - cur_len
+                bsz = it["input_ids"].size(0)  # 通常为 1
+
+                # input_ids: pad_id
+                pad_ids = it["input_ids"].new_full((bsz, pad_amt), pad_id)
+                it["input_ids"] = torch.cat([it["input_ids"], pad_ids], dim=1)
+
+                # attention_mask: 0
+                pad_mask = it["attention_mask"].new_zeros((bsz, pad_amt))
+                it["attention_mask"] = torch.cat([it["attention_mask"], pad_mask], dim=1)
+
+                # labels: -100
+                pad_labels = it["labels"].new_full((bsz, pad_amt), -100)
+                it["labels"] = torch.cat([it["labels"], pad_labels], dim=1)
+
+        # 聚合成 batch，并移动到目标设备
+        inputs: Dict[str, torch.Tensor] = {}
+        keys = inputs_list[0].keys()
+        for k in keys:
+            tensors = [it[k] for it in inputs_list]
+            inputs[k] = torch.cat(tensors, dim=0).to(self.vla.device)
+        inputs["proprio"] = inputs["proprio"].to(torch.float32)
+        return inputs
+
+    def prepare_inputs_batch(self, inputs_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        """
+        对多条样本执行：
+          - 归一化 proprio 到 [-1, 1]
+          - 基本一致性检查
+          - 序列右侧 padding 并拼 batch
+        """
+        # Normalize proprio for each sample and run per-sample checks
+        for it in inputs_list:
+            # Normalize proprio using internal norm stats
+            proprio_norm = self.normalize_proprio(it["proprio"])
+            it["proprio"] = torch.tensor(proprio_norm, dtype=torch.float32)
+
+            # Consistency check
+            assert it["input_ids"].size(1) == it["attention_mask"].size(1) == it["labels"].size(1), \
+                "Per-sample sequence lengths of input_ids/attention_mask/labels must match."
+
+        # Batchify
+        return self.batch_process_obs(inputs_list)
+
+    def _compute_num_patches(self) -> int:
+        num_patches = (
+            self.vla.vision_backbone.get_num_patches()
+            * self.vla.vision_backbone.get_num_images_in_input()
+        )
+        if self.cfg.use_proprio:
+            num_patches += 1
+        return num_patches
+
+    def _extract_actions_hidden(self, last_hidden_states: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        From last_hidden_states, extract the text-token hiddens corresponding
+        to current + next actions, as (B, NUM_ACTIONS_CHUNK*ACTION_DIM, D).
+        """
+        ground_truth_token_ids = batch["labels"][:, 1:].to(self.device)  # (B, text_len-1)
+        current_action_mask = get_current_action_mask(ground_truth_token_ids)  # (B, text_len-1)
+        next_actions_mask = get_next_actions_mask(ground_truth_token_ids)      # (B, text_len-1)
+        action_mask = current_action_mask | next_actions_mask
+
+        num_patches = self._compute_num_patches()
+        text_hidden_states = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
+
+        B, _, D = text_hidden_states.shape
+        actions_hidden_states = (
+            text_hidden_states[action_mask]
+            .reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, D)
+            .to(self.model_dtype)
+        )
+        return actions_hidden_states
+
+    def _forward_vla(self, batch: Dict[str, torch.Tensor]):
+        """
+        Single VLA forward that returns output with hidden states.
+        """
+        ctx = torch.autocast("cuda", dtype=self.model_dtype) if self.device.type == "cuda" else nullcontext()
+        with ctx:
+            output = self.vla(
+                input_ids=batch["input_ids"].to(self.device),
+                attention_mask=batch["attention_mask"].to(self.device),
+                pixel_values=batch["pixel_values"].to(self.model_dtype).to(self.device),
+                labels=batch["labels"].to(self.device),  # for mask derivation and potential loss
+                output_hidden_states=True,
+                proprio=batch["proprio"] if self.cfg.use_proprio else None,
+                proprio_projector=self.proprio_projector if self.cfg.use_proprio else None,
+                noisy_actions=None,
+                noisy_action_projector=None,
+                diffusion_timestep_embeddings=None,
+                use_film=self.cfg.use_film,
+            )
+        return output
+
+    def _compute_value_from_hidden(self, last_hidden_states: torch.Tensor) -> torch.Tensor:
+        num_patches = self._compute_num_patches()
+        text_hidden = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
+        pooled = text_hidden.mean(dim=1)                     # (B, D)
+        value = self.value_head(pooled.to(self.model_dtype)).squeeze(-1)  # (B,)
+        return value.to(torch.float32)
+
+    def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
         Returns:
-            - action (torch.Tensor): 采样得到的动作块 (B, chunk_len, action_dim)。
-            - log_prob (torch.Tensor): 采样动作块的对数概率 (B, 1)。
-            - entropy (torch.Tensor): 动作分布的熵 (B, 1)。
-            - value (torch.Tensor): 状态价值 (B,)。
+          actions_all: (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+          mu_all:      (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+          log_std_all: (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+          value:       (B,)
         """
-        # 步骤 1: 从 VLA 获取 actions_hidden_states
-        kwargs_for_vla = predict_action_kwargs.copy()
-        kwargs_for_vla['action_head'] = None
-        
-        # 如果 VLA 被冻结，在训练循环中可以将其放入 torch.no_grad() 上下文
-        _, actions_hidden_states = self.vla.predict_action(**kwargs_for_vla)
+        # Sanity checks
+        for k in ("input_ids", "attention_mask", "pixel_values", "labels", "proprio"):
+            if k not in inputs_batch:
+                raise KeyError(f"inputs_batch missing key: {k}")
 
-        # 步骤 2: Actor - 预测动作均值
-        action_mean = self.action_mean_head.predict_action(actions_hidden_states)
+        # 1) VLA forward to obtain hidden states
+        output = self._forward_vla(inputs_batch)
+        last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
 
-        # 步骤 3: Critic - 预测状态价值
-        aggregated_state = torch.mean(actions_hidden_states, dim=1)
-        value = self.value_head(aggregated_state)
+        # 2) Predict continuous actions mean (mu) using action-related hidden states
+        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, inputs_batch)
+        predicted_actions = self.action_head.predict_action(actions_hidden_states)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM) or flat
+        if predicted_actions.dim() == 3:
+            mu_all = predicted_actions
+        else:
+            raise ValueError(f"Unexpected predicted_actions shape: {predicted_actions.shape}")
 
-        # 步骤 4: 构建随机策略并采样
-        action_log_std = self.action_log_std.expand_as(action_mean)
-        action_std = torch.exp(action_log_std)
-        action_distribution = Normal(action_mean, action_std)
+        # 3) Condition-independent log_std broadcast across chunks
+        B = mu_all.size(0)
+        log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
+        log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
 
-        action = action_distribution.sample()
-        log_prob = action_distribution.log_prob(action).sum(dim=(-2, -1), keepdim=True)
-        entropy = action_distribution.entropy().sum(dim=(-2, -1), keepdim=True)
-        
-        return action, log_prob, entropy, value.squeeze(-1)
+        # 4) Squashed Gaussian sampling to (-1, 1) for all chunks
+        std_all = torch.exp(log_std_all)                             # (B, T, A)
+        base_dist = Normal(mu_all.to(torch.float32), std_all)        # fp32 sampling for stability
+        dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+        actions_all = dist.rsample()                                  # (B, T, A) in (-1, 1)
 
-    def get_action(
-        self, 
-        observation: Dict[str, Any], 
-        inference_mode: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        从原始观测数据中获取动作。
-        此方法封装了所有预处理步骤和模型的前向传播。
+        # 5) Value from hidden states
+        value = self._compute_value_from_hidden(last_hidden_states)   # (B,)
 
-        Args:
-            observation (Dict[str, Any]): 包含图像和状态信息的观测字典。
-            inference_mode (bool): 如果为 True，则在 `torch.inference_mode()` 下运行，
-                                   不计算梯度，适用于评估。默认为 False。
-
-        Returns:
-            - action (torch.Tensor): 采样得到的动作块。
-            - log_prob (torch.Tensor): 动作的对数概率。
-            - entropy (torch.Tensor): 动作分布的熵。
-            - value (torch.Tensor): 预测的状态价值。
-        """
-        # 根据 inference_mode 选择是否使用梯度上下文
-        context = torch.inference_mode() if inference_mode else torch.enable_grad()
-        
-        with context:
-            # 确定输入应发送到的设备和数据类型
-            device = next(self.parameters()).device
-            dtype = next(self.parameters()).dtype
-
-            # 准备图像输入
-            all_images = [observation["full_image"]]
-            if self.cfg.num_images_in_input > 1:
-                all_images.extend([obs_img for k, obs_img in observation.items() if "wrist" in k])
-            
-            all_prepared_images = prepare_images_for_vla(all_images, self.cfg)
-            primary_image = all_prepared_images.pop(0)
-            additional_images = all_prepared_images
-
-            # 准备文本输入
-            prompt = f"In: What action should the robot take to {observation['task_description'].lower()}?\nOut:"
-            inputs = self.processor(prompt, primary_image).to(device=device, dtype=dtype)
-            
-            if additional_images:
-                all_wrist_inputs = [
-                    self.processor(prompt, image_wrist).to(device=device, dtype=dtype) for image_wrist in additional_images
-                ]
-                primary_pixel_values = inputs["pixel_values"]
-                all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
-                inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
-
-            # 准备本体感受输入
-            proprio = None
-            if self.cfg.use_proprio:
-                proprio_state = observation["state"]
-                proprio_norm_stats = self.vla.norm_stats[self.cfg.unnorm_key]["proprio"]
-                proprio = normalize_proprio(proprio_state, proprio_norm_stats)
-                proprio = np.expand_dims(proprio, axis=0) # 添加 batch 维度
-
-            # 组装 forward 方法所需的所有参数
-            predict_action_kwargs = {
-                **inputs,
-                "unnorm_key": self.cfg.unnorm_key,
-                "proprio": proprio,
-                "proprio_projector": self.proprio_projector,
-            }
-
-            # 调用核心 forward 方法
-            return self.forward(**predict_action_kwargs)
-
-    def to(self, device: torch.device) -> "ActorCriticVLA":
-        """
-        将所有相关模型组件移动到指定的设备。
-
-        Args:
-            device (torch.device): 目标设备 (例如, torch.device("cuda"))。
-
-        Returns:
-            self (ActorCriticVLA): 移动到设备后的模型实例。
-        """
-        super().to(device)
-        self.vla.to(device)
-        self.action_mean_head.to(device)
-        if self.proprio_projector:
-            self.proprio_projector.to(device)
-        print(f"--> [ActorCriticVLA] All components moved to {device}.")
-        return self
+        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
 
 
 if __name__ == "__main__":
-    import os
-    os.environ["MUJOCO_GL"] = "osmesa"
-    
-    # 步骤 1: 创建配置
-    print("--> Loading configuration...")
+    import sys
+    import numpy as np
+
+    # Libero env wrapper and helpers
+    from rl.libero_env import LiberoEnvWrapper
+    from rl.utils import prepare_one_obs
+    from experiments.robot.libero.run_libero_eval import GenerateConfig
+
+    # Precision policy to match the example
+    USE_BF16: bool = True
+    TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
+
+    # Instantiate config
     cfg = GenerateConfig(
         pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/",
         use_l1_regression=True,
@@ -229,36 +293,79 @@ if __name__ == "__main__":
         unnorm_key="libero_spatial_no_noops",
     )
 
-    # 步骤 2: 仅用 cfg 初始化整个 ActorCriticVLA 模型
-    # 模型加载和组件初始化现在都在类的内部完成
-    actor_critic_model = ActorCriticVLA(cfg)
+    # Create ActorCritic policy
+    actor = ActorCritic(cfg)
+    actor.eval()
 
-    # 步骤 3: 将模型移动到设备
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 使用我们重写的 .to() 方法来确保所有子模块都被移动
-    actor_critic_model.to(DEVICE)
+    print("正在初始化 LiberoEnvWrapper...")
 
-    # 步骤 4: 加载样本观测数据
-    print("\n--> Loading sample observation...")
-    with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
-        observation = pickle.load(file)
-    print("--> Sample observation loaded successfully.")
+    BENCHMARK = "libero_spatial"
+    TASK_ID = 3  # e.g., pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate
 
-    # 步骤 5: 使用新的 get_action 方法执行前向传播
-    # 注意：我们将 inference_mode 设置为 True 进行评估
-    print("\n--> Executing a forward pass using the get_action method...")
-    action_chunk, log_prob, entropy, value = actor_critic_model.get_action(
-        observation, 
-        inference_mode=True
-    )
+    try:
+        env = LiberoEnvWrapper(
+            benchmark_name=BENCHMARK,
+            task_id=TASK_ID,
+            image_size=224,
+            render_mode="rgb_array",
+        )
+    except Exception as e:
+        print("\n--- 初始化失败 ---")
+        print(f"错误: {e}")
+        print("\n请确保：")
+        print("1. 您已按照 LIBERO 的说明安装了所有依赖项。")
+        print("2. 您已下载了 'libero_spatial' 数据集并放置在正确的位置。")
+        print("3. 当前工作目录正确，以便脚本能够找到必要的工具函数。")
+        sys.exit(1)
 
-    # 步骤 6: 打印结果
-    print("\n--- FORWARD PASS RESULTS ---")
-    print(f"Sampled Action Chunk Shape: {action_chunk.shape}")
-    print(f"First action in chunk: {action_chunk[0, 0, :]}")
-    print(f"Log Probability Shape: {log_prob.shape}")
-    print(f"Log Probability: {log_prob.item():.4f}")
-    print(f"Entropy Shape: {entropy.shape}")
-    print(f"Entropy: {entropy.item():.4f}")
-    print(f"State Value Shape: {value.shape}")
-    print(f"State Value: {value.item():.4f}")
+    print("\n--- 环境信息 ---")
+    print(f"任务 ID: {env.task_id}")
+    print(f"任务名称: {env.task.name}")
+    print(f"任务描述: {env.task_description}")
+    print(f"动作空间: {env.action_space}")
+    print(f"观测空间: {env.observation_space}")
+    print(f"最大步数: {env.max_episode_steps}")
+    print("------------------\n")
+
+    # Reset environment
+    print("正在重置环境...")
+    obs, info = env.reset()
+    print("环境重置成功。")
+
+    # Run one episode with the ActorCritic policy
+    terminated, truncated = False, False
+    total_reward = 0.0
+    step = 0
+
+    while not (terminated or truncated):
+        # Prepare single-sample inputs
+        inputs_t = prepare_one_obs(cfg, actor.processor, obs, env.task_description, TORCH_DTYPE)
+
+        # 使用类方法封装的预处理：对列表执行 归一化 proprio + 一致性检查 + batchify
+        inputs_batch = actor.prepare_inputs_batch([inputs_t])
+
+        # Get actions from policy (all chunks); 用第一个 chunk 与环境交互
+        with torch.no_grad():
+            actions_all, mu_all, log_std_all, value = actor(inputs_batch)
+
+        # 取第一个 chunk 的动作，并进行反归一化
+        action_norm = actions_all[0, 0].cpu().numpy().astype(np.float32)  # in (-1, 1)
+        action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
+
+        # Step the environment
+        obs, reward, terminated, truncated, info = env.step(action_env)
+
+        total_reward += float(reward)
+        step += 1
+        print(
+            f"Step {step}: "
+            f"Reward={reward:.4f}, Terminated={terminated}, Truncated={truncated}, "
+            f"Success={info.get('is_success', False)}"
+        )
+
+    print("\nEpisode 结束。")
+    print(f"总步数: {step}")
+    print(f"总奖励: {total_reward:.4f}")
+
+    env.close()
+    print("环境已关闭。")

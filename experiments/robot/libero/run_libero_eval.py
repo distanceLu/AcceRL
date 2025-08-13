@@ -328,7 +328,7 @@ def run_episode(
             if len(action_queue) == 0:
                 # Query model to get action
                 observation['task_description'] = task_description
-                actions = my_get_action(model, cfg, processor, observation, action_head, proprio_projector, model.dtype)
+                actions = my_get_action(model, cfg, processor, [observation], action_head, proprio_projector, model.dtype)
                 action_queue.extend(actions)
 
             # Get action from queue

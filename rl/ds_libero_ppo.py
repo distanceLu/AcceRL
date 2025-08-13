@@ -25,12 +25,13 @@ from torch.distributions import Normal, TransformedDistribution, TanhTransform
 import deepspeed
 from torch.utils.tensorboard import SummaryWriter
 
-# --- 新增: 引入 Transformers 库 ---
 from transformers import AutoProcessor
 
 from ds_com import TrainerActorCom, InferenceActorCom
 from qwen_actor_critic import QwenVLWithPPOHeads
-from meta_world_multi import MetaWorldMultiTask
+from rl.libero_env import LiberoEnvWrapper
+from libero.libero import benchmark
+from rl.utils import prepare_one_obs
 
 # ================================================================
 # 0. 超参数 (已为 MetaWorld reach-v3 和 Qwen-VL 模型调整)
@@ -39,6 +40,7 @@ from meta_world_multi import MetaWorldMultiTask
 # Qwen-VL 的视觉编码器通常使用 448x448 的图像
 OBS_SHAPE = (64, 64, 3)   # 图像观测空间 (H, W, C)
 ACT_DIM = 4                # 动作空间维度
+BENCHMARK = "libero_spatial"
 
 # --- 分布式系统参数 ---
 NUM_TRAINER_GPUS = 4       # Trainer使用GPU数量
@@ -76,11 +78,12 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 BROADCAST_GROUP_PORT = 29532
 MODEL_NAME = "/cpfs01/lcx_workspace/models/Qwen2.5-VL-3B-Instruct"
 
+USE_BF16: bool = True  # True 使用 bfloat16；False 使用 float32
+TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
 @dataclass
 class Experience:
-    obs: np.ndarray
-    instruction: str
+    obs: dict
     action: np.ndarray
     advantage: float
     behaviour_mu: np.ndarray
@@ -196,35 +199,39 @@ class ReplayBufferActor:
 
 @ray.remote
 class RolloutWorkerActor:
-    def __init__(self, infer, replay, wid, stats_actor):
+    def __init__(self, infer, replay, wid, stats_actor, cfg, processor):
         self.infer, self.replay = infer, replay
         self.stats_actor = stats_actor
-        
-        # --- 修改: 初始化 MetaWorld 环境并使用正确的渲染尺寸 ---
-        self.env = MetaWorldMultiTask(shape=OBS_SHAPE)
+        self.cfg = cfg
+        self.processor = processor
+        self.env = LiberoEnvWrapper(
+            benchmark_name=BENCHMARK,
+            task_id=3,
+            image_size=224,
+            render_mode="rgb_array"
+        )
         
         self.wid = wid
         self.local_buffer = []
-        self.current_instruction = None
+        self.task_description = None
         self.current_env_name = None 
 
     def run(self):
         obs, info = self.env.reset(seed=self.wid)
-        self.current_instruction = info['instruction']
-        self.current_env_name = info['env_name']
+        self.task_description = self.env.task_description
+        self.current_env_name = self.env.task.name
         reward_sum = 0.0
         step_count = 0
         time_start = time.time()
         step_count_total = 0
         while True:
-            # obs 是 (H, W, 3) 的 uint8 numpy 数组
-            # 传递图像观测和当前任务指令
-            action, mu, log_std, value = ray.get(self.infer.request.remote(obs, self.current_instruction))
+            inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
+            action, mu, log_std, value = ray.get(self.infer.request.remote(inputs_t))
             nxt, r, term, trunc, info = self.env.step(action)
             reward_sum += r
             r *= REWARD_SCALE
             step_count += 1
-            self.local_buffer.append((obs, self.current_instruction, action, r, mu, log_std, value))
+            self.local_buffer.append((inputs_t, action, r, mu, log_std, value))
             obs = nxt
             step_count_total += 1
             if term or trunc:
@@ -241,7 +248,7 @@ class RolloutWorkerActor:
                     self._process_traj(self.local_buffer, 0.0)
                 self.local_buffer.clear()
                 obs, info = self.env.reset()
-                self.current_instruction = info['instruction']
+                self.task_description = info['instruction']
                 self.current_env_name = info['env_name'] # 重置后记录新的环境名称
             elif len(self.local_buffer) == ROLLOUT_LOCAL_BUF + 1:
                 _, _, _, _, _, _, bootstrap_val = self.local_buffer[-1]

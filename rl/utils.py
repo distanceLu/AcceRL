@@ -80,7 +80,7 @@ def prepare_one_obs(
     obs: Dict[str, Any],
     task_label: str,
     torch_dtype: torch.dtype,
-) -> List[np.ndarray]:
+) -> Dict:
     """
     Generate action predictions with the VLA policy.
 
@@ -94,9 +94,6 @@ def prepare_one_obs(
         proprio_projector: Optional proprioception projector
         noisy_action_projector: Optional noisy action projector for diffusion
         use_film: Whether to use FiLM
-
-    Returns:
-        List[np.ndarray]: Predicted actions
     """
     with torch.inference_mode():
 
@@ -131,16 +128,23 @@ def prepare_one_obs(
         proprio = None
         if cfg.use_proprio:
             proprio = obs["state"]
-    """
-    本样本注释可以方便代码理解和修改，不要删除
-    inputs example:
-    input_ids torch.Size([1, 34])
-    attention_mask torch.Size([1, 34])
-    pixel_values torch.Size([1, 12, 224, 224])
+        """
+        本样本注释可以方便代码理解和修改，不要删除
+        inputs example:
+        input_ids torch.Size([1, 34])
+        attention_mask torch.Size([1, 34])
+        pixel_values torch.Size([1, 12, 224, 224])
 
-    proprio example: (8,), numpy.ndarray
-    """
-    return inputs, proprio
+        proprio example: (8,), numpy.ndarray
+        """
+        input_ids, attention_mask, labels = process_one_obs(
+            inputs["input_ids"], inputs["attention_mask"]
+        )
+        inputs["input_ids"] = input_ids
+        inputs["attention_mask"] = attention_mask
+        inputs["labels"] = labels
+        inputs["proprio"] = proprio
+    return inputs
 
 
 def process_one_obs(input_ids, attention_mask):
@@ -297,36 +301,8 @@ def run_forward_pass(
 
 def batch_process_obs(
     vla,
-    cfg,
-    observations: List[Dict[str, Any]],
-    processor,
-    torch_dtype: torch.dtype,
+    inputs_list: List[Dict[str, Any]],
 ):
-    inputs_list = []
-    for obs in observations:
-        inputs_t, proprio_t = prepare_one_obs(cfg, processor, obs, obs["task_description"], torch_dtype)
-        input_ids, attention_mask, labels = process_one_obs(
-            inputs_t["input_ids"], inputs_t["attention_mask"]
-        )
-        # 保证类型
-        input_ids = input_ids.long()
-        attention_mask = attention_mask.long()
-        labels = labels.long()
-
-        # 回填
-        inputs_t["input_ids"] = input_ids
-        inputs_t["attention_mask"] = attention_mask
-        inputs_t["labels"] = labels
-
-        proprio_t_norm = normalize_proprio(proprio_t, vla.norm_stats[cfg.unnorm_key]["proprio"])
-        inputs_t["proprio"] = torch.tensor(proprio_t_norm)
-
-        # 基本一致性检查（单条样本内长度应一致）
-        assert inputs_t["input_ids"].size(1) == inputs_t["attention_mask"].size(1) == inputs_t["labels"].size(1), \
-            "Per-sample sequence lengths of input_ids/attention_mask/labels must match."
-
-        inputs_list.append(inputs_t)
-
     # 目标序列最大长度（对齐到同一个 max_len，确保各 key 同长）
     max_len = max(it["input_ids"].size(1) for it in inputs_list)
     pad_id = int(vla.pad_token_id)  # 例如 Llama 的 <pad>，若无请在模型配置中设置
@@ -360,8 +336,18 @@ def batch_process_obs(
     return inputs
 
 
-def my_get_action(vla, cfg, processor, observation, action_head, proprio_projector, torch_dtype: torch.dtype):
-    inputs_batch = batch_process_obs(vla, cfg, [observation], processor, torch_dtype)
+def my_get_action(vla, cfg, processor, observations, action_head, proprio_projector, torch_dtype: torch.dtype):
+    inputs_list = []
+    for obs in observations:
+        inputs_t = prepare_one_obs(cfg, processor, obs, obs["task_description"], torch_dtype)
+        inputs_list.append(inputs_t)
+    for inputs_t in inputs_list:
+        proprio_t_norm = normalize_proprio(inputs_t['proprio'], vla.norm_stats[cfg.unnorm_key]["proprio"])
+        inputs_t["proprio"] = torch.tensor(proprio_t_norm)
+        # 基本一致性检查（单条样本内长度应一致）
+        assert inputs_t["input_ids"].size(1) == inputs_t["attention_mask"].size(1) == inputs_t["labels"].size(1), \
+            "Per-sample sequence lengths of input_ids/attention_mask/labels must match."
+    inputs_batch = batch_process_obs(vla, inputs_list)
     norm_action = run_forward_pass(
         vla=vla,
         action_head=action_head,
