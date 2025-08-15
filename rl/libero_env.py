@@ -6,9 +6,6 @@ import numpy as np
 from gymnasium import spaces
 from libero.libero import benchmark
 
-# 假设此文件位于 experiments/robot/libero/ 目录下
-# 将项目根目录添加到 Python 路径中，以便导入工具函数
-# 请根据您的项目结构调整此路径
 try:
     sys.path.append("../../..") 
     from experiments.robot.libero.libero_utils import (

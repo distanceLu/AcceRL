@@ -6,7 +6,17 @@ import torch
 import torch.distributed as dist
 from torch.distributed import Backend
 import deepspeed
+import contextlib
 
+def _unwrap_module(m):
+    # DeepSpeedEngine 或 DDP 包装时取到真实 nn.Module
+    return getattr(m, "module", m)
+
+def _named_tensors_in_order(module):
+    # 以确定性顺序返回 (name, tensor) 列表：先参数后缓冲区，均按名字排序
+    params = sorted(list(module.named_parameters(recurse=True)), key=lambda x: x[0])
+    buffers = sorted(list(module.named_buffers(recurse=True)), key=lambda x: x[0])
+    return params, buffers
 
 def init_custom_process_group(
     backend=None, init_method=None, timeout=None, world_size=-1, rank=-1,
@@ -87,13 +97,42 @@ class TrainerActorCom:
         print(f"TrainerActor Rank {self.rank}: 已作为 rank {my_rank_in_group} 加入广播组 '{group_name}'。")
 
     def broadcast_weights(self, group_name):
-        with deepspeed.zero.GatheredParameters(self.model.parameters(), modifier_rank=0):
-            if self.rank == 0:
-                state_dict = self.model.state_dict()
-                for tensor in state_dict.values():
-                    tensor_gpu = tensor.to(self.model.device)
-                    broadcast(tensor_gpu, src_rank=0, group_name=group_name)
+        # 只在 src=0 的 Trainer 调用（你的主循环里就是这样）
+        group_handle = _group_mgr.get_group_by_name(group_name)
+        assert group_handle is not None, f"广播组 '{group_name}' 未初始化"
 
+        module = _unwrap_module(self.model)  # DeepSpeedEngine -> nn.Module
+        # ZeRO-2 下需先 gather 完整参数到 rank0
+        # 非 ZeRO / 单机也可用空上下文
+        zero_ctx = getattr(deepspeed.zero, "GatheredParameters", None)
+        if zero_ctx is None:
+            zero_ctx = contextlib.nullcontext
+
+        params, buffers = _named_tensors_in_order(module)
+        device = next(module.parameters()).device
+
+        with zero_ctx(module.parameters(), modifier_rank=0):
+            # 广播参数
+            for name, p in params:
+                # p 此时在 rank0 才是完整的参数
+                t = p.detach().to(device=device, dtype=p.dtype).contiguous()
+                dist.broadcast(t, src=0, group=group_handle)
+            # 广播缓冲区（如 BN 的 running_mean/var 等）
+            for name, b in buffers:
+                t = b.detach().to(device=device, dtype=b.dtype).contiguous()
+                dist.broadcast(t, src=0, group=group_handle)
+
+    def get_broadcast_signature(self):
+        module = _unwrap_module(self.model)
+        sig = []
+        # 强烈建议：只取可训练参数；缓冲区是否包含要看你是否需要动它们
+        for name, p in sorted(module.named_parameters(recurse=True), key=lambda x: x[0]):
+            if p.requires_grad:
+                sig.append(("param", name, tuple(p.shape), str(p.dtype)))
+        # 如果一定要广播 buffer，则也要列出来
+        for name, b in sorted(module.named_buffers(recurse=True), key=lambda x: x[0]):
+            sig.append(("buffer", name, tuple(b.shape), str(b.dtype)))
+        return sig
 
 class InferenceActorCom:
     def __init__(self):
@@ -106,11 +145,36 @@ class InferenceActorCom:
         print(f"InferenceActor {self.actor_id}: 已作为 rank {my_rank_in_group} 加入广播组 '{group_name}'。")
 
     def receive_and_update_weights(self, group_name):
-        state_dict = self.model.state_dict()
-        for key, value in state_dict.items():
-            received_tensor = torch.empty_like(state_dict[key], device='cuda')
-            assert received_tensor.dtype == value.dtype, f"received_tensor dtype: {received_tensor.dtype}, value dtype: {value.dtype}"
-            broadcast(received_tensor, src_rank=0, group_name=group_name)
-            state_dict[key] = received_tensor
-        self.model.load_state_dict(state_dict)
+        group_handle = _group_mgr.get_group_by_name(group_name)
+        assert group_handle is not None, f"广播组 '{group_name}' 未初始化"
 
+        module = _unwrap_module(self.model)
+        params, buffers = _named_tensors_in_order(module)
+        device = next(module.parameters()).device
+
+        # 逐个接收并原地写入，严格对齐名字顺序
+        for name, p in params:
+            buf = torch.empty_like(p.data, device=device)
+            dist.broadcast(buf, src=0, group=group_handle)
+            p.data.copy_(buf)
+
+        for name, b in buffers:
+            buf = torch.empty_like(b.data, device=device)
+            dist.broadcast(buf, src=0, group=group_handle)
+            b.data.copy_(buf)
+
+        # 同步与确认
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+            
+    def get_broadcast_signature(self):
+        module = _unwrap_module(self.model)
+        sig = []
+        # 强烈建议：只取可训练参数；缓冲区是否包含要看你是否需要动它们
+        for name, p in sorted(module.named_parameters(recurse=True), key=lambda x: x[0]):
+            if p.requires_grad:
+                sig.append(("param", name, tuple(p.shape), str(p.dtype)))
+        # 如果一定要广播 buffer，则也要列出来
+        for name, b in sorted(module.named_buffers(recurse=True), key=lambda x: x[0]):
+            sig.append(("buffer", name, tuple(b.shape), str(b.dtype)))
+        return sig

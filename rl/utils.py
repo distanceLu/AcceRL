@@ -86,7 +86,6 @@ def prepare_one_obs(
 
     Args:
         cfg: Configuration object with parameters
-        vla: The VLA model
         processor: Model processor for inputs
         obs: Observation dictionary
         task_label: Text description of the task
@@ -95,55 +94,52 @@ def prepare_one_obs(
         noisy_action_projector: Optional noisy action projector for diffusion
         use_film: Whether to use FiLM
     """
-    with torch.inference_mode():
+    # Collect all input images
+    all_images = [obs["full_image"]]
+    if cfg.num_images_in_input > 1:
+        all_images.extend([obs[k] for k in obs.keys() if "wrist" in k])
 
-        # Collect all input images
-        all_images = [obs["full_image"]]
-        if cfg.num_images_in_input > 1:
-            all_images.extend([obs[k] for k in obs.keys() if "wrist" in k])
+    # Process images
+    all_images = prepare_images_for_vla(all_images, cfg)
 
-        # Process images
-        all_images = prepare_images_for_vla(all_images, cfg)
+    # Extract primary image and additional images
+    primary_image = all_images.pop(0)
 
-        # Extract primary image and additional images
-        primary_image = all_images.pop(0)
+    # Build VLA prompt
+    prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+    
+    # Process primary image
+    inputs = processor(prompt, primary_image).to(dtype=torch_dtype)
 
-        # Build VLA prompt
-        prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+    # Process additional wrist images if any
+    if all_images:
+        all_wrist_inputs = [
+            processor(prompt, image_wrist).to(dtype=torch_dtype) for image_wrist in all_images
+        ]
+        # Concatenate all images
+        primary_pixel_values = inputs["pixel_values"]
+        all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
+        inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
+    # Process proprioception data if used
+    proprio = None
+    if cfg.use_proprio:
+        proprio = obs["state"]
+    """
+    本样本注释可以方便代码理解和修改，不要删除
+    inputs example:
+    input_ids torch.Size([1, 34])
+    attention_mask torch.Size([1, 34])
+    pixel_values torch.Size([1, 12, 224, 224])
 
-        # Process primary image
-        inputs = processor(prompt, primary_image).to(dtype=torch_dtype)
-
-        # Process additional wrist images if any
-        if all_images:
-            all_wrist_inputs = [
-                processor(prompt, image_wrist).to(dtype=torch_dtype) for image_wrist in all_images
-            ]
-            # Concatenate all images
-            primary_pixel_values = inputs["pixel_values"]
-            all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
-            inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
-
-        # Process proprioception data if used
-        proprio = None
-        if cfg.use_proprio:
-            proprio = obs["state"]
-        """
-        本样本注释可以方便代码理解和修改，不要删除
-        inputs example:
-        input_ids torch.Size([1, 34])
-        attention_mask torch.Size([1, 34])
-        pixel_values torch.Size([1, 12, 224, 224])
-
-        proprio example: (8,), numpy.ndarray
-        """
-        input_ids, attention_mask, labels = process_one_obs(
-            inputs["input_ids"], inputs["attention_mask"]
-        )
-        inputs["input_ids"] = input_ids
-        inputs["attention_mask"] = attention_mask
-        inputs["labels"] = labels
-        inputs["proprio"] = proprio
+    proprio example: (8,), numpy.ndarray
+    """
+    input_ids, attention_mask, labels = process_one_obs(
+        inputs["input_ids"], inputs["attention_mask"]
+    )
+    inputs["input_ids"] = input_ids
+    inputs["attention_mask"] = attention_mask
+    inputs["labels"] = labels
+    inputs["proprio"] = proprio
     return inputs
 
 

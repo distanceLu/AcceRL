@@ -12,7 +12,6 @@ from experiments.robot.openvla_utils import (
     get_action_head,
     get_processor,
     get_proprio_projector,
-    get_vla,
 )
 
 # Masks used to extract action-related hidden states
@@ -29,6 +28,58 @@ from prismatic.vla.constants import (
     ACTION_PROPRIO_NORMALIZATION_TYPE,
 )
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
+from typing import Any
+import torch
+
+# 显式类：避免依赖 auto_map
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+
+DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+
+
+def get_vla(cfg: Any) -> torch.nn.Module:
+    """
+    只读加载 OpenVLA：不修改 checkpoint 内的 config.json。
+    """
+    print("Instantiating pretrained VLA policy (read-only, no config.json mutation)...")
+
+    # 1) 显式加载 Config（不会触发 auto_map 也不会写文件）
+    vla_cfg = OpenVLAConfig.from_pretrained(
+        cfg.pretrained_checkpoint,
+        trust_remote_code=True,   # 允许自定义类
+    )
+
+    # 2) 显式加载模型（不走 Auto*，不需要 auto_map）
+    vla = OpenVLAForActionPrediction.from_pretrained(
+        cfg.pretrained_checkpoint,
+        config=vla_cfg,
+        torch_dtype=torch.bfloat16,
+        load_in_8bit=cfg.load_in_8bit,
+        load_in_4bit=cfg.load_in_4bit,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+    )
+
+    # 3) FiLM（若启用）
+    if getattr(cfg, "use_film", False):
+        from experiments.robot.openvla_utils import _apply_film_to_vla
+        vla = _apply_film_to_vla(vla, cfg)
+
+    # 4) 设定输入图像数量
+    vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+
+    vla.eval()
+
+    # 5) 未量化时放到目标设备
+    if not cfg.load_in_8bit and not cfg.load_in_4bit:
+        vla = vla.to(DEVICE)
+
+    # 6) 加载数据集统计（归一化/反归一化用）
+    from experiments.robot.openvla_utils import _load_dataset_stats
+    _load_dataset_stats(vla, cfg.pretrained_checkpoint)
+
+    return vla
 
 
 class ActorCritic(nn.Module):
@@ -42,14 +93,14 @@ class ActorCritic(nn.Module):
       - value: state value estimate, shape (B,)
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, torch_dtype: torch.dtype):
         super().__init__()
         self.cfg = cfg
 
         # Device / dtype
         self.vla = get_vla(cfg)
         self.device = self.vla.device
-        self.model_dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
+        self.model_dtype = torch_dtype
         self.vla = self.vla.to(dtype=self.model_dtype)
 
         # Keep processor for external preparation (forward 接收已组装好的 batch，但依旧保留 processor)
@@ -65,7 +116,7 @@ class ActorCritic(nn.Module):
         self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
 
         # Condition-independent log_std parameter (float32 for stability)
-        self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=torch.float32, device=self.device))
+        self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
 
         # Value head: mean-pool over text tokens from the last hidden layer -> scalar
         self.value_head = nn.Sequential(
@@ -294,8 +345,11 @@ if __name__ == "__main__":
     )
 
     # Create ActorCritic policy
-    actor = ActorCritic(cfg)
+    actor = ActorCritic(cfg, TORCH_DTYPE)
     actor.eval()
+    for key, value in actor.named_parameters():
+        if value.dtype != TORCH_DTYPE:
+            print(f"Warning: Parameter {key} has dtype {value.dtype}, expected {TORCH_DTYPE}.")
 
     print("正在初始化 LiberoEnvWrapper...")
 
