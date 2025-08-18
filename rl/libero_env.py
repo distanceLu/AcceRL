@@ -173,6 +173,10 @@ class LiberoEnvWrapper(gym.Env):
         """关闭环境并释放资源。"""
         self.env.close()
 
+    def get_name(self) -> str:
+        """返回当前任务的名称。"""
+        return f"{self.task.name} (ID: {self.task_id})"
+
 
 if __name__ == '__main__':
     # --- 这是一个演示如何使用 LiberoEnvWrapper 的示例 ---

@@ -103,7 +103,11 @@ class ActorCritic(nn.Module):
         self.model_dtype = torch_dtype
         self.vla = self.vla.to(dtype=self.model_dtype)
 
-        # Keep processor for external preparation (forward 接收已组装好的 batch，但依旧保留 processor)
+        # 🔒 冻结 VLA 参数
+        for param in self.vla.parameters():
+            param.requires_grad = False
+
+        # 保留 processor（只是预处理，不需要训练）
         self.processor = get_processor(cfg)
 
         # Heads

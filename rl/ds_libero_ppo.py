@@ -45,14 +45,13 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # Libero benchmark
 BENCHMARK = "libero_spatial"
-TASK_ID = 3
 
 # 分布式系统参数
 NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
-NUM_ROLLOUT_WORKERS = 8
-ROLLOUT_LOCAL_BUF = 8
-INFERENCE_BATCH = 2
+NUM_ROLLOUT_WORKERS = 20
+ROLLOUT_LOCAL_BUF = 64
+INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 8
@@ -62,13 +61,13 @@ TRAIN_ITERS = 100000
 # PPO
 GAMMA = 0.99
 LAMBDA = 0.95
-LR = 1e-7
+LR = 1e-5
 CLIP_EPS = 0.2
 VF_COEF = 0.5
 ENT_COEF = 0.01
 
 # 奖励缩放
-REWARD_SCALE = 0.01
+REWARD_SCALE = 1.0
 
 # LR 调度
 WARMUP_STEPS = 500
@@ -181,17 +180,26 @@ class ReplayBufferActor:
 
 @ray.remote
 class RolloutWorkerActor:
-    def __init__(self, infer, replay, wid, stats_actor, cfg):
+    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
         self.infer, self.replay = infer, replay
         self.stats_actor = stats_actor
         self.cfg = cfg
         # 仅需 processor，Worker 不加载大模型
         self.processor = get_processor(cfg)
+        self.benchmark_name = benchmark_name
         from rl.libero_env import LiberoEnvWrapper
+        # from libero.libero import benchmark
 
+        # benchmark_dict = benchmark.get_benchmark_dict()
+        # if self.benchmark_name not in benchmark_dict:
+        #     raise ValueError(f"基准 '{self.benchmark_name}' 不存在。可用选项: {list(benchmark_dict.keys())}")
+        # task_suite = benchmark_dict[self.benchmark_name]()
+        # task_id = int(wid % task_suite.n_tasks)
+        # print(f"RolloutWorker {wid} 正在加载任务: {task_id} ({task_suite.get_task(task_id).name})")
+        task_id = 5
         self.env = LiberoEnvWrapper(
-            benchmark_name=BENCHMARK,
-            task_id=TASK_ID,
+            benchmark_name=self.benchmark_name,
+            task_id=task_id,
             image_size=224,
             render_mode="rgb_array",
         )
@@ -204,7 +212,7 @@ class RolloutWorkerActor:
         try:
             obs, info = self.env.reset(seed=self.wid)
             self.task_description = self.env.task_description
-            self.current_env_name = self.env.task.name
+            self.current_env_name = self.env.get_name()
 
             reward_sum = 0.0
             step_count = 0
@@ -242,7 +250,7 @@ class RolloutWorkerActor:
                     self.local_buffer.clear()
                     obs, info = self.env.reset()
                     self.task_description = self.env.task_description
-                    self.current_env_name = self.env.task.name
+                    self.current_env_name = self.env.get_name()
                     time_start = time.time()
                     step_count_total = 0
                 elif len(self.local_buffer) == ROLLOUT_LOCAL_BUF + 1:
@@ -457,7 +465,7 @@ class TrainerActor(TrainerActorCom):
                     "cos_min_ratio": 0.0,
                 },
             },
-            "bf16": {"enabled": True},
+            "bf16": {"enabled": USE_BF16},
             "zero_optimization": {
                 "stage": 2,
                 "allgather_partitions": True,
@@ -474,17 +482,16 @@ class TrainerActor(TrainerActorCom):
         elif ds_config.get("bf16", {}).get("enabled", False): self.data_dtype = torch.bfloat16
         else: self.data_dtype = torch.float32
 
-        self.model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+        self.model, _, _, _ = deepspeed.initialize(model=model, model_parameters=trainable_params, config=ds_config)
         print(f"TrainerActor Rank {self.rank}: DeepSpeed 训练组 (ZeRO-2) 初始化完成。")
 
         # 后台取数
         self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
 
-        # 为通信基类使用
-        # 注意：广播时会用 self.model（DeepSpeedEngine）或其 .module
-        # ds_com 需能处理 DeepSpeed engine；若不支持，可重载 get_state_dict/ load_state_dict
-        # 这里按原接口假设可用
-        # self.model 已被设置
+        n_total = sum(p.numel() for p in model.parameters())
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
 
     async def _data_fetching_loop(self):
         print(f"Trainer {self.rank}: 后台数据准备循环已启动。")
@@ -589,7 +596,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = "runs/Libero/OpenVLA_DS_PPO_lr1e-7_" + str(int(time.time()))
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_bs1024_id5_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
@@ -645,14 +652,14 @@ def main():
     train_sig = ray.get(trainer_group[0].get_broadcast_signature.remote())
     infer_sig = ray.get(inference_pool[0].get_broadcast_signature.remote())
     # 打印前几十个，或计算哈希对比
-    print(len(train_sig), len(infer_sig))
+    if len(train_sig) != len(infer_sig):
+        raise RuntimeError(f"训练器与推理器的广播签名长度不匹配: {len(train_sig)} vs {len(infer_sig)}")
     for i, (a, b) in enumerate(zip(train_sig, infer_sig)):
         if a != b:
             raise RuntimeError(f"First mismatch at idx: {i}, trainer: {a}, inference: {b}")
     forward_test_tasks = [inf.forward_test.remote() for inf in inference_pool]
     ray.get(forward_test_tasks)
     print("推理器前向测试完成。before broadcast")
-    print(forward_test_tasks[0])  # 打印第一个推理器的测试结果
     broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
     receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
     ray.get([broadcast_task] + receive_tasks)
@@ -660,14 +667,14 @@ def main():
     forward_test_tasks = [inf.forward_test.remote() for inf in inference_pool]
     ray.get(forward_test_tasks)
     print("推理器前向测试完成。after broadcast")
-    print(forward_test_tasks[0])  # 打印第一个推理器的测试结果
 
     print("\n--- 步骤 4: 启动 Rollout Workers 进行数据收集 ---")
     for w in rollout_workers:
         w.run.remote()
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
-    min_buffer_size_for_start = TRAIN_BATCH_SIZE
+    min_buffer_size_for_start = TRAIN_BATCH_SIZE * ACCUMULATION_STEPS
+    assert min_buffer_size_for_start < REPLAY_CAPACITY
     while not all(size >= min_buffer_size_for_start for size in ray.get([rb.size.remote() for rb in replay_buffers])):
         sizes = ray.get([rb.size.remote() for rb in replay_buffers])
         print(f"等待所有经验池填充初始数据 (目标: {min_buffer_size_for_start})... (当前大小: {sizes})")
@@ -714,7 +721,7 @@ def main():
                   f"全局平均幕长: {avg_ep_len:.1f} | "
                   f"value loss: {np.mean(v_losses):.4f} | "
                   f"学习率: {current_lr:.7f} | "
-                  f"经验池总大小: {total_buffer_size:,} | "
+                  f"Episodes数量: {total_episodes:,} | "
                   f"Step平均时间: {avg_step_time:.3f}s")
 
             writer.add_scalar('Train/Learning_Rate', current_lr, i)

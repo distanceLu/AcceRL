@@ -8,15 +8,27 @@ from torch.distributed import Backend
 import deepspeed
 import contextlib
 
+
 def _unwrap_module(m):
     # DeepSpeedEngine 或 DDP 包装时取到真实 nn.Module
     return getattr(m, "module", m)
 
+
 def _named_tensors_in_order(module):
-    # 以确定性顺序返回 (name, tensor) 列表：先参数后缓冲区，均按名字排序
-    params = sorted(list(module.named_parameters(recurse=True)), key=lambda x: x[0])
-    buffers = sorted(list(module.named_buffers(recurse=True)), key=lambda x: x[0])
+    """
+    只返回需要广播的张量：
+      - 可训练参数 (requires_grad=True)
+      - 可选的 buffers (比如 BN 的 running stats)
+    """
+    params = sorted(
+        [(n, p) for n, p in module.named_parameters(recurse=True) if p.requires_grad],
+        key=lambda x: x[0]
+    )
+    buffers = sorted(
+        list(module.named_buffers(recurse=True)), key=lambda x: x[0]
+    )
     return params, buffers
+
 
 def init_custom_process_group(
     backend=None, init_method=None, timeout=None, world_size=-1, rank=-1,
@@ -133,6 +145,7 @@ class TrainerActorCom:
         for name, b in sorted(module.named_buffers(recurse=True), key=lambda x: x[0]):
             sig.append(("buffer", name, tuple(b.shape), str(b.dtype)))
         return sig
+
 
 class InferenceActorCom:
     def __init__(self):
