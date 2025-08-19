@@ -126,9 +126,27 @@ class ActorCritic(nn.Module):
         self.value_head = nn.Sequential(
             nn.LayerNorm(self.vla.llm_dim),
             nn.Linear(self.vla.llm_dim, self.vla.llm_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(self.vla.llm_dim, 1),
         ).to(self.device).to(dtype=self.model_dtype)
+
+    def get_parameter_groups(self) -> List[Dict[str, Any]]:
+        """
+        将可训练参数分为 'policy' 和 'value' 两组。
+        这对于为不同组件设置不同的学习率至关重要。
+        """
+        policy_params = list(self.action_head.parameters()) + [self.log_std_param] + list(self.proprio_projector.parameters())
+        value_params = list(self.value_head.parameters())
+        
+        # 确保没有遗漏任何可训练参数
+        all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
+        grouped_params = set(policy_params) | set(value_params)
+        assert all_trainable_params == grouped_params, "并非所有可训练参数都被分组！"
+
+        return [
+            {"name": "policy", "params": policy_params},
+            {"name": "value", "params": value_params},
+        ]
 
     def normalize_proprio(self, proprio: Any) -> np.ndarray:
         """
@@ -256,7 +274,8 @@ class ActorCritic(nn.Module):
         """
         ctx = torch.autocast("cuda", dtype=self.model_dtype) if self.device.type == "cuda" else nullcontext()
         with ctx:
-            output = self.vla(
+            self.vla: OpenVLAForActionPrediction
+            output = self.vla.forward(
                 input_ids=batch["input_ids"].to(self.device),
                 attention_mask=batch["attention_mask"].to(self.device),
                 pixel_values=batch["pixel_values"].to(self.model_dtype).to(self.device),
@@ -272,9 +291,10 @@ class ActorCritic(nn.Module):
         return output
 
     def _compute_value_from_hidden(self, last_hidden_states: torch.Tensor) -> torch.Tensor:
-        num_patches = self._compute_num_patches()
-        text_hidden = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
-        pooled = text_hidden.mean(dim=1)                     # (B, D)
+        # num_patches = self._compute_num_patches()
+        # text_hidden = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
+        # pooled = text_hidden.mean(dim=1)                     # (B, D)
+        pooled = last_hidden_states[:, -2]  # -2这个位置的state比较靠后了，一般用不到
         value = self.value_head(pooled.to(self.model_dtype)).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
@@ -321,8 +341,8 @@ class ActorCritic(nn.Module):
 
 
 if __name__ == "__main__":
-    import sys
     import numpy as np
+    import random
 
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
@@ -350,80 +370,60 @@ if __name__ == "__main__":
 
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
+    actor.get_parameter_groups()
     actor.eval()
     for key, value in actor.named_parameters():
         if value.dtype != TORCH_DTYPE:
             print(f"Warning: Parameter {key} has dtype {value.dtype}, expected {TORCH_DTYPE}.")
 
-    print("正在初始化 LiberoEnvWrapper...")
-
     BENCHMARK = "libero_spatial"
-    TASK_ID = 3  # e.g., pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate
-
-    try:
+    num_episodes = 300
+    success_count = 0
+    for episode_i in range(num_episodes):
+        task_id = random.randint(0, 9)
         env = LiberoEnvWrapper(
             benchmark_name=BENCHMARK,
-            task_id=TASK_ID,
+            task_id=task_id,  # 随机任务 ID
             image_size=224,
             render_mode="rgb_array",
         )
-    except Exception as e:
-        print("\n--- 初始化失败 ---")
-        print(f"错误: {e}")
-        print("\n请确保：")
-        print("1. 您已按照 LIBERO 的说明安装了所有依赖项。")
-        print("2. 您已下载了 'libero_spatial' 数据集并放置在正确的位置。")
-        print("3. 当前工作目录正确，以便脚本能够找到必要的工具函数。")
-        sys.exit(1)
+        obs, info = env.reset(seed=episode_i)
+        print(f"Episode {episode_i + 1}, task id: {task_id}, task description: {env.task_description}")
 
-    print("\n--- 环境信息 ---")
-    print(f"任务 ID: {env.task_id}")
-    print(f"任务名称: {env.task.name}")
-    print(f"任务描述: {env.task_description}")
-    print(f"动作空间: {env.action_space}")
-    print(f"观测空间: {env.observation_space}")
-    print(f"最大步数: {env.max_episode_steps}")
-    print("------------------\n")
+        # Run one episode with the ActorCritic policy
+        terminated, truncated = False, False
+        total_reward = 0.0
+        step = 0
+        while not (terminated or truncated):
+            # Prepare single-sample inputs
+            inputs_t = prepare_one_obs(cfg, actor.processor, obs, env.task_description, TORCH_DTYPE)
 
-    # Reset environment
-    print("正在重置环境...")
-    obs, info = env.reset()
-    print("环境重置成功。")
+            # 使用类方法封装的预处理：对列表执行 归一化 proprio + 一致性检查 + batchify
+            inputs_batch = actor.prepare_inputs_batch([inputs_t])
 
-    # Run one episode with the ActorCritic policy
-    terminated, truncated = False, False
-    total_reward = 0.0
-    step = 0
+            # Get actions from policy (all chunks); 用第一个 chunk 与环境交互
+            with torch.no_grad():
+                actions_all, mu_all, log_std_all, value = actor.forward(inputs_batch)
 
-    while not (terminated or truncated):
-        # Prepare single-sample inputs
-        inputs_t = prepare_one_obs(cfg, actor.processor, obs, env.task_description, TORCH_DTYPE)
+            # 取第一个 chunk 的动作，并进行反归一化
+            action_norm = mu_all[0, 0].cpu().numpy().astype(np.float32)  # in (-1, 1)
+            action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
 
-        # 使用类方法封装的预处理：对列表执行 归一化 proprio + 一致性检查 + batchify
-        inputs_batch = actor.prepare_inputs_batch([inputs_t])
+            # Step the environment
+            obs, reward, terminated, truncated, info = env.step(action_env)
 
-        # Get actions from policy (all chunks); 用第一个 chunk 与环境交互
-        with torch.no_grad():
-            actions_all, mu_all, log_std_all, value = actor(inputs_batch)
+            total_reward += float(reward)
+            step += 1
+            # print(
+            #     f"Step {step}: "
+            #     f"Reward={reward:.4f}, Terminated={terminated}, Truncated={truncated}, "
+            #     f"Success={info.get('is_success', False)}"
+            # )
 
-        # 取第一个 chunk 的动作，并进行反归一化
-        action_norm = actions_all[0, 0].cpu().numpy().astype(np.float32)  # in (-1, 1)
-        action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
-
-        # Step the environment
-        obs, reward, terminated, truncated, info = env.step(action_env)
-
-        total_reward += float(reward)
-        step += 1
-        print(
-            f"Step {step}: "
-            f"Reward={reward:.4f}, Terminated={terminated}, Truncated={truncated}, "
-            f"Success={info.get('is_success', False)}"
-        )
-
-    print("\nEpisode 结束。")
-    print(f"总步数: {step}")
-    print(f"总奖励: {total_reward:.4f}")
-
+        print(f"总步数: {step}")
+        print(f"总奖励: {total_reward:.4f}")
+        success_count += info.get('is_success', False)
+        print(f"Success rate over {episode_i + 1} episodes: {success_count / (episode_i + 1):.2%}\n")
+    print(f"Success rate over {num_episodes} episodes: {success_count / num_episodes:.2%}")
     env.close()
     print("环境已关闭。")

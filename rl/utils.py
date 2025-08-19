@@ -89,10 +89,6 @@ def prepare_one_obs(
         processor: Model processor for inputs
         obs: Observation dictionary
         task_label: Text description of the task
-        action_head: Optional action head for continuous actions
-        proprio_projector: Optional proprioception projector
-        noisy_action_projector: Optional noisy action projector for diffusion
-        use_film: Whether to use FiLM
     """
     # Collect all input images
     all_images = [obs["full_image"]]
