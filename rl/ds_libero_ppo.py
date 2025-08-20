@@ -4,7 +4,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm/ray"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -48,7 +48,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 4
+NUM_TRAINER_GPUS = 2
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 20
 ROLLOUT_LOCAL_BUF = 64
@@ -56,7 +56,8 @@ INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 32
-ACCUMULATION_STEPS = 8
+ACCUMULATION_STEPS = 16
+SUPER_BATCH_SIZE = 512
 TRAIN_ITERS = 100000
 
 # PPO
@@ -425,14 +426,15 @@ class TrainerActor(TrainerActorCom):
         self.world_size = world_size
         self.replay_buffer = replay_buffer
         self.cfg = cfg
-
         self.model = None             # DeepSpeed engine
         self.optimizer = None         # DeepSpeed optimizer
         self.base_model = None        # 原始 PyTorch 模型
         self.data_dtype = None
-        self.training_batch: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
+        # self.training_batch: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
+        self.next_ready_batch: Optional[Tuple] = None
         self.data_fetching_task = None
-        
+        self.super_batch_size = SUPER_BATCH_SIZE
+
         # 新增: 用于手动学习率调度的状态
         self.global_step = 0
 
@@ -539,15 +541,22 @@ class TrainerActor(TrainerActorCom):
         return peak_lr * cosine_decay
 
     async def _data_fetching_loop(self):
-        print(f"Trainer {self.rank}: 后台数据准备循环已启动。")
+        print(f"Trainer {self.rank}: 后台数据准备循环已启动 (超级批次大小: {self.super_batch_size})。")
         while True:
             try:
-                if await self.replay_buffer.size.remote() < TRAIN_BATCH_SIZE:
-                    await asyncio.sleep(3)
+                # 如果下一个批次的缓冲区已经满了，就等待，避免内存过度占用
+                if self.next_ready_batch is not None:
+                    await asyncio.sleep(0.1)
                     continue
 
-                # 获取经验
-                obs_list, act_np, adv_np, mu_old_np, log_std_old_np, v_targ_np = await self.replay_buffer.sample.remote(TRAIN_BATCH_SIZE)
+                # 等待 ReplayBuffer 中有足够的数据
+                while await self.replay_buffer.size.remote() < self.super_batch_size:
+                    print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size}...")
+                    await asyncio.sleep(3)
+
+                # 1. 获取经验 (仍然是 numpy 数组)
+                obs_list, act_np, adv_np, mu_old_np, log_std_old_np, v_targ_np = \
+                    await self.replay_buffer.sample.remote(self.super_batch_size)
 
                 # 准备 batch（右侧 padding + proprio 归一化；放到 ActorCritic 的 device）
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
@@ -561,19 +570,19 @@ class TrainerActor(TrainerActorCom):
                 v_targ_t = torch.tensor(v_targ_np, dtype=torch.float32, device=device)
 
                 # 缓存本轮训练 batch
-                self.training_batch = (inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t)
+                self.next_ready_batch = (inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t)
 
             except Exception as e:
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
 
-    # 修改: train_step 实现分阶段训练
-    async def train_step(self) -> Tuple[float, float, float, float, Dict[str, float], bool]:
-        if self.training_batch is None:
-            print(f"Trainer {self.rank}: 首次训练，等待初始数据批次...")
-            while self.training_batch is None:
+    async def run_training_epoch(self) -> Tuple[float, float, float, float, Dict[str, float], int]:
+        # 等待后台任务准备好第一个批次 (仅在启动时发生一次)
+        if self.next_ready_batch is None:
+            print(f"Trainer {self.rank}: 等待初始超级批次...")
+            while self.next_ready_batch is None:
                 await asyncio.sleep(0.2)
-            print(f"Trainer {self.rank}: 初始数据已收到，开始训练。")
+            print(f"Trainer {self.rank}: 初始数据已收到，开始第一个训练周期。")
 
         # 1. 手动更新学习率
         current_lrs = {}
@@ -587,53 +596,84 @@ class TrainerActor(TrainerActorCom):
             elif param_group['name'] == 'policy':
                 param_group['lr'] = policy_lr
                 current_lrs['policy'] = policy_lr
+        # 2. "原子"地获取当前批次，并触发后台准备下一个批次
+        current_batch = self.next_ready_batch
+        self.next_ready_batch = None  # 清空，信号后台任务开始工作
 
-        inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t = self.training_batch
+        inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t = current_batch
+        # 3. **关键：在整个超级批次上计算优势的统计量**
+        adv_mean = adv_t.mean()
+        adv_std = adv_t.std()
 
-        # 前向
-        actions_all, mu_all, log_std_all, value = self.model(inputs_batch)
-        # 仅用第一个 chunk
-        mu = mu_all[:, 0, :].to(torch.float32)
-        log_std = log_std_all[:, 0, :].to(torch.float32)
-        value = value.to(torch.float32)
-
-        # 3. 根据 global_step 计算损失
-        value_loss = VF_COEF * torch.mean((value - v_targ_t) ** 2)
+        # 记录本周期的所有损失和指标
+        epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses = [], [], [], []
         
-        if self.global_step < POLICY_TRAIN_START_STEP:
-            # 阶段一: 只训练 value head
-            loss = value_loss
-            policy_loss = torch.tensor(0.0, device=loss.device)
-            ent_loss = torch.tensor(0.0, device=loss.device)
-        else:
-            # 阶段二: 训练所有组件
-            std = torch.exp(log_std)
-            base_dist = Normal(mu, std)
-            dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-            epsilon = 1e-6
-            clipped_act_t = torch.clamp(act_t, -1.0 + epsilon, 1.0 - epsilon)
-            logp = dist.log_prob(clipped_act_t).sum(dim=-1)
+        num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE
+        
+        # 4. 内循环：对小批次进行梯度更新
+        for i in range(num_updates_in_epoch):
+            start = i * TRAIN_BATCH_SIZE
+            end = start + TRAIN_BATCH_SIZE
 
-            with torch.no_grad():
-                std_old = torch.exp(log_std_old_t)
-                base_dist_old = Normal(mu_old_t, std_old)
-                dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
-                logp_old = dist_old.log_prob(clipped_act_t).sum(dim=-1)
+            # 切分小批次
+            mini_inputs = {k: v[start:end] for k, v in inputs_batch.items()}
+            mini_act = act_t[start:end]
+            mini_adv = adv_t[start:end]
+            mini_mu_old = mu_old_t[start:end]
+            mini_log_std = log_std_old_t[start:end]
+            mini_v_targ = v_targ_t[start:end]
+            normalized_adv = (mini_adv - adv_mean) / (adv_std + 1e-8)
+            # 前向
+            actions_all, mu_all, log_std_all, value = self.model(mini_inputs)
+            # 仅用第一个 chunk
+            mu = mu_all[:, 0, :].to(torch.float32)
+            log_std = log_std_all[:, 0, :].to(torch.float32)
+            value = value.to(torch.float32)
 
-            ratio = torch.exp(logp - logp_old)
-            surr1 = ratio * adv_t
-            surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_t
-            policy_loss = -torch.mean(torch.min(surr1, surr2))
-            ent_loss = -ENT_COEF * torch.mean(base_dist.entropy().sum(dim=-1))
-            loss = policy_loss + value_loss + ent_loss
+            # 3. 根据 global_step 计算损失
+            value_loss = VF_COEF * torch.mean((value - mini_v_targ) ** 2)
+            
+            if self.global_step < POLICY_TRAIN_START_STEP:
+                # 阶段一: 只训练 value head
+                loss = value_loss
+                policy_loss = torch.tensor(0.0, device=loss.device)
+                ent_loss = torch.tensor(0.0, device=loss.device)
+            else:
+                # 阶段二: 训练所有组件
+                std = torch.exp(log_std)
+                base_dist = Normal(mu, std)
+                dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+                epsilon = 1e-6
+                clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
+                logp = dist.log_prob(clipped_act_t).sum(dim=-1)
 
-        self.model.backward(loss)
-        self.model.step()
-        updated = self.model.is_gradient_accumulation_boundary()
-        if updated:
-            self.global_step += 1
+                with torch.no_grad():
+                    std_old = torch.exp(mini_log_std)
+                    base_dist_old = Normal(mini_mu_old, std_old)
+                    dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
+                    logp_old = dist_old.log_prob(clipped_act_t).sum(dim=-1)
 
-        return loss.item(), policy_loss.item(), value_loss.item(), ent_loss.item(), current_lrs, updated, self.global_step
+                ratio = torch.exp(logp - logp_old)
+                surr1 = ratio * normalized_adv
+                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * normalized_adv
+                policy_loss = -torch.mean(torch.min(surr1, surr2))
+                ent_loss = -ENT_COEF * torch.mean(base_dist.entropy().sum(dim=-1))
+                loss = policy_loss + value_loss + ent_loss
+
+            self.model.backward(loss)
+            self.model.step()
+            epoch_losses.append(loss.item())
+            epoch_p_losses.append(policy_loss.item())
+            epoch_v_losses.append(value_loss.item())
+            epoch_e_losses.append(ent_loss.item())
+            if self.model.is_gradient_accumulation_boundary():
+                self.global_step += 1
+        avg_loss = np.mean(epoch_losses)
+        avg_p_loss = np.mean(epoch_p_losses)
+        avg_v_loss = np.mean(epoch_v_losses)
+        avg_e_loss = np.mean(epoch_e_losses)
+
+        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, current_lrs, self.global_step
 
 # ================================================================
 # 5. 主逻辑
@@ -739,7 +779,7 @@ def main():
         w.run.remote()
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
-    min_buffer_size_for_start = TRAIN_BATCH_SIZE * ACCUMULATION_STEPS
+    min_buffer_size_for_start = SUPER_BATCH_SIZE
     assert min_buffer_size_for_start < REPLAY_CAPACITY
     while not all(size >= min_buffer_size_for_start for size in ray.get([rb.size.remote() for rb in replay_buffers])):
         sizes = ray.get([rb.size.remote() for rb in replay_buffers])
@@ -752,15 +792,13 @@ def main():
     last_log_time = time.time()
     global_step = 0
     while global_step < TRAIN_ITERS:
-        results = []
-        while True:
-            train_tasks = [trainer.train_step.remote() for trainer in trainer_group]
-            result = ray.get(train_tasks)
-            # 从结果中解包
-            _, _, _, _, current_lrs, updated, global_step = result[0]
-            results.extend(result)
-            if updated:
-                break
+        # 每个 trainer 独立运行一个训练周期
+        train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
+        results = ray.get(train_tasks)
+        
+        # 从结果中解包 (现在返回的是整个周期的平均值)
+        # 注意：global_step 现在由 trainer 内部管理和返回
+        _, _, _, _, current_lrs, global_step = results[0]
 
         # 广播权重到推理器
         broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
@@ -777,7 +815,7 @@ def main():
             total_episodes = global_stats["total_episodes_processed"]
             avg_step_time = global_stats["avg_step_time"]
 
-            total_losses, p_losses, v_losses, e_losses, lrs_list, _, _ = zip(*results)
+            total_losses, p_losses, v_losses, e_losses, lrs_list, _ = zip(*results)
             # lrs_list 是一个元组，每个元素是一个字典: ({'value': lr_v, 'policy': lr_p}, ...)
             # 我们从第一个 worker 的结果中获取学习率
             current_lrs = lrs_list[0]

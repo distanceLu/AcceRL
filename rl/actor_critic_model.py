@@ -229,7 +229,7 @@ class ActorCritic(nn.Module):
         for it in inputs_list:
             # Normalize proprio using internal norm stats
             proprio_norm = self.normalize_proprio(it["proprio"])
-            it["proprio"] = torch.tensor(proprio_norm, dtype=torch.float32)
+            it["proprio"] = torch.tensor(proprio_norm, dtype=torch.float32).unsqueeze(dim=0)
 
             # Consistency check
             assert it["input_ids"].size(1) == it["attention_mask"].size(1) == it["labels"].size(1), \
@@ -343,6 +343,7 @@ class ActorCritic(nn.Module):
 if __name__ == "__main__":
     import numpy as np
     import random
+    import time
 
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
@@ -352,6 +353,10 @@ if __name__ == "__main__":
     # Precision policy to match the example
     USE_BF16: bool = True
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
+
+    # 在这里设置要并行处理的环境数量
+    NUM_ENVS = 4
+    BENCHMARK = "libero_spatial"
 
     # Instantiate config
     cfg = GenerateConfig(
@@ -374,56 +379,115 @@ if __name__ == "__main__":
     actor.eval()
     for key, value in actor.named_parameters():
         if value.dtype != TORCH_DTYPE:
-            print(f"Warning: Parameter {key} has dtype {value.dtype}, expected {TORCH_DTYPE}.")
+            print(f"警告: 参数 {key} 的数据类型是 {value.dtype}, 但期望的是 {TORCH_DTYPE}.")
+    print("策略初始化完成。")
 
-    BENCHMARK = "libero_spatial"
-    num_episodes = 300
-    success_count = 0
-    for episode_i in range(num_episodes):
-        task_id = random.randint(0, 9)
-        env = LiberoEnvWrapper(
+    # --- 并行初始化多个环境 ---
+    print(f"正在初始化 {NUM_ENVS} 个并行的 Libero 环境...")
+    envs = [
+        LiberoEnvWrapper(
             benchmark_name=BENCHMARK,
-            task_id=task_id,  # 随机任务 ID
+            task_id=random.randint(0, 9),  # 每个环境一个随机任务
             image_size=224,
             render_mode="rgb_array",
         )
-        obs, info = env.reset(seed=episode_i)
-        print(f"Episode {episode_i + 1}, task id: {task_id}, task description: {env.task_description}")
+        for _ in range(NUM_ENVS)
+    ]
+    print("所有环境初始化完成。")
 
-        # Run one episode with the ActorCritic policy
-        terminated, truncated = False, False
-        total_reward = 0.0
-        step = 0
-        while not (terminated or truncated):
-            # Prepare single-sample inputs
-            inputs_t = prepare_one_obs(cfg, actor.processor, obs, env.task_description, TORCH_DTYPE)
+    # --- 初始化所有环境的状态 ---
+    # 使用列表来独立跟踪每个环境的状态
+    observations = []
+    task_descriptions = []
+    for i, env in enumerate(envs):
+        # 为每个环境设置不同的随机种子以保证多样性
+        obs, info = env.reset(seed=int(time.time()) + i)
+        observations.append(obs)
+        task_descriptions.append(env.task_description)
+        print(f"环境 {i}: 任务 ID = {env.task_id}, 任务描述 = {env.task_description}")
 
-            # 使用类方法封装的预处理：对列表执行 归一化 proprio + 一致性检查 + batchify
-            inputs_batch = actor.prepare_inputs_batch([inputs_t])
+    # 跟踪每个环境是否仍在活动、奖励和步数
+    active_envs = [True] * NUM_ENVS
+    total_rewards = [0.0] * NUM_ENVS
+    episode_steps = [0] * NUM_ENVS
+    success_info = [False] * NUM_ENVS
 
-            # Get actions from policy (all chunks); 用第一个 chunk 与环境交互
-            with torch.no_grad():
-                actions_all, mu_all, log_std_all, value = actor.forward(inputs_batch)
+    # 用于统计最终成功率
+    total_episodes_finished = 0
+    total_successes = 0
 
-            # 取第一个 chunk 的动作，并进行反归一化
-            action_norm = mu_all[0, 0].cpu().numpy().astype(np.float32)  # in (-1, 1)
+    print("\n开始并行执行所有环境...")
+    start_time = time.time()
+
+    # --- 主循环：只要有任何一个环境在活动，就继续 ---
+    while any(active_envs):
+        # 1. 从所有【活动】的环境中收集输入数据
+        inputs_t_list = []
+        # 记录当前批次中数据对应的原始环境索引
+        active_indices_this_step = []
+        
+        for i in range(NUM_ENVS):
+            if active_envs[i]:
+                inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
+                inputs_t_list.append(inputs_t)
+                active_indices_this_step.append(i)
+
+        # 如果没有活动的输入，则退出循环
+        if not inputs_t_list:
+            break
+
+        # 2. 使用类方法将输入列表批处理成一个大的张量
+        #    这是实现并行处理的关键步骤
+        inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
+
+        # 3. 执行一次前向传播，为批次中的所有环境获取动作
+        with torch.no_grad():
+            # actions_all 的形状是 (batch_size, num_chunks, action_dim)
+            # 其中 batch_size 等于当前活动的任务数量 len(inputs_t_list)
+            _, mu_all, _, _ = actor.forward(inputs_batch)
+
+        # 4. 将批次动作分发回各自的环境并执行一步
+        for i, env_idx in enumerate(active_indices_this_step):
+            # i 是批次中的索引, env_idx 是原始环境列表中的索引
+            action_norm = mu_all[i, 0].cpu().numpy().astype(np.float32)
             action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
 
-            # Step the environment
-            obs, reward, terminated, truncated, info = env.step(action_env)
+            # 在对应的环境中执行动作
+            obs, reward, terminated, truncated, info = envs[env_idx].step(action_env)
 
-            total_reward += float(reward)
-            step += 1
-            # print(
-            #     f"Step {step}: "
-            #     f"Reward={reward:.4f}, Terminated={terminated}, Truncated={truncated}, "
-            #     f"Success={info.get('is_success', False)}"
-            # )
+            # 更新该环境的状态
+            observations[env_idx] = obs
+            total_rewards[env_idx] += float(reward)
+            episode_steps[env_idx] += 1
 
-        print(f"总步数: {step}")
-        print(f"总奖励: {total_reward:.4f}")
-        success_count += info.get('is_success', False)
-        print(f"Success rate over {episode_i + 1} episodes: {success_count / (episode_i + 1):.2%}\n")
-    print(f"Success rate over {num_episodes} episodes: {success_count / num_episodes:.2%}")
-    env.close()
-    print("环境已关闭。")
+            # 5. 检查环境是否完成
+            if terminated or truncated:
+                envs[env_idx].reset(seed=random.randint(0, 1000))
+                is_success = info.get('is_success', False)
+                success_info[env_idx] = is_success
+                
+                # 打印单个环境完成的信息
+                print("-" * 40)
+                print(f"环境 {env_idx} 已完成! (任务: {envs[env_idx].task_description[:50]}...)")
+                print(f"  总步数: {episode_steps[env_idx]}, 总奖励: {total_rewards[env_idx]:.4f}, 是否成功: {is_success}")
+                print("-" * 40)
+                episode_steps[env_idx] = 0
+                total_rewards[env_idx] = 0
+
+    # --- 所有环境运行完毕后，关闭并打印最终报告 ---
+    end_time = time.time()
+    print("\n所有环境均已执行完毕。")
+    for env in envs:
+        env.close()
+    print("所有环境已关闭。")
+
+    # 计算并打印最终的成功率
+    final_success_count = sum(success_info)
+    final_success_rate = final_success_count / NUM_ENVS if NUM_ENVS > 0 else 0.0
+    
+    print("\n" + "="*20 + " 最终统计报告 " + "="*20)
+    print(f"总共运行了 {NUM_ENVS} 个环境。")
+    print(f"总耗时: {end_time - start_time:.2f} 秒。")
+    print(f"总成功数: {final_success_count}")
+    print(f"最终成功率: {final_success_rate:.2%}")
+    print("="*54)
