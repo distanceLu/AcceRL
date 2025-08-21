@@ -355,7 +355,7 @@ if __name__ == "__main__":
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = [5]
+    ENVS_ID = [5, 6, 8]
     envs_num = len(ENVS_ID)
     BENCHMARK = TaskSuite.LIBERO_OBJECT
 
@@ -462,9 +462,12 @@ if __name__ == "__main__":
             total_rewards[env_idx] += float(reward)
             episode_steps[env_idx] += 1
 
+            # 使用确定性打印
+            if episode_steps[env_idx] % 50 == 0:
+                print(f"环境 {env_idx}, Step: {episode_steps[env_idx]}, 奖励: {reward:.4f}, 终止: {terminated}, 截断: {truncated}")
+
             # 5. 检查环境是否完成
             if terminated or truncated:
-                envs[env_idx].reset(seed=random.randint(0, 1000))
                 is_success = info.get('is_success', False)
                 total_successes += is_success
                 total_episodes_finished += 1
@@ -478,3 +481,5 @@ if __name__ == "__main__":
                 print("-" * 40)
                 episode_steps[env_idx] = 0
                 total_rewards[env_idx] = 0
+                obs, info = envs[env_idx].reset(seed=random.randint(0, 1000))
+                observations[env_idx] = obs
