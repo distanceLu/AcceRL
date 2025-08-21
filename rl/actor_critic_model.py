@@ -347,17 +347,19 @@ if __name__ == "__main__":
 
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
-    from rl.utils import prepare_one_obs
-    from experiments.robot.libero.run_libero_eval import GenerateConfig
+    from rl.utils import prepare_one_obs, check_unnorm_key
+    from experiments.robot.libero.run_libero_eval import GenerateConfig, TaskSuite
 
     # Precision policy to match the example
     USE_BF16: bool = True
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    NUM_ENVS = 4
-    BENCHMARK = "libero_spatial"
+    ENVS_ID = [5]
+    envs_num = len(ENVS_ID)
+    BENCHMARK = TaskSuite.LIBERO_OBJECT
 
+    unnorm_key = f"{BENCHMARK}_no_noops"
     # Instantiate config
     cfg = GenerateConfig(
         pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/",
@@ -370,11 +372,12 @@ if __name__ == "__main__":
         load_in_4bit=False,
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
-        unnorm_key="libero_spatial_no_noops",
+        unnorm_key=unnorm_key,
     )
 
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
+    check_unnorm_key(cfg, actor.vla)
     actor.get_parameter_groups()
     actor.eval()
     for key, value in actor.named_parameters():
@@ -383,15 +386,15 @@ if __name__ == "__main__":
     print("策略初始化完成。")
 
     # --- 并行初始化多个环境 ---
-    print(f"正在初始化 {NUM_ENVS} 个并行的 Libero 环境...")
+    print(f"正在初始化 {len(ENVS_ID)} 个并行的 Libero 环境...")
     envs = [
         LiberoEnvWrapper(
             benchmark_name=BENCHMARK,
-            task_id=random.randint(0, 9),  # 每个环境一个随机任务
+            task_id=env_id,  # 每个环境一个随机任务
             image_size=224,
             render_mode="rgb_array",
         )
-        for _ in range(NUM_ENVS)
+        for env_id in ENVS_ID
     ]
     print("所有环境初始化完成。")
 
@@ -407,17 +410,16 @@ if __name__ == "__main__":
         print(f"环境 {i}: 任务 ID = {env.task_id}, 任务描述 = {env.task_description}")
 
     # 跟踪每个环境是否仍在活动、奖励和步数
-    active_envs = [True] * NUM_ENVS
-    total_rewards = [0.0] * NUM_ENVS
-    episode_steps = [0] * NUM_ENVS
-    success_info = [False] * NUM_ENVS
+    active_envs = [True] * envs_num
+    total_rewards = [0.0] * envs_num
+    episode_steps = [0] * envs_num
+    success_info = [False] * envs_num
 
     # 用于统计最终成功率
     total_episodes_finished = 0
     total_successes = 0
 
     print("\n开始并行执行所有环境...")
-    start_time = time.time()
 
     # --- 主循环：只要有任何一个环境在活动，就继续 ---
     while any(active_envs):
@@ -426,7 +428,7 @@ if __name__ == "__main__":
         # 记录当前批次中数据对应的原始环境索引
         active_indices_this_step = []
         
-        for i in range(NUM_ENVS):
+        for i in range(envs_num):
             if active_envs[i]:
                 inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
                 inputs_t_list.append(inputs_t)
@@ -464,30 +466,15 @@ if __name__ == "__main__":
             if terminated or truncated:
                 envs[env_idx].reset(seed=random.randint(0, 1000))
                 is_success = info.get('is_success', False)
+                total_successes += is_success
+                total_episodes_finished += 1
                 success_info[env_idx] = is_success
                 
                 # 打印单个环境完成的信息
                 print("-" * 40)
-                print(f"环境 {env_idx} 已完成! (任务: {envs[env_idx].task_description[:50]}...)")
+                print(f"环境 {env_idx} 已完成 (任务: {envs[env_idx].task_description[:50]}...)")
                 print(f"  总步数: {episode_steps[env_idx]}, 总奖励: {total_rewards[env_idx]:.4f}, 是否成功: {is_success}")
+                print(f"Success rate: {total_successes / total_episodes_finished}, total_episodes_finished: {total_episodes_finished}")
                 print("-" * 40)
                 episode_steps[env_idx] = 0
                 total_rewards[env_idx] = 0
-
-    # --- 所有环境运行完毕后，关闭并打印最终报告 ---
-    end_time = time.time()
-    print("\n所有环境均已执行完毕。")
-    for env in envs:
-        env.close()
-    print("所有环境已关闭。")
-
-    # 计算并打印最终的成功率
-    final_success_count = sum(success_info)
-    final_success_rate = final_success_count / NUM_ENVS if NUM_ENVS > 0 else 0.0
-    
-    print("\n" + "="*20 + " 最终统计报告 " + "="*20)
-    print(f"总共运行了 {NUM_ENVS} 个环境。")
-    print(f"总耗时: {end_time - start_time:.2f} 秒。")
-    print(f"总成功数: {final_success_count}")
-    print(f"最终成功率: {final_success_rate:.2%}")
-    print("="*54)
