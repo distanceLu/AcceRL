@@ -354,3 +354,10 @@ def my_get_action(vla, cfg, processor, observations, action_head, proprio_projec
     )
     actions = vla._unnormalize_actions(norm_action[0].float().detach().cpu().numpy(), cfg.unnorm_key)
     return actions
+
+
+def check_unnorm_key(cfg, model) -> None:
+    """Check that the model contains the action un-normalization key."""
+    # Initialize unnorm_key
+    unnorm_key = cfg.unnorm_key
+    assert unnorm_key in model.norm_stats, f"Action un-norm key {unnorm_key} not found in VLA `norm_stats`!"
