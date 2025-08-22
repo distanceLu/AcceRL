@@ -290,11 +290,8 @@ class ActorCritic(nn.Module):
             )
         return output
 
-    def _compute_value_from_hidden(self, last_hidden_states: torch.Tensor) -> torch.Tensor:
-        # num_patches = self._compute_num_patches()
-        # text_hidden = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
-        # pooled = text_hidden.mean(dim=1)                     # (B, D)
-        pooled = last_hidden_states[:, -2]  # -2这个位置的state比较靠后了，一般用不到
+    def _compute_value_from_hidden(self, actions_hidden_states: torch.Tensor) -> torch.Tensor:
+        pooled = actions_hidden_states[:, -2]  # -2这个位置的state比较靠后了，一般用不到
         value = self.value_head(pooled.to(self.model_dtype)).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
@@ -335,7 +332,7 @@ class ActorCritic(nn.Module):
         actions_all = dist.rsample()                                  # (B, T, A) in (-1, 1)
 
         # 5) Value from hidden states
-        value = self._compute_value_from_hidden(last_hidden_states)   # (B,)
+        value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)
 
         return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
 
@@ -355,7 +352,7 @@ if __name__ == "__main__":
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = [5, 6, 8]
+    ENVS_ID = list(range(1))
     envs_num = len(ENVS_ID)
     BENCHMARK = TaskSuite.LIBERO_OBJECT
 
