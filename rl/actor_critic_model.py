@@ -352,9 +352,12 @@ if __name__ == "__main__":
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = list(range(1))
+    ENVS_ID = list(range(10))
     envs_num = len(ENVS_ID)
-    BENCHMARK = TaskSuite.LIBERO_OBJECT
+    BENCHMARK = TaskSuite.LIBERO_SPATIAL
+    # LIBERO_SPATIAL: 93.2% (10 envs, 2982 episodes)
+    # LIBERO_GOAL: 84.1% (10 envs, 2101 episodes)
+    # LIBERO_OBJECT: 51.6% (10 envs, 1475 episodes)
 
     unnorm_key = f"{BENCHMARK}_no_noops"
     # Instantiate config

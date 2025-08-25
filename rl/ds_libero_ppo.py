@@ -4,7 +4,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm/ray"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,3,4,5,6"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -49,7 +49,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 2
+NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 20
 ROLLOUT_LOCAL_BUF = 64
@@ -57,7 +57,7 @@ INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 32
-ACCUMULATION_STEPS = 16
+ACCUMULATION_STEPS = 8
 SUPER_BATCH_SIZE = 512
 TRAIN_ITERS = 100000
 
@@ -196,15 +196,17 @@ class RolloutWorkerActor:
         self.processor = get_processor(cfg)
         self.benchmark_name = benchmark_name
         from rl.libero_env import LiberoEnvWrapper
-        # from libero.libero import benchmark
+        from libero.libero import benchmark
 
-        # benchmark_dict = benchmark.get_benchmark_dict()
-        # if self.benchmark_name not in benchmark_dict:
-        #     raise ValueError(f"基准 '{self.benchmark_name}' 不存在。可用选项: {list(benchmark_dict.keys())}")
-        # task_suite = benchmark_dict[self.benchmark_name]()
-        # task_id = int(wid % task_suite.n_tasks)
-        # print(f"RolloutWorker {wid} 正在加载任务: {task_id} ({task_suite.get_task(task_id).name})")
-        task_id = 5
+        benchmark_dict = benchmark.get_benchmark_dict()
+        if self.benchmark_name not in benchmark_dict:
+            err_info = f"基准 '{self.benchmark_name}' 不存在。可用选项: {list(benchmark_dict.keys())}"
+            print(err_info, flush=True)  # ray可能不会打印报错信息，所以这里用print及时打印
+            raise ValueError(err_info)
+        task_suite = benchmark_dict[self.benchmark_name]()
+        task_id = int(wid % task_suite.n_tasks)
+        print(f"RolloutWorker {wid} 正在加载任务: {task_id} ({task_suite.get_task(task_id).name})")
+        # task_id = 5
         self.env = LiberoEnvWrapper(
             benchmark_name=self.benchmark_name,
             task_id=task_id,
@@ -225,7 +227,6 @@ class RolloutWorkerActor:
             reward_sum = 0.0
             step_count = 0
             time_start = time.time()
-            step_count_total = 0
 
             while True:
                 # 2) 用 prepare_one_obs 生成单条样本
@@ -240,13 +241,12 @@ class RolloutWorkerActor:
                 r_scaled = r * REWARD_SCALE
 
                 step_count += 1
-                step_count_total += 1
                 # 只在 buffer 存标准化后的动作与策略统计量
                 self.local_buffer.append((inputs_t, action_norm, r_scaled, mu, log_std, value))
                 obs = nxt
 
                 if term or trunc:
-                    step_time = (time.time() - time_start) / max(step_count_total, 1)
+                    step_time = (time.time() - time_start) / max(step_count, 1)
                     success = float(info.get('is_success', 0.0))  # Libero 用 is_success
                     self.stats_actor.add_episode_return.remote(
                         self.current_env_name, reward_sum, step_time, step_count, success
@@ -260,7 +260,6 @@ class RolloutWorkerActor:
                     self.task_description = self.env.task_description
                     self.current_env_name = self.env.get_name()
                     time_start = time.time()
-                    step_count_total = 0
                 elif len(self.local_buffer) == ROLLOUT_LOCAL_BUF + 1:
                     _, _, _, _, _, bootstrap_val = self.local_buffer[-1]
                     self._process_traj(self.local_buffer[:-1], bootstrap_val)
@@ -722,7 +721,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_adv_all_reduce_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_all_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
