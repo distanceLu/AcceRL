@@ -1,7 +1,10 @@
 import os
 os.makedirs("obs", exist_ok=True)
-# os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 import pickle
+import time
+import random
+
 import torch
 import torch.nn as nn
 from typing import Dict, Any, Tuple, List
@@ -64,7 +67,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     vla = OpenVLAForActionPrediction.from_pretrained(
         cfg.pretrained_checkpoint,
         config=vla_cfg,
-        torch_dtype=torch.float32, #bfloat16
+        torch_dtype=torch.float32, #bfloat16 
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
         low_cpu_mem_usage=True,
@@ -218,9 +221,9 @@ class ActorCritic(nn.Module):
             # 如果 tensors 不为空，则拼接；否则跳过
             if tensors:
                 inputs[k] = torch.cat(tensors, dim=0).to(self.vla.device)
-            else:
-                # 可选：跳过该键
-                print(f"Warning: Key '{k}' has no valid tensors, skipping...")
+            else: 
+                #print(f"Warning: Key '{k}' has no valid tensors, skipping...")
+                pass 
         # inputs["proprio"] = inputs["proprio"].to(torch.float32)
         return inputs
 
@@ -366,12 +369,18 @@ if __name__ == "__main__":
 
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
-    from rl.utils import prepare_one_obs
-    from experiments.robot.libero.run_libero_eval import GenerateConfig
+    from rl.utils import prepare_one_obs, check_unnorm_key
+    from experiments.robot.libero.run_libero_eval import GenerateConfig, TaskSuite
 
     # Precision policy to match the example
     USE_BF16: bool = False
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
+
+    # 在这里设置要并行处理的环境数量
+    ENVS_ID = list(range(1))
+    envs_num = len(ENVS_ID)
+    BENCHMARK = TaskSuite.LIBERO_SPATIAL
+    unnorm_key = f"{BENCHMARK}_no_noops"
 
     # Instantiate config
     cfg = GenerateConfig(
@@ -385,110 +394,121 @@ if __name__ == "__main__":
         load_in_4bit=False,
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
-        unnorm_key="libero_spatial_no_noops",
+        unnorm_key=unnorm_key,
     )
 
-    # Create ActorCritic policy
+    # 创建策略
     actor = ActorCritic(cfg, TORCH_DTYPE)
+    check_unnorm_key(cfg, actor.vla)
     actor.eval()
+    
+    # 检查参数类型
     for key, value in actor.named_parameters():
         if value.dtype != TORCH_DTYPE:
             print(f"Warning: Parameter {key} has dtype {value.dtype}, expected {TORCH_DTYPE}.")
+    print("策略初始化完成。")
 
-    print("正在初始化 LiberoEnvWrapper...")
-
-    BENCHMARK = "libero_spatial"
-    TASK_ID = 3  # e.g., pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate
-
-    try:
-        env = LiberoEnvWrapper(
+    # 初始化环境
+    print(f"正在初始化 {len(ENVS_ID)} 个并行的 Libero 环境...")
+    envs = [
+        LiberoEnvWrapper(
             benchmark_name=BENCHMARK,
-            task_id=TASK_ID,
+            task_id=env_id,
             image_size=224,
             render_mode="rgb_array",
         )
-    except Exception as e:
-        print("\n--- 初始化失败 ---")
-        print(f"错误: {e}")
-        print("\n请确保：")
-        print("1. 您已按照 LIBERO 的说明安装了所有依赖项。")
-        print("2. 您已下载了 'libero_spatial' 数据集并放置在正确的位置。")
-        print("3. 当前工作目录正确，以便脚本能够找到必要的工具函数。")
-        sys.exit(1)
+        for env_id in ENVS_ID
+    ]
+    print("所有环境初始化完成。")
 
-    print("\n--- 环境信息 ---")
-    print(f"任务 ID: {env.task_id}")
-    print(f"任务名称: {env.task.name}")
-    print(f"任务描述: {env.task_description}")
-    print(f"动作空间: {env.action_space}")
-    print(f"观测空间: {env.observation_space}")
-    print(f"最大步数: {env.max_episode_steps}")
-    print("------------------\n")
+    # 全局统计
+    total_episodes_finished = 0
+    total_successes = 0
 
-    # Reset environment
-    print("正在重置环境...")
-    obs, info = env.reset()
-    print("环境重置成功。")
+    # from collections import deque
+    # env_queues = [deque() for _ in range(len(ENVS_ID))]  # ENVS_ID是环境ID列表
 
-    # Run one episode with the ActorCritic policy
-    terminated, truncated = False, False
-    total_reward = 0.0
-    step = 0
-    images_for_gif = []
+    # 主循环
+    while True:
+        # 初始化环境状态
+        observations = []
+        task_descriptions = []
+        for i, env in enumerate(envs):
+            obs, info = env.reset(seed=int(time.time()) + i)
+            observations.append(obs)
+            task_descriptions.append(env.task_description)
+            print(f"环境 {i}: 任务 ID = {env.task_id}, 任务描述 = {env.task_description}")
+            # env_queues[i].clear()  # 重置该环境的动作队列
+            
+        # 跟踪变量
+        active_envs = [True] * envs_num
+        total_rewards = [0.0] * envs_num
+        episode_steps = [0] * envs_num
+        success_info = [False] * envs_num
 
-    # 初始化动作队列
-    from collections import deque
-    action_queue = deque()
-    
-    while not (terminated or truncated):
-        # Prepare single-sample inputs
-        # with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
-        #     observation = pickle.load(file)
-        inputs_t = prepare_one_obs(cfg, actor.processor, obs, env.task_description, TORCH_DTYPE)  #obs observation, observation["task_description"]
+        print(f"\n开始第 {total_episodes_finished // envs_num + 1} 轮并行执行...")
 
-        # 使用类方法封装的预处理：对列表执行 归一化 proprio + 一致性检查 + batchify
-        inputs_batch = actor.prepare_inputs_batch([inputs_t])
+        # 环境执行循环
+        while any(active_envs):
+            # 1. 收集活动环境的输入
+            inputs_t_list = []
+            active_indices_this_step = []
+            
+            for i in range(envs_num):
+                if active_envs[i]:
+                    inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
+                    inputs_t_list.append(inputs_t)
+                    active_indices_this_step.append(i)
 
-        # Get actions from policy (all chunks); 用第一个 chunk 与环境交互
-        with torch.inference_mode():
-        # with torch.no_grad():
-            actions_all, mu_all, log_std_all, value = actor.forward(inputs_batch)
+            if not inputs_t_list:
+                break
 
-        # 取第一个 chunk 的动作，并进行反归一化
-        action_norm = actions_all[0, 0].cpu().numpy().astype(np.float32)  # in (-1, 1)
-        action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
+            # 2. 批处理输入
+            inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
 
-        # action_env = invert_gripper_action(action_env) 
+            # 3. 获取动作
+            with torch.no_grad():
+                actions_all, mu_all, _, _ = actor.forward(inputs_batch)
 
-        # Step the environment
-        obs, reward, terminated, truncated, info = env.step(action_env)
-        full_image = Image.fromarray(obs['full_image'])
-        # save_path = os.path.join("obs", f"full_image_{step}.png")  # 路径拼接
-        # full_image.save(save_path)
-        images_for_gif.append(full_image)
+            # 4. 执行动作
+            for i, env_idx in enumerate(active_indices_this_step):
+                action_norm = actions_all[i, 0].cpu().numpy().astype(np.float32)
+                action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
 
-        total_reward += float(reward)
-        step += 1
-        print(
-            f"Step {step}: "
-            f"Reward={reward:.4f}, Terminated={terminated}, Truncated={truncated}, "
-            f"Success={info.get('is_success', False)}"
-        )
-    if images_for_gif:
-        gif_path = os.path.join("obs", "animation.gif")
-        # 设置每帧显示时间（毫秒），这里设为100ms（0.1秒）
-        images_for_gif[0].save(
-            gif_path,
-            save_all=True,
-            append_images=images_for_gif[1:],
-            duration=100,  # 每帧显示时间
-            loop=0  # 0表示无限循环
-        )
-        print(f"GIF动画已保存到: {gif_path}")
+                obs, reward, terminated, truncated, info = envs[env_idx].step(action_env)
 
-    print("\nEpisode 结束。")
-    print(f"总步数: {step}")
-    print(f"总奖励: {total_reward:.4f}")
+                # 更新状态
+                observations[env_idx] = obs
+                total_rewards[env_idx] += float(reward)
+                episode_steps[env_idx] += 1
 
-    env.close()
-    print("环境已关闭。")
+                # 定期打印
+                if episode_steps[env_idx] % 50 == 0:
+                    print(f"环境 {env_idx}, Step: {episode_steps[env_idx]}, 奖励: {reward:.4f}, 终止: {terminated}, 截断: {truncated}")
+
+                # 检查环境是否完成
+                if terminated or truncated:
+                    is_success = info.get('is_success', False)
+                    total_successes += is_success
+                    total_episodes_finished += 1
+                    success_info[env_idx] = is_success
+                    
+                    print("-" * 40)
+                    print(f"环境 {env_idx} 已完成 (任务: {envs[env_idx].task_description[:50]}...)")
+                    print(f"总步数: {episode_steps[env_idx]}, 总奖励: {total_rewards[env_idx]:.4f}, 是否成功: {is_success}")
+                    print(f"成功率: {total_successes/total_episodes_finished:.3f}, 总回合数: {total_episodes_finished}")
+                    print("-" * 40)
+                    
+                    # 重置环境
+                    active_envs[env_idx] = False
+                    episode_steps[env_idx] = 0
+                    total_rewards[env_idx] = 0
+                    obs, info = envs[env_idx].reset(seed=random.randint(0, 1000))
+                    observations[env_idx] = obs
+
+        # 每轮结束后打印统计信息
+        print("=" * 60)
+        print(f"第 {total_episodes_finished // envs_num} 轮完成!")
+        print(f"累计总回合数: {total_episodes_finished}, 成功次数: {total_successes}")
+        print(f"总体成功率: {total_successes/total_episodes_finished:.3f}")
+        print("=" * 60)
