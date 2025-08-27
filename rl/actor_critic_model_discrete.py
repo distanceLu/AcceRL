@@ -51,7 +51,7 @@ from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 
-def get_vla(cfg: Any) -> torch.nn.Module:
+def get_vla(cfg: Any,torch_dtype: torch.dtype = torch.bfloat16) -> torch.nn.Module:
     """
     只读加载 OpenVLA：不修改 checkpoint 内的 config.json。
     """
@@ -67,7 +67,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     vla = OpenVLAForActionPrediction.from_pretrained(
         cfg.pretrained_checkpoint,
         config=vla_cfg,
-        torch_dtype=torch.float32, #bfloat16 
+        torch_dtype=torch_dtype,     #bfloat16 
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
         low_cpu_mem_usage=True,
@@ -119,7 +119,7 @@ class ActorCritic(nn.Module):
         self.cfg = cfg
 
         # Device / dtype
-        self.vla = get_vla(cfg)
+        self.vla = get_vla(cfg,torch_dtype)
         self.device = self.vla.device
         self.model_dtype = torch_dtype
         self.vla = self.vla.to(dtype=self.model_dtype)
@@ -246,7 +246,14 @@ class ActorCritic(nn.Module):
 
         # Batchify
         return self.batch_process_obs(inputs_list)
-
+    
+    def get_log_probs(self, inputs_batch: Dict[str, Any], actions: torch.Tensor) -> torch.Tensor:
+        """计算给定状态下采取给定动作的对数概率"""
+        output = self._forward_vla(inputs_batch)
+        action_logits = self._extract_actions_hidden(output.logits, inputs_batch)
+        batch_dist = torch.distributions.Categorical(logits=action_logits)
+        return batch_dist.log_prob(actions)  # shape = (B,)
+    
     def _compute_num_patches(self) -> int:
         num_patches = (
             self.vla.vision_backbone.get_num_patches()
@@ -326,23 +333,32 @@ class ActorCritic(nn.Module):
         logits = output.logits
         action_logits = self._extract_actions_hidden(logits, inputs_batch)
 
+        # 输入: action_logits.shape = (B, num_dims, vocab_size)
+        batch_dist = torch.distributions.Categorical(logits=action_logits)  # 批量创建分布
 
-        # 2. 构建分类分布（每个动作维度独立）
-        dist_per_dim = [
-            torch.distributions.Categorical(logits=action_logits[:, i, :]) 
-            for i in range(NUM_ACTIONS_CHUNK * ACTION_DIM)
-        ]
+        # 采样时 (替代原来的循环采样)
+        actions_all = batch_dist.sample()  # shape = (B, num_dims)
 
-        # 3. 采样动作（联合采样所有维度）
+        # 计算对数概率 (替代原来的循环计算)
+        log_probs = batch_dist.log_prob(actions_all)  # shape = (B, num_dims)
+        entropy = batch_dist.entropy()               # shape = (B, num_dims)
+
+        # # 2. 构建分类分布（每个动作维度独立）
+        # dist_per_dim = [
+        #     torch.distributions.Categorical(logits=action_logits[:, i, :]) 
+        #     for i in range(NUM_ACTIONS_CHUNK * ACTION_DIM)
+        # ]
+
+        # # 3. 采样动作（联合采样所有维度）
         # actions_all = torch.stack([dist.sample() for dist in dist_per_dim], dim=1)  # (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
-        actions_all = torch.argmax(action_logits, dim=2)
-        # 4. 计算对数概率和熵（PPO需要）
-        log_probs = torch.stack([
-            dist.log_prob(actions_all[:, i]) 
-            for i, dist in enumerate(dist_per_dim)
-        ], dim=1).sum(dim=1)  # (B,)
+        # # actions_all = torch.argmax(action_logits, dim=2)
+        # # 4. 计算对数概率和熵（PPO需要）
+        # log_probs = torch.stack([
+        #     dist.log_prob(actions_all[:, i]) 
+        #     for i, dist in enumerate(dist_per_dim)
+        # ], dim=1).sum(dim=1)  # (B,)
 
-        entropy = torch.stack([dist.entropy() for dist in dist_per_dim], dim=1).sum(dim=1)  # (B,)
+        # entropy = torch.stack([dist.entropy() for dist in dist_per_dim], dim=1).sum(dim=1)  # (B,)
 
         # 5. 反规范化离散动作（映射到实际值）
         discretized_actions = self.vocab_size - actions_all.cpu().numpy()
@@ -357,11 +373,11 @@ class ActorCritic(nn.Module):
         value = self._compute_value_from_hidden(last_hidden_states)  # (B,)
 
         return (
-            normalized_actions,          # 替换原actions_all：实际动作值 (B, T, A)
+            actions_all,  
             log_probs.to(torch.float32), # 替换原mu_all：对数概率 (B,)
             entropy.to(torch.float32),   # 替换原log_std_all：熵 (B,)
             value.to(torch.float32)      # 状态价值 (B,)
-        )
+        )   # val -> normalized_actions
 
 if __name__ == "__main__":
     import sys
@@ -373,11 +389,11 @@ if __name__ == "__main__":
     from experiments.robot.libero.run_libero_eval import GenerateConfig, TaskSuite
 
     # Precision policy to match the example
-    USE_BF16: bool = False
+    USE_BF16: bool = True
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = list(range(1))
+    ENVS_ID = list(range(10))
     envs_num = len(ENVS_ID)
     BENCHMARK = TaskSuite.LIBERO_SPATIAL
     unnorm_key = f"{BENCHMARK}_no_noops"
