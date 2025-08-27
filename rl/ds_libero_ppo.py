@@ -602,24 +602,18 @@ class TrainerActor(TrainerActorCom):
         inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t = current_batch
         
         # 3. **关键：在整个超级批次上计算优势的全局统计量**
-        # ======================= 代码修改开始 =======================
-        # 在当前 rank 计算本地的均值和标准差
-        local_adv_mean = adv_t.mean()
-        local_adv_std = adv_t.std()
+        # 本地统计
+        local_sum = adv_t.sum()
+        local_sq_sum = (adv_t * adv_t).sum()
+        local_count = torch.tensor([adv_t.numel()], device=adv_t.device, dtype=torch.float32)
 
-        # 将本地统计数据打包到一个 tensor 中，以便进行分布式通信
-        # 使用 .item() 来获取纯数值，避免任何不必要的计算图连接
-        global_adv_stats = torch.tensor(
-            [local_adv_mean.item(), local_adv_std.item()], 
-            device=adv_t.device, 
-            dtype=self.data_dtype
-        )
-        distributed.all_reduce(global_adv_stats, op=distributed.ReduceOp.AVG)
+        stats_tensor = torch.stack([local_sum, local_sq_sum, local_count.squeeze(0)])
+        distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
 
-        # 提取全局的均值和标准差
-        global_adv_mean = global_adv_stats[0]
-        global_adv_std = global_adv_stats[1]
-        # ======================= 代码修改结束 =======================
+        global_sum, global_sq_sum, global_count = stats_tensor[0], stats_tensor[1], stats_tensor[2]
+        global_mean = global_sum / torch.clamp(global_count, min=1.0)
+        global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
+        global_std = torch.sqrt(global_var)
 
         # 记录本周期的所有损失和指标
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses = [], [], [], []
@@ -640,7 +634,7 @@ class TrainerActor(TrainerActorCom):
             mini_v_targ = v_targ_t[start:end]
             
             # 使用全局统计量进行归一化
-            normalized_adv = (mini_adv - global_adv_mean) / (global_adv_std + 1e-8)
+            normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
             
             # 前向
             actions_all, mu_all, log_std_all, value = self.model(mini_inputs)
@@ -721,7 +715,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_all_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_fix_std_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
