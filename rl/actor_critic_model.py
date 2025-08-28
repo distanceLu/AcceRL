@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from typing import Dict, Any, Tuple, List
@@ -6,6 +7,9 @@ import numpy as np
 
 from torch.distributions import Normal, TransformedDistribution
 from torch.distributions.transforms import TanhTransform
+
+from peft import LoraConfig, get_peft_model
+from experiments.robot.openvla_utils import L1RegressionActionHead
 
 # Core OpenVLA components
 from experiments.robot.openvla_utils import (
@@ -37,6 +41,14 @@ from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
 DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
+class CustomTanhTransform(TanhTransform):
+    def __init__(self, scale_factor=1.5):
+        super().__init__(cache_size=1)
+        self.scale_factor = scale_factor
+    
+    def _call(self, x):
+        # Scale the result to the range [-1.5, 1.5]
+        return super()._call(x) * self.scale_factor
 
 def get_vla(cfg: Any) -> torch.nn.Module:
     """
@@ -107,12 +119,16 @@ class ActorCritic(nn.Module):
         for param in self.vla.parameters():
             param.requires_grad = False
 
+        # 标记 VLA 是否已经被 LoRA 修改
+        self._vla_is_lora_tuned = False
+
         # 保留 processor（只是预处理，不需要训练）
         self.processor = get_processor(cfg)
 
         # Heads
         self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim)
         self.action_head = self.action_head.to(self.device).to(dtype=self.model_dtype)
+        self.log_std_head = L1RegressionActionHead(input_dim=self.vla.llm_dim, hidden_dim=self.vla.llm_dim, action_dim=ACTION_DIM).to(self.device).to(dtype=self.model_dtype)
 
         self.proprio_projector = get_proprio_projector(
             cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
@@ -120,7 +136,7 @@ class ActorCritic(nn.Module):
         self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
 
         # Condition-independent log_std parameter (float32 for stability)
-        self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
+        # self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
 
         # Value head: mean-pool over text tokens from the last hidden layer -> scalar
         self.value_head = nn.Sequential(
@@ -130,22 +146,45 @@ class ActorCritic(nn.Module):
             nn.Linear(self.vla.llm_dim, 1),
         ).to(self.device).to(dtype=self.model_dtype)
 
+    def setup_finetuning(self, lora_rank: int, lora_dropout: float):
+        """为微调准备模型，注入 LoRA 适配器。"""
+        if self.cfg.use_lora:
+            print("Injecting LoRA adapters for fine-tuning...")
+            lora_config = LoraConfig(
+                r=lora_rank,
+                lora_alpha=min(lora_rank, 16),
+                lora_dropout=lora_dropout,
+                target_modules="all-linear",
+                init_lora_weights="gaussian",
+            )
+            self.vla = get_peft_model(self.vla, lora_config)
+            self._vla_is_lora_tuned = True
+            print("LoRA injection complete.")
+            self.vla.print_trainable_parameters()
+
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
         """
         将可训练参数分为 'policy' 和 'value' 两组。
         这对于为不同组件设置不同的学习率至关重要。
         """
-        policy_params = list(self.action_head.parameters()) + [self.log_std_param] + list(self.proprio_projector.parameters())
+        # policy_params = list(self.action_head.parameters()) + [self.log_std_param] + list(self.proprio_projector.parameters())
+        policy_params = list(self.action_head.parameters()) + list(self.log_std_head.parameters()) + list(self.proprio_projector.parameters())
+
         value_params = list(self.value_head.parameters())
+
+        if self._vla_is_lora_tuned:
+            lora_params = [p for p in self.vla.parameters() if p.requires_grad]
+
         
         # 确保没有遗漏任何可训练参数
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
-        grouped_params = set(policy_params) | set(value_params)
+        grouped_params = set(policy_params) | set(value_params) | (set(lora_params) if self._vla_is_lora_tuned else set())
         assert all_trainable_params == grouped_params, "并非所有可训练参数都被分组！"
 
         return [
             {"name": "policy", "params": policy_params},
             {"name": "value", "params": value_params},
+            {"name": "lora", "params": lora_params} if self._vla_is_lora_tuned else {},
         ]
 
     def normalize_proprio(self, proprio: Any) -> np.ndarray:
@@ -281,8 +320,8 @@ class ActorCritic(nn.Module):
                 pixel_values=batch["pixel_values"].to(self.model_dtype).to(self.device),
                 labels=batch["labels"].to(self.device),  # for mask derivation and potential loss
                 output_hidden_states=True,
-                proprio=batch["proprio"] if self.cfg.use_proprio else None,
-                proprio_projector=self.proprio_projector if self.cfg.use_proprio else None,
+                proprio=batch["proprio"].to(self.device) if self.cfg.use_proprio else None,
+                proprio_projector=self.proprio_projector.to(self.device) if self.cfg.use_proprio else None,
                 noisy_actions=None,
                 noisy_action_projector=None,
                 diffusion_timestep_embeddings=None,
@@ -322,19 +361,71 @@ class ActorCritic(nn.Module):
 
         # 3) Condition-independent log_std broadcast across chunks
         B = mu_all.size(0)
-        log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
-        log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
+        # log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
+        log_std_all = self.log_std_head.predict_action(actions_hidden_states)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM) or flat
+        # log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
 
         # 4) Squashed Gaussian sampling to (-1, 1) for all chunks
-        std_all = torch.exp(log_std_all)                             # (B, T, A)
+        std_all = torch.exp(log_std_all.float())  # (B, T, A)
+        mu_all = mu_all.float()
+        # print('*******************************')
+        # print(std_all)                        # (B, T, A)
+        # print(mu_all)
+        # print('nan mu:', torch.any(torch.isnan(mu_all)))
+        # print('inf mu:', torch.any(torch.isinf(mu_all)))
+        # print('nan std:', torch.any(torch.isnan(std_all)))
+        # print('inf std:', torch.any(torch.isinf(std_all)))
+        # print('*******************************')
         base_dist = Normal(mu_all.to(torch.float32), std_all)        # fp32 sampling for stability
-        dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+        # dist = TransformedDistribution(base_dist, [CustomTanhTransform(scale_factor=1.5)])
+        dist = base_dist
         actions_all = dist.rsample()                                  # (B, T, A) in (-1, 1)
 
         # 5) Value from hidden states
         value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)
 
-        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
+        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), None, dist
+    
+    def load_weights_for_eval(self, checkpoint_dir: str, step: int):
+        """
+        为评估加载所有组件的权重。
+        """
+        print(f"\nLoading weights for evaluation from: {checkpoint_dir} at step {step}")
+        
+        # --- 加载 Action Head ---
+        action_head_path = os.path.join(checkpoint_dir, f"action_head--{step}_checkpoint.pt")
+        if os.path.exists(action_head_path):
+            print(f"  -> Loading Action Head from {action_head_path}")
+            state_dict = torch.load(action_head_path, map_location=self.device)
+            if all(key.startswith('module.') for key in state_dict.keys()):
+                state_dict = {k.partition('module.')[2]: v for k, v in state_dict.items()}
+            self.action_head.load_state_dict(state_dict)
+        else:
+            raise FileNotFoundError(f"Action Head checkpoint not found at: {action_head_path}")
+
+        # --- 加载 Log_Std Head ---
+        log_std_head_path = os.path.join(checkpoint_dir, f"log_std_head--{step}_checkpoint.pt")
+        if os.path.exists(log_std_head_path):
+            print(f"  -> Loading Action Head from {log_std_head_path}")
+            state_dict = torch.load(log_std_head_path, map_location=self.device)
+            if all(key.startswith('module.') for key in state_dict.keys()):
+                state_dict = {k.partition('module.')[2]: v for k, v in state_dict.items()}
+            self.log_std_head.load_state_dict(state_dict)
+        else:
+            raise FileNotFoundError(f"Log_Std Head checkpoint not found at: {log_std_head_path}")
+
+        # --- 加载 Proprio Projector ---
+        proprio_path = os.path.join(checkpoint_dir, f"proprio_projector--{step}_checkpoint.pt")
+        if os.path.exists(proprio_path):
+            print(f"  -> Loading Proprio Projector from {proprio_path}")
+            state_dict = torch.load(proprio_path, map_location=self.device)
+            if all(key.startswith('module.') for key in state_dict.keys()):
+                state_dict = {k.partition('module.')[2]: v for k, v in state_dict.items()}
+            self.proprio_projector.load_state_dict(state_dict)
+        else:
+            print(f"  -> WARNING: Proprio Projector checkpoint not found, skipping: {proprio_path}")
+
+        print("Weight loading complete.")
 
 
 if __name__ == "__main__":
@@ -354,12 +445,12 @@ if __name__ == "__main__":
     # 在这里设置要并行处理的环境数量
     ENVS_ID = list(range(1))
     envs_num = len(ENVS_ID)
-    BENCHMARK = TaskSuite.LIBERO_OBJECT
+    BENCHMARK = TaskSuite.LIBERO_SPATIAL
 
     unnorm_key = f"{BENCHMARK}_no_noops"
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/",
+        pretrained_checkpoint="/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_test/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b8+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state--100_chkpt", #/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/
         use_l1_regression=True,
         use_diffusion=False,
         use_film=False,
@@ -374,6 +465,11 @@ if __name__ == "__main__":
 
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
+
+    # 从你的检查点目录名中提取步数
+    checkpoint_step = 100 
+    actor.load_weights_for_eval(cfg.pretrained_checkpoint, checkpoint_step)
+
     check_unnorm_key(cfg, actor.vla)
     actor.get_parameter_groups()
     actor.eval()
@@ -443,7 +539,7 @@ if __name__ == "__main__":
         with torch.no_grad():
             # actions_all 的形状是 (batch_size, num_chunks, action_dim)
             # 其中 batch_size 等于当前活动的任务数量 len(inputs_t_list)
-            _, mu_all, _, _ = actor.forward(inputs_batch)
+            _, mu_all, _, _, _ = actor.forward(inputs_batch)
 
         # 4. 将批次动作分发回各自的环境并执行一步
         for i, env_idx in enumerate(active_indices_this_step):
