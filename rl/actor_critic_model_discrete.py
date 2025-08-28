@@ -333,51 +333,22 @@ class ActorCritic(nn.Module):
         logits = output.logits
         action_logits = self._extract_actions_hidden(logits, inputs_batch)
 
-        # 输入: action_logits.shape = (B, num_dims, vocab_size)
-        batch_dist = torch.distributions.Categorical(logits=action_logits)  # 批量创建分布
+        # 2. 计算价值函数
+        value = self._compute_value_from_hidden(last_hidden_states)  # (B,)
 
+        return action_logits, value.to(torch.float32)
+
+    def post_process(self, logits):
+        batch_dist = torch.distributions.Categorical(logits=logits)  # 批量创建分布
         # 采样时 (替代原来的循环采样)
         actions_all = batch_dist.sample()  # shape = (B, num_dims)
-
-        # 计算对数概率 (替代原来的循环计算)
-        log_probs = batch_dist.log_prob(actions_all)  # shape = (B, num_dims)
-        entropy = batch_dist.entropy()               # shape = (B, num_dims)
-
-        # # 2. 构建分类分布（每个动作维度独立）
-        # dist_per_dim = [
-        #     torch.distributions.Categorical(logits=action_logits[:, i, :]) 
-        #     for i in range(NUM_ACTIONS_CHUNK * ACTION_DIM)
-        # ]
-
-        # # 3. 采样动作（联合采样所有维度）
-        # actions_all = torch.stack([dist.sample() for dist in dist_per_dim], dim=1)  # (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
-        # # actions_all = torch.argmax(action_logits, dim=2)
-        # # 4. 计算对数概率和熵（PPO需要）
-        # log_probs = torch.stack([
-        #     dist.log_prob(actions_all[:, i]) 
-        #     for i, dist in enumerate(dist_per_dim)
-        # ], dim=1).sum(dim=1)  # (B,)
-
-        # entropy = torch.stack([dist.entropy() for dist in dist_per_dim], dim=1).sum(dim=1)  # (B,)
-
-        # 5. 反规范化离散动作（映射到实际值）
         discretized_actions = self.vocab_size - actions_all.cpu().numpy()
-        # discretized_actions = self.vocab_size - predicted_action
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized_actions]  # (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
         normalized_actions = torch.from_numpy(normalized_actions.reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)).to(
             device=actions_all.device, dtype=torch.float32
         )
-
-        # 6. 计算价值函数
-        value = self._compute_value_from_hidden(last_hidden_states)  # (B,)
-
-        return (
-            actions_all,  
-            log_probs.to(torch.float32), # 替换原mu_all：对数概率 (B,)
-            entropy.to(torch.float32),   # 替换原log_std_all：熵 (B,)
-            value.to(torch.float32)      # 状态价值 (B,)
-        )   # val -> normalized_actions
+        return batch_dist, actions_all, normalized_actions
 
 if __name__ == "__main__":
     import sys
@@ -484,11 +455,12 @@ if __name__ == "__main__":
 
             # 3. 获取动作
             with torch.no_grad():
-                actions_all, mu_all, _, _ = actor.forward(inputs_batch)
+                action_logits, _ = actor.forward(inputs_batch)
+            _, _, normalized_actions = actor.post_process(action_logits)
 
             # 4. 执行动作
             for i, env_idx in enumerate(active_indices_this_step):
-                action_norm = actions_all[i, 0].cpu().numpy().astype(np.float32)
+                action_norm = normalized_actions[i, 0].cpu().numpy().astype(np.float32)
                 action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
 
                 obs, reward, terminated, truncated, info = envs[env_idx].step(action_env)
