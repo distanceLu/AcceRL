@@ -1,4 +1,3 @@
-# from experiments.robot.libero.run_libero_eval import GenerateConfig
 from experiments.robot.openvla_utils import prepare_images_for_vla, normalize_proprio
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, IGNORE_INDEX, ACTION_DIM
 import torch

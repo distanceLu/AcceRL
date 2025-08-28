@@ -345,7 +345,7 @@ if __name__ == "__main__":
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
     from rl.utils import prepare_one_obs, check_unnorm_key
-    from experiments.robot.libero.run_libero_eval import GenerateConfig, TaskSuite
+    from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
 
     # Precision policy to match the example
     USE_BF16: bool = True

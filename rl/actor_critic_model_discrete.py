@@ -48,7 +48,8 @@ from typing import Any
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+from transformers.models.llama.modeling_llama import LlamaForCausalLM
+DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
 def get_vla(cfg: Any,torch_dtype: torch.dtype = torch.bfloat16) -> torch.nn.Module:
@@ -124,6 +125,15 @@ class ActorCritic(nn.Module):
         self.model_dtype = torch_dtype
         self.vla = self.vla.to(dtype=self.model_dtype)
 
+        # 🔒 冻结 VLA 参数
+        self.vla.language_model: LlamaForCausalLM
+        for param in self.vla.parameters():
+            param.requires_grad = False
+            
+        # 然后解冻 lm_head 参数
+        for param in self.vla.language_model.lm_head.parameters():
+            param.requires_grad = True
+
         self.vocab_size = self.vla.config.text_config.vocab_size - self.vla.config.pad_to_multiple_of
         self.bins = np.linspace(-1, 1, self.vla.config.n_action_bins)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
@@ -141,9 +151,7 @@ class ActorCritic(nn.Module):
         # )
         # self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
         self.proprio_projector = None
-        # Condition-independent log_std parameter (float32 for stability)
-        self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
-
+        
         # Value head: mean-pool over text tokens from the last hidden layer -> scalar
         self.value_head = nn.Sequential(
             nn.LayerNorm(self.vla.llm_dim),
@@ -151,6 +159,27 @@ class ActorCritic(nn.Module):
             nn.Tanh(),
             nn.Linear(self.vla.llm_dim, 1),
         ).to(self.device).to(dtype=self.model_dtype)
+
+    def get_parameter_groups(self) -> List[Dict[str, Any]]:
+        """
+        将可训练参数分为 'policy' 和 'value' 两组。
+        这对于为不同组件设置不同的学习率至关重要。
+        """
+        # self.vla.language_model: 
+        self.vla.language_model: LlamaForCausalLM
+        policy_params = list(self.vla.language_model.lm_head.parameters())   #.language_model.lm_head
+        value_params = list(self.value_head.parameters())
+        
+        # 确保没有遗漏任何可训练参数
+        all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
+        grouped_params = set(policy_params) | set(value_params)
+        # print("all_trainable_params:",all_trainable_params)
+        # print("grouped_params:",grouped_params)
+        assert all_trainable_params == grouped_params, "并非所有可训练参数都被分组！"
+        return [
+            {"name": "policy", "params": policy_params},
+            {"name": "value", "params": value_params},
+        ]
 
     def normalize_proprio(self, proprio: Any) -> np.ndarray:
         """
@@ -357,7 +386,7 @@ if __name__ == "__main__":
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
     from rl.utils import prepare_one_obs, check_unnorm_key
-    from experiments.robot.libero.run_libero_eval import GenerateConfig, TaskSuite
+    from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
 
     # Precision policy to match the example
     USE_BF16: bool = True
@@ -453,8 +482,8 @@ if __name__ == "__main__":
             # 2. 批处理输入
             inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
 
-            # 3. 获取动作
-            with torch.no_grad():
+            # 3. 获取动作      
+            with torch.inference_mode():
                 action_logits, _ = actor.forward(inputs_batch)
             _, _, normalized_actions = actor.post_process(action_logits)
 
