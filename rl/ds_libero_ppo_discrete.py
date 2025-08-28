@@ -22,22 +22,17 @@ import ray
 import torch
 import torch.distributions
 import deepspeed
-import torch.distributed as distributed # 新增：为了分布式通信
+import torch.distributed as distributed 
 from torch.utils.tensorboard import SummaryWriter
 
 # OpenVLA 组件与常量
 from experiments.robot.openvla_utils import (
     get_processor,
 )
-# ############################# 新增导入 ##############################
+
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
-# ###################################################################
-
 from experiments.robot.libero.libero_utils import GenerateConfig
-
-# ############################# 核心修改：导入新的 ActorCritic 模型 ##############################
 from rl.actor_critic_model_discrete import ActorCritic
-# ############################################################################################
 from rl.utils import prepare_one_obs
 # 训练/推理通信（保持接口不变）
 from ds_com import TrainerActorCom, InferenceActorCom
@@ -56,8 +51,8 @@ ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 32
-ACCUMULATION_STEPS = 16
+TRAIN_BATCH_SIZE = 128
+ACCUMULATION_STEPS = 4
 SUPER_BATCH_SIZE = 512
 TRAIN_ITERS = 100000
 
@@ -95,9 +90,8 @@ TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
 
 # ================================================================
-# 数据结构
+# 数据结构 更新经验数据结
 # ================================================================
-# ############################# 核心修改：更新经验数据结构 ##############################
 @dataclass
 class Experience:
     obs: Dict[str, torch.Tensor]            # prepare_one_obs 的结果（CPU tensors）
@@ -105,8 +99,6 @@ class Experience:
     advantage: float
     behaviour_logits: np.ndarray            # 行为策略的 logits (shape: [ACTION_DIM, VOCAB_SIZE])
     value_target: float
-# ####################################################################################
-
 
 # ================================================================
 # 1.5. 统计模块 (StatsActor)
@@ -214,7 +206,9 @@ class RolloutWorkerActor:
 
     def run(self):
         try:
-            obs, info = self.env.reset(seed=self.wid)
+            current_seed = int(time.time() * 1000) + self.wid + os.getpid()
+            obs, info = self.env.reset(seed=current_seed)
+
             self.task_description = self.env.task_description
             self.current_env_name = self.env.get_name()
 
@@ -252,7 +246,8 @@ class RolloutWorkerActor:
                     if self.local_buffer:
                         self._process_traj(self.local_buffer, 0.0)
                     self.local_buffer.clear()
-                    obs, info = self.env.reset()
+                    current_seed = int(time.time() * 1000) + self.wid + os.getpid()
+                    obs, info = self.env.reset(seed=current_seed)
                     self.task_description = self.env.task_description
                     self.current_env_name = self.env.get_name()
                     time_start = time.time()
