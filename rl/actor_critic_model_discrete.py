@@ -1,17 +1,31 @@
+import os
+os.makedirs("obs", exist_ok=True)
+# os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+import pickle
+import time
+import random
+
 import torch
 import torch.nn as nn
 from typing import Dict, Any, Tuple, List
 from contextlib import nullcontext
 import numpy as np
-
+from PIL import Image
+import datetime
 from torch.distributions import Normal, TransformedDistribution
 from torch.distributions.transforms import TanhTransform
+# from experiments.robot.openvla_utils import get_vla
+
 
 # Core OpenVLA components
 from experiments.robot.openvla_utils import (
     get_action_head,
     get_processor,
     get_proprio_projector,
+)
+
+from experiments.robot.robot_utils import (
+    invert_gripper_action,
 )
 
 # Masks used to extract action-related hidden states
@@ -29,16 +43,16 @@ from prismatic.vla.constants import (
 )
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 from typing import Any
-import torch
 
 # 显式类：避免依赖 auto_map
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+from transformers.models.llama.modeling_llama import LlamaForCausalLM
+DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
-def get_vla(cfg: Any) -> torch.nn.Module:
+def get_vla(cfg: Any,torch_dtype: torch.dtype = torch.bfloat16) -> torch.nn.Module:
     """
     只读加载 OpenVLA：不修改 checkpoint 内的 config.json。
     """
@@ -54,12 +68,20 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     vla = OpenVLAForActionPrediction.from_pretrained(
         cfg.pretrained_checkpoint,
         config=vla_cfg,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch_dtype,     #bfloat16 
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
+    # Load the model
+    # vla = OpenVLAForActionPrediction.from_pretrained(
+    #     cfg.pretrained_checkpoint,
+    #     # attn_implementation="flash_attention_2",
+    #     torch_dtype=torch.bfloat16,
+    #     low_cpu_mem_usage=True,
+    #     trust_remote_code=True,
+    # )
 
     # 3) FiLM（若启用）
     if getattr(cfg, "use_film", False):
@@ -98,35 +120,43 @@ class ActorCritic(nn.Module):
         self.cfg = cfg
 
         # Device / dtype
-        self.vla = get_vla(cfg)
+        self.vla = get_vla(cfg,torch_dtype)
         self.device = self.vla.device
         self.model_dtype = torch_dtype
         self.vla = self.vla.to(dtype=self.model_dtype)
 
         # 🔒 冻结 VLA 参数
+        self.vla.language_model: LlamaForCausalLM
         for param in self.vla.parameters():
             param.requires_grad = False
+            
+        # 然后解冻 lm_head 参数
+        for param in self.vla.language_model.lm_head.parameters():
+            param.requires_grad = True
 
-        # 保留 processor（只是预处理，不需要训练）
+        self.vocab_size = self.vla.config.text_config.vocab_size - self.vla.config.pad_to_multiple_of
+        self.bins = np.linspace(-1, 1, self.vla.config.n_action_bins)
+        self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
+
+
+        # Keep processor for external preparation (forward 接收已组装好的 batch，但依旧保留 processor)
         self.processor = get_processor(cfg)
 
         # Heads
-        self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim)
-        self.action_head = self.action_head.to(self.device).to(dtype=self.model_dtype)
+        # self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim)
+        # self.action_head = self.action_head.to(self.device).to(dtype=self.model_dtype)
 
-        self.proprio_projector = get_proprio_projector(
-            cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
-        )
-        self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
-
-        # Condition-independent log_std parameter (float32 for stability)
-        self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
-
+        # self.proprio_projector = get_proprio_projector(
+        #     cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
+        # )
+        # self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
+        self.proprio_projector = None
+        
         # Value head: mean-pool over text tokens from the last hidden layer -> scalar
         self.value_head = nn.Sequential(
             nn.LayerNorm(self.vla.llm_dim),
             nn.Linear(self.vla.llm_dim, self.vla.llm_dim),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(self.vla.llm_dim, 1),
         ).to(self.device).to(dtype=self.model_dtype)
 
@@ -135,14 +165,17 @@ class ActorCritic(nn.Module):
         将可训练参数分为 'policy' 和 'value' 两组。
         这对于为不同组件设置不同的学习率至关重要。
         """
-        policy_params = list(self.action_head.parameters()) + [self.log_std_param] + list(self.proprio_projector.parameters())
+        # self.vla.language_model: 
+        self.vla.language_model: LlamaForCausalLM
+        policy_params = list(self.vla.language_model.lm_head.parameters())   #.language_model.lm_head
         value_params = list(self.value_head.parameters())
         
         # 确保没有遗漏任何可训练参数
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
         grouped_params = set(policy_params) | set(value_params)
+        # print("all_trainable_params:",all_trainable_params)
+        # print("grouped_params:",grouped_params)
         assert all_trainable_params == grouped_params, "并非所有可训练参数都被分组！"
-
         return [
             {"name": "policy", "params": policy_params},
             {"name": "value", "params": value_params},
@@ -213,9 +246,14 @@ class ActorCritic(nn.Module):
         inputs: Dict[str, torch.Tensor] = {}
         keys = inputs_list[0].keys()
         for k in keys:
-            tensors = [it[k] for it in inputs_list]
-            inputs[k] = torch.cat(tensors, dim=0).to(self.vla.device)
-        inputs["proprio"] = inputs["proprio"].to(torch.float32)
+            tensors = [it[k] for it in inputs_list if it.get(k) is not None and isinstance(it[k], torch.Tensor)]
+            # 如果 tensors 不为空，则拼接；否则跳过
+            if tensors:
+                inputs[k] = torch.cat(tensors, dim=0).to(self.vla.device)
+            else: 
+                #print(f"Warning: Key '{k}' has no valid tensors, skipping...")
+                pass 
+        # inputs["proprio"] = inputs["proprio"].to(torch.float32)
         return inputs
 
     def prepare_inputs_batch(self, inputs_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -228,8 +266,8 @@ class ActorCritic(nn.Module):
         # Normalize proprio for each sample and run per-sample checks
         for it in inputs_list:
             # Normalize proprio using internal norm stats
-            proprio_norm = self.normalize_proprio(it["proprio"])
-            it["proprio"] = torch.tensor(proprio_norm, dtype=torch.float32).unsqueeze(dim=0)
+            # proprio_norm = self.normalize_proprio(it["proprio"])
+            # it["proprio"] = torch.tensor(it["proprio"], dtype=torch.float32)
 
             # Consistency check
             assert it["input_ids"].size(1) == it["attention_mask"].size(1) == it["labels"].size(1), \
@@ -237,7 +275,14 @@ class ActorCritic(nn.Module):
 
         # Batchify
         return self.batch_process_obs(inputs_list)
-
+    
+    def get_log_probs(self, inputs_batch: Dict[str, Any], actions: torch.Tensor) -> torch.Tensor:
+        """计算给定状态下采取给定动作的对数概率"""
+        output = self._forward_vla(inputs_batch)
+        action_logits = self._extract_actions_hidden(output.logits, inputs_batch)
+        batch_dist = torch.distributions.Categorical(logits=action_logits)
+        return batch_dist.log_prob(actions)  # shape = (B,)
+    
     def _compute_num_patches(self) -> int:
         num_patches = (
             self.vla.vision_backbone.get_num_patches()
@@ -247,7 +292,7 @@ class ActorCritic(nn.Module):
             num_patches += 1
         return num_patches
 
-    def _extract_actions_hidden(self, last_hidden_states: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _extract_actions_hidden(self, logits: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         From last_hidden_states, extract the text-token hiddens corresponding
         to current + next actions, as (B, NUM_ACTIONS_CHUNK*ACTION_DIM, D).
@@ -258,7 +303,7 @@ class ActorCritic(nn.Module):
         action_mask = current_action_mask | next_actions_mask
 
         num_patches = self._compute_num_patches()
-        text_hidden_states = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
+        text_hidden_states = logits[:, num_patches:-1]  # (B, text_len, D)
 
         B, _, D = text_hidden_states.shape
         actions_hidden_states = (
@@ -272,26 +317,28 @@ class ActorCritic(nn.Module):
         """
         Single VLA forward that returns output with hidden states.
         """
-        ctx = torch.autocast("cuda", dtype=self.model_dtype) if self.device.type == "cuda" else nullcontext()
-        with ctx:
-            self.vla: OpenVLAForActionPrediction
-            output = self.vla.forward(
-                input_ids=batch["input_ids"].to(self.device),
-                attention_mask=batch["attention_mask"].to(self.device),
-                pixel_values=batch["pixel_values"].to(self.model_dtype).to(self.device),
-                labels=batch["labels"].to(self.device),  # for mask derivation and potential loss
-                output_hidden_states=True,
-                proprio=batch["proprio"] if self.cfg.use_proprio else None,
-                proprio_projector=self.proprio_projector if self.cfg.use_proprio else None,
-                noisy_actions=None,
-                noisy_action_projector=None,
-                diffusion_timestep_embeddings=None,
-                use_film=self.cfg.use_film,
-            )
+        # ctx = torch.autocast("cuda", dtype=self.model_dtype) if self.device.type == "cuda" else nullcontext()
+        # with ctx:
+        self.vla: OpenVLAForActionPrediction
+        output = self.vla.forward(
+            input_ids=batch["input_ids"].to(self.device),
+            attention_mask=batch["attention_mask"].to(self.device),
+            pixel_values=batch["pixel_values"].to(self.model_dtype).to(self.device),
+            labels=batch["labels"].to(self.device),  # for mask derivation and potential loss
+            output_hidden_states=True,
+            proprio=batch["proprio"] if self.cfg.use_proprio else None,
+            proprio_projector=self.proprio_projector if self.cfg.use_proprio else None,
+            noisy_actions=None,
+            noisy_action_projector=None,
+            diffusion_timestep_embeddings=None,
+            use_film=self.cfg.use_film,
+        )
         return output
 
-    def _compute_value_from_hidden(self, actions_hidden_states: torch.Tensor) -> torch.Tensor:
-        pooled = actions_hidden_states[:, -2]  # -2这个位置的state比较靠后了，一般用不到
+    def _compute_value_from_hidden(self, last_hidden_states: torch.Tensor) -> torch.Tensor:
+        num_patches = self._compute_num_patches()
+        text_hidden = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
+        pooled = text_hidden.mean(dim=1)                     # (B, D)
         value = self.value_head(pooled.to(self.model_dtype)).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
@@ -304,43 +351,37 @@ class ActorCritic(nn.Module):
           value:       (B,)
         """
         # Sanity checks
-        for k in ("input_ids", "attention_mask", "pixel_values", "labels", "proprio"):
+        for k in ("input_ids", "attention_mask", "pixel_values", "labels"):
             if k not in inputs_batch:
                 raise KeyError(f"inputs_batch missing key: {k}")
 
-        # 1) VLA forward to obtain hidden states
+        # 1. 提取动作部分的原始logits（未argmax）   
         output = self._forward_vla(inputs_batch)
         last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
 
-        # 2) Predict continuous actions mean (mu) using action-related hidden states
-        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, inputs_batch)
-        predicted_actions = self.action_head.predict_action(actions_hidden_states)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM) or flat
-        if predicted_actions.dim() == 3:
-            mu_all = predicted_actions
-        else:
-            raise ValueError(f"Unexpected predicted_actions shape: {predicted_actions.shape}")
+        logits = output.logits
+        action_logits = self._extract_actions_hidden(logits, inputs_batch)
 
-        # 3) Condition-independent log_std broadcast across chunks
-        B = mu_all.size(0)
-        log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
-        log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
+        # 2. 计算价值函数
+        value = self._compute_value_from_hidden(last_hidden_states)  # (B,)
 
-        # 4) Squashed Gaussian sampling to (-1, 1) for all chunks
-        std_all = torch.exp(log_std_all)                             # (B, T, A)
-        base_dist = Normal(mu_all.to(torch.float32), std_all)        # fp32 sampling for stability
-        dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-        actions_all = dist.rsample()                                  # (B, T, A) in (-1, 1)
+        return action_logits, value.to(torch.float32)
 
-        # 5) Value from hidden states
-        value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)
-
-        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
-
+    def post_process(self, logits):
+        batch_dist = torch.distributions.Categorical(logits=logits)  # 批量创建分布
+        # 采样时 (替代原来的循环采样)
+        actions_all = batch_dist.sample()  # shape = (B, num_dims)
+        discretized_actions = self.vocab_size - actions_all.cpu().numpy()
+        discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
+        normalized_actions = self.bin_centers[discretized_actions]  # (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
+        normalized_actions = torch.from_numpy(normalized_actions.reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)).to(
+            device=actions_all.device, dtype=torch.float32
+        )
+        return batch_dist, actions_all, normalized_actions
 
 if __name__ == "__main__":
+    import sys
     import numpy as np
-    import random
-    import time
 
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
@@ -355,19 +396,16 @@ if __name__ == "__main__":
     ENVS_ID = list(range(10))
     envs_num = len(ENVS_ID)
     BENCHMARK = TaskSuite.LIBERO_SPATIAL
-    # LIBERO_SPATIAL: 93.2% (10 envs, 2982 episodes)
-    # LIBERO_GOAL: 84.1% (10 envs, 2101 episodes)
-    # LIBERO_OBJECT: 51.6% (10 envs, 1475 episodes)
-
     unnorm_key = f"{BENCHMARK}_no_noops"
+
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/",
-        use_l1_regression=True,
+        pretrained_checkpoint="/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16",
+        use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
         num_images_in_input=2,
-        use_proprio=True,
+        use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=True,
@@ -375,22 +413,23 @@ if __name__ == "__main__":
         unnorm_key=unnorm_key,
     )
 
-    # Create ActorCritic policy
+    # 创建策略
     actor = ActorCritic(cfg, TORCH_DTYPE)
     check_unnorm_key(cfg, actor.vla)
-    actor.get_parameter_groups()
     actor.eval()
+    
+    # 检查参数类型
     for key, value in actor.named_parameters():
         if value.dtype != TORCH_DTYPE:
-            print(f"警告: 参数 {key} 的数据类型是 {value.dtype}, 但期望的是 {TORCH_DTYPE}.")
+            print(f"Warning: Parameter {key} has dtype {value.dtype}, expected {TORCH_DTYPE}.")
     print("策略初始化完成。")
 
-    # --- 并行初始化多个环境 ---
+    # 初始化环境
     print(f"正在初始化 {len(ENVS_ID)} 个并行的 Libero 环境...")
     envs = [
         LiberoEnvWrapper(
             benchmark_name=BENCHMARK,
-            task_id=env_id,  # 每个环境一个随机任务
+            task_id=env_id,
             image_size=224,
             render_mode="rgb_array",
         )
@@ -398,88 +437,95 @@ if __name__ == "__main__":
     ]
     print("所有环境初始化完成。")
 
-    # --- 初始化所有环境的状态 ---
-    # 使用列表来独立跟踪每个环境的状态
-    observations = []
-    task_descriptions = []
-    for i, env in enumerate(envs):
-        # 为每个环境设置不同的随机种子以保证多样性
-        obs, info = env.reset(seed=int(time.time()) + i)
-        observations.append(obs)
-        task_descriptions.append(env.task_description)
-        print(f"环境 {i}: 任务 ID = {env.task_id}, 任务描述 = {env.task_description}")
-
-    # 跟踪每个环境是否仍在活动、奖励和步数
-    active_envs = [True] * envs_num
-    total_rewards = [0.0] * envs_num
-    episode_steps = [0] * envs_num
-    success_info = [False] * envs_num
-
-    # 用于统计最终成功率
+    # 全局统计
     total_episodes_finished = 0
     total_successes = 0
 
-    print("\n开始并行执行所有环境...")
+    # from collections import deque
+    # env_queues = [deque() for _ in range(len(ENVS_ID))]  # ENVS_ID是环境ID列表
 
-    # --- 主循环：只要有任何一个环境在活动，就继续 ---
-    while any(active_envs):
-        # 1. 从所有【活动】的环境中收集输入数据
-        inputs_t_list = []
-        # 记录当前批次中数据对应的原始环境索引
-        active_indices_this_step = []
-        
-        for i in range(envs_num):
-            if active_envs[i]:
-                inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
-                inputs_t_list.append(inputs_t)
-                active_indices_this_step.append(i)
+    # 主循环
+    while True:
+        # 初始化环境状态
+        observations = []
+        task_descriptions = []
+        for i, env in enumerate(envs):
+            obs, info = env.reset(seed=int(time.time()) + i)
+            observations.append(obs)
+            task_descriptions.append(env.task_description)
+            print(f"环境 {i}: 任务 ID = {env.task_id}, 任务描述 = {env.task_description}")
+            # env_queues[i].clear()  # 重置该环境的动作队列
+            
+        # 跟踪变量
+        active_envs = [True] * envs_num
+        total_rewards = [0.0] * envs_num
+        episode_steps = [0] * envs_num
+        success_info = [False] * envs_num
 
-        # 如果没有活动的输入，则退出循环
-        if not inputs_t_list:
-            break
+        print(f"\n开始第 {total_episodes_finished // envs_num + 1} 轮并行执行...")
 
-        # 2. 使用类方法将输入列表批处理成一个大的张量
-        #    这是实现并行处理的关键步骤
-        inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
+        # 环境执行循环
+        while any(active_envs):
+            # 1. 收集活动环境的输入
+            inputs_t_list = []
+            active_indices_this_step = []
+            
+            for i in range(envs_num):
+                if active_envs[i]:
+                    inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
+                    inputs_t_list.append(inputs_t)
+                    active_indices_this_step.append(i)
 
-        # 3. 执行一次前向传播，为批次中的所有环境获取动作
-        with torch.no_grad():
-            # actions_all 的形状是 (batch_size, num_chunks, action_dim)
-            # 其中 batch_size 等于当前活动的任务数量 len(inputs_t_list)
-            _, mu_all, _, _ = actor.forward(inputs_batch)
+            if not inputs_t_list:
+                break
 
-        # 4. 将批次动作分发回各自的环境并执行一步
-        for i, env_idx in enumerate(active_indices_this_step):
-            # i 是批次中的索引, env_idx 是原始环境列表中的索引
-            action_norm = mu_all[i, 0].cpu().numpy().astype(np.float32)
-            action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
+            # 2. 批处理输入
+            inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
 
-            # 在对应的环境中执行动作
-            obs, reward, terminated, truncated, info = envs[env_idx].step(action_env)
+            # 3. 获取动作      
+            with torch.inference_mode():
+                action_logits, _ = actor.forward(inputs_batch)
+            _, _, normalized_actions = actor.post_process(action_logits)
 
-            # 更新该环境的状态
-            observations[env_idx] = obs
-            total_rewards[env_idx] += float(reward)
-            episode_steps[env_idx] += 1
+            # 4. 执行动作
+            for i, env_idx in enumerate(active_indices_this_step):
+                action_norm = normalized_actions[i, 0].cpu().numpy().astype(np.float32)
+                action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
 
-            # 使用确定性打印
-            if episode_steps[env_idx] % 50 == 0:
-                print(f"环境 {env_idx}, Step: {episode_steps[env_idx]}, 奖励: {reward:.4f}, 终止: {terminated}, 截断: {truncated}")
+                obs, reward, terminated, truncated, info = envs[env_idx].step(action_env)
 
-            # 5. 检查环境是否完成
-            if terminated or truncated:
-                is_success = info.get('is_success', False)
-                total_successes += is_success
-                total_episodes_finished += 1
-                success_info[env_idx] = is_success
-                
-                # 打印单个环境完成的信息
-                print("-" * 40)
-                print(f"环境 {env_idx} 已完成 (任务: {envs[env_idx].task_description[:50]}...)")
-                print(f"  总步数: {episode_steps[env_idx]}, 总奖励: {total_rewards[env_idx]:.4f}, 是否成功: {is_success}")
-                print(f"Success rate: {total_successes / total_episodes_finished}, total_episodes_finished: {total_episodes_finished}")
-                print("-" * 40)
-                episode_steps[env_idx] = 0
-                total_rewards[env_idx] = 0
-                obs, info = envs[env_idx].reset(seed=random.randint(0, 1000))
+                # 更新状态
                 observations[env_idx] = obs
+                total_rewards[env_idx] += float(reward)
+                episode_steps[env_idx] += 1
+
+                # 定期打印
+                if episode_steps[env_idx] % 50 == 0:
+                    print(f"环境 {env_idx}, Step: {episode_steps[env_idx]}, 奖励: {reward:.4f}, 终止: {terminated}, 截断: {truncated}")
+
+                # 检查环境是否完成
+                if terminated or truncated:
+                    is_success = info.get('is_success', False)
+                    total_successes += is_success
+                    total_episodes_finished += 1
+                    success_info[env_idx] = is_success
+                    
+                    print("-" * 40)
+                    print(f"环境 {env_idx} 已完成 (任务: {envs[env_idx].task_description[:50]}...)")
+                    print(f"总步数: {episode_steps[env_idx]}, 总奖励: {total_rewards[env_idx]:.4f}, 是否成功: {is_success}")
+                    print(f"成功率: {total_successes/total_episodes_finished:.3f}, 总回合数: {total_episodes_finished}")
+                    print("-" * 40)
+                    
+                    # 重置环境
+                    active_envs[env_idx] = False
+                    episode_steps[env_idx] = 0
+                    total_rewards[env_idx] = 0
+                    obs, info = envs[env_idx].reset(seed=random.randint(0, 1000))
+                    observations[env_idx] = obs
+
+        # 每轮结束后打印统计信息
+        print("=" * 60)
+        print(f"第 {total_episodes_finished // envs_num} 轮完成!")
+        print(f"累计总回合数: {total_episodes_finished}, 成功次数: {total_successes}")
+        print(f"总体成功率: {total_successes/total_episodes_finished:.3f}")
+        print("=" * 60)

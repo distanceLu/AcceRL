@@ -250,7 +250,7 @@ def load_component_state_dict(checkpoint_path: str) -> Dict[str, torch.Tensor]:
     return new_state_dict
 
 
-def get_vla(cfg: Any) -> torch.nn.Module:
+def get_vla(cfg: Any, dtype = torch.bfloat16) -> torch.nn.Module:
     """
     Load and initialize the VLA model from checkpoint.
 
@@ -282,12 +282,12 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
         # attn_implementation="flash_attention_2",
-        torch_dtype=torch.bfloat16,
+        torch_dtype=dtype,
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
-    )
+    ) ##bfloat16
 
     # If using FiLM, wrap the vision backbone to allow for infusion of language inputs
     if cfg.use_film:
@@ -308,7 +308,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     return vla
 
 
-def _apply_film_to_vla(vla: torch.nn.Module, cfg: Any) -> torch.nn.Module:
+def _apply_film_to_vla(vla: torch.nn.Module, cfg: Any, dtype = torch.bfloat16) -> torch.nn.Module:
     """
     Apply FiLM (Feature-wise Linear Modulation) to the VLA vision backbone.
 
@@ -344,7 +344,7 @@ def _apply_film_to_vla(vla: torch.nn.Module, cfg: Any) -> torch.nn.Module:
 
     # Use the model component instead of wrapper and convert to bfloat16
     vla = vla.model
-    vla.vision_backbone = vla.vision_backbone.to(torch.bfloat16)
+    vla.vision_backbone = vla.vision_backbone.to(dtype) #bfloat16
 
     return vla
 
@@ -390,7 +390,7 @@ def get_processor(cfg: Any) -> AutoProcessor:
     return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
 
 
-def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioProjector:
+def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int, dtype = torch.bfloat16) -> ProprioProjector:
     """
     Get proprioception projector for the VLA model.
 
@@ -407,7 +407,7 @@ def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioPr
         llm_dim=llm_dim,
         proprio_dim=proprio_dim,
     ).to(DEVICE)
-    proprio_projector = proprio_projector.to(torch.bfloat16).to(DEVICE)
+    proprio_projector = proprio_projector.to(dtype).to(DEVICE) #bfloat16
     proprio_projector.eval()
 
     # Find and load checkpoint (may be on Hugging Face Hub or stored locally)
@@ -435,7 +435,7 @@ def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioPr
     return proprio_projector
 
 
-def get_noisy_action_projector(cfg: Any, llm_dim: int) -> NoisyActionProjector:
+def get_noisy_action_projector(cfg: Any, llm_dim: int, dtype = torch.bfloat16) -> NoisyActionProjector:
     """
     Get noisy action projector for diffusion-based action prediction.
 
@@ -450,7 +450,7 @@ def get_noisy_action_projector(cfg: Any, llm_dim: int) -> NoisyActionProjector:
     noisy_action_projector = NoisyActionProjector(
         llm_dim=llm_dim,
     ).to(DEVICE)
-    noisy_action_projector = noisy_action_projector.to(torch.bfloat16).to(DEVICE)
+    noisy_action_projector = noisy_action_projector.to(dtype).to(DEVICE) #bfloat16
     noisy_action_projector.eval()
 
     # Find and load checkpoint
@@ -461,7 +461,7 @@ def get_noisy_action_projector(cfg: Any, llm_dim: int) -> NoisyActionProjector:
     return noisy_action_projector
 
 
-def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, DiffusionActionHead]:
+def get_action_head(cfg: Any, llm_dim: int, dtype = torch.bfloat16) -> Union[L1RegressionActionHead, DiffusionActionHead]:
     """
     Get action head for continuous value prediction.
 
@@ -489,7 +489,7 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, Dif
     else:
         raise ValueError("Either use_l1_regression or use_diffusion must be True")
 
-    action_head = action_head.to(torch.bfloat16).to(DEVICE)
+    action_head = action_head.to(dtype).to(DEVICE) 
     action_head.eval()
 
     # Find and load checkpoint (may be on Hugging Face Hub or stored locally)
@@ -722,6 +722,7 @@ def get_vla_action(
     proprio_projector: Optional[torch.nn.Module] = None,
     noisy_action_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
+    dtype = torch.bfloat16
 ) -> List[np.ndarray]:
     """
     Generate action predictions with the VLA policy.
@@ -740,6 +741,7 @@ def get_vla_action(
     Returns:
         List[np.ndarray]: Predicted actions
     """
+   
     with torch.inference_mode():
 
         # Collect all input images
@@ -757,12 +759,12 @@ def get_vla_action(
         prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
 
         # Process primary image
-        inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
+        inputs = processor(prompt, primary_image).to(DEVICE, dtype=dtype) #bfloat16
 
         # Process additional wrist images if any
         if all_images:
             all_wrist_inputs = [
-                processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16) for image_wrist in all_images
+                processor(prompt, image_wrist).to(DEVICE, dtype=dtype) for image_wrist in all_images #bfloat16
             ]
             # Concatenate all images
             primary_pixel_values = inputs["pixel_values"]
