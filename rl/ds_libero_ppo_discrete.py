@@ -73,10 +73,10 @@ VALUE_LR = 1e-4
 POLICY_LR = 1e-5
 VALUE_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 500 # 策略网络从第500个 *更新步* 开始训练
+POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
 
 # 日志
-MOVING_AVG_WINDOW = 100
+MOVING_AVG_WINDOW = 1000
 LOG_INTERVAL_SECONDS = 10
 
 # 通信组
@@ -220,9 +220,7 @@ class RolloutWorkerActor:
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
                 
-                # ############################# 核心修改：获取离散动作和 logits ##############################
                 action_env, action_token, logits, value = ray.get(self.infer.request.remote(inputs_t))
-                # ########################################################################################
                 
                 nxt, r, term, trunc, info = self.env.step(action_env)
                 reward_sum += r
@@ -364,7 +362,7 @@ class InferenceActor(InferenceActorCom):
                     _, action_tokens_all, normalized_actions_all = self.model.post_process(action_logits)
                     
                     # 3. 我们只使用第一个动作块进行环境交互和训练
-                    normalized_actions = normalized_actions_all[:, 0, :].to(torch.float32).cpu().numpy()
+                    normalized_actions = normalized_actions_all[:, 0, :]
                     
                     # action_tokens_all 的形状是 (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
                     # 我们需要 reshape 并提取第一个块的 tokens
@@ -583,7 +581,7 @@ class TrainerActor(TrainerActorCom):
             
             # ############################# 核心修改：新的前向与损失计算 ##############################
             # 前向
-            action_logits, value = self.model(mini_inputs)
+            action_logits, value = self.model.forward(mini_inputs)
             value = value.to(torch.float32)
 
             # 只使用第一个动作块进行训练
@@ -660,7 +658,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_cut_logit_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")

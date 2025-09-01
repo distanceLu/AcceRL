@@ -156,7 +156,7 @@ class ActorCritic(nn.Module):
         self.value_head = nn.Sequential(
             nn.LayerNorm(self.vla.llm_dim),
             nn.Linear(self.vla.llm_dim, self.vla.llm_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(self.vla.llm_dim, 1),
         ).to(self.device).to(dtype=self.model_dtype)
 
@@ -276,13 +276,6 @@ class ActorCritic(nn.Module):
         # Batchify
         return self.batch_process_obs(inputs_list)
     
-    def get_log_probs(self, inputs_batch: Dict[str, Any], actions: torch.Tensor) -> torch.Tensor:
-        """计算给定状态下采取给定动作的对数概率"""
-        output = self._forward_vla(inputs_batch)
-        action_logits = self._extract_actions_hidden(output.logits, inputs_batch)
-        batch_dist = torch.distributions.Categorical(logits=action_logits)
-        return batch_dist.log_prob(actions)  # shape = (B,)
-    
     def _compute_num_patches(self) -> int:
         num_patches = (
             self.vla.vision_backbone.get_num_patches()
@@ -292,7 +285,7 @@ class ActorCritic(nn.Module):
             num_patches += 1
         return num_patches
 
-    def _extract_actions_hidden(self, logits: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _extract_actions_hidden(self, last_hidden_states, logits: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         From last_hidden_states, extract the text-token hiddens corresponding
         to current + next actions, as (B, NUM_ACTIONS_CHUNK*ACTION_DIM, D).
@@ -303,7 +296,7 @@ class ActorCritic(nn.Module):
         action_mask = current_action_mask | next_actions_mask
 
         num_patches = self._compute_num_patches()
-        text_hidden_states = logits[:, num_patches:-1]  # (B, text_len, D)
+        text_hidden_states = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
 
         B, _, D = text_hidden_states.shape
         actions_hidden_states = (
@@ -311,7 +304,11 @@ class ActorCritic(nn.Module):
             .reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, D)
             .to(self.model_dtype)
         )
-        return actions_hidden_states
+        text_logits = logits[:, num_patches:-1]  # (B, text_len, D)
+        _, _, vocab_size = text_logits.shape
+        actions_logits = text_logits[action_mask].reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, vocab_size)
+        logits_cut = actions_logits[..., self.vocab_size-self.vla.config.n_action_bins:self.vocab_size]
+        return logits_cut, actions_hidden_states
 
     def _forward_vla(self, batch: Dict[str, torch.Tensor]):
         """
@@ -335,10 +332,8 @@ class ActorCritic(nn.Module):
         )
         return output
 
-    def _compute_value_from_hidden(self, last_hidden_states: torch.Tensor) -> torch.Tensor:
-        num_patches = self._compute_num_patches()
-        text_hidden = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
-        pooled = text_hidden.mean(dim=1)                     # (B, D)
+    def _compute_value_from_hidden(self, actions_hidden_states: torch.Tensor) -> torch.Tensor:
+        pooled = actions_hidden_states[:, -2]  # -2这个位置的state比较靠后了，一般用不到
         value = self.value_head(pooled.to(self.model_dtype)).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
@@ -360,24 +355,26 @@ class ActorCritic(nn.Module):
         last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
 
         logits = output.logits
-        action_logits = self._extract_actions_hidden(logits, inputs_batch)
+        action_logits, actions_hidden_states = self._extract_actions_hidden(last_hidden_states, logits, inputs_batch)
 
         # 2. 计算价值函数
-        value = self._compute_value_from_hidden(last_hidden_states)  # (B,)
+        value = self._compute_value_from_hidden(actions_hidden_states)  # (B,)
 
         return action_logits, value.to(torch.float32)
 
     def post_process(self, logits):
         batch_dist = torch.distributions.Categorical(logits=logits)  # 批量创建分布
         # 采样时 (替代原来的循环采样)
-        actions_all = batch_dist.sample()  # shape = (B, num_dims)
-        discretized_actions = self.vocab_size - actions_all.cpu().numpy()
-        discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
+        action_token_ids = batch_dist.sample()  # shape = (B, num_dims)
+        actions_all = self.vla.config.n_action_bins - action_token_ids  # shape = (B, num_dims)
+        # discretized_actions = self.vocab_size - actions_all.cpu().numpy()
+        discretized_actions = np.clip(actions_all.cpu().numpy(), a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized_actions]  # (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
-        normalized_actions = torch.from_numpy(normalized_actions.reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)).to(
-            device=actions_all.device, dtype=torch.float32
-        )
-        return batch_dist, actions_all, normalized_actions
+        normalized_actions = normalized_actions.reshape(normalized_actions.shape[0], NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+        # normalized_actions = torch.from_numpy(normalized_actions.reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)).to(
+        #     device=actions_all.device, dtype=torch.float32
+        # )
+        return batch_dist, action_token_ids, normalized_actions
 
 if __name__ == "__main__":
     import sys
@@ -489,7 +486,7 @@ if __name__ == "__main__":
 
             # 4. 执行动作
             for i, env_idx in enumerate(active_indices_this_step):
-                action_norm = normalized_actions[i, 0].cpu().numpy().astype(np.float32)
+                action_norm = normalized_actions[i, 0]
                 action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
 
                 obs, reward, terminated, truncated, info = envs[env_idx].step(action_env)
