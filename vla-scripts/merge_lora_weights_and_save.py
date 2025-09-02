@@ -35,7 +35,7 @@ class ConvertConfig:
     # fmt: off
 
     base_checkpoint: Union[str, Path] = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"                   # Base model checkpoint path/dir (either openvla/openvla-7b or whichever model you fine-tuned / resumed training from)
-    lora_finetuned_checkpoint_dir: Union[str, Path] = "/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_test/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b8+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state--100_chkpt"     # Checkpoint directory containing the LoRA adapter
+    lora_finetuned_checkpoint_dir: Union[str, Path] = "/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll_16/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state"     # Checkpoint directory containing the LoRA adapter
 
     # fmt: on
 

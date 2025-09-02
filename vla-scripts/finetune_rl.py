@@ -1123,6 +1123,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         actor.train()
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
+            batch = {
+            k: v.to(device_id, non_blocking=True) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+            }
             # Compute training metrics and loss
             compute_diffusion_l1 = cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0
             loss, metrics = run_forward_pass(

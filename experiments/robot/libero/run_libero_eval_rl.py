@@ -1,7 +1,7 @@
 """
-run_libero_eval.py
+run_libero_eval_actor.py
 
-Evaluates a trained policy in a LIBERO simulation benchmark task suite.
+Evaluates a trained policy (loaded into an ActorCritic network) in a LIBERO simulation benchmark task suite.
 """
 from rl.utils import my_get_action
 
@@ -13,14 +13,20 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Any, List
 
 import draccus
 import numpy as np
+import torch
 import tqdm
 from libero.libero import benchmark
 
 import wandb
+
+# 假设您的 ActorCritic 类保存在名为 actor_critic.py 的文件中
+# 请确保该文件位于Python解释器可以找到的路径中
+from rl.actor_critic_model import ActorCritic
+from rl.utils import prepare_one_obs
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
@@ -33,16 +39,11 @@ from experiments.robot.libero.libero_utils import (
     save_rollout_video,
 )
 from experiments.robot.openvla_utils import (
-    get_action_head,
-    get_noisy_action_projector,
-    get_processor,
-    get_proprio_projector,
-    resize_image_for_policy,
+    resize_image_for_policy
 )
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_image_resize_size,
-    get_model,
     invert_gripper_action,
     normalize_gripper_action,
     set_seed_everywhere,
@@ -86,13 +87,14 @@ class GenerateConfig:
     # Model-specific parameters
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
-    pretrained_checkpoint: Union[str, Path] = "/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll_16/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state"     # Pretrained checkpoint path
+    pretrained_checkpoint: Union[str, Path] = "/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state"     # Pretrained checkpoint path for both VLA and Actor
+    actor_checkpoint_step: str = "latest"            # Step of the actor checkpoint to load (e.g., "latest" or a number)
     device: str = "cuda"                            # Device to run model on
 
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
-    use_diffusion: bool = False                      # If True, uses continuous action head with diffusion modeling objective (DDIM)
-    num_diffusion_steps_train: int = 50              # (When `diffusion==True`) Number of diffusion steps used for training
-    num_diffusion_steps_inference: int = 50          # (When `diffusion==True`) Number of diffusion steps used for inference
+    use_diffusion: bool = False                      # Not used when loading a full actor, but kept for config compatibility
+    num_diffusion_steps_train: int = 50              # Not used
+    num_diffusion_steps_inference: int = 50          # Not used
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
@@ -144,50 +146,42 @@ def validate_config(cfg: GenerateConfig) -> None:
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
 
 
-def initialize_model(cfg: GenerateConfig):
-    """Initialize model and associated components."""
-    # Load model
-    model = get_model(cfg)
+def initialize_model(cfg: GenerateConfig) -> ActorCritic:
+    """
+    Initialize the full ActorCritic model and load its weights for evaluation.
+    """
+    # Precision policy
+    use_bf16 = True
+    torch_dtype = torch.bfloat16 if use_bf16 else torch.float32
 
-    # Load proprio projector if needed
-    proprio_projector = None
-    if cfg.use_proprio:
-        proprio_projector = get_proprio_projector(
-            cfg,
-            model.llm_dim,
-            proprio_dim=8,  # 8-dimensional proprio for LIBERO
-        )
+    # Create ActorCritic policy
+    logger.info("Initializing ActorCritic network...")
+    actor = ActorCritic(cfg, torch_dtype)
 
-    # Load action head if needed
-    action_head = None
-    if cfg.use_l1_regression or cfg.use_diffusion:
-        action_head = get_action_head(cfg, model.llm_dim)
+    # Load trained weights for all components of the actor
+    actor.load_weights_for_eval(cfg.pretrained_checkpoint, cfg.actor_checkpoint_step)
 
-    # Load noisy action projector if using diffusion
-    noisy_action_projector = None
-    if cfg.use_diffusion:
-        noisy_action_projector = get_noisy_action_projector(cfg, model.llm_dim)
+    # Set model to evaluation mode
+    actor.eval()
+    
+    # Check that the un-normalization key is present in the loaded stats
+    check_unnorm_key(cfg, actor.vla)
+    
+    logger.info(f"ActorCritic network initialized and weights loaded from: {cfg.pretrained_checkpoint}")
 
-    # Get OpenVLA processor if needed
-    processor = None
-    if cfg.model_family == "openvla":
-        processor = get_processor(cfg)
-        check_unnorm_key(cfg, model)
-
-    return model, action_head, proprio_projector, noisy_action_projector, processor
+    return actor
 
 
-def check_unnorm_key(cfg: GenerateConfig, model) -> None:
+def check_unnorm_key(cfg: GenerateConfig, vla_model) -> None:
     """Check that the model contains the action un-normalization key."""
     # Initialize unnorm_key
     unnorm_key = cfg.task_suite_name
 
-    # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
-    # with the suffix "_no_noops" in the dataset name)
-    if unnorm_key not in model.norm_stats and f"{unnorm_key}_no_noops" in model.norm_stats:
+    # In some cases, the key must be manually modified
+    if unnorm_key not in vla_model.norm_stats and f"{unnorm_key}_no_noops" in vla_model.norm_stats:
         unnorm_key = f"{unnorm_key}_no_noops"
 
-    assert unnorm_key in model.norm_stats, f"Action un-norm key {unnorm_key} not found in VLA `norm_stats`!"
+    assert unnorm_key in vla_model.norm_stats, f"Action un-norm key {unnorm_key} not found in VLA `norm_stats`!"
 
     # Set the unnorm_key in cfg
     cfg.unnorm_key = unnorm_key
@@ -227,10 +221,7 @@ def log_message(message: str, log_file=None):
 
 def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=None):
     """Load initial states for the given task."""
-    # Get default initial states
     initial_states = task_suite.get_task_init_states(task_id)
-
-    # If using custom initial states, load them from file
     if cfg.initial_states_path != "DEFAULT":
         with open(cfg.initial_states_path, "r") as f:
             all_initial_states = json.load(f)
@@ -280,65 +271,64 @@ def run_episode(
     cfg: GenerateConfig,
     env,
     task_description: str,
-    model,
-    resize_size,
-    processor=None,
-    action_head=None,
-    proprio_projector=None,
-    noisy_action_projector=None,
+    actor: ActorCritic,
     initial_state=None,
     log_file=None,
 ):
     """Run a single episode in the environment."""
-    # Reset environment
+    resize_size = get_image_resize_size(cfg)
+
     env.reset()
 
-    # Set initial state if provided
     if initial_state is not None:
         obs = env.set_init_state(initial_state)
     else:
         obs = env.get_observation()
 
-    # Initialize action queue
     if cfg.num_open_loop_steps != NUM_ACTIONS_CHUNK:
-        print(f"WARNING: cfg.num_open_loop_steps ({cfg.num_open_loop_steps}) does not match the NUM_ACTIONS_CHUNK "
-              f"({NUM_ACTIONS_CHUNK}) constant defined in prismatic.vla.constants! For best performance (in terms of "
-               "both speed and success rate), we recommend executing the full action chunk.")
+        print(f"WARNING: cfg.num_open_loop_steps ({cfg.num_open_loop_steps}) does not match NUM_ACTIONS_CHUNK ({NUM_ACTIONS_CHUNK})")
     action_queue = deque(maxlen=cfg.num_open_loop_steps)
 
-    # Setup
     t = 0
     replay_images = []
     max_steps = TASK_MAX_STEPS[cfg.task_suite_name]
-
-    # Run episode
     success = False
+    
     try:
         while t < max_steps + cfg.num_steps_wait:
-            # Do nothing for the first few timesteps to let objects stabilize
             if t < cfg.num_steps_wait:
                 obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                replay_images.append(get_libero_image(obs))
                 t += 1
                 continue
 
-            # Prepare observation
-            observation, img = prepare_observation(obs, resize_size)
-            replay_images.append(img)
+            replay_images.append(get_libero_image(obs))
 
-            # If action queue is empty, requery model
             if len(action_queue) == 0:
-                # Query model to get action
-                observation['task_description'] = task_description
-                actions = my_get_action(model, cfg, processor, [observation], action_head, proprio_projector, model.dtype)
-                action_queue.extend(actions)
+                observation_for_policy, _ = prepare_observation(obs, resize_size)
 
-            # Get action from queue
-            action = action_queue.popleft()
+                # 1. 使用与 ActorCritic 兼容的函数准备观测数据
+                inputs_t = prepare_one_obs(cfg, actor.processor, observation_for_policy, task_description, actor.model_dtype)
+                
+                # 2. 将单个观测数据批处理
+                inputs_batch = actor.prepare_inputs_batch([inputs_t])
+                
+                # 3. 调用 actor.forward() 获取动作均值
+                with torch.no_grad():
+                    # 我们在评估时使用确定性的均值动作 (mu_all)
+                    _, mu_all, _, _, _ = actor.forward(inputs_batch)
+                    mu_all = torch.clamp(mu_all, -1.0, 1.0) # 确保动作在 [-1, 1] 范围内
+                
+                # 4. 将归一化的动作 (-1, 1) 转换回环境的实际动作范围
+                actions_norm = mu_all.cpu().numpy()
+                actions_unnorm = actor.vla._unnormalize_actions(actions_norm, cfg.unnorm_key)
+                
+                # actions_unnorm 的形状是 (1, chunk_size, action_dim), 我们需要去掉批次维度
+                action_queue.extend(actions_unnorm[0])
 
-            # Process action
-            action = process_action(action, cfg.model_family)
+            action_unnorm = action_queue.popleft()
+            action = process_action(action_unnorm, cfg.model_family)
 
-            # Execute action in environment
             obs, reward, done, info = env.step(action.tolist())
             if done:
                 success = True
@@ -355,98 +345,65 @@ def run_task(
     cfg: GenerateConfig,
     task_suite,
     task_id: int,
-    model,
-    resize_size,
-    processor=None,
-    action_head=None,
-    proprio_projector=None,
-    noisy_action_projector=None,
+    actor: ActorCritic,
     total_episodes=0,
     total_successes=0,
     log_file=None,
 ):
     """Run evaluation for a single task."""
-    # Get task
     task = task_suite.get_task(task_id)
-
-    # Get initial states
     initial_states, all_initial_states = load_initial_states(cfg, task_suite, task_id, log_file)
-
-    # Initialize environment and get task description
     env, task_description = get_libero_env(task, cfg.model_family, resolution=cfg.env_img_res)
 
-    # Start episodes
     task_episodes, task_successes = 0, 0
     for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
         log_message(f"\nTask: {task_description}", log_file)
 
-        # Handle initial state
+        initial_state = None
         if cfg.initial_states_path == "DEFAULT":
-            # Use default initial state
             initial_state = initial_states[episode_idx]
         else:
-            # Get keys for fetching initial episode state from JSON
             initial_states_task_key = task_description.replace(" ", "_")
             episode_key = f"demo_{episode_idx}"
-
-            # Skip episode if expert demonstration failed to complete the task
             if not all_initial_states[initial_states_task_key][episode_key]["success"]:
                 log_message(f"Skipping task {task_id} episode {episode_idx} due to failed expert demo!", log_file)
                 continue
-
-            # Get initial state
             initial_state = np.array(all_initial_states[initial_states_task_key][episode_key]["initial_state"])
 
         log_message(f"Starting episode {task_episodes + 1}...", log_file)
 
-        # Run episode
         success, replay_images = run_episode(
             cfg,
             env,
             task_description,
-            model,
-            resize_size,
-            processor,
-            action_head,
-            proprio_projector,
-            noisy_action_projector,
+            actor,
             initial_state,
             log_file,
         )
 
-        # Update counters
         task_episodes += 1
         total_episodes += 1
         if success:
             task_successes += 1
             total_successes += 1
 
-        # Save replay video
         if not success:
             save_rollout_video(
                 replay_images, total_episodes, success=success, task_description=task_description, log_file=log_file
             )
 
-        # Log results
         log_message(f"Success: {success}", log_file)
         log_message(f"# episodes completed so far: {total_episodes}", log_file)
         log_message(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)", log_file)
 
-    # Log task results
     task_success_rate = float(task_successes) / float(task_episodes) if task_episodes > 0 else 0
     total_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0
 
     log_message(f"Current task success rate: {task_success_rate}", log_file)
     log_message(f"Current total success rate: {total_success_rate}", log_file)
 
-    # Log to wandb if enabled
     if cfg.use_wandb:
-        wandb.log(
-            {
-                f"success_rate/{task_description}": task_success_rate,
-                f"num_episodes/{task_description}": task_episodes,
-            }
-        )
+        wandb.log({f"success_rate/{task_description}": task_success_rate})
 
     return total_episodes, total_successes
 
@@ -454,66 +411,42 @@ def run_task(
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> float:
     """Main function to evaluate a trained policy on LIBERO benchmark tasks."""
-    # Validate configuration
     validate_config(cfg)
-
-    # Set random seed
     set_seed_everywhere(cfg.seed)
 
-    # Initialize model and components
-    model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
+    # MODIFICATION: Initialize the full actor model
+    actor = initialize_model(cfg)
 
-    # Get expected image dimensions
-    resize_size = get_image_resize_size(cfg)
-
-    # Setup logging
     log_file, local_log_filepath, run_id = setup_logging(cfg)
-
-    # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
-    num_tasks = task_suite.n_tasks
-
+    
     log_message(f"Task suite: {cfg.task_suite_name}", log_file)
+    log_message(f"Evaluating checkpoint: {cfg.pretrained_checkpoint}", log_file)
 
-    # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks)):
+    for task_id in tqdm.tqdm(range(task_suite.n_tasks)):
         total_episodes, total_successes = run_task(
             cfg,
             task_suite,
             task_id,
-            model,
-            resize_size,
-            processor,
-            action_head,
-            proprio_projector,
-            noisy_action_projector,
+            actor,
             total_episodes,
             total_successes,
             log_file,
         )
 
-    # Calculate final success rate
     final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0
 
-    # Log final results
     log_message("Final results:", log_file)
     log_message(f"Total episodes: {total_episodes}", log_file)
     log_message(f"Total successes: {total_successes}", log_file)
     log_message(f"Overall success rate: {final_success_rate:.4f} ({final_success_rate * 100:.1f}%)", log_file)
 
-    # Log to wandb if enabled
     if cfg.use_wandb:
-        wandb.log(
-            {
-                "success_rate/total": final_success_rate,
-                "num_episodes/total": total_episodes,
-            }
-        )
+        wandb.log({"success_rate/total": final_success_rate, "num_episodes/total": total_episodes})
         wandb.save(local_log_filepath)
 
-    # Close log file
     if log_file:
         log_file.close()
 

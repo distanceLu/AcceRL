@@ -2,9 +2,9 @@ import os
 os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
 # 设置临时文件目录，避免磁盘I/O瓶颈
-os.environ["TMPDIR"] = "/dev/shm/ray"
+os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -20,7 +20,7 @@ import numpy as np
 
 import ray
 import torch
-from torch.distributions import Normal, TransformedDistribution
+from torch.distributions import Normal
 from torch.distributions.transforms import TanhTransform
 import deepspeed
 import torch.distributed as distributed # 新增：为了分布式通信
@@ -78,21 +78,21 @@ VALUE_LR = 1e-4
 POLICY_LR = 1e-5
 VALUE_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 500 # 策略网络从第500个 *更新步* 开始训练
+POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
 
 # 日志
 MOVING_AVG_WINDOW = 100
 LOG_INTERVAL_SECONDS = 10
 
 # 通信组
-TRAIN_GROUP_PORT = 29531
+TRAIN_GROUP_PORT = 47480
 BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
-BROADCAST_GROUP_PORT = 29532
+BROADCAST_GROUP_PORT = 47481
 
 # OpenVLA 加载配置
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
-PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
+PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll_16/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state"
 
 # ================================================================
 # 数据结构
@@ -218,7 +218,7 @@ class RolloutWorkerActor:
 
     def run(self):
         try:
-            obs, info = self.env.reset(seed=self.wid)
+            obs, info = self.env.reset(0)
             self.task_description = self.env.task_description
             self.current_env_name = self.env.get_name()
 
@@ -256,7 +256,7 @@ class RolloutWorkerActor:
                     if self.local_buffer:
                         self._process_traj(self.local_buffer, 0.0)
                     self.local_buffer.clear()
-                    obs, info = self.env.reset()
+                    obs, info = self.env.reset(0)
                     self.task_description = self.env.task_description
                     self.current_env_name = self.env.get_name()
                     time_start = time.time()
@@ -310,6 +310,10 @@ class InferenceActor(InferenceActorCom):
         # 加载 ActorCritic（包含 VLA）与 processor
         print(f"InferenceActor {actor_id}: 正在加载 OpenVLA ActorCritic...")
         self.model = ActorCritic(cfg, torch_dtype=TORCH_DTYPE)
+        # 从你的检查点目录名中提取步数
+        checkpoint_step = 'latest'   # 或者设置为特定的步数，例如 10000 'latest'
+        self.model.load_weights_for_eval(cfg.pretrained_checkpoint, checkpoint_step)
+
         self.model.cuda()
         self.model.eval()
         self.processor = self.model.processor
@@ -371,7 +375,7 @@ class InferenceActor(InferenceActorCom):
                 inputs_batch = self.model.prepare_inputs_batch(requests_to_process)
                 with torch.inference_mode():
                     # 前向：得到所有 chunk 的动作、mu、log_std、value
-                    actions_all, mu_all, log_std_all, value = self.model(inputs_batch)
+                    actions_all, mu_all, log_std_all, value, _ = self.model.forward(inputs_batch)
                 # 只用第一个 chunk
                 actions_norm = actions_all[:, 0, :].to(torch.float32).detach().cpu().numpy()          # (-1,1)
                 mu = mu_all[:, 0, :].to(torch.float32).detach().cpu().numpy()
@@ -380,7 +384,8 @@ class InferenceActor(InferenceActorCom):
                 # 仅在推理器中将标准化动作转换为环境动作（反归一化）
                 actions_env = []
                 for i in range(actions_norm.shape[0]):
-                    a_env = self.model.vla._unnormalize_actions(actions_norm[i], self.cfg.unnorm_key)
+                    clipped = np.clip(actions_norm[i], -1.0, 1.0)
+                    a_env = self.model.vla._unnormalize_actions(clipped, self.cfg.unnorm_key)
                     actions_env.append(a_env.astype(np.float32))
                 for i in range(len(promises_to_process)):
                     # 返回：
@@ -411,7 +416,7 @@ class InferenceActor(InferenceActorCom):
         inputs_t = prepare_one_obs(self.cfg, self.processor, observation, observation['task_description'], TORCH_DTYPE)
         inputs_batch = self.model.prepare_inputs_batch([inputs_t])
         with torch.no_grad():
-            actions_all, mu_all, log_std_all, value = self.model(inputs_batch)
+            actions_all, mu_all, log_std_all, _, _ = self.model(inputs_batch)
         return actions_all
     
 
@@ -463,6 +468,10 @@ class TrainerActor(TrainerActorCom):
 
         print(f"Trainer {self.rank}: 正在加载 OpenVLA ActorCritic...")
         model = ActorCritic(self.cfg, torch_dtype=TORCH_DTYPE)
+        # 从你的检查点目录名中提取步数
+        checkpoint_step = 'latest'   # 或者设置为特定的步数，例如 10000 'latest'
+        model.load_weights_for_eval(self.cfg.pretrained_checkpoint, checkpoint_step)
+
         self.base_model = model
 
         # 修改: 使用参数分组来配置优化器
@@ -644,7 +653,7 @@ class TrainerActor(TrainerActorCom):
             normalized_adv = (mini_adv - global_adv_mean) / (global_adv_std + 1e-8)
             
             # 前向
-            actions_all, mu_all, log_std_all, value = self.model(mini_inputs)
+            actions_all, mu_all, log_std_all, value, _ = self.model(mini_inputs)
             # 仅用第一个 chunk
             mu = mu_all[:, 0, :].to(torch.float32)
             log_std = log_std_all[:, 0, :].to(torch.float32)
@@ -662,24 +671,30 @@ class TrainerActor(TrainerActorCom):
                 # 阶段二: 训练所有组件
                 std = torch.exp(log_std)
                 base_dist = Normal(mu, std)
-                dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-                epsilon = 1e-6
-                clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
-                logp = dist.log_prob(clipped_act_t).sum(dim=-1)
+                # dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+                dist = base_dist
+                # epsilon = 1e-6
+                # clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
+                logp = dist.log_prob(mini_act).sum(dim=-1)
 
                 with torch.no_grad():
                     std_old = torch.exp(mini_log_std)
                     base_dist_old = Normal(mini_mu_old, std_old)
-                    dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
-                    logp_old = dist_old.log_prob(clipped_act_t).sum(dim=-1)
+                    dist_old = base_dist_old
+                    # dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
+                    logp_old = dist_old.log_prob(mini_act).sum(dim=-1)
 
                 ratio = torch.exp(logp - logp_old)
+                if torch.isnan(ratio).any() or torch.isinf(ratio).any():
+                    raise ValueError(f"Trainer {self.rank}: 比率 ratio 包含 NaN 或 Inf，停止训练。")
                 surr1 = ratio * normalized_adv
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * normalized_adv
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
                 ent_loss = -ENT_COEF * torch.mean(base_dist.entropy().sum(dim=-1))
                 loss = policy_loss + value_loss + ent_loss
 
+            if torch.isnan(loss) or torch.isinf(loss):
+                raise ValueError(f"Trainer {self.rank}: 损失为 NaN 或 Inf，停止训练。")
             self.model.backward(loss)
             self.model.step()
             epoch_losses.append(loss.item())
@@ -711,6 +726,7 @@ def build_openvla_cfg() -> GenerateConfig:
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,  # 与常量保持一致
         unnorm_key="libero_spatial_no_noops",
+        device="cuda",
     )
     return cfg
 
