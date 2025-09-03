@@ -223,7 +223,6 @@ class RolloutWorkerActor:
             self.current_env_name = self.env.get_name()
 
             reward_sum = 0.0
-            step_count = 0
             time_start = time.time()
             step_count_total = 0
 
@@ -232,27 +231,30 @@ class RolloutWorkerActor:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
                 # 3) 发给 InferenceActor：它返回 env 动作（已 unnormalize），以及标准化动作与策略信息
                 action_env, action_norm, mu, log_std, value = ray.get(self.infer.request.remote(inputs_t))
-                # 环境交互使用 env 动作（已反归一化）
-                nxt, r, term, trunc, info = self.env.step(action_env)
-                reward_sum += r
-
-                # 训练使用缩放后的奖励
-                r_scaled = r * REWARD_SCALE
-
-                step_count += 1
-                step_count_total += 1
-                # 只在 buffer 存标准化后的动作与策略统计量
-                self.local_buffer.append((inputs_t, action_norm, r_scaled, mu, log_std, value))
+                chunk_reward = 0.0
+                done = False
+                for i in range(len(action_env)):
+                    single_action = action_env[i]
+                    nxt, r, term, trunc, info = self.env.step(single_action)
+                
+                    reward_sum += r
+                    r_scaled = r * REWARD_SCALE
+                    chunk_reward += r_scaled
+                
+                    step_count_total += 1
+                    if term or trunc:
+                        done = True
+                        break
+                self.local_buffer.append((inputs_t, action_norm, chunk_reward, mu, log_std, value))
                 obs = nxt
 
-                if term or trunc:
+                if done:
                     step_time = (time.time() - time_start) / max(step_count_total, 1)
                     success = float(info.get('is_success', 0.0))  # Libero 用 is_success
                     self.stats_actor.add_episode_return.remote(
-                        self.current_env_name, reward_sum, step_time, step_count, success
+                        self.current_env_name, reward_sum, step_time, step_count_total, success
                     )
                     reward_sum = 0.0
-                    step_count = 0
                     if self.local_buffer:
                         self._process_traj(self.local_buffer, 0.0)
                     self.local_buffer.clear()
@@ -376,10 +378,10 @@ class InferenceActor(InferenceActorCom):
                 with torch.inference_mode():
                     # 前向：得到所有 chunk 的动作、mu、log_std、value
                     actions_all, mu_all, log_std_all, value, _ = self.model.forward(inputs_batch)
-                # 只用第一个 chunk
-                actions_norm = actions_all[:, 0, :].to(torch.float32).detach().cpu().numpy()          # (-1,1)
-                mu = mu_all[:, 0, :].to(torch.float32).detach().cpu().numpy()
-                log_std = log_std_all[:, 0, :].to(torch.float32).detach().cpu().numpy()
+                
+                actions_norm = actions_all.to(torch.float32).detach().cpu().numpy()          # (-1,1)
+                mu = mu_all.to(torch.float32).detach().cpu().numpy()
+                log_std = log_std_all.to(torch.float32).detach().cpu().numpy()
                 values = value.to(torch.float32).detach().cpu().numpy()
                 # 仅在推理器中将标准化动作转换为环境动作（反归一化）
                 actions_env = []
@@ -655,8 +657,8 @@ class TrainerActor(TrainerActorCom):
             # 前向
             actions_all, mu_all, log_std_all, value, _ = self.model(mini_inputs)
             # 仅用第一个 chunk
-            mu = mu_all[:, 0, :].to(torch.float32)
-            log_std = log_std_all[:, 0, :].to(torch.float32)
+            mu = mu_all.to(torch.float32)
+            log_std = log_std_all.to(torch.float32)
             value = value.to(torch.float32)
 
             # 3. 根据 global_step 计算损失
@@ -687,8 +689,8 @@ class TrainerActor(TrainerActorCom):
                 ratio = torch.exp(logp - logp_old)
                 if torch.isnan(ratio).any() or torch.isinf(ratio).any():
                     raise ValueError(f"Trainer {self.rank}: 比率 ratio 包含 NaN 或 Inf，停止训练。")
-                surr1 = ratio * normalized_adv
-                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * normalized_adv
+                surr1 = ratio * normalized_adv.unsqueeze(-1)
+                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * normalized_adv.unsqueeze(-1)
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
                 ent_loss = -ENT_COEF * torch.mean(base_dist.entropy().sum(dim=-1))
                 loss = policy_loss + value_loss + ent_loss

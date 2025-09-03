@@ -114,7 +114,7 @@ class GenerateConfig:
     #################################################################################################################
     task_suite_name: str = TaskSuite.LIBERO_SPATIAL  # Task suite
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 50                    # Number of rollouts per task
+    num_trials_per_task: int = 500                    # Number of rollouts per task
     initial_states_path: str = "DEFAULT"             # "DEFAULT", or path to initial states JSON file
     env_img_res: int = 256                           # Resolution for environment images (not policy input resolution)
 
@@ -316,11 +316,12 @@ def run_episode(
                 # 3. 调用 actor.forward() 获取动作均值
                 with torch.no_grad():
                     # 我们在评估时使用确定性的均值动作 (mu_all)
-                    _, mu_all, _, _, _ = actor.forward(inputs_batch)
-                    mu_all = torch.clamp(mu_all, -1.0, 1.0) # 确保动作在 [-1, 1] 范围内
+                    sample_all, mu_all, _, _, _ = actor.forward(inputs_batch)
+                    # action_all = torch.clamp(mu_all, -1.0, 1.0) # 确保动作在 [-1, 1] 范围内
+                    action_all = torch.clamp(sample_all, -1.0, 1.0)
                 
                 # 4. 将归一化的动作 (-1, 1) 转换回环境的实际动作范围
-                actions_norm = mu_all.cpu().numpy()
+                actions_norm = action_all.cpu().numpy()
                 actions_unnorm = actor.vla._unnormalize_actions(actions_norm, cfg.unnorm_key)
                 
                 # actions_unnorm 的形状是 (1, chunk_size, action_dim), 我们需要去掉批次维度
@@ -425,7 +426,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
     log_message(f"Evaluating checkpoint: {cfg.pretrained_checkpoint}", log_file)
 
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(task_suite.n_tasks)):
+    for task_id in tqdm.tqdm([5]):
         total_episodes, total_successes = run_task(
             cfg,
             task_suite,

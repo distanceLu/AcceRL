@@ -4,6 +4,7 @@ import torch.nn as nn
 from typing import Dict, Any, Tuple, List
 from contextlib import nullcontext
 import numpy as np
+from collections import deque
 
 from torch.distributions import Normal, TransformedDistribution
 from torch.distributions.transforms import TanhTransform
@@ -60,7 +61,7 @@ if __name__ == "__main__":
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = [5]
+    ENVS_ID = list(range(10))
     envs_num = len(ENVS_ID)
     BENCHMARK = TaskSuite.LIBERO_SPATIAL
 
@@ -120,6 +121,8 @@ if __name__ == "__main__":
         task_descriptions.append(env.task_description)
         print(f"环境 {i}: 任务 ID = {env.task_id}, 任务描述 = {env.task_description}")
 
+    action_queues = [deque(maxlen=cfg.num_open_loop_steps) for _ in range(envs_num)]
+
     # 跟踪每个环境是否仍在活动、奖励和步数
     active_envs = [True] * envs_num
     total_rewards = [0.0] * envs_num
@@ -134,38 +137,43 @@ if __name__ == "__main__":
 
     # --- 主循环：只要有任何一个环境在活动，就继续 ---
     while any(active_envs):
-        # 1. 从所有【活动】的环境中收集输入数据
-        inputs_t_list = []
-        # 记录当前批次中数据对应的原始环境索引
-        active_indices_this_step = []
-        
+        # ============================ 修改后的核心逻辑: 按需推理 ============================
+
+        # 1. 识别哪些环境的动作队列已空，需要进行新的推理
+        inputs_for_inference = []
+        indices_needing_inference = []
         for i in range(envs_num):
-            if active_envs[i]:
+            if active_envs[i] and len(action_queues[i]) == 0:
                 inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
-                inputs_t_list.append(inputs_t)
-                active_indices_this_step.append(i)
+                inputs_for_inference.append(inputs_t)
+                indices_needing_inference.append(i)
 
-        # 如果没有活动的输入，则退出循环
-        if not inputs_t_list:
-            break
+        # 2. 如果有需要推理的环境，则执行一次批处理前向传播
+        if inputs_for_inference:
+            inputs_batch = actor.prepare_inputs_batch(inputs_for_inference)
+            
+            with torch.no_grad():
+                sample_all, mu_all, _, _, _ = actor.forward(inputs_batch)
+                action_all_norm = torch.clamp(sample_all, -1.0, 1.0)
+                # action_all_norm = torch.clamp(mu_all, -1.0, 1.0)
 
-        # 2. 使用类方法将输入列表批处理成一个大的张量
-        #    这是实现并行处理的关键步骤
-        inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
+            # 3. 将生成的动作块（chunks）填充到对应的队列中
+            actions_unnorm = actor.vla._unnormalize_actions(action_all_norm.cpu().numpy(), cfg.unnorm_key)
+            
+            for i, env_idx in enumerate(indices_needing_inference):
+                # actions_unnorm[i] 是一个形状为 (num_chunks, action_dim) 的数组
+                action_queues[env_idx].extend(actions_unnorm[i])
 
-        # 3. 执行一次前向传播，为批次中的所有环境获取动作
-        with torch.no_grad():
-            # actions_all 的形状是 (batch_size, num_chunks, action_dim)
-            # 其中 batch_size 等于当前活动的任务数量 len(inputs_t_list)
-            sample_all, mu_all, _, _, _ = actor.forward(inputs_batch)
-            # action_all = torch.clamp(mu_all, -1.0, 1.0)
-            action_all = torch.clamp(sample_all, -1.0, 1.0)
-
-        # 4. 将批次动作分发回各自的环境并执行一步
-        for i, env_idx in enumerate(active_indices_this_step):
-            # i 是批次中的索引, env_idx 是原始环境列表中的索引
-            action_norm = action_all[i, 0].cpu().numpy().astype(np.float32)
-            action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
+        # ============================ 修改后的核心逻辑: 顺序执行 ============================
+        
+        # 4. 为所有活动环境执行队列中的一个动作
+        for env_idx in range(envs_num):
+            if not active_envs[env_idx]:
+                continue
+            
+            # 从队列中取出一个动作
+            # 此时可以保证队列非空，因为前面已经填充过了
+            action_env = action_queues[env_idx].popleft()
 
             # 在对应的环境中执行动作
             obs, reward, terminated, truncated, info = envs[env_idx].step(action_env)
@@ -175,24 +183,33 @@ if __name__ == "__main__":
             total_rewards[env_idx] += float(reward)
             episode_steps[env_idx] += 1
 
-            # 使用确定性打印
             if episode_steps[env_idx] % 50 == 0:
                 print(f"环境 {env_idx}, Step: {episode_steps[env_idx]}, 奖励: {reward:.4f}, 终止: {terminated}, 截断: {truncated}")
 
             # 5. 检查环境是否完成
             if terminated or truncated:
+                active_envs[env_idx] = False # 标记环境为非活动
                 is_success = info.get('is_success', False)
-                total_successes += is_success
+                total_successes += int(is_success)
                 total_episodes_finished += 1
                 success_info[env_idx] = is_success
                 
-                # 打印单个环境完成的信息
                 print("-" * 40)
                 print(f"环境 {env_idx} 已完成 (任务: {envs[env_idx].task_description[:50]}...)")
                 print(f"  总步数: {episode_steps[env_idx]}, 总奖励: {total_rewards[env_idx]:.4f}, 是否成功: {is_success}")
-                print(f"Success rate: {total_successes / total_episodes_finished}, total_episodes_finished: {total_episodes_finished}")
+                if total_episodes_finished > 0:
+                    print(f"当前成功率: {total_successes / total_episodes_finished:.2%}, 完成的回合数: {total_episodes_finished}")
                 print("-" * 40)
+
+                # # 如果需要自动重置并继续跑，可以取消下面的注释
                 episode_steps[env_idx] = 0
                 total_rewards[env_idx] = 0
-                obs, info = envs[env_idx].reset(seed=0)
+                obs, info = envs[env_idx].reset(seed=0) # 可以用不同的seed增加多样性
                 observations[env_idx] = obs
+                active_envs[env_idx] = True
+                action_queues[env_idx].clear() # 清空旧的动作队列
+    
+    print("\n所有环境执行完毕。")
+    if total_episodes_finished > 0:
+        final_rate = total_successes / total_episodes_finished
+        print(f"最终成功率: {final_rate:.2%} ({total_successes}/{total_episodes_finished})")
