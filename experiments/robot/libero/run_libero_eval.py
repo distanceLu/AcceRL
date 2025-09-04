@@ -19,6 +19,7 @@ import draccus
 import numpy as np
 import tqdm
 from libero.libero import benchmark
+from experiments.robot.robot_utils import DEVICE
 
 import wandb
 
@@ -129,6 +130,53 @@ class GenerateConfig:
 
     # fmt: on
 
+import torch
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+
+def get_vla(cfg) -> torch.nn.Module:
+    """
+    只读加载 OpenVLA：不修改 checkpoint 内的 config.json。
+    """
+    print("Instantiating pretrained VLA policy (read-only, no config.json mutation)...")
+
+    # 1) 显式加载 Config（不会触发 auto_map 也不会写文件）
+    vla_cfg = OpenVLAConfig.from_pretrained(
+        cfg.pretrained_checkpoint,
+        trust_remote_code=True,   # 允许自定义类
+    )
+
+    # 2) 显式加载模型（不走 Auto*，不需要 auto_map）
+    vla = OpenVLAForActionPrediction.from_pretrained(
+        cfg.pretrained_checkpoint,
+        config=vla_cfg,
+        torch_dtype=torch.bfloat16,
+        load_in_8bit=cfg.load_in_8bit,
+        load_in_4bit=cfg.load_in_4bit,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+    )
+
+    # 3) FiLM（若启用）
+    if getattr(cfg, "use_film", False):
+        from experiments.robot.openvla_utils import _apply_film_to_vla
+        vla = _apply_film_to_vla(vla, cfg)
+
+    # 4) 设定输入图像数量
+    vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+
+    vla.eval()
+
+    # 5) 未量化时放到目标设备
+    if not cfg.load_in_8bit and not cfg.load_in_4bit:
+        vla = vla.to(DEVICE)
+
+    # 6) 加载数据集统计（归一化/反归一化用）
+    from experiments.robot.openvla_utils import _load_dataset_stats
+    _load_dataset_stats(vla, cfg.pretrained_checkpoint)
+
+    return vla
+
 
 def validate_config(cfg: GenerateConfig) -> None:
     """Validate configuration parameters."""
@@ -146,7 +194,8 @@ def validate_config(cfg: GenerateConfig) -> None:
 def initialize_model(cfg: GenerateConfig):
     """Initialize model and associated components."""
     # Load model
-    model = get_model(cfg)
+    # model = get_model(cfg)
+    model = get_vla(cfg)
 
     # Load proprio projector if needed
     proprio_projector = None

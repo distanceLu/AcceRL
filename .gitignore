@@ -154,3 +154,4 @@ wandb/
 test/
 experiments/logs/
 runs/
+vit_vae_log/
