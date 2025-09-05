@@ -125,13 +125,13 @@ class ViTDecoder(nn.Module):
         # Input shape: (B*L, 256, 4096)
         B, L, N, D = x.shape
         x = x.reshape(B*L, N, D)
-        patch_features = torch.split(x, [256] * 2, dim=1)
+        patch_features = [x] if N==256 else list(torch.split(x, [256] * 2, dim=1))
         all_images = []
         for x in patch_features:
             x = self.decode_projector(x)
             x = self.blocks(x)
             x = self.norm(x)
-            x = self.patch_unembed(x)  # (B, 6, 224, 224)
+            x = self.patch_unembed(x)  # (B*L, 6, 224, 224)
             all_images.append(x)
         all_images = torch.cat(all_images, dim=1) # (B*L, 12, 224, 224)
         _, C, H, W = all_images.shape
