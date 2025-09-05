@@ -38,7 +38,7 @@ from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 
-def get_vla(cfg: Any) -> torch.nn.Module:
+def get_vla(cfg: Any, device) -> OpenVLAForActionPrediction:
     """
     只读加载 OpenVLA：不修改 checkpoint 内的 config.json。
     """

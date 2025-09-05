@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '4'
 
 import torch
 import torch.nn as nn
@@ -12,8 +12,9 @@ from replay_buffer import ObsReplayBuffer
 from storm.actor_critic_model import get_vla, get_processor
 
 from experiments.robot.openvla_utils import prepare_images_for_vla
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+DEVICE = torch.device("cuda:0")
 
 class MSELoss(nn.Module):
     def __init__(self) -> None:
@@ -54,8 +55,8 @@ class ViTVAE(nn.Module):
         # Encoder
         self.encoder = encoder
         # Freeze encoder parameters
-        # for param in self.encoder.parameters():
-        #     param.requires_grad = False
+        for param in self.encoder.parameters():
+            param.requires_grad = False
             
         self.projector = projector
 
@@ -79,9 +80,9 @@ class ViTVAE(nn.Module):
         post_dist = OneHotCategorical(logits=post_logits)
         prior_dist = OneHotCategorical(probs=torch.ones_like(post_logits) / self.stoch_dim)
         kl_div = torch.distributions.kl.kl_divergence(post_dist, prior_dist)
-        kl_div = reduce(kl_div, "B L N D -> B L", "sum")
+        kl_div = reduce(kl_div, "B L N D -> B L N", "sum")
         kl_div = kl_div.mean()
-        kl_div = torch.max(torch.ones_like(kl_div)*free_bits, kl_div)
+        # kl_div = torch.max(torch.ones_like(kl_div)*free_bits, kl_div)
 
         return kl_div
 
@@ -90,6 +91,8 @@ class ViTVAE(nn.Module):
         return rearrange(sample, "B L N K C -> B L N (K C)")
 
     def update(self, obs, current_steps=0, logger=None):
+        self.optimizer.zero_grad(set_to_none=True)
+
         B, L, C, H, W = obs.shape # (B, L, 12, 224, 224)
         obs_reshape = obs.reshape(B*L, C, H, W)
         # Encode image
@@ -110,13 +113,12 @@ class ViTVAE(nn.Module):
 
         reconstruction_loss = self.mse_loss_func(obs_hat, obs)
         kl_loss = self.calculate_kl_loss(post_logits.float())
-        total_loss = reconstruction_loss + kl_loss
+        total_loss = reconstruction_loss + 10*kl_loss
 
         # gradient descent
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
         self.optimizer.step()
-        self.optimizer.zero_grad(set_to_none=True)
 
         if logger is not None:
             logger.add_scalar("reconstruction_loss", reconstruction_loss.item(), current_steps)
@@ -162,7 +164,7 @@ if __name__ ==  "__main__":
     TRAIN_ITERS = 100000
     BATCH_SIZE = 1
     BATCH_LENGTH = 8
-    SAVE_MODEL = True
+    SAVE_MODEL = False
     SAVE_FREQ = 100
 
     BENCHMARK = "libero_spatial"
@@ -188,15 +190,18 @@ if __name__ ==  "__main__":
         unnorm_key="libero_spatial_no_noops",
     )
 
-    vla = get_vla(cfg)
+    vla = get_vla(cfg, device=DEVICE)
 
     processor = get_processor(cfg)
 
-    vision_backbone = copy.deepcopy(vla.vision_backbone).cpu()
-    vision_backbone = vision_backbone.to(DEVICE, dtype=torch.bfloat16)
-    projector = copy.deepcopy(vla.projector).cpu()
-    projector = projector.to(DEVICE, dtype=torch.bfloat16)
-    del vla
+    # vision_backbone = copy.deepcopy(vla.vision_backbone).cpu()
+    # vision_backbone = vision_backbone.to(DEVICE, dtype=torch.bfloat16)
+    # projector = copy.deepcopy(vla.projector).cpu()
+    # projector = projector.to(DEVICE, dtype=torch.bfloat16)
+    # del vla
+    vision_backbone = vla.vision_backbone
+    projector = vla.projector
+    del vla.language_model
 
     vit_vae = ViTVAE(encoder=vision_backbone, projector=projector)
     vit_vae.to(DEVICE, dtype=torch.bfloat16)
@@ -225,13 +230,13 @@ if __name__ ==  "__main__":
         done_flag = np.logical_or(done, truncated)
 
         if done_flag:
-            task_id = random.randint(0, 9)
-            env = LiberoEnvWrapper(
-                benchmark_name=BENCHMARK,
-                task_id=task_id,  # 随机任务 ID
-                image_size=224,
-                render_mode="rgb_array",
-            )
+            # task_id = random.randint(0, 9)
+            # env = LiberoEnvWrapper(
+            #     benchmark_name=BENCHMARK,
+            #     task_id=task_id,  # 随机任务 ID
+            #     image_size=224,
+            #     render_mode="rgb_array",
+            # )
             obs, info = env.reset(seed=total_steps)
 
         current_obs = obs
@@ -244,7 +249,7 @@ if __name__ ==  "__main__":
                 reconstruction_loss, kl_loss, total_loss = vit_vae.update(obs=obs_sample)
 
 
-            print(f"step: {total_steps}, total_loss:, {total_loss:.2f}, reconstruction_loss: {reconstruction_loss:.2f}, kl_loss: {kl_loss:.2f}")
+            print(f"step: {total_steps}, total_loss:, {total_loss:.4f}, reconstruction_loss: {reconstruction_loss:.4f}, kl_loss: {kl_loss:.4f}")
 
             if SAVE_MODEL and (total_steps+1)%SAVE_FREQ==0:
                 save_dir = f"{LOG_DIR}/checkpoint"
