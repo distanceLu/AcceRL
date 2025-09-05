@@ -1,0 +1,237 @@
+import numpy as np
+import random
+import unittest
+import torch
+from einops import rearrange
+import copy
+import pickle
+
+
+class ReplayBuffer():
+    def __init__(self, obs_shape, num_envs, action_dim, dist, instruction_buffer, max_length=int(1E6), warmup_length=50000, store_on_gpu=False) -> None:
+        self.store_on_gpu = store_on_gpu
+        if store_on_gpu:
+            # self.obs_buffer = torch.empty((max_length//num_envs, num_envs, *obs_shape), dtype=torch.uint8, device="cuda", requires_grad=False)
+            self.obs_buffer = torch.empty((max_length//num_envs, num_envs, *obs_shape), dtype=torch.float32, device="cuda", requires_grad=False)
+            if dist == "onehot":
+                self.action_buffer = torch.empty((max_length//num_envs, num_envs), dtype=torch.float32, device="cuda", requires_grad=False)
+            else:
+                self.action_buffer = torch.empty((max_length//num_envs, num_envs, action_dim), dtype=torch.float32, device="cuda", requires_grad=False)
+            self.reward_buffer = torch.empty((max_length//num_envs, num_envs), dtype=torch.float32, device="cuda", requires_grad=False)
+            self.termination_buffer = torch.empty((max_length//num_envs, num_envs), dtype=torch.float32, device="cuda", requires_grad=False)
+        else:
+            # self.obs_buffer = np.empty((max_length//num_envs, num_envs, *obs_shape), dtype=np.uint8)
+            self.obs_buffer = np.empty((max_length//num_envs, num_envs, *obs_shape), dtype=np.float32)
+            if dist == "onehot":
+                self.action_buffer = torch.empty((max_length//num_envs, num_envs), dtype=torch.float32)
+            else:
+                self.action_buffer = np.empty((max_length//num_envs, num_envs, action_dim), dtype=np.float32)
+            self.reward_buffer = np.empty((max_length//num_envs, num_envs), dtype=np.float32)
+            self.termination_buffer = np.empty((max_length//num_envs, num_envs), dtype=np.float32)
+
+        self.instruction_buffer = instruction_buffer # (num_envs, instruction_dim)
+
+        self.length = 0
+        self.num_envs = num_envs
+        self.last_pointer = -1
+        self.max_length = max_length
+        self.warmup_length = warmup_length
+        self.external_buffer_length = None
+
+    def load_trajectory(self, path):
+        buffer = pickle.load(open(path, "rb"))
+        if self.store_on_gpu:
+            self.external_buffer = {name: torch.from_numpy(buffer[name]).to("cuda") for name in buffer}
+        else:
+            self.external_buffer = buffer
+        self.external_buffer_length = self.external_buffer["obs"].shape[0]
+
+    def sample_external(self, batch_size, batch_length, to_device="cuda"):
+        indexes = np.random.randint(0, self.external_buffer_length+1-batch_length, size=batch_size)
+        if self.store_on_gpu:
+            obs = torch.stack([self.external_buffer["obs"][idx:idx+batch_length] for idx in indexes])
+            action = torch.stack([self.external_buffer["action"][idx:idx+batch_length] for idx in indexes])
+            reward = torch.stack([self.external_buffer["reward"][idx:idx+batch_length] for idx in indexes])
+            termination = torch.stack([self.external_buffer["done"][idx:idx+batch_length] for idx in indexes])
+            instruction = self.instruction_buffer.expand(batch_size, batch_length, -1)
+        else:
+            obs = np.stack([self.external_buffer["obs"][idx:idx+batch_length] for idx in indexes])
+            action = np.stack([self.external_buffer["action"][idx:idx+batch_length] for idx in indexes])
+            reward = np.stack([self.external_buffer["reward"][idx:idx+batch_length] for idx in indexes])
+            termination = np.stack([self.external_buffer["done"][idx:idx+batch_length] for idx in indexes])
+            instruction = np.tile(self.instruction_buffer[np.newaxis, np.newaxis, :], (batch_size, batch_length, 1))
+        return obs, action, reward, termination, instruction
+
+    def ready(self):
+        return self.length * self.num_envs > self.warmup_length
+    
+    def sample_context_instruction(self, to_device="cuda"):
+        if self.store_on_gpu:
+            context_instruction = self.instruction_buffer.unsqueeze(1)
+        else:
+            context_instruction = torch.from_numpy(self.instruction_buffer[:, np.newaxis, :]).to(to_device)
+        
+        return context_instruction
+    
+    @torch.no_grad()
+    def sample(self, batch_size, external_batch_size, batch_length, to_device="cuda"):
+        if self.store_on_gpu:
+            obs, action, reward, termination, instruction = [], [], [], [], []
+            if batch_size > 0:
+                for i in range(self.num_envs):
+                    indexes = np.random.randint(0, self.length+1-batch_length, size=batch_size//self.num_envs)
+                    obs.append(torch.stack([self.obs_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    action.append(torch.stack([self.action_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    reward.append(torch.stack([self.reward_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    termination.append(torch.stack([self.termination_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    instruction.append(self.instruction_buffer[i].expand(len(indexes), batch_length, -1))
+            
+            if self.external_buffer_length is not None and external_batch_size > 0:
+                external_obs, external_action, external_reward, external_termination, external_instruction  = self.sample_external(
+                    external_batch_size, batch_length, to_device)
+                obs.append(external_obs)
+                action.append(external_action)
+                reward.append(external_reward)
+                termination.append(external_termination)
+                instruction.append(external_instruction)
+
+            # obs = torch.cat(obs, dim=0).float() / 255
+            # obs = rearrange(obs, "B T H W C -> B T C H W")
+            obs = torch.cat(obs, dim=0)
+            action = torch.cat(action, dim=0)
+            reward = torch.cat(reward, dim=0)
+            termination = torch.cat(termination, dim=0)
+            instruction = torch.cat(instruction, dim=0)
+        else:
+            obs, action, reward, termination, instruction = [], [], [], [], []
+            if batch_size > 0:
+                for i in range(self.num_envs):
+                    indexes = np.random.randint(0, self.length+1-batch_length, size=batch_size//self.num_envs)
+                    obs.append(np.stack([self.obs_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    action.append(np.stack([self.action_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    reward.append(np.stack([self.reward_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    termination.append(np.stack([self.termination_buffer[idx:idx+batch_length, i] for idx in indexes]))
+                    instruction.append(np.tile(self.instruction_buffer[i][np.newaxis, np.newaxis, :], (len(indexes), batch_length, 1)))
+
+            if self.external_buffer_length is not None and external_batch_size > 0:
+                external_obs, external_action, external_reward, external_termination, external_instruction = self.sample_external(
+                    external_batch_size, batch_length, to_device)
+                obs.append(external_obs)
+                action.append(external_action)
+                reward.append(external_reward)
+                termination.append(external_termination)
+                instruction.append(external_instruction)
+
+            # obs = torch.from_numpy(np.concatenate(obs, axis=0)).float().cuda() / 255
+            # obs = rearrange(obs, "B T H W C -> B T C H W")
+            obs = torch.from_numpy(np.concatenate(obs, axis=0)).cuda()
+            action = torch.from_numpy(np.concatenate(action, axis=0)).cuda()
+            reward = torch.from_numpy(np.concatenate(reward, axis=0)).cuda()
+            termination = torch.from_numpy(np.concatenate(termination, axis=0)).cuda()
+            instruction = torch.from_numpy(np.concatenate(instruction, axis=0)).cuda()
+
+        return obs, action, reward, termination, instruction
+
+    def append(self, obs, action, reward, termination):
+        # obs/nex_obs: torch Tensor
+        # action/reward/termination: int or float or bool
+        self.last_pointer = (self.last_pointer + 1) % (self.max_length//self.num_envs)
+        if self.store_on_gpu:
+            self.obs_buffer[self.last_pointer] = torch.from_numpy(obs)
+            self.action_buffer[self.last_pointer] = torch.from_numpy(action)
+            self.reward_buffer[self.last_pointer] = torch.from_numpy(reward)
+            self.termination_buffer[self.last_pointer] = torch.from_numpy(termination)
+        else:
+            self.obs_buffer[self.last_pointer] = obs
+            self.action_buffer[self.last_pointer] = action
+            self.reward_buffer[self.last_pointer] = reward
+            self.termination_buffer[self.last_pointer] = termination
+
+        if len(self) < self.max_length:
+            self.length += 1
+
+    def __len__(self):
+        return self.length * self.num_envs
+    
+
+
+class ObsReplayBuffer():
+    def __init__(self, obs_shape, num_envs, max_length=int(1E6), warmup_length=50000, store_on_gpu=False, device=torch.device("cpu")) -> None:
+        self.store_on_gpu = store_on_gpu
+        self.device = device
+        if store_on_gpu:
+            self.obs_buffer = torch.empty((max_length//num_envs, num_envs, *obs_shape), dtype=torch.bfloat16, device=self.device, requires_grad=False)
+        else:
+            self.obs_buffer = np.empty((max_length//num_envs, num_envs, *obs_shape), dtype=np.float16)
+
+        self.length = 0
+        self.num_envs = num_envs
+        self.last_pointer = -1
+        self.max_length = max_length
+        self.warmup_length = warmup_length
+        self.external_buffer_length = None
+
+    def load_trajectory(self, path):
+        buffer = pickle.load(open(path, "rb"))
+        if self.store_on_gpu:
+            self.external_buffer = {name: torch.from_numpy(buffer[name]).to(self.device) for name in buffer}
+        else:
+            self.external_buffer = buffer
+        self.external_buffer_length = self.external_buffer["obs"].shape[0]
+
+    def sample_external(self, batch_size, batch_length):
+        indexes = np.random.randint(0, self.external_buffer_length+1-batch_length, size=batch_size)
+        if self.store_on_gpu:
+            obs = torch.stack([self.external_buffer["obs"][idx:idx+batch_length] for idx in indexes])
+        else:
+            obs = np.stack([self.external_buffer["obs"][idx:idx+batch_length] for idx in indexes])
+
+        return obs
+    
+    def ready(self):
+        return self.length * self.num_envs > self.warmup_length
+
+    
+    @torch.no_grad()
+    def sample(self, batch_size, external_batch_size, batch_length):
+        if self.store_on_gpu:
+            obs = []
+            if batch_size > 0:
+                for i in range(self.num_envs):
+                    indexes = np.random.randint(0, self.length+1-batch_length, size=batch_size//self.num_envs)
+                    obs.append(torch.stack([self.obs_buffer[idx:idx+batch_length, i] for idx in indexes]))
+            
+            if self.external_buffer_length is not None and external_batch_size > 0:
+                external_obs= self.sample_external(external_batch_size, batch_length)
+                obs.append(external_obs)
+
+            obs = torch.cat(obs, dim=0)
+        else:
+            obs = []
+            if batch_size > 0:
+                for i in range(self.num_envs):
+                    indexes = np.random.randint(0, self.length+1-batch_length, size=batch_size//self.num_envs)
+                    obs.append(np.stack([self.obs_buffer[idx:idx+batch_length, i] for idx in indexes]))
+
+            if self.external_buffer_length is not None and external_batch_size > 0:
+                external_obs= self.sample_external(external_batch_size, batch_length)
+                obs.append(external_obs)
+
+            obs = torch.from_numpy(np.concatenate(obs, axis=0)).to(device=self.device, dtype=torch.bfloat16)
+
+        return obs
+
+    def append(self, obs):
+        self.last_pointer = (self.last_pointer + 1) % (self.max_length//self.num_envs)
+        if self.store_on_gpu:
+            self.obs_buffer[self.last_pointer] = obs
+        else:
+            self.obs_buffer[self.last_pointer] = obs.cpu().numpy()
+
+        if len(self) < self.max_length:
+            self.length += 1
+
+    def __len__(self):
+        return self.length * self.num_envs
+
+
