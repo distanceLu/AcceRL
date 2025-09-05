@@ -200,7 +200,7 @@ class PrismaticVisionBackbone(nn.Module):
             # Split `pixel_values :: [bsz, 2 * 3, resolution, resolution]` =>> featurize =>> channel stack
             img, img_fused = torch.split(pixel_values, [3, 3], dim=1)
             patches, patches_fused = self.featurizer(img), self.fused_featurizer(img_fused)
-            # 1024 + 1152
+
             return torch.cat([patches, patches_fused], dim=2)
 
         else:

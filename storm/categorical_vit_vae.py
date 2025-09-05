@@ -171,6 +171,7 @@ if __name__ ==  "__main__":
     TENSORBOARD_LOG = True
     LOG_DIR = f"./vit_vae_log/{BENCHMARK}/{DATE_TIME}"
 
+    logger = None
     if TENSORBOARD_LOG:
         logger = SummaryWriter(logdir=LOG_DIR)
 

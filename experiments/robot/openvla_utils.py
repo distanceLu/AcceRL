@@ -36,7 +36,7 @@ from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 # Initialize important constants
 DATE = time.strftime("%Y_%m_%d")
 DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
-DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 OPENVLA_IMAGE_SIZE = 224  # Standard image size expected by OpenVLA
 
 # Configure NumPy print settings
@@ -84,7 +84,7 @@ def update_auto_map(pretrained_checkpoint: str) -> None:
     config["auto_map"] = {
         "AutoConfig": "configuration_prismatic.OpenVLAConfig",
         "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
-    }   
+    }
 
     # Write back the updated config
     with open(config_path, "w") as f:
@@ -279,8 +279,7 @@ def get_vla(cfg: Any, dtype = torch.bfloat16) -> torch.nn.Module:
         check_model_logic_mismatch(cfg.pretrained_checkpoint)
 
     # Load the model
-    # vla = AutoModelForVision2Seq.from_pretrained(
-    vla = OpenVLAForActionPrediction.from_pretrained(
+    vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
         # attn_implementation="flash_attention_2",
         torch_dtype=dtype,

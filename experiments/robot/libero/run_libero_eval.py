@@ -16,7 +16,6 @@ import draccus
 import numpy as np
 import tqdm
 from libero.libero import benchmark
-from experiments.robot.robot_utils import DEVICE
 
 import wandb
 
@@ -85,8 +84,7 @@ def validate_config(cfg: GenerateConfig) -> None:
 def initialize_model(cfg: GenerateConfig):
     """Initialize model and associated components."""
     # Load model
-    # model = get_model(cfg)
-    model = get_vla(cfg)
+    model = get_model(cfg)
 
     # Load proprio projector if needed
     proprio_projector = None
