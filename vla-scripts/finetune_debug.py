@@ -554,7 +554,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Device setup
     if torch.cuda.is_available():
-        device = torch.device("cuda:0")
+        device = torch.device("cuda")
         torch.cuda.set_device(0)
         torch.cuda.empty_cache()
     else:
