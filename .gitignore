@@ -154,3 +154,5 @@ wandb/
 test/
 experiments/logs/
 runs/
+ckpt/
+logs/
