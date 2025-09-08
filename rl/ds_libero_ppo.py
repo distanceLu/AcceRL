@@ -4,7 +4,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,3,4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -49,7 +49,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 4
+NUM_TRAINER_GPUS = 2
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 20
 ROLLOUT_LOCAL_BUF = 64
@@ -57,7 +57,7 @@ INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 32
-ACCUMULATION_STEPS = 8
+ACCUMULATION_STEPS = 16
 SUPER_BATCH_SIZE = 512
 TRAIN_ITERS = 100000
 
@@ -78,16 +78,16 @@ VALUE_LR = 1e-4
 POLICY_LR = 1e-5
 VALUE_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 500 # 策略网络从第500个 *更新步* 开始训练
+POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
 
 # 日志
-MOVING_AVG_WINDOW = 100
+MOVING_AVG_WINDOW = 1000
 LOG_INTERVAL_SECONDS = 10
 
 # 通信组
-TRAIN_GROUP_PORT = 29531
+TRAIN_GROUP_PORT = 42354
 BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
-BROADCAST_GROUP_PORT = 29532
+BROADCAST_GROUP_PORT = 43255
 
 # OpenVLA 加载配置
 USE_BF16: bool = True
@@ -204,9 +204,9 @@ class RolloutWorkerActor:
             print(err_info, flush=True)  # ray可能不会打印报错信息，所以这里用print及时打印
             raise ValueError(err_info)
         task_suite = benchmark_dict[self.benchmark_name]()
-        task_id = int(wid % task_suite.n_tasks)
-        print(f"RolloutWorker {wid} 正在加载任务: {task_id} ({task_suite.get_task(task_id).name})")
-        # task_id = 5
+        # task_id = int(wid % task_suite.n_tasks)
+        # print(f"RolloutWorker {wid} 正在加载任务: {task_id} ({task_suite.get_task(task_id).name})")
+        task_id = 5
         self.env = LiberoEnvWrapper(
             benchmark_name=self.benchmark_name,
             task_id=task_id,
@@ -233,19 +233,23 @@ class RolloutWorkerActor:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
                 # 3) 发给 InferenceActor：它返回 env 动作（已 unnormalize），以及标准化动作与策略信息
                 action_env, action_norm, mu, log_std, value = ray.get(self.infer.request.remote(inputs_t))
-                # 环境交互使用 env 动作（已反归一化）
-                nxt, r, term, trunc, info = self.env.step(action_env)
-                reward_sum += r
-
-                # 训练使用缩放后的奖励
-                r_scaled = r * REWARD_SCALE
-
-                step_count += 1
-                # 只在 buffer 存标准化后的动作与策略统计量
-                self.local_buffer.append((inputs_t, action_norm, r_scaled, mu, log_std, value))
-                obs = nxt
-
-                if term or trunc:
+                chunk_reward = 0.0
+                done = False
+                for i in range(len(action_env)):
+                    single_action = action_env[i]
+                    nxt, r, term, trunc, info = self.env.step(single_action)
+                
+                    reward_sum += r
+                    r_scaled = r * REWARD_SCALE
+                    chunk_reward += r_scaled
+                
+                    step_count += 1
+                    if term or trunc:
+                        done = True
+                        break
+                self.local_buffer.append((inputs_t, action_norm, chunk_reward, mu, log_std, value))
+                obs = nxt 
+                if done:
                     step_time = (time.time() - time_start) / max(step_count, 1)
                     success = float(info.get('is_success', 0.0))  # Libero 用 is_success
                     self.stats_actor.add_episode_return.remote(
@@ -372,9 +376,9 @@ class InferenceActor(InferenceActorCom):
                     # 前向：得到所有 chunk 的动作、mu、log_std、value
                     actions_all, mu_all, log_std_all, value = self.model(inputs_batch)
                 # 只用第一个 chunk
-                actions_norm = actions_all[:, 0, :].to(torch.float32).detach().cpu().numpy()          # (-1,1)
-                mu = mu_all[:, 0, :].to(torch.float32).detach().cpu().numpy()
-                log_std = log_std_all[:, 0, :].to(torch.float32).detach().cpu().numpy()
+                actions_norm = actions_all.to(torch.float32).detach().cpu().numpy()          # (-1,1)
+                mu = mu_all.to(torch.float32).detach().cpu().numpy()
+                log_std = log_std_all.to(torch.float32).detach().cpu().numpy()
                 values = value.to(torch.float32).detach().cpu().numpy()
                 # 仅在推理器中将标准化动作转换为环境动作（反归一化）
                 actions_env = []
@@ -578,10 +582,10 @@ class TrainerActor(TrainerActorCom):
     async def run_training_epoch(self) -> Tuple[float, float, float, float, Dict[str, float], int]:
         # 等待后台任务准备好第一个批次 (仅在启动时发生一次)
         if self.next_ready_batch is None:
-            print(f"Trainer {self.rank}: 等待初始超级批次...")
+            print(f"Trainer {self.rank}: 等待初始超级批次...", flush=True)
             while self.next_ready_batch is None:
                 await asyncio.sleep(0.2)
-            print(f"Trainer {self.rank}: 初始数据已收到，开始第一个训练周期。")
+            print(f"Trainer {self.rank}: 初始数据已收到，开始第一个训练周期。", flush=True)
 
         # 1. 手动更新学习率
         current_lrs = {}
@@ -639,8 +643,8 @@ class TrainerActor(TrainerActorCom):
             # 前向
             actions_all, mu_all, log_std_all, value = self.model(mini_inputs)
             # 仅用第一个 chunk
-            mu = mu_all[:, 0, :].to(torch.float32)
-            log_std = log_std_all[:, 0, :].to(torch.float32)
+            mu = mu_all.to(torch.float32)
+            log_std = log_std_all.to(torch.float32)
             value = value.to(torch.float32)
 
             # 3. 根据 global_step 计算损失
@@ -658,19 +662,20 @@ class TrainerActor(TrainerActorCom):
                 dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
                 epsilon = 1e-6
                 clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
-                logp = dist.log_prob(clipped_act_t).sum(dim=-1)
+                logp = dist.log_prob(clipped_act_t)
 
                 with torch.no_grad():
                     std_old = torch.exp(mini_log_std)
                     base_dist_old = Normal(mini_mu_old, std_old)
                     dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
-                    logp_old = dist_old.log_prob(clipped_act_t).sum(dim=-1)
+                    logp_old = dist_old.log_prob(clipped_act_t)
 
                 ratio = torch.exp(logp - logp_old)
-                surr1 = ratio * normalized_adv
-                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * normalized_adv
+                adv_unsqueezed = normalized_adv.unsqueeze(-1).unsqueeze(-1)
+                surr1 = ratio * adv_unsqueezed
+                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
-                ent_loss = -ENT_COEF * torch.mean(base_dist.entropy().sum(dim=-1))
+                ent_loss = -ENT_COEF * torch.mean(base_dist.entropy())
                 loss = policy_loss + value_loss + ent_loss
 
             self.model.backward(loss)
@@ -715,7 +720,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_fix_std_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_devtest_indep_clip_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
