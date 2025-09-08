@@ -407,7 +407,6 @@ class InferenceActor(InferenceActorCom):
         with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
             observation = pickle.load(file)
         inputs_t = prepare_one_obs(self.cfg, self.processor, observation, observation['task_description'], TORCH_DTYPE)
-        #print("cfg.use_proprio:",self.cfg.use_proprio)
         inputs_batch = self.model.prepare_inputs_batch([inputs_t])
         with torch.no_grad():
             action_logits, value = self.model(inputs_batch)
@@ -571,12 +570,6 @@ class TrainerActor(TrainerActorCom):
         global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
         global_std = torch.sqrt(global_var)
         # ========================================================
-
-        # local_adv_mean = adv_t.mean()
-        # local_adv_std = adv_t.std()
-        # global_adv_stats = torch.tensor([local_adv_mean.item(), local_adv_std.item()], device=adv_t.device, dtype=self.data_dtype)
-        # distributed.all_reduce(global_adv_stats, op=distributed.ReduceOp.AVG)
-        # global_adv_mean, global_adv_std = global_adv_stats[0], global_adv_stats[1]
 
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses = [], [], [], []
         num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE

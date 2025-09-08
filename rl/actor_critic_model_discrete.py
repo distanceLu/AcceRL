@@ -15,8 +15,6 @@ import datetime
 from peft import LoraConfig, PeftModel, get_peft_model
 from torch.distributions import Normal, TransformedDistribution
 from torch.distributions.transforms import TanhTransform
-# from experiments.robot.openvla_utils import get_vla
-
 
 # Core OpenVLA components
 from experiments.robot.openvla_utils import (
@@ -75,14 +73,6 @@ def get_vla(cfg: Any,torch_dtype: torch.dtype = torch.bfloat16) -> torch.nn.Modu
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
-    # Load the model
-    # vla = OpenVLAForActionPrediction.from_pretrained(
-    #     cfg.pretrained_checkpoint,
-    #     # attn_implementation="flash_attention_2",
-    #     torch_dtype=torch.bfloat16,
-    #     low_cpu_mem_usage=True,
-    #     trust_remote_code=True,
-    # )
 
     # 3) FiLM（若启用）
     if getattr(cfg, "use_film", False):
@@ -145,31 +135,12 @@ class ActorCritic(nn.Module):
         # 打印可训练参数信息
         self.vla.print_trainable_parameters()
 
-        # # 🔒 冻结 VLA 参数
-        # self.vla.language_model: LlamaForCausalLM
-        # for param in self.vla.parameters():
-        #     param.requires_grad = False
-            
-        # # 然后解冻 lm_head 参数
-        # for param in self.vla.language_model.lm_head.parameters():
-        #     param.requires_grad = True
-
         self.vocab_size = self.vla.config.text_config.vocab_size - self.vla.config.pad_to_multiple_of
         self.bins = np.linspace(-1, 1, self.vla.config.n_action_bins)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
-
         # Keep processor for external preparation (forward 接收已组装好的 batch，但依旧保留 processor)
         self.processor = get_processor(cfg)
-
-        # Heads
-        # self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim)
-        # self.action_head = self.action_head.to(self.device).to(dtype=self.model_dtype)
-
-        # self.proprio_projector = get_proprio_projector(
-        #     cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
-        # )
-        # self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
         self.proprio_projector = None
         
         # 注意力池化层
@@ -295,9 +266,7 @@ class ActorCritic(nn.Module):
             if tensors:
                 inputs[k] = torch.cat(tensors, dim=0).to(self.vla.device)
             else: 
-                #print(f"Warning: Key '{k}' has no valid tensors, skipping...")
                 pass 
-        # inputs["proprio"] = inputs["proprio"].to(torch.float32)
         return inputs
 
     def prepare_inputs_batch(self, inputs_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -309,10 +278,6 @@ class ActorCritic(nn.Module):
         """
         # Normalize proprio for each sample and run per-sample checks
         for it in inputs_list:
-            # Normalize proprio using internal norm stats
-            # proprio_norm = self.normalize_proprio(it["proprio"])
-            # it["proprio"] = torch.tensor(it["proprio"], dtype=torch.float32)
-
             # Consistency check
             assert it["input_ids"].size(1) == it["attention_mask"].size(1) == it["labels"].size(1), \
                 "Per-sample sequence lengths of input_ids/attention_mask/labels must match."
@@ -358,7 +323,6 @@ class ActorCritic(nn.Module):
         """
         Single VLA forward that returns output with hidden states.
         """
-        # ctx = torch.autocast("cuda", dtype=self.model_dtype) if self.device.type == "cuda" else nullcontext()
         # with ctx:
         self.vla: OpenVLAForActionPrediction
         output = self.vla.forward(
@@ -424,13 +388,10 @@ class ActorCritic(nn.Module):
         # 采样时 (替代原来的循环采样)
         action_token_ids = batch_dist.sample()  # shape = (B, num_dims)
         actions_all = self.vla.config.n_action_bins - action_token_ids  # shape = (B, num_dims)
-        # discretized_actions = self.vocab_size - actions_all.cpu().numpy()
+
         discretized_actions = np.clip(actions_all.cpu().numpy(), a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized_actions]  # (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
         normalized_actions = normalized_actions.reshape(normalized_actions.shape[0], NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
-        # normalized_actions = torch.from_numpy(normalized_actions.reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)).to(
-        #     device=actions_all.device, dtype=torch.float32
-        # )
         return batch_dist, action_token_ids, normalized_actions
 
 if __name__ == "__main__":
