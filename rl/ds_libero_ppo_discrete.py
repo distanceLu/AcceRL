@@ -51,8 +51,8 @@ ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 128
-ACCUMULATION_STEPS = 4
+TRAIN_BATCH_SIZE = 16
+ACCUMULATION_STEPS = 32
 SUPER_BATCH_SIZE = 512
 TRAIN_ITERS = 100000
 
@@ -213,7 +213,6 @@ class RolloutWorkerActor:
             self.current_env_name = self.env.get_name()
 
             reward_sum = 0.0
-            step_count = 0
             time_start = time.time()
             step_count_total = 0
 
@@ -221,26 +220,31 @@ class RolloutWorkerActor:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
                 
                 action_env, action_token, logits, value = ray.get(self.infer.request.remote(inputs_t))
+                chunk_reward = 0.0
+                # 假设action_env的形状是(8, action_dim)，循环执行每个动作
+                done = False
+                for i in range(len(action_env)):
+                    single_action = action_env[i]  # 取出第i个动作
+                    nxt, r, term, trunc, info = self.env.step(single_action)
                 
-                nxt, r, term, trunc, info = self.env.step(action_env)
-                reward_sum += r
-                r_scaled = r * REWARD_SCALE
-                step_count += 1
-                step_count_total += 1
+                    reward_sum += r
+                    r_scaled = r * REWARD_SCALE
+                    chunk_reward += r_scaled
                 
-                # ############################# 核心修改：在缓冲区中存储 tokens 和 logits ##############################
-                self.local_buffer.append((inputs_t, action_token, r_scaled, logits, value))
-                # ###########################################################################################
+                    step_count_total += 1
+                    if term or trunc:
+                        done = True
+                        break
+                self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
                 obs = nxt
 
-                if term or trunc:
+                if done:
                     step_time = (time.time() - time_start) / max(step_count_total, 1)
                     success = float(info.get('is_success', 0.0))
                     self.stats_actor.add_episode_return.remote(
-                        self.current_env_name, reward_sum, step_time, step_count, success
+                        self.current_env_name, reward_sum, step_time, step_count_total, success
                     )
                     reward_sum = 0.0
-                    step_count = 0
                     if self.local_buffer:
                         self._process_traj(self.local_buffer, 0.0)
                     self.local_buffer.clear()
@@ -361,28 +365,23 @@ class InferenceActor(InferenceActorCom):
                     # 2. 后处理以采样动作 tokens 和对应的归一化连续动作
                     _, action_tokens_all, normalized_actions_all = self.model.post_process(action_logits)
                     
-                    # 3. 我们只使用第一个动作块进行环境交互和训练
-                    normalized_actions = normalized_actions_all[:, 0, :]
-                    
                     # action_tokens_all 的形状是 (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
-                    # 我们需要 reshape 并提取第一个块的 tokens
                     action_tokens = action_tokens_all.view(
                         -1, NUM_ACTIONS_CHUNK, ACTION_DIM
-                    )[:, 0, :].cpu().numpy()
+                    ).cpu().numpy()
 
                     # action_logits 的形状是 (B, NUM_ACTIONS_CHUNK * ACTION_DIM, VocabSize)
-                    # 我们需要 reshape 并提取第一个块的 logits
                     logits_for_first_action = action_logits.view(
                         -1, NUM_ACTIONS_CHUNK, ACTION_DIM, action_logits.shape[-1]
-                    )[:, 0, :, :].float().cpu().numpy()
+                    ).float().cpu().numpy()
                     
                     values = value.to(torch.float32).cpu().numpy()
                     # ####################################################################################
 
                 # 将标准化动作转换为环境动作
                 actions_env = []
-                for i in range(normalized_actions.shape[0]):
-                    a_env = self.model.vla._unnormalize_actions(normalized_actions[i], self.cfg.unnorm_key)
+                for i in range(normalized_actions_all.shape[0]):
+                    a_env = self.model.vla._unnormalize_actions(normalized_actions_all[i], self.cfg.unnorm_key)
                     actions_env.append(a_env.astype(np.float32))
 
                 for i in range(len(promises_to_process)):
@@ -408,7 +407,6 @@ class InferenceActor(InferenceActorCom):
         with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
             observation = pickle.load(file)
         inputs_t = prepare_one_obs(self.cfg, self.processor, observation, observation['task_description'], TORCH_DTYPE)
-        #print("cfg.use_proprio:",self.cfg.use_proprio)
         inputs_batch = self.model.prepare_inputs_batch([inputs_t])
         with torch.no_grad():
             action_logits, value = self.model(inputs_batch)
@@ -557,11 +555,21 @@ class TrainerActor(TrainerActorCom):
         inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t = current_batch
         # ####################################################################################
 
-        local_adv_mean = adv_t.mean()
-        local_adv_std = adv_t.std()
-        global_adv_stats = torch.tensor([local_adv_mean.item(), local_adv_std.item()], device=adv_t.device, dtype=self.data_dtype)
-        distributed.all_reduce(global_adv_stats, op=distributed.ReduceOp.AVG)
-        global_adv_mean, global_adv_std = global_adv_stats[0], global_adv_stats[1]
+        # 修正std 归一化（消融1）
+        # 计算本地统计量
+        local_sum = adv_t.sum()
+        local_sq_sum = (adv_t * adv_t).sum()
+        local_count = torch.tensor([adv_t.numel()], device=adv_t.device, dtype=torch.float32)
+
+        # 使用分布式all_reduce获取全局统计量
+        stats_tensor = torch.stack([local_sum, local_sq_sum, local_count.squeeze(0)])
+        distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
+
+        global_sum, global_sq_sum, global_count = stats_tensor[0], stats_tensor[1], stats_tensor[2]
+        global_mean = global_sum / torch.clamp(global_count, min=1.0)
+        global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
+        global_std = torch.sqrt(global_var)
+        # ========================================================
 
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses = [], [], [], []
         num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE
@@ -575,19 +583,16 @@ class TrainerActor(TrainerActorCom):
             mini_adv = adv_t[start:end]
             mini_logits_old = logits_old_t[start:end]
             mini_v_targ = v_targ_t[start:end]
-            # ####################################################################################
             
-            normalized_adv = (mini_adv - global_adv_mean) / (global_adv_std + 1e-8)
-            
-            # ############################# 核心修改：新的前向与损失计算 ##############################
+            # 使用全局统计量进行归一化
+            normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
             # 前向
             action_logits, value = self.model.forward(mini_inputs)
             value = value.to(torch.float32)
 
-            # 只使用第一个动作块进行训练
-            action_logits_first_chunk = action_logits.view(
+            action_logits_reshape = action_logits.view(
                 -1, NUM_ACTIONS_CHUNK, ACTION_DIM, action_logits.shape[-1]
-            )[:, 0, :, :]
+            )
 
             # 价值损失 (不变)
             value_loss = VF_COEF * torch.mean((value - mini_v_targ) ** 2)
@@ -598,22 +603,21 @@ class TrainerActor(TrainerActorCom):
                 ent_loss = torch.tensor(0.0, device=loss.device)
             else:
                 # 策略与熵损失 (离散版本)
-                dist = torch.distributions.Categorical(logits=action_logits_first_chunk)
-                logp = dist.log_prob(mini_act_token).sum(dim=-1) # 对动作维度求和
+                dist = torch.distributions.Categorical(logits=action_logits_reshape)
+                logp = dist.log_prob(mini_act_token) # 对动作维度求和
 
                 with torch.no_grad():
                     dist_old = torch.distributions.Categorical(logits=mini_logits_old)
-                    logp_old = dist_old.log_prob(mini_act_token).sum(dim=-1)
+                    logp_old = dist_old.log_prob(mini_act_token)
 
                 ratio = torch.exp(logp - logp_old)
-                surr1 = ratio * normalized_adv
-                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * normalized_adv
+                adv_unsqueezed = normalized_adv.unsqueeze(dim=-1).unsqueeze(dim=-1)
+                surr1 = ratio * adv_unsqueezed
+                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
                 
-                # 熵是在动作维度上求和，然后在批次上求平均
-                ent_loss = -ENT_COEF * torch.mean(dist.entropy().sum(dim=-1))
+                ent_loss = -ENT_COEF * torch.mean(dist.entropy())
                 loss = policy_loss + value_loss + ent_loss
-            # #######################################################################################
 
             self.model.backward(loss)
             self.model.step()
@@ -658,7 +662,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_cut_logit_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_indep_clip_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
