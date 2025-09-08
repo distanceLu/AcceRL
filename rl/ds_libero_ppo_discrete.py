@@ -597,8 +597,7 @@ class TrainerActor(TrainerActorCom):
             action_logits, value = self.model.forward(mini_inputs)
             value = value.to(torch.float32)
 
-            # 只使用第一个动作块进行训练
-            action_logits_first_chunk = action_logits.view(
+            action_logits_reshape = action_logits.view(
                 -1, NUM_ACTIONS_CHUNK, ACTION_DIM, action_logits.shape[-1]
             )
 
@@ -611,22 +610,21 @@ class TrainerActor(TrainerActorCom):
                 ent_loss = torch.tensor(0.0, device=loss.device)
             else:
                 # 策略与熵损失 (离散版本)
-                dist = torch.distributions.Categorical(logits=action_logits_first_chunk)
-                logp = dist.log_prob(mini_act_token).sum(dim=-1) # 对动作维度求和
+                dist = torch.distributions.Categorical(logits=action_logits_reshape)
+                logp = dist.log_prob(mini_act_token) # 对动作维度求和
 
                 with torch.no_grad():
                     dist_old = torch.distributions.Categorical(logits=mini_logits_old)
-                    logp_old = dist_old.log_prob(mini_act_token).sum(dim=-1)
+                    logp_old = dist_old.log_prob(mini_act_token)
 
                 ratio = torch.exp(logp - logp_old)
-                surr1 = ratio * normalized_adv.unsqueeze(dim=-1)
-                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * normalized_adv.unsqueeze(dim=-1)
+                adv_unsqueezed = normalized_adv.unsqueeze(dim=-1).unsqueeze(dim=-1)
+                surr1 = ratio * adv_unsqueezed
+                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
                 
-                # 熵是在动作维度上求和，然后在批次上求平均
-                ent_loss = -ENT_COEF * torch.mean(dist.entropy().sum(dim=-1))
+                ent_loss = -ENT_COEF * torch.mean(dist.entropy())
                 loss = policy_loss + value_loss + ent_loss
-            # #######################################################################################
 
             self.model.backward(loss)
             self.model.step()
@@ -671,7 +669,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_ATTE_POOL_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_indep_clip_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
