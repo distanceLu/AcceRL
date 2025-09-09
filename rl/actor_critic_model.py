@@ -328,8 +328,9 @@ class ActorCritic(nn.Module):
         # 4) Squashed Gaussian sampling to (-1, 1) for all chunks
         std_all = torch.exp(log_std_all)                             # (B, T, A)
         base_dist = Normal(mu_all.to(torch.float32), std_all)        # fp32 sampling for stability
-        dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-        actions_all = dist.rsample()                                  # (B, T, A) in (-1, 1)
+        # dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+        dist = base_dist
+        actions_all = dist.sample()                                  # (B, T, A) in (-1, 1)
 
         # 5) Value from hidden states
         value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)

@@ -381,9 +381,12 @@ class InferenceActor(InferenceActorCom):
                 log_std = log_std_all.to(torch.float32).detach().cpu().numpy()
                 values = value.to(torch.float32).detach().cpu().numpy()
                 # 仅在推理器中将标准化动作转换为环境动作（反归一化）
+
+                actions_env_clip = np.clip(actions_norm, -1, 1)
+
                 actions_env = []
                 for i in range(actions_norm.shape[0]):
-                    a_env = self.model.vla._unnormalize_actions(actions_norm[i], self.cfg.unnorm_key)
+                    a_env = self.model.vla._unnormalize_actions(actions_env_clip[i], self.cfg.unnorm_key)
                     actions_env.append(a_env.astype(np.float32))
                 for i in range(len(promises_to_process)):
                     # 返回：
@@ -659,15 +662,18 @@ class TrainerActor(TrainerActorCom):
                 # 阶段二: 训练所有组件
                 std = torch.exp(log_std)
                 base_dist = Normal(mu, std)
-                dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-                epsilon = 1e-6
-                clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
+                # dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+                dist = base_dist
+                # epsilon = 1e-6
+                # clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
+                clipped_act_t = mini_act
                 logp = dist.log_prob(clipped_act_t)
 
                 with torch.no_grad():
                     std_old = torch.exp(mini_log_std)
                     base_dist_old = Normal(mini_mu_old, std_old)
-                    dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
+                    # dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
+                    dist_old = base_dist_old
                     logp_old = dist_old.log_prob(clipped_act_t)
 
                 ratio = torch.exp(logp - logp_old)
@@ -720,7 +726,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_devtest_indep_clip_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_normal_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
