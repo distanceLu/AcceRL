@@ -25,6 +25,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from torch.distributions import Normal
 
 import wandb
 from torch.utils.tensorboard import SummaryWriter
@@ -376,7 +377,8 @@ def run_forward_pass(
         )
     # Compute metrics for continuous action representations (L1 regression | diffusion)
     else:
-        action_all, mu_all, log_std_all, _, dist = actor.forward(batch)
+        action_all, mu_all, log_std_all, _ = actor.forward(batch)
+        dist =  Normal(mu_all, torch.exp(log_std_all))
         log_probs = dist.log_prob(ground_truth_actions)
         nll_loss = -log_probs.mean()
         l1_loss_sample = torch.nn.L1Loss()(ground_truth_actions, action_all.detach())
@@ -912,7 +914,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     count_trainable_params(actor.module.proprio_projector, "Proprio Projector")
 
     # 3. 
-    count_trainable_params(actor.module.log_std_head, "Log_std_head Projector")
+    count_trainable_params(actor.module.log_std_param, "Log_std_param Projector")
 
     # # Load processor and VLA
     # processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
@@ -927,7 +929,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     processor = actor.module.processor
     action_head = actor.module.action_head.to(device_id)
     proprio_projector = actor.module.proprio_projector.to(device_id)
-    log_std_head = actor.module.log_std_head.to(device_id)
+    log_std_head = actor.module.log_std_param.to(device_id)
     vla = actor.module.vla.to(device_id)
    
 
