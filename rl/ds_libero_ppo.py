@@ -92,7 +92,8 @@ BROADCAST_GROUP_PORT = 43255
 # OpenVLA 加载配置
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
-PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
+# PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
+PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll_16/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state"
 
 # ================================================================
 # 数据结构
@@ -715,6 +716,7 @@ def build_openvla_cfg() -> GenerateConfig:
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,  # 与常量保持一致
         unnorm_key="libero_spatial_no_noops",
+        device="cuda",
     )
     return cfg
 
