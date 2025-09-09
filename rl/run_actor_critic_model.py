@@ -84,11 +84,6 @@ if __name__ == "__main__":
     set_seed_everywhere(cfg.seed)
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
-
-    # 从你的检查点目录名中提取步数
-    checkpoint_step = 'latest'   # 或者设置为特定的步数，例如 10000 'latest'
-    actor.load_weights_for_eval(cfg.pretrained_checkpoint, checkpoint_step)
-
     check_unnorm_key(cfg, actor.vla)
     actor.get_parameter_groups()
     actor.eval()
