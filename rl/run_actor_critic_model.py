@@ -53,22 +53,22 @@ if __name__ == "__main__":
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
     from rl.utils import prepare_one_obs, check_unnorm_key
-    from experiments.robot.libero.run_libero_eval import GenerateConfig, TaskSuite
-    device = torch.device("cuda:3") if torch.cuda.is_available() else torch.device("cpu")
+    from experiments.robot.libero.libero_utils  import GenerateConfig, TaskSuite
+    device = torch.device("cuda:1") if torch.cuda.is_available() else torch.device("cpu")
     
     # Precision policy to match the example
     USE_BF16: bool = True
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = list(range(10))
+    ENVS_ID = [5]
     envs_num = len(ENVS_ID)
     BENCHMARK = TaskSuite.LIBERO_SPATIAL
 
     unnorm_key = f"{BENCHMARK}_no_noops"
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint="/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll_16/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state", #/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/
+        pretrained_checkpoint="/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll_std_param/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state--40000_chkpt", #/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/
         use_l1_regression=True,
         use_diffusion=False,
         use_film=False,
@@ -84,6 +84,8 @@ if __name__ == "__main__":
     set_seed_everywhere(cfg.seed)
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
+    actor.load_log_std(cfg.pretrained_checkpoint, step="latest")
+
     check_unnorm_key(cfg, actor.vla)
     actor.get_parameter_groups()
     actor.eval()
@@ -148,9 +150,9 @@ if __name__ == "__main__":
             inputs_batch = actor.prepare_inputs_batch(inputs_for_inference)
             
             with torch.no_grad():
-                sample_all, mu_all, _, _, _ = actor.forward(inputs_batch)
-                action_all_norm = torch.clamp(sample_all, -1.0, 1.0)
-                # action_all_norm = torch.clamp(mu_all, -1.0, 1.0)
+                sample_all, mu_all, _, _ = actor.forward(inputs_batch)
+                # action_all_norm = torch.clamp(sample_all, -1.0, 1.0)
+                action_all_norm = torch.clamp(mu_all, -1.0, 1.0)
 
             # 3. 将生成的动作块（chunks）填充到对应的队列中
             actions_unnorm = actor.vla._unnormalize_actions(action_all_norm.cpu().numpy(), cfg.unnorm_key)

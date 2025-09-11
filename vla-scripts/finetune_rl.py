@@ -72,6 +72,7 @@ class FinetuneConfig:
     # fmt: off
     vla_path: str = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"             # openvla/openvla-7b Path to OpenVLA model (on HuggingFace Hub or stored locally)
     pretrained_checkpoint = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
+    device: str | torch.device = "cuda"
     load_in_8bit=False
     load_in_4bit=False
     # Dataset
@@ -664,7 +665,17 @@ def save_training_checkpoint(
 
         if (cfg.use_l1_regression or cfg.use_diffusion) and action_head is not None:
             torch.save(action_head.state_dict(), checkpoint_dir / f"action_head--{checkpoint_name_suffix}")
-            torch.save(log_std_head.state_dict(), checkpoint_dir / f"log_std_head--{checkpoint_name_suffix}")
+
+            if isinstance(log_std_head, nn.Module):
+                # 如果是 Module，则按原方式保存 state_dict
+                torch.save(log_std_head.state_dict(), checkpoint_dir / f"log_std_head--{checkpoint_name_suffix}")
+                print("Saved log_std_head as an nn.Module state_dict.")
+            elif isinstance(log_std_head, nn.Parameter):
+                # 如果是 Parameter，则将其包装在字典中保存
+                log_std_head_state = {'log_std_param': log_std_head}
+                torch.save(log_std_head_state, checkpoint_dir / f"log_std_head--{checkpoint_name_suffix}")
+                print("Saved log_std_head as an nn.Parameter in a dictionary.")
+            # torch.save(log_std_head.state_dict(), checkpoint_dir / f"log_std_head--{checkpoint_name_suffix}")
 
         if cfg.use_film:
             # To be safe, just save the entire vision backbone (not just FiLM components)
@@ -914,7 +925,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     count_trainable_params(actor.module.proprio_projector, "Proprio Projector")
 
     # 3. 
-    count_trainable_params(actor.module.log_std_param, "Log_std_param Projector")
+    # count_trainable_params(actor.module.log_std_param, "Log_std_param Projector")
+    if actor.module.log_std_param.requires_grad:
+        log_std_params = actor.module.log_std_param.numel()
+    else:
+        log_std_params = 0
+    print(f"Trainable params in 'Log_std_param': {log_std_params}")
 
     # # Load processor and VLA
     # processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)

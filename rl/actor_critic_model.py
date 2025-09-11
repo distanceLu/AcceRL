@@ -365,7 +365,38 @@ class ActorCritic(nn.Module):
         # 5) Value from hidden states
         value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)
 
-        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
+        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all, value.to(torch.float32)
+    
+    def load_log_std(self, checkpoint_dir: str, step: int|str):
+        # --- 加载 Log_Std parameter ---
+        log_std_head_path = os.path.join(checkpoint_dir, f"log_std_head--{step}_checkpoint.pt")
+        if not os.path.exists(log_std_head_path):
+            raise FileNotFoundError(f"Log_Std Head checkpoint not found at: {log_std_head_path}")
+        
+        print(f"  -> Loading Log_std from {log_std_head_path}")
+        loaded_data = torch.load(log_std_head_path, map_location=self.device)
+        
+        if isinstance(self.log_std_param, nn.Module):
+            print("  -> Target `self.log_std_param` is an nn.Module. Attempting to load state_dict.")
+            state_dict = loaded_data
+            # 处理分布式训练 (DDP) 保存的 'module.' 前缀
+            if all(key.startswith('module.') for key in state_dict.keys()):
+                print("  -> Removing 'module.' prefix from state_dict keys.")
+                state_dict = {k.partition('module.')[2]: v for k, v in state_dict.items()}
+            
+            self.log_std_param.load_state_dict(state_dict)
+
+        elif isinstance(self.log_std_param, nn.Parameter):
+            print("  -> Target `self.log_std_param` is an nn.Parameter. Attempting to load data.")
+            tensor_to_load = loaded_data['log_std_param']
+            with torch.no_grad():
+                self.log_std_param.data.copy_(tensor_to_load)
+        
+        else:
+            # 如果 self.log_std_param 不是我们支持的类型
+             raise TypeError(f"self.log_std_param is of an unsupported type: {type(self.log_std_param)}")
+
+        print("Log_std parameter loading complete.")
 
 
 if __name__ == "__main__":
@@ -412,6 +443,8 @@ if __name__ == "__main__":
     set_seed_everywhere(cfg.seed)
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
+    actor.load_log_std(cfg.pretrained_checkpoint, step="latest")
+
     check_unnorm_key(cfg, actor.vla)
     actor.get_parameter_groups()
     actor.eval()

@@ -87,9 +87,9 @@ class GenerateConfig:
     # Model-specific parameters
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
-    pretrained_checkpoint: Union[str, Path] = "/cpfs01/liuwei_workspace/openvla_oft_rl/ckpt/finetune_nll/openvla-7b-oft-finetuned-libero-spatial-object-goal-10+libero_spatial_no_noops+b16+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state"     # Pretrained checkpoint path for both VLA and Actor
+    pretrained_checkpoint: Union[str, Path] = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"     # Pretrained checkpoint path for both VLA and Actor
     actor_checkpoint_step: str = "latest"            # Step of the actor checkpoint to load (e.g., "latest" or a number)
-    device: str = "cuda"                            # Device to run model on
+    device: str = "cuda:1"                            # Device to run model on
 
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
     use_diffusion: bool = False                      # Not used when loading a full actor, but kept for config compatibility
@@ -157,9 +157,6 @@ def initialize_model(cfg: GenerateConfig) -> ActorCritic:
     # Create ActorCritic policy
     logger.info("Initializing ActorCritic network...")
     actor = ActorCritic(cfg, torch_dtype)
-
-    # Load trained weights for all components of the actor
-    actor.load_weights_for_eval(cfg.pretrained_checkpoint, cfg.actor_checkpoint_step)
 
     # Set model to evaluation mode
     actor.eval()
@@ -316,7 +313,7 @@ def run_episode(
                 # 3. 调用 actor.forward() 获取动作均值
                 with torch.no_grad():
                     # 我们在评估时使用确定性的均值动作 (mu_all)
-                    sample_all, mu_all, _, _, _ = actor.forward(inputs_batch)
+                    sample_all, mu_all, _, _ = actor.forward(inputs_batch)
                     # action_all = torch.clamp(mu_all, -1.0, 1.0) # 确保动作在 [-1, 1] 范围内
                     action_all = torch.clamp(sample_all, -1.0, 1.0)
                 
