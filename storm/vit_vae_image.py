@@ -56,8 +56,8 @@ class ViTVAE(nn.Module):
         # Encoder
         self.encoder = encoder
         # Freeze encoder parameters
-        # for param in self.encoder.parameters():
-        #     param.requires_grad = False
+        for param in self.encoder.parameters():
+            param.requires_grad = False
             
         self.projector = projector
 
