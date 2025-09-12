@@ -47,7 +47,9 @@ class GenerateConfig:
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
     num_open_loop_steps: int = 8                     # Number of actions to execute open-loop before requerying policy
 
-    lora_rank: int = 32                              # Rank of LoRA weight matrix (MAKE SURE THIS MATCHES TRAINING!)
+    # LoRA
+    lora_rank: int = 32                              # Rank of LoRA weight matrix
+    lora_dropout: float = 0.0                        # Dropout applied to LoRA weights
 
     unnorm_key: Union[str, Path] = ""                # Action un-normalization key
 
