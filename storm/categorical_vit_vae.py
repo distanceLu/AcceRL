@@ -14,7 +14,7 @@ from storm.actor_critic_model import get_vla, get_processor
 from experiments.robot.openvla_utils import prepare_images_for_vla
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-DEVICE = torch.device("cuda:3")
+DEVICE = torch.device("cuda:4")
 
 class MSELoss(nn.Module):
     def __init__(self) -> None:
@@ -67,7 +67,7 @@ class ViTVAE(nn.Module):
         self.image_decoder = ViTDecoder(embed_dim=self.stoch_flattened_dim, depth=12)
 
         self.mse_loss_func = MSELoss()
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-5)
 
 
     def straight_through_gradient(self, logits):
@@ -161,7 +161,7 @@ if __name__ ==  "__main__":
 
     DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
 
-    TRAIN_ITERS = 1000000
+    TRAIN_ITERS = 500000
     BATCH_SIZE = 4
     BATCH_LENGTH = 16
     SAVE_MODEL = False
