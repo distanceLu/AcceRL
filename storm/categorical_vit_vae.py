@@ -14,7 +14,7 @@ from storm.actor_critic_model import get_vla, get_processor
 from experiments.robot.openvla_utils import prepare_images_for_vla
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-DEVICE = torch.device("cuda:0")
+DEVICE = torch.device("cuda:4")
 
 class MSELoss(nn.Module):
     def __init__(self) -> None:
@@ -48,7 +48,7 @@ class DistHead(nn.Module):
     
 
 class ViTVAE(nn.Module):
-    def __init__(self, encoder, projector):
+    def __init__(self, encoder, projector, num_images_in_input):
         super().__init__()
         self.stoch_dim = 64
         self.stoch_flattened_dim = self.stoch_dim * self.stoch_dim
@@ -67,7 +67,7 @@ class ViTVAE(nn.Module):
         self.image_decoder = ViTDecoder(embed_dim=self.stoch_flattened_dim, depth=12)
 
         self.mse_loss_func = MSELoss()
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-5)
 
 
     def straight_through_gradient(self, logits):
@@ -113,7 +113,7 @@ class ViTVAE(nn.Module):
 
         reconstruction_loss = self.mse_loss_func(obs_hat, obs)
         kl_loss = self.calculate_kl_loss(post_logits.float())
-        total_loss = reconstruction_loss + 10*kl_loss
+        total_loss = reconstruction_loss + kl_loss
 
         # gradient descent
         total_loss.backward()
@@ -127,8 +127,8 @@ class ViTVAE(nn.Module):
 
         return reconstruction_loss.item(), kl_loss.item(), total_loss.item()
     
-def obs_process(processor, obs, task_label):
-    all_images = [obs["full_image"], obs["wrist_image"]]
+def obs_process(processor, obs, task_label, num_images_in_input):
+    all_images = [obs["full_image"]] if num_images_in_input==1 else [obs["full_image"], obs["wrist_image"]]
     all_images = prepare_images_for_vla(all_images, cfg)
     primary_image = all_images.pop(0)
 
@@ -161,9 +161,9 @@ if __name__ ==  "__main__":
 
     DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
 
-    TRAIN_ITERS = 100000
-    BATCH_SIZE = 1
-    BATCH_LENGTH = 8
+    TRAIN_ITERS = 500000
+    BATCH_SIZE = 4
+    BATCH_LENGTH = 16
     SAVE_MODEL = False
     SAVE_FREQ = 100
 
@@ -182,7 +182,7 @@ if __name__ ==  "__main__":
         use_l1_regression=True,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=2,
+        num_images_in_input=1,
         use_proprio=True,
         load_in_8bit=False,
         load_in_4bit=False,
@@ -204,10 +204,11 @@ if __name__ ==  "__main__":
     projector = vla.projector
     del vla.language_model
 
-    vit_vae = ViTVAE(encoder=vision_backbone, projector=projector)
+    vit_vae = ViTVAE(encoder=vision_backbone, projector=projector, num_images_in_input=cfg.num_images_in_input)
     vit_vae.to(DEVICE, dtype=torch.bfloat16)
 
-    replay_buffer = ObsReplayBuffer(obs_shape=(12, 224, 224), num_envs=1, warmup_length=BATCH_SIZE*BATCH_LENGTH, 
+    obs_shape = (6, 224, 224) if cfg.num_images_in_input==1 else (12, 224, 224)
+    replay_buffer = ObsReplayBuffer(obs_shape=obs_shape, num_envs=1, warmup_length=BATCH_SIZE*BATCH_LENGTH, 
                                     max_length=TRAIN_ITERS, store_on_gpu=False, device=DEVICE)
 
     task_id = random.randint(0, 9)
@@ -225,7 +226,7 @@ if __name__ ==  "__main__":
         action = env.action_space.sample()
         obs, reward, done, truncated, info = env.step(action)
 
-        current_image = obs_process(processor, current_obs, env.task_description)
+        current_image = obs_process(processor, current_obs, env.task_description, cfg.num_images_in_input)
         replay_buffer.append(current_image)
 
         done_flag = np.logical_or(done, truncated)

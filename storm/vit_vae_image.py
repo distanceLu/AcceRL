@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '4'
 
 import torch
 import torch.nn as nn
@@ -12,8 +12,9 @@ from replay_buffer import ObsReplayBuffer
 from storm.actor_critic_model import get_vla, get_processor
 
 from experiments.robot.openvla_utils import prepare_images_for_vla
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+DEVICE = torch.device("cuda:1")
 
 class MSELoss(nn.Module):
     def __init__(self) -> None:
@@ -21,7 +22,7 @@ class MSELoss(nn.Module):
 
     def forward(self, obs_hat, obs):
         loss = (obs_hat - obs)**2
-        # loss = reduce(loss, "B L C H W -> B L", "sum")
+        loss = reduce(loss, "B L C H W -> B L", "sum")
         return loss.mean()
     
 
@@ -47,15 +48,16 @@ class DistHead(nn.Module):
     
 
 class ViTVAE(nn.Module):
-    def __init__(self, encoder, projector):
+    def __init__(self, encoder, projector, num_images_in_input):
         super().__init__()
         self.stoch_dim = 64
         self.stoch_flattened_dim = self.stoch_dim * self.stoch_dim
+        self.num_images_in_input = num_images_in_input
         # Encoder
         self.encoder = encoder
         # Freeze encoder parameters
-        # for param in self.encoder.parameters():
-        #     param.requires_grad = False
+        for param in self.encoder.parameters():
+            param.requires_grad = False
             
         self.projector = projector
 
@@ -63,7 +65,7 @@ class ViTVAE(nn.Module):
         self.dist_head = DistHead(self.stoch_flattened_dim, self.stoch_dim)
 
         # Decoder
-        self.image_decoder = ViTDecoder(embed_dim=self.stoch_flattened_dim, depth=12)
+        self.image_decoder = ViTDecoder(in_chans=3, embed_dim=self.stoch_flattened_dim, depth=12)
 
         self.mse_loss_func = MSELoss()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
@@ -79,9 +81,9 @@ class ViTVAE(nn.Module):
         post_dist = OneHotCategorical(logits=post_logits)
         prior_dist = OneHotCategorical(probs=torch.ones_like(post_logits) / self.stoch_dim)
         kl_div = torch.distributions.kl.kl_divergence(post_dist, prior_dist)
-        # kl_div = reduce(kl_div, "B L N D -> B L N", "sum")
+        kl_div = reduce(kl_div, "B L N D -> B L N", "sum")
         kl_div = kl_div.mean()
-        # kl_div = torch.max(torch.ones_like(kl_div)*free_bits, kl_div)
+        kl_div = torch.max(torch.ones_like(kl_div)*free_bits, kl_div)
 
         return kl_div
 
@@ -90,8 +92,14 @@ class ViTVAE(nn.Module):
         return rearrange(sample, "B L N K C -> B L N (K C)")
 
     def update(self, obs, current_steps=0, logger=None):
-        B, L, C, H, W = obs.shape # (B, L, 12, 224, 224)
-        obs_reshape = obs.reshape(B*L, C, H, W)
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.num_images_in_input == 1:
+            obs_reshape = torch.cat([obs, obs], dim=2)
+        else:
+            obs_reshape = torch.cat([obs[:, :, :3], obs[:, :, :3], obs[:, :, 3:], obs[:, :, 3:]], dim=2)
+
+        B, L, C, H, W = obs_reshape.shape # (B, L, 6, 224, 224)
+        obs_reshape = obs_reshape.reshape(B*L, C, H, W)
         # Encode image
         patch_features = self.encoder(obs_reshape) # (B*L, 512, 2176)
         _, N, _ = patch_features.shape
@@ -106,17 +114,16 @@ class ViTVAE(nn.Module):
         flattened_sample = self.flatten_sample(sample) # (B, L, 512, 4096)
 
         # Decode image
-        obs_hat = self.image_decoder(flattened_sample) # (B, L, 12, 224, 224)
+        obs_hat = self.image_decoder(flattened_sample) # (B, L, 3, 224, 224)
 
         reconstruction_loss = self.mse_loss_func(obs_hat, obs)
         kl_loss = self.calculate_kl_loss(post_logits.float())
-        total_loss = reconstruction_loss + kl_loss
+        total_loss = reconstruction_loss + 5*kl_loss
 
         # gradient descent
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
         self.optimizer.step()
-        self.optimizer.zero_grad(set_to_none=True)
 
         if logger is not None:
             logger.add_scalar("reconstruction_loss", reconstruction_loss.item(), current_steps)
@@ -125,25 +132,39 @@ class ViTVAE(nn.Module):
 
         return reconstruction_loss.item(), kl_loss.item(), total_loss.item()
     
-def obs_process(processor, obs, task_label):
-    all_images = [obs["full_image"], obs["wrist_image"]]
-    all_images = prepare_images_for_vla(all_images, cfg)
-    primary_image = all_images.pop(0)
+    def reconstruct_image(self, obs):
+        with torch.no_grad():
+            if self.num_images_in_input == 1:
+                obs_reshape = torch.cat([obs, obs], dim=0).unsqueeze(0)
+            else:
+                obs_reshape = torch.cat([obs[:3], obs[:3], obs[3:], obs[3:]], dim=0).unsqueeze(0)
 
-    prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+            # Encode image
+            obs_reshape = obs_reshape.to(device=DEVICE, dtype=torch.bfloat16)
+            patch_features = self.encoder(obs_reshape) # (1, 512, 2176)
+            
+            patch_features = patch_features.unsqueeze(0) # (1, 1, 512, 2176)
+            projected_patch_embeddings = self.projector(patch_features) # (1, 1, 256*2, 4096)
 
-    inputs = processor(prompt, primary_image)
+            # Get posterior logits
+            post_logits = self.dist_head.forward_post(projected_patch_embeddings) # (1, 1, 512, 64, 64)
 
-    if all_images:
-        all_wrist_inputs = [
-            processor(prompt, image_wrist) for image_wrist in all_images
-        ]
-        # Concatenate all images
-        primary_pixel_values = inputs["pixel_values"]
-        all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
-        inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
+            # Sample using straight-through gradient
+            sample = self.straight_through_gradient(post_logits.float()).to(torch.bfloat16) # (1, 1, 512, 64, 64)
+            flattened_sample = self.flatten_sample(sample) # (1, 1, 512, 4096)
 
-    return inputs["pixel_values"]
+            # Decode image
+            obs_hat = self.image_decoder(flattened_sample) # (1, 1, 3, 224, 224)
+            obs_hat = obs_hat.squeeze(0)
+
+            return obs_hat
+
+    
+def my_obs_process(obs, num_images_in_input):
+    all_images = [obs["full_image"]] if num_images_in_input==1 else [obs["full_image"], obs["wrist_image"]]
+    pixel_values = [rearrange(torch.Tensor(image), "H W C -> C H W")/255.0 for image in all_images]
+    pixel_values = torch.cat(pixel_values, dim=0)
+    return pixel_values 
 
 if __name__ ==  "__main__":
 
@@ -159,16 +180,17 @@ if __name__ ==  "__main__":
 
     DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
 
-    TRAIN_ITERS = 100000
-    BATCH_SIZE = 1
-    BATCH_LENGTH = 8
+    TRAIN_ITERS = 500000
+    BATCH_SIZE = 4
+    BATCH_LENGTH = 16
     SAVE_MODEL = False
     SAVE_FREQ = 100
 
     BENCHMARK = "libero_spatial"
     TENSORBOARD_LOG = True
-    LOG_DIR = f"./vit_vae_log/{BENCHMARK}/{DATE_TIME}"
+    LOG_DIR = f"./vit_vae_log/{BENCHMARK}/wo_freeze_{DATE_TIME}"
 
+    logger = None
     if TENSORBOARD_LOG:
         logger = SummaryWriter(logdir=LOG_DIR)
 
@@ -179,7 +201,7 @@ if __name__ ==  "__main__":
         use_l1_regression=True,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=2,
+        num_images_in_input=1,
         use_proprio=True,
         load_in_8bit=False,
         load_in_4bit=False,
@@ -190,18 +212,22 @@ if __name__ ==  "__main__":
 
     vla = get_vla(cfg, device=DEVICE)
 
-    processor = get_processor(cfg)
+    # processor = get_processor(cfg)
 
-    vision_backbone = copy.deepcopy(vla.vision_backbone).cpu()
-    vision_backbone = vision_backbone.to(DEVICE, dtype=torch.bfloat16)
-    projector = copy.deepcopy(vla.projector).cpu()
-    projector = projector.to(DEVICE, dtype=torch.bfloat16)
-    del vla
+    # vision_backbone = copy.deepcopy(vla.vision_backbone).cpu()
+    # vision_backbone = vision_backbone.to(DEVICE, dtype=torch.bfloat16)
+    # projector = copy.deepcopy(vla.projector).cpu()
+    # projector = projector.to(DEVICE, dtype=torch.bfloat16)
+    # del vla
+    vision_backbone = vla.vision_backbone
+    projector = vla.projector
+    del vla.language_model
 
-    vit_vae = ViTVAE(encoder=vision_backbone, projector=projector)
+    vit_vae = ViTVAE(encoder=vision_backbone, projector=projector, num_images_in_input=cfg.num_images_in_input)
     vit_vae.to(DEVICE, dtype=torch.bfloat16)
 
-    replay_buffer = ObsReplayBuffer(obs_shape=(12, 224, 224), num_envs=1, warmup_length=BATCH_SIZE*BATCH_LENGTH, 
+    obs_shape = (3, 224, 224) if cfg.num_images_in_input==1 else (6, 224, 224)
+    replay_buffer = ObsReplayBuffer(obs_shape=obs_shape, num_envs=1, warmup_length=BATCH_SIZE*BATCH_LENGTH, 
                                     max_length=TRAIN_ITERS, store_on_gpu=False, device=DEVICE)
 
     task_id = random.randint(0, 9)
@@ -219,8 +245,8 @@ if __name__ ==  "__main__":
         action = env.action_space.sample()
         obs, reward, done, truncated, info = env.step(action)
 
-        current_image = obs_process(processor, current_obs, env.task_description)
-        replay_buffer.append(current_image)
+        image = my_obs_process(current_obs, cfg.num_images_in_input)
+        replay_buffer.append(image)
 
         done_flag = np.logical_or(done, truncated)
 
@@ -237,12 +263,9 @@ if __name__ ==  "__main__":
         current_obs = obs
 
         if replay_buffer.ready():
-            obs_sample = replay_buffer.sample(batch_size=BATCH_SIZE, external_batch_size=None, batch_length=BATCH_LENGTH) # (16, 64, 12, 224, 224)
-            if TENSORBOARD_LOG:
-                reconstruction_loss, kl_loss, total_loss = vit_vae.update(obs=obs_sample, current_steps=total_steps, logger=logger)
-            else:
-                reconstruction_loss, kl_loss, total_loss = vit_vae.update(obs=obs_sample)
+            obs_sample = replay_buffer.sample(batch_size=BATCH_SIZE, external_batch_size=None, batch_length=BATCH_LENGTH) # (16, 64, 6, 224, 224)
 
+            reconstruction_loss, kl_loss, total_loss = vit_vae.update(obs=obs_sample, current_steps=total_steps, logger=logger)
 
             print(f"step: {total_steps}, total_loss:, {total_loss:.4f}, reconstruction_loss: {reconstruction_loss:.4f}, kl_loss: {kl_loss:.4f}")
 
@@ -251,6 +274,19 @@ if __name__ ==  "__main__":
                 os.makedirs(save_dir, exist_ok=True)
                 torch.save(vit_vae.state_dict(), f"{save_dir}/vit_vae.pth")
 
+        if TENSORBOARD_LOG:
+            image_hat = vit_vae.reconstruct_image(image)
+            image_hat = torch.clamp(image_hat, 0.0, 1.0)
+            image = (image*255.0).to("cpu", dtype=torch.uint8).unsqueeze(0).numpy()
+            image_hat = (image_hat*255.0).to("cpu", dtype=torch.uint8).numpy()
+            if cfg.num_images_in_input == 1:
+                logger.add_images('full_image', image, total_steps)
+                logger.add_images('full_image_hat', image_hat, total_steps)
+            else:
+                logger.add_images('full_image', image[:3], total_steps)
+                logger.add_images('full_image_hat', image_hat[:3], total_steps)
+                logger.add_images('wrist_image', image[3:], total_steps)
+                logger.add_images('wrist_image_hat', image_hat[3:], total_steps)
     
     # obs = torch.randn((2, 4, 12, 224, 224)).to(DEVICE, dtype=torch.bfloat16)
 
