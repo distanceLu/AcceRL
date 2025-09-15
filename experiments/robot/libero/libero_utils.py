@@ -13,8 +13,6 @@ from libero.libero.envs import OffScreenRenderEnv
 from enum import Enum
 import torch
 
-import torch
-
 from experiments.robot.robot_utils import (
     DATE,
     DATE_TIME,

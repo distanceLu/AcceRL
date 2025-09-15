@@ -38,7 +38,6 @@ import torch
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-
 def get_vla(cfg: Any) -> torch.nn.Module:
     """
     只读加载 OpenVLA：不修改 checkpoint 内的 config.json。
@@ -401,6 +400,7 @@ def load_log_std(self, checkpoint_dir: str, step: int|str):
              raise TypeError(f"self.log_std_param is of an unsupported type: {type(self.log_std_param)}")
 
         print("Log_std parameter loading complete.")
+
 
 if __name__ == "__main__":
     import numpy as np

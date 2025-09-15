@@ -664,18 +664,15 @@ class TrainerActor(TrainerActorCom):
                 std = torch.exp(log_std)
                 base_dist = Normal(mu, std)
                 # dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-                dist = base_dist
                 # epsilon = 1e-6
                 # clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
-                clipped_act_t = mini_act
-                logp = dist.log_prob(clipped_act_t)
+                logp = base_dist.log_prob(mini_act)
 
                 with torch.no_grad():
                     std_old = torch.exp(mini_log_std)
                     base_dist_old = Normal(mini_mu_old, std_old)
                     # dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
-                    dist_old = base_dist_old
-                    logp_old = dist_old.log_prob(clipped_act_t)
+                    logp_old = base_dist_old.log_prob(mini_act)
 
                 ratio = torch.exp(logp - logp_old)
                 adv_unsqueezed = normalized_adv.unsqueeze(-1).unsqueeze(-1)
@@ -730,7 +727,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_lora_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_push_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
