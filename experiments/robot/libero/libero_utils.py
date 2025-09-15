@@ -12,6 +12,8 @@ from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 from enum import Enum
 
+import torch
+
 from experiments.robot.robot_utils import (
     DATE,
     DATE_TIME,
@@ -79,6 +81,7 @@ class GenerateConfig:
     tensorboard_log_dir: str = "./experiments/tb_logs/2_gpu_batch_size_16" # TensorBoard 日志目录
 
     seed: int = 7                                    # Random Seed (for reproducibility)
+    device: torch.device = torch.device("cuda")
 
     # fmt: on
 

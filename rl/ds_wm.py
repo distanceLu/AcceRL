@@ -1,12 +1,8 @@
 import os
-os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
-os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
-# 设置临时文件目录，避免磁盘I/O瓶颈
+os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
-# 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
-# 防止 transformers 库的 tokenizer 并行化警告
-# os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4"
 
 import time
 import random
@@ -17,29 +13,25 @@ from dataclasses import dataclass
 import math
 
 import numpy as np
+import torch.nn.functional as F
 
 import ray
 import torch
 from torch.distributions import Normal, TransformedDistribution
 from torch.distributions.transforms import TanhTransform
 import deepspeed
-import torch.distributed as distributed # 新增：为了分布式通信
+import torch.distributed as distributed
 from torch.utils.tensorboard import SummaryWriter
 
-# Libero env 与工具
-
-# OpenVLA 组件与常量
-from experiments.robot.openvla_utils import (
-    get_processor,
-)
+# OpenVLA 和 Libero 工具
+from experiments.robot.openvla_utils import get_processor
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
-
 from experiments.robot.libero.libero_utils import GenerateConfig
 
-# 替换为你的 ActorCritic 类实现（来自你给的示例）
+# --- 修改: 导入 WorldModel 和 原始的 ActorCritic ---
+from rl.world_model import WorldModel
 from rl.actor_critic_model import ActorCritic
 from rl.utils import prepare_one_obs
-# 训练/推理通信（保持接口不变）
 from ds_com import TrainerActorCom, InferenceActorCom
 
 # ================================================================
@@ -51,14 +43,14 @@ BENCHMARK = "libero_spatial"
 # 分布式系统参数
 NUM_TRAINER_GPUS = 2
 NUM_INFERENCE_ACTORS = 1
-NUM_ROLLOUT_WORKERS = 20
+NUM_ROLLOUT_WORKERS = 10
 ROLLOUT_LOCAL_BUF = 64
-INFERENCE_BATCH = 8
+INFERENCE_BATCH = 2
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 32
-ACCUMULATION_STEPS = 16
-SUPER_BATCH_SIZE = 512
+TRAIN_BATCH_SIZE = 24
+ACCUMULATION_STEPS = 1
+SUPER_BATCH_SIZE = 24
 TRAIN_ITERS = 100000
 
 # PPO
@@ -68,26 +60,27 @@ CLIP_EPS = 0.2
 VF_COEF = 0.5
 ENT_COEF = 0.01
 
+# AE 和 IL 损失的系数
+TERMINATION_LOSS_COEF = 0.3
+
 # 奖励缩放
 REWARD_SCALE = 1.0
 
-# ================================================================
 # 学习率调度参数
-# ================================================================
 VALUE_LR = 1e-4
-POLICY_LR = 1e-5
-VALUE_WARMUP_STEPS = 500
-POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
+POLICY_LR = 1e-4
+VALUE_WARMUP_STEPS = 0
+POLICY_WARMUP_STEPS = 0
+POLICY_TRAIN_START_STEP = 0
 
 # 日志
 MOVING_AVG_WINDOW = 1000
 LOG_INTERVAL_SECONDS = 10
 
 # 通信组
-TRAIN_GROUP_PORT = 42354
+TRAIN_GROUP_PORT = 42364
 BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
-BROADCAST_GROUP_PORT = 43255
+BROADCAST_GROUP_PORT = 43265
 
 # OpenVLA 加载配置
 USE_BF16: bool = True
@@ -99,12 +92,16 @@ PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-l
 # ================================================================
 @dataclass
 class Experience:
-    obs: Dict[str, torch.Tensor]            # prepare_one_obs 的结果（CPU tensors）
-    action: np.ndarray                      # 标准化后的动作（tanh 后，范围在 (-1,1)）
+    obs: Dict[str, torch.Tensor]
+    action: np.ndarray                      # 学生动作 (normalized)
     advantage: float
-    behaviour_mu: np.ndarray                # 策略均值（对应 action 的 chunk）
-    behaviour_log_std: np.ndarray           # 策略对数标准差（对应 action 的 chunk）
+    behaviour_mu: np.ndarray
+    behaviour_log_std: np.ndarray
     value_target: float
+    done: bool                              # 结束标志
+    teacher_action: np.ndarray              # 教师动作 (normalized)
+    next_teacher_projector_features: Optional[np.ndarray] # 下一状态的教师视觉特征
+    reward: float
 
 # ================================================================
 # 1.5. 统计模块 (StatsActor)
@@ -176,14 +173,29 @@ class ReplayBufferActor:
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        # obs 是 prepare_one_obs 的字典，不能 stack，保持 list 返回
         obs_list = [b.obs for b in batch]
-        act = np.stack([b.action for b in batch])  # 标准化动作（tanh 后）
+        act = np.stack([b.action for b in batch])
         adv = np.asarray([b.advantage for b in batch], np.float32)
         mu_old = np.stack([b.behaviour_mu for b in batch])
         log_std_old = np.stack([b.behaviour_log_std for b in batch])
         v_targ = np.asarray([b.value_target for b in batch], np.float32)
-        return obs_list, act, adv, mu_old, log_std_old, v_targ
+        done = np.asarray([b.done for b in batch], np.bool_)
+        teacher_act = np.stack([b.teacher_action for b in batch])
+        # 如果 next_teacher_projector_features 为 None (在 done=True 时)，用零填充
+        for b in batch:
+            if b.next_teacher_projector_features is not None:
+                feasible_b = b
+                break
+        for b in batch:
+            if b.next_teacher_projector_features is None:
+                b.next_teacher_projector_features = np.zeros_like(feasible_b.next_teacher_projector_features)
+            elif b.next_teacher_projector_features.shape != feasible_b.next_teacher_projector_features.shape:
+                print_str = f"[ERROR] ReplayBufferActor.sample(): next_teacher_projector_features 形状不匹配: {b.next_teacher_projector_features.shape} vs {batch[0].next_teacher_projector_features.shape}"
+                print(print_str, flush=True)
+                raise RuntimeError(print_str)
+        next_teacher_proj_feat = np.stack([b.next_teacher_projector_features for b in batch])
+        reward = np.asarray([b.reward for b in batch], np.float32)
+        return obs_list, act, adv, mu_old, log_std_old, v_targ, done, teacher_act, next_teacher_proj_feat, reward
 
 
 @ray.remote
@@ -192,21 +204,14 @@ class RolloutWorkerActor:
         self.infer, self.replay = infer, replay
         self.stats_actor = stats_actor
         self.cfg = cfg
-        # 仅需 processor，Worker 不加载大模型
         self.processor = get_processor(cfg)
         self.benchmark_name = benchmark_name
         from rl.libero_env import LiberoEnvWrapper
         from libero.libero import benchmark
 
         benchmark_dict = benchmark.get_benchmark_dict()
-        if self.benchmark_name not in benchmark_dict:
-            err_info = f"基准 '{self.benchmark_name}' 不存在。可用选项: {list(benchmark_dict.keys())}"
-            print(err_info, flush=True)  # ray可能不会打印报错信息，所以这里用print及时打印
-            raise ValueError(err_info)
         task_suite = benchmark_dict[self.benchmark_name]()
-        # task_id = int(wid % task_suite.n_tasks)
-        # print(f"RolloutWorker {wid} 正在加载任务: {task_id} ({task_suite.get_task(task_id).name})")
-        task_id = 5
+        task_id = wid % 10
         self.env = LiberoEnvWrapper(
             benchmark_name=self.benchmark_name,
             task_id=task_id,
@@ -229,14 +234,16 @@ class RolloutWorkerActor:
             time_start = time.time()
 
             while True:
-                # 2) 用 prepare_one_obs 生成单条样本
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
-                # 3) 发给 InferenceActor：它返回 env 动作（已 unnormalize），以及标准化动作与策略信息
-                action_env, action_norm, mu, log_std, value = ray.get(self.infer.request.remote(inputs_t))
+                inputs_t['step_count'] = torch.tensor([step_count], dtype=torch.long)  # 添加 step_count 信息
+                # --- 修改: 从InferenceActor获取更多信息 ---
+                (student_action_env, student_action_norm, mu, log_std, value, 
+                 teacher_action_norm, teacher_proj_features) = ray.get(self.infer.request.remote(inputs_t))
+
                 chunk_reward = 0.0
                 done = False
-                for i in range(len(action_env)):
-                    single_action = action_env[i]
+                for i in range(len(student_action_env)):
+                    single_action = student_action_env[i]
                     nxt, r, term, trunc, info = self.env.step(single_action)
                 
                     reward_sum += r
@@ -247,39 +254,48 @@ class RolloutWorkerActor:
                     if term or trunc:
                         done = True
                         break
-                self.local_buffer.append((inputs_t, action_norm, chunk_reward, mu, log_std, value))
+                
+                # 存储所有信息，包括教师信号和结束标志
+                self.local_buffer.append((
+                    inputs_t, student_action_norm, chunk_reward, mu, log_std, value,
+                    teacher_action_norm, teacher_proj_features, done
+                ))
                 obs = nxt 
                 if done:
                     step_time = (time.time() - time_start) / max(step_count, 1)
-                    success = float(info.get('is_success', 0.0))  # Libero 用 is_success
+                    success = float(info.get('is_success', 0.0))
                     self.stats_actor.add_episode_return.remote(
                         self.current_env_name, reward_sum, step_time, step_count, success
                     )
-                    reward_sum = 0.0
-                    step_count = 0
                     if self.local_buffer:
-                        self._process_traj(self.local_buffer, 0.0)
+                        # 最后一个状态的价值为0，没有下一个状态的特征
+                        self._process_traj(self.local_buffer, 0.0, None)
                     self.local_buffer.clear()
+                    
                     obs, info = self.env.reset()
                     self.task_description = self.env.task_description
                     self.current_env_name = self.env.get_name()
+                    reward_sum = 0.0
+                    step_count = 0
                     time_start = time.time()
                 elif len(self.local_buffer) == ROLLOUT_LOCAL_BUF + 1:
-                    _, _, _, _, _, bootstrap_val = self.local_buffer[-1]
-                    self._process_traj(self.local_buffer[:-1], bootstrap_val)
+                    # 使用最后一个状态的信息进行引导
+                    _, _, _, _, _, bootstrap_val, _, bootstrap_proj_feat, _ = self.local_buffer[-1]
+                    self._process_traj(self.local_buffer[:-1], bootstrap_val, bootstrap_proj_feat)
                     self.local_buffer = [self.local_buffer[-1]]
         except Exception as e:
             import traceback
             print(f"[ERROR] RolloutWorker {self.wid} run() 崩溃: {e}", flush=True)
             traceback.print_exc()
-            # 调试期可以选择 re-raise，让 Ray 标记该任务失败
             raise
 
-    def _process_traj(self, traj_segment, bootstrap_val):
+    def _process_traj(self, traj_segment, bootstrap_val, bootstrap_proj_features):
         rets, advs = [], []
         gae = 0.0
+        # 从后向前计算 GAE
         for i in reversed(range(len(traj_segment))):
-            _, _, r, _, _, v = traj_segment[i]
+            _, _, r, _, _, v, _, _, _ = traj_segment[i]
+            # 下一个状态的价值
             nv = bootstrap_val if i == len(traj_segment) - 1 else traj_segment[i+1][5]
             delta = r + GAMMA * nv - v
             gae = delta + GAMMA * LAMBDA * gae
@@ -289,7 +305,15 @@ class RolloutWorkerActor:
         advs_np = np.array(advs, dtype=np.float32)
 
         batch: List[Experience] = []
-        for i, (s, a_norm, _, mu, log_std, _) in enumerate(traj_segment):
+        for i, (s, a_norm, rew, mu, log_std, _, teacher_a, _, done) in enumerate(traj_segment):
+            # 获取下一个状态的教师视觉特征
+            if i < len(traj_segment) - 1:
+                # 从轨迹的下一个时间步获取
+                next_teacher_features = traj_segment[i+1][7] 
+            else:
+                # 这是段的末尾，使用引导特征 (如果 episode 没结束)
+                next_teacher_features = bootstrap_proj_features if not done else None
+            
             batch.append(
                 Experience(
                     obs=s,
@@ -298,23 +322,34 @@ class RolloutWorkerActor:
                     behaviour_mu=mu.astype(np.float32),
                     behaviour_log_std=log_std.astype(np.float32),
                     value_target=float(rets[i]),
+                    done=done,
+                    teacher_action=teacher_a.astype(np.float32),
+                    next_teacher_projector_features=next_teacher_features.astype(np.float32) if next_teacher_features is not None else None,
+                    reward=rew,
                 )
             )
         self.replay.add_batch.remote(batch)
 
 # ================================================================
-# 3. 推理器 (InferenceActor) — 使用 ActorCritic，并仅在此处反归一化动作
+# 3. 推理器 (InferenceActor)
 # ================================================================
 @ray.remote(num_gpus=1)
 class InferenceActor(InferenceActorCom):
     def __init__(self, actor_id, cfg):
         super().__init__()
         self.actor_id = actor_id
-        # 加载 ActorCritic（包含 VLA）与 processor
-        print(f"InferenceActor {actor_id}: 正在加载 OpenVLA ActorCritic...")
-        self.model = ActorCritic(cfg, torch_dtype=TORCH_DTYPE)
+        # 加载学生模型(WorldModel)和教师模型(ActorCritic)
+        print(f"InferenceActor {actor_id}: 正在加载 WorldModel (学生)...")
+        # InferenceActorCom会调用self.model，要更新的模型名字必须是self.model。不要删除本注释！
+        self.model = WorldModel(cfg, torch_dtype=TORCH_DTYPE)  
         self.model.cuda()
         self.model.eval()
+
+        print(f"InferenceActor {actor_id}: 正在加载 ActorCritic (教师)...")
+        self.teacher_model = ActorCritic(cfg, torch_dtype=TORCH_DTYPE)
+        self.teacher_model.cuda()
+        self.teacher_model.eval()
+
         self.processor = self.model.processor
         self.cfg = cfg
 
@@ -324,19 +359,16 @@ class InferenceActor(InferenceActorCom):
         self.last_process_time = time.time()
 
         loop = asyncio.get_event_loop()
-        # 保存 task 句柄，防止被 GC；并加回调打印异常
         self._bg_task = loop.create_task(self._loop())
         self._bg_task.add_done_callback(self._on_bg_task_done)
-        print(f"InferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {INFERENCE_TIMEOUT_MS}ms)")
+        print(f"InferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()}")
 
     def get_model_keys(self):
+        # 我们只关心学生模型的键，因为它是被训练和同步的
         if self.model is None:
-            print("模型尚未初始化。")
             return {}
         sd = self.model.state_dict()
-        # 返回一个小型摘要，便于比较键是否一致，且便于序列化
-        res = {k: float(v.abs().sum().item()) for k, v in sd.items()}
-        return res
+        return {k: float(v.abs().sum().item()) for k, v in sd.items()}
 
     def _on_bg_task_done(self, task: asyncio.Task):
         try:
@@ -355,7 +387,6 @@ class InferenceActor(InferenceActorCom):
 
     async def _loop(self):
         while True:
-            # 周期性检查
             should_process = self.requests and (
                 len(self.requests) >= self.batch_size or
                 time.time() - self.last_process_time > self.timeout_sec
@@ -370,41 +401,47 @@ class InferenceActor(InferenceActorCom):
             self.last_process_time = time.time()
 
             try:
-                # 准备 batch
                 inputs_batch = self.model.prepare_inputs_batch(requests_to_process)
                 with torch.inference_mode():
-                    # 前向：得到所有 chunk 的动作、mu、log_std、value
-                    actions_all, mu_all, log_std_all, value = self.model(inputs_batch)
-                # 只用第一个 chunk
-                actions_norm = actions_all.to(torch.float32).detach().cpu().numpy()          # (-1,1)
-                mu = mu_all.to(torch.float32).detach().cpu().numpy()
-                log_std = log_std_all.to(torch.float32).detach().cpu().numpy()
-                values = value.to(torch.float32).detach().cpu().numpy()
-                # 仅在推理器中将标准化动作转换为环境动作（反归一化）
-                actions_env = []
-                for i in range(actions_norm.shape[0]):
-                    a_env = self.model.vla._unnormalize_actions(actions_norm[i], self.cfg.unnorm_key)
-                    actions_env.append(a_env.astype(np.float32))
+                    student_mu, student_log_std, student_value, _, _, _, _ = self.model.forward(inputs_batch)
+                    _, teacher_action_norm_chunks, _, _, teacher_proj_features = self.teacher_model.forward(inputs_batch, return_vit_out=True)
+                
+                # 只使用第一个动作块
+                student_mu_chunk = student_mu.to(torch.float32).detach().cpu().numpy()
+                student_log_std_chunk = student_log_std.to(torch.float32).detach().cpu().numpy()
+                student_values = student_value.to(torch.float32).detach().cpu().numpy()
+
+                # 将学生动作反归一化以用于环境
+                student_actions_env = []
+                for i in range(student_mu.shape[0]):
+                    # 创建一个分布来采样或直接使用均值
+                    dist = TransformedDistribution(Normal(student_mu[i], torch.exp(student_log_std[i])), [TanhTransform(cache_size=1)])
+                    action_norm_i = dist.sample() # or student_mu[i] for deterministic action
+                    action_norm_i = torch.tanh(student_mu[i]) # 确定性动作
+                    a_env = self.model.vla._unnormalize_actions(action_norm_i.cpu().numpy(), self.cfg.unnorm_key)
+                    student_actions_env.append(a_env.astype(np.float32))
+
+                # 教师信号
+                teacher_action_norm = teacher_action_norm_chunks.to(torch.float32).detach().cpu().numpy()
+                teacher_proj_features_np = teacher_proj_features.to(torch.float32).detach().cpu().numpy()
+
                 for i in range(len(promises_to_process)):
-                    # 返回：
-                    #  - env 动作（反归一化）
-                    #  - 标准化动作（用于训练 log_prob）
-                    #  - mu/log_std（标准化空间）
-                    #  - value 估计
                     promises_to_process[i].set_result((
-                        actions_env[i], actions_norm[i], mu[i], log_std[i], values[i]
+                        student_actions_env[i],      # 用于环境的动作
+                        torch.tanh(student_mu)[i].cpu().numpy(), # 学生动作 (normalized, for experience)
+                        student_mu_chunk[i],         # 学生策略 mu
+                        student_log_std_chunk[i],    # 学生策略 log_std
+                        student_values[i],           # 学生价值估计
+                        teacher_action_norm[i],      # 教师动作 (normalized)
+                        teacher_proj_features_np[i]  # 教师视觉特征
                     ))
             except Exception as e:
-                # 1) 打印详细堆栈
                 import traceback
                 print(f"[ERROR] InferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
                 traceback.print_exc()
-
-                # 2) 把异常传给所有请求者，避免上游永远等待
                 for p in promises_to_process:
                     if not p.done():
                         p.set_exception(e)
-                # 3) 也可选择 re-raise 让后台任务整体崩溃（若希望 actor 直接失败）：
                 raise
     
     def forward_test(self):
@@ -414,12 +451,11 @@ class InferenceActor(InferenceActorCom):
         inputs_t = prepare_one_obs(self.cfg, self.processor, observation, observation['task_description'], TORCH_DTYPE)
         inputs_batch = self.model.prepare_inputs_batch([inputs_t])
         with torch.no_grad():
-            actions_all, mu_all, log_std_all, value = self.model(inputs_batch)
-        return actions_all
+            self.model(inputs_batch)
     
 
 # ================================================================
-# 4. 训练器 (TrainerActor) — 使用 ActorCritic + DeepSpeed
+# 4. 训练器 (TrainerActor)
 # ================================================================
 @ray.remote(num_gpus=1)
 class TrainerActor(TrainerActorCom):
@@ -429,29 +465,24 @@ class TrainerActor(TrainerActorCom):
         self.world_size = world_size
         self.replay_buffer = replay_buffer
         self.cfg = cfg
-        self.model = None             # DeepSpeed engine
-        self.optimizer = None         # DeepSpeed optimizer
-        self.base_model = None        # 原始 PyTorch 模型
+        self.model = None
+        self.optimizer = None
+        self.base_model = None
         self.data_dtype = None
-        # self.training_batch: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
         self.next_ready_batch: Optional[Tuple] = None
+        self.old_ready_batch: Optional[Tuple] = None
         self.data_fetching_task = None
         self.super_batch_size = SUPER_BATCH_SIZE
-
-        # 新增: 用于手动学习率调度的状态
         self.global_step = 0
-
         print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()}")
 
     def get_model_keys(self):
         if self.model is None:
             print("模型尚未初始化。请先调用 setup_deepspeed_group()。")
             return {}
-        # self.model 是 DeepSpeedEngine，取其 module 的 state_dict 更稳妥
         module = self.model.module if hasattr(self.model, "module") else self.model
         sd = module.state_dict()
-        res = {k: float(v.abs().sum().item()) for k, v in sd.items()}
-        return res
+        return {k: float(v.abs().sum().item()) for k, v in sd.items()}
 
     def get_node_ip(self):
         return ray.util.get_node_ip_address()
@@ -464,146 +495,101 @@ class TrainerActor(TrainerActorCom):
         os.environ["LOCAL_RANK"] = "0"
         deepspeed.init_distributed(dist_backend="nccl")
 
-        print(f"Trainer {self.rank}: 正在加载 OpenVLA ActorCritic...")
-        model = ActorCritic(self.cfg, torch_dtype=TORCH_DTYPE)
+        # 使用 WorldModel 进行训练
+        print(f"Trainer {self.rank}: 正在加载 OpenVLA WorldModel...")
+        model = WorldModel(self.cfg, torch_dtype=TORCH_DTYPE)
         self.base_model = model
 
-        # 修改: 使用参数分组来配置优化器
         param_groups = self.base_model.get_parameter_groups()
         optimizer_params = [
-            {
-                "params": pg["params"], 
-                "name": pg["name"], 
-                # 为每个组设置其峰值学习率
-                "lr": POLICY_LR if pg["name"] == "policy" else VALUE_LR
-            }
+            {"params": pg["params"], "name": pg["name"], "lr": POLICY_LR if pg["name"] == "policy" else VALUE_LR}
             for pg in param_groups
         ]
         
         ds_config = {
             "train_micro_batch_size_per_gpu": TRAIN_BATCH_SIZE,
             "gradient_accumulation_steps": ACCUMULATION_STEPS,
-            "optimizer": {
-                "type": "AdamW", 
-                "params": {
-                    # 此处为空，因为参数和学习率由 `model_parameters` 提供
-                    # 且学习率将被手动调度。可以添加如 'betas': [0.9, 0.999] 等
-                }
-            },
-            # 移除scheduler，我们将手动实现调度器
+            "optimizer": {"type": "AdamW", "params": {}},
             "bf16": {"enabled": USE_BF16},
-            "zero_optimization": {
-                "stage": 2,
-                "allgather_partitions": True,
-                "allgather_bucket_size": 5e8,
-                "reduce_scatter": True,
-                "reduce_bucket_size": 5e8,
-                "overlap_comm": True,
-                "contiguous_gradients": True
-            },
+            "zero_optimization": {"stage": 2, "overlap_comm": True, "contiguous_gradients": True},
             "gradient_clipping": 1.0,
         }
 
-        if ds_config.get("fp16", {}).get("enabled", False): self.data_dtype = torch.float16
-        elif ds_config.get("bf16", {}).get("enabled", False): self.data_dtype = torch.bfloat16
+        if ds_config.get("bf16", {}).get("enabled", False): self.data_dtype = torch.bfloat16
         else: self.data_dtype = torch.float32
 
-        # 修改: DeepSpeed 初始化现在返回优化器实例
         self.model, self.optimizer, _, _ = deepspeed.initialize(
-            model=model, 
-            config=ds_config,
-            # 将构造好的参数组列表传递给这里
-            model_parameters=optimizer_params
+            model=model, config=ds_config, model_parameters=optimizer_params
         )
         print(f"TrainerActor Rank {self.rank}: DeepSpeed 训练组 (ZeRO-2) 初始化完成。")
-
-        # 后台取数
         self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
 
-        n_total = sum(p.numel() for p in model.parameters())
-        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
-
-    # 新增: 手动学习率调度器逻辑
-    def _get_current_lr(self, current_step: int, peak_lr: float, warmup_steps: int, total_steps: int, start_step: int = 0) -> float:
-        """计算给定步骤的学习率，支持延迟启动、线性预热和余弦退火。"""
-        if current_step < start_step:
-            return 0.0
-        
+    def _get_current_lr(self, current_step, peak_lr, warmup_steps, total_steps, start_step=0):
+        if current_step < start_step: return 0.0
         effective_step = current_step - start_step
-        
-        # 1. 线性预热
         if effective_step < warmup_steps:
             return peak_lr * (effective_step / warmup_steps)
-        
-        # 2. 余弦退火
         progress = (effective_step - warmup_steps) / (total_steps - start_step - warmup_steps)
-        progress = min(progress, 1.0) # 确保不超调
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-        
-        return peak_lr * cosine_decay
+        progress = min(progress, 1.0)
+        return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     async def _data_fetching_loop(self):
-        print(f"Trainer {self.rank}: 后台数据准备循环已启动 (超级批次大小: {self.super_batch_size})。")
+        print(f"Trainer {self.rank}: 后台数据准备循环已启动。")
         while True:
             try:
-                # 如果下一个批次的缓冲区已经满了，就等待，避免内存过度占用
                 if self.next_ready_batch is not None:
                     await asyncio.sleep(0.1)
                     continue
 
-                # 等待 ReplayBuffer 中有足够的数据
                 while await self.replay_buffer.size.remote() < self.super_batch_size:
                     print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size}...")
                     await asyncio.sleep(3)
 
-                # 1. 获取经验 (仍然是 numpy 数组)
-                obs_list, act_np, adv_np, mu_old_np, log_std_old_np, v_targ_np = \
+                obs_list, act_np, adv_np, mu_old_np, log_std_old_np, v_targ_np, done_np, teacher_act_np, next_teacher_proj_feat_np, reward_np = \
                     await self.replay_buffer.sample.remote(self.super_batch_size)
 
-                # 准备 batch（右侧 padding + proprio 归一化；放到 ActorCritic 的 device）
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
-
-                # 其它张量
                 device = next(self.model.parameters()).device
+                
+                # --- 转换所有数据为张量 ---
                 act_t = torch.tensor(act_np, dtype=torch.float32, device=device)
                 adv_t = torch.tensor(adv_np, dtype=torch.float32, device=device)
                 mu_old_t = torch.tensor(mu_old_np, dtype=torch.float32, device=device)
                 log_std_old_t = torch.tensor(log_std_old_np, dtype=torch.float32, device=device)
                 v_targ_t = torch.tensor(v_targ_np, dtype=torch.float32, device=device)
-
-                # 缓存本轮训练 batch
-                self.next_ready_batch = (inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t)
+                done_t = torch.tensor(done_np, dtype=torch.bool, device=device)
+                teacher_act_t = torch.tensor(teacher_act_np, dtype=torch.float32, device=device)
+                next_teacher_proj_feat_t = torch.tensor(next_teacher_proj_feat_np, dtype=torch.float32, device=device)
+                reward_t = torch.tensor(reward_np, dtype=torch.float32, device=device)
+                self.next_ready_batch = (inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t, done_t, teacher_act_t, next_teacher_proj_feat_t, reward_t)
 
             except Exception as e:
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
-
-    async def run_training_epoch(self) -> Tuple[float, float, float, float, Dict[str, float], int]:
-        # 等待后台任务准备好第一个批次 (仅在启动时发生一次)
-        if self.next_ready_batch is None:
-            print(f"Trainer {self.rank}: 等待初始超级批次...", flush=True)
+    
+    async def run_training_epoch(self) -> Tuple[Dict[str, float], Dict[str, float], int]:
+        if self.next_ready_batch is None and self.old_ready_batch is None:
+            print(f"Trainer {self.rank}: 等待初始超级批次...", flush=True)  # 打印代码不要删
             while self.next_ready_batch is None:
                 await asyncio.sleep(0.2)
-            print(f"Trainer {self.rank}: 初始数据已收到，开始第一个训练周期。", flush=True)
+            print(f"Trainer {self.rank}: 初始数据已收到，开始第一次训练。", flush=True)  # 打印代码不要删
 
-        # 1. 手动更新学习率
+        # 更新学习率
         current_lrs = {}
         value_lr = self._get_current_lr(self.global_step, VALUE_LR, VALUE_WARMUP_STEPS, TRAIN_ITERS)
         policy_lr = self._get_current_lr(self.global_step, POLICY_LR, POLICY_WARMUP_STEPS, TRAIN_ITERS, start_step=POLICY_TRAIN_START_STEP)
-        
         for param_group in self.optimizer.param_groups:
-            if param_group['name'] == 'value':
-                param_group['lr'] = value_lr
-                current_lrs['value'] = value_lr
-            elif param_group['name'] == 'policy':
-                param_group['lr'] = policy_lr
-                current_lrs['policy'] = policy_lr
-        # 2. "原子"地获取当前批次，并触发后台准备下一个批次
-        current_batch = self.next_ready_batch
-        self.next_ready_batch = None  # 清空，信号后台任务开始工作
-
-        inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t = current_batch
+            if param_group['name'] == 'value': param_group['lr'] = value_lr; current_lrs['value'] = value_lr
+            elif param_group['name'] == 'policy': param_group['lr'] = policy_lr; current_lrs['policy'] = policy_lr
+        
+        if self.next_ready_batch is None:
+            current_batch = self.old_ready_batch
+        else:
+            current_batch = self.next_ready_batch
+            self.old_ready_batch = self.next_ready_batch
+        self.next_ready_batch = None
+        (inputs_batch, act_t, adv_t, mu_old_t, log_std_old_t, v_targ_t, 
+         done_t, teacher_act_t, next_teacher_proj_feat_t, reward_t) = current_batch
         
         # 3. **关键：在整个超级批次上计算优势的全局统计量**
         # 本地统计
@@ -618,80 +604,93 @@ class TrainerActor(TrainerActorCom):
         global_mean = global_sum / torch.clamp(global_count, min=1.0)
         global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
         global_std = torch.sqrt(global_var)
-
-        # 记录本周期的所有损失和指标
-        epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses = [], [], [], []
         
+        epoch_losses = defaultdict(list)
         num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE
         
-        # 4. 内循环：对小批次进行梯度更新
         for i in range(num_updates_in_epoch):
-            start = i * TRAIN_BATCH_SIZE
-            end = start + TRAIN_BATCH_SIZE
+            start = i * TRAIN_BATCH_SIZE; end = start + TRAIN_BATCH_SIZE
 
             # 切分小批次
             mini_inputs = {k: v[start:end] for k, v in inputs_batch.items()}
             mini_act = act_t[start:end]
             mini_adv = adv_t[start:end]
             mini_mu_old = mu_old_t[start:end]
-            mini_log_std = log_std_old_t[start:end]
+            mini_log_std_old = log_std_old_t[start:end]
             mini_v_targ = v_targ_t[start:end]
-            
+            mini_done = done_t[start:end]
+            mini_reward = reward_t[start:end]
+            mini_teacher_act = teacher_act_t[start:end]
+            mini_next_teacher_proj_feat = next_teacher_proj_feat_t[start:end]
             # 使用全局统计量进行归一化
             normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
-            
-            # 前向
-            actions_all, mu_all, log_std_all, value = self.model(mini_inputs)
-            # 仅用第一个 chunk
-            mu = mu_all.to(torch.float32)
-            log_std = log_std_all.to(torch.float32)
-            value = value.to(torch.float32)
 
-            # 3. 根据 global_step 计算损失
-            value_loss = VF_COEF * torch.mean((value - mini_v_targ) ** 2)
+            # --- 修改: 前向传播和损失计算 ---
+            mu, log_std, value, _, _, _, _ = self.model(mini_inputs)
+            # 1. PPO 价值损失
+            value_loss = VF_COEF * F.mse_loss(value.squeeze(), mini_v_targ)
             
             if self.global_step < POLICY_TRAIN_START_STEP:
-                # 阶段一: 只训练 value head
                 loss = value_loss
                 policy_loss = torch.tensor(0.0, device=loss.device)
                 ent_loss = torch.tensor(0.0, device=loss.device)
+                ent = torch.tensor(0.0, device=loss.device)
+                imitation_loss = torch.tensor(0.0, device=loss.device)
+                ae_loss = torch.tensor(0.0, device=loss.device)
             else:
-                # 阶段二: 训练所有组件
-                std = torch.exp(log_std)
-                base_dist = Normal(mu, std)
-                dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-                epsilon = 1e-6
-                clipped_act_t = torch.clamp(mini_act, -1.0 + epsilon, 1.0 - epsilon)
-                logp = dist.log_prob(clipped_act_t)
-
+                # 2. PPO 策略损失
+                dist = TransformedDistribution(Normal(mu, torch.exp(log_std)), [TanhTransform(cache_size=1)])
+                logp = dist.log_prob(torch.clamp(mini_act, -1.0 + 1e-6, 1.0 - 1e-6))
                 with torch.no_grad():
-                    std_old = torch.exp(mini_log_std)
-                    base_dist_old = Normal(mini_mu_old, std_old)
-                    dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
-                    logp_old = dist_old.log_prob(clipped_act_t)
-
+                    dist_old = TransformedDistribution(Normal(mini_mu_old, torch.exp(mini_log_std_old)), [TanhTransform(cache_size=1)])
+                    logp_old = dist_old.log_prob(torch.clamp(mini_act, -1.0 + 1e-6, 1.0 - 1e-6))
+                
                 ratio = torch.exp(logp - logp_old)
                 adv_unsqueezed = normalized_adv.unsqueeze(-1).unsqueeze(-1)
                 surr1 = ratio * adv_unsqueezed
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
-                ent_loss = -ENT_COEF * torch.mean(base_dist.entropy())
-                loss = policy_loss + value_loss + ent_loss
+                ent = torch.mean(dist.base_dist.entropy())
+                ent_loss = -ENT_COEF * ent
+
+                # 3. 模仿学习损失
+                imitation_loss = F.mse_loss(torch.tanh(mu), mini_teacher_act)
+                loss1 = imitation_loss
+                self.model.backward(loss1)  # backward掉，释放显存
+                self.model.step()
+
+                mini_inputs['this_action'] = mini_act  # 用于自编码器损失
+                _, _, _, post_patch_embeddings, _, reward_hat, termi_hat = self.model(mini_inputs)
+                non_terminal_mask = ~mini_done.squeeze()
+                if torch.any(non_terminal_mask):
+                    ae_loss = F.mse_loss(
+                        post_patch_embeddings[non_terminal_mask],
+                        mini_next_teacher_proj_feat[non_terminal_mask]
+                    )  # 自编码器损失 (仅对非终止状态)
+                else:
+                    ae_loss = torch.tensor(0.0, device=value_loss.device)
+                reward_loss = self.model.symlog_twohot_loss_func(reward_hat, mini_reward)
+                termi_loss = self.model.symlog_twohot_loss_func(termi_hat, mini_done.float())
+
+                loss = ae_loss + reward_loss + TERMINATION_LOSS_COEF * termi_loss
 
             self.model.backward(loss)
             self.model.step()
-            epoch_losses.append(loss.item())
-            epoch_p_losses.append(policy_loss.item())
-            epoch_v_losses.append(value_loss.item())
-            epoch_e_losses.append(ent_loss.item())
+            epoch_losses["total_loss"].append(loss.item())
+            epoch_losses["policy_loss"].append(policy_loss.item())
+            epoch_losses["value_loss"].append(value_loss.item())
+            epoch_losses["entropy_loss"].append(ent_loss.item())
+            epoch_losses["entropy"].append(ent.item())
+            epoch_losses["imitation_loss"].append(imitation_loss.item())
+            epoch_losses["reward_loss"].append(reward_loss.item())
+            epoch_losses["ae_loss"].append(ae_loss.item())
+            epoch_losses["termi_loss"].append(termi_loss.item())
+            
             if self.model.is_gradient_accumulation_boundary():
                 self.global_step += 1
-        avg_loss = np.mean(epoch_losses)
-        avg_p_loss = np.mean(epoch_p_losses)
-        avg_v_loss = np.mean(epoch_v_losses)
-        avg_e_loss = np.mean(epoch_e_losses)
 
-        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, current_lrs, self.global_step
+        avg_losses = {k: np.mean(v) for k, v in epoch_losses.items()}
+        return avg_losses, current_lrs, self.global_step
 
 
 def build_openvla_cfg() -> GenerateConfig:
@@ -713,18 +712,16 @@ def build_openvla_cfg() -> GenerateConfig:
 
 def main():
     if not os.path.exists(PRETRAINED_CHECKPOINT):
-        print(f"错误: OpenVLA checkpoint 路径 '{PRETRAINED_CHECKPOINT}' 不存在。请更新 PRETRAINED_CHECKPOINT。")
+        print(f"错误: OpenVLA checkpoint 路径 '{PRETRAINED_CHECKPOINT}' 不存在。")
         return
 
-    os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_devtest_indep_clip_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_1e-4_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
-    # 构建 OpenVLA 配置
     cfg = build_openvla_cfg()
 
     print("--- 步骤 1: 创建 Actors ---")
@@ -737,33 +734,27 @@ def main():
     rollout_workers = [
         RolloutWorkerActor.remote(
             inference_pool[i % NUM_INFERENCE_ACTORS],
-            replay_buffers[i % NUM_TRAINER_GPUS],
-            i,
-            stats_actor,
-            cfg,
-        )
-        for i in range(NUM_ROLLOUT_WORKERS)
+            replay_buffers[i % NUM_TRAINER_GPUS], i, stats_actor, cfg
+        ) for i in range(NUM_ROLLOUT_WORKERS)
     ]
 
-    print("\n--- 步骤 2: 建立独立的 DeepSpeed 训练组 ---")
+    print("\n--- 步骤 2: 建立 DeepSpeed 训练组 ---")
     trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
-    train_setup_tasks = [actor.setup_deepspeed_group.remote(trainer_master_addr, TRAIN_GROUP_PORT) for actor in trainer_group]
-    ray.get(train_setup_tasks)
+    ray.get([actor.setup_deepspeed_group.remote(trainer_master_addr, TRAIN_GROUP_PORT) for actor in trainer_group])
     print("DeepSpeed 训练组建立完成。")
 
-    print(f"\n--- 步骤 3: 建立共享广播组 ({BROADCAST_GROUP_NAME}) ---")
+    print(f"\n--- 步骤 3: 建立共享广播组 ---")
     broadcast_participants = [trainer_group[0]] + inference_pool
     broadcast_group_world_size = len(broadcast_participants)
     broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
-    broadcast_setup_tasks = [
+    ray.get([
         actor.setup_broadcast_group.remote(
             master_addr=broadcast_master_addr, master_port=BROADCAST_GROUP_PORT,
             group_name=BROADCAST_GROUP_NAME, group_world_size=broadcast_group_world_size,
             my_rank_in_group=rank) for rank, actor in enumerate(broadcast_participants)
-    ]
-    ray.get(broadcast_setup_tasks)
+    ])
     print("共享广播组建立完成。")
-
+    
     inf_keys = ray.get(inference_pool[0].get_model_keys.remote())
     trainer_keys = ray.get(trainer_group[0].get_model_keys.remote())
     for key in inf_keys:
@@ -791,33 +782,28 @@ def main():
     ray.get(forward_test_tasks)
     print("推理器前向测试完成。after broadcast")
 
-    print("\n--- 步骤 4: 启动 Rollout Workers 进行数据收集 ---")
-    for w in rollout_workers:
-        w.run.remote()
+    print("\n--- 步骤 4: 启动 Rollout Workers ---")
+    for w in rollout_workers: w.run.remote()
 
-    print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
+    print("\n--- 步骤 5: 等待经验池填充 ---")
     min_buffer_size_for_start = SUPER_BATCH_SIZE
     assert min_buffer_size_for_start < REPLAY_CAPACITY
     while not all(size >= min_buffer_size_for_start for size in ray.get([rb.size.remote() for rb in replay_buffers])):
         sizes = ray.get([rb.size.remote() for rb in replay_buffers])
-        print(f"等待所有经验池填充初始数据 (目标: {min_buffer_size_for_start})... (当前大小: {sizes})")
+        print(f"等待经验池填充... (目标: {min_buffer_size_for_start}, 当前: {sizes})")
         time.sleep(5)
-    print("远程经验池已准备好，训练器将按需获取数据。")
-
-    print("\n--- 步骤 6: 开始主训练与同步循环 ---")
+    
+    print("\n--- 步骤 6: 开始主训练循环 ---")
     start_time = time.time()
     last_log_time = time.time()
     global_step = 0
     while global_step < TRAIN_ITERS:
-        # 每个 trainer 独立运行一个训练周期
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
         
-        # 从结果中解包 (现在返回的是整个周期的平均值)
-        # 注意：global_step 现在由 trainer 内部管理和返回
-        _, _, _, _, current_lrs, global_step = results[0]
+        avg_losses_list, lrs_list, steps_list = zip(*results)
+        global_step = steps_list[0]
 
-        # 广播权重到推理器
         broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
         receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
         ray.get([broadcast_task] + receive_tasks)
@@ -825,40 +811,43 @@ def main():
         current_time = time.time()
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:
             all_stats = ray.get(stats_actor.get_stats.remote())
-
             global_stats = all_stats.pop("_global_")
-            avg_return = global_stats["avg_return"]
-            avg_ep_len = global_stats["avg_ep_len"]
             total_episodes = global_stats["total_episodes_processed"]
-            avg_step_time = global_stats["avg_step_time"]
-
-            total_losses, p_losses, v_losses, e_losses, lrs_list, _ = zip(*results)
-            # lrs_list 是一个元组，每个元素是一个字典: ({'value': lr_v, 'policy': lr_p}, ...)
-            # 我们从第一个 worker 的结果中获取学习率
+            avg_step_time = global_stats["avg_step_time"]            
+            # 平均所有训练器的损失
+            avg_total_loss = np.mean([d['total_loss'] for d in avg_losses_list])
+            avg_v_loss = np.mean([d['value_loss'] for d in avg_losses_list])
+            avg_p_loss = np.mean([d['policy_loss'] for d in avg_losses_list])
+            avg_il_loss = np.mean([d['imitation_loss'] for d in avg_losses_list])
+            avg_ae_loss = np.mean([d['ae_loss'] for d in avg_losses_list])
+            avg_ent = np.mean([d['entropy'] for d in avg_losses_list])
+            avg_ent_loss = np.mean([d['entropy_loss'] for d in avg_losses_list])
+            avg_reward_loss = np.mean([d['reward_loss'] for d in avg_losses_list])
+            avg_termi_loss = np.mean([d['termi_loss'] for d in avg_losses_list])
             current_lrs = lrs_list[0]
 
             elapsed_time = current_time - start_time
             total_buffer_size = sum(ray.get([rb.size.remote() for rb in replay_buffers]))
 
             print(f"更新步 {global_step}/{TRAIN_ITERS} | 时间: {elapsed_time:.1f}s | "
-                  f"全局平均奖励: {avg_return:.2f} | "
-                  f"全局平均幕长: {avg_ep_len:.1f} | "
-                  f"value loss: {np.mean(v_losses):.4f} | "
-                  f"LR(V/P): {current_lrs['value']:.7f}/{current_lrs['policy']:.7f} | "
-                  f"Episodes数量: {total_episodes:,} | "
-                  f"Step平均时间: {avg_step_time:.3f}s")
+                  f"奖励: {global_stats['avg_return']:.2f} | 幕长: {global_stats['avg_ep_len']:.1f} | "
+                  f"总损失: {avg_total_loss:.4f} | V Loss: {avg_v_loss:.4f} | P Loss: {avg_p_loss:.4f} | "
+                  f"IL Loss: {avg_il_loss:.4f} | AE Loss: {avg_ae_loss:.4f} | "
+                  f"LR(V/P): {current_lrs['value']:.7f}/{current_lrs['policy']:.7f}")
 
-            # 修改: 记录两个学习率
             writer.add_scalar('Train/Learning_Rate/Value', current_lrs['value'], global_step)
             writer.add_scalar('Train/Learning_Rate/Policy', current_lrs['policy'], global_step)
-            
-            writer.add_scalar('Loss/Total', np.mean(total_losses), global_step)
-            writer.add_scalar('Loss/Policy', np.mean(p_losses), global_step)
-            writer.add_scalar('Loss/Value', np.mean(v_losses), global_step)
-            writer.add_scalar('Loss/Entropy', np.mean(e_losses), global_step)
-
-            writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
-            writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
+            writer.add_scalar('Loss/Total', avg_total_loss, global_step)
+            writer.add_scalar('Loss/Policy', avg_p_loss, global_step)
+            writer.add_scalar('Loss/Value', avg_v_loss, global_step)
+            writer.add_scalar('Loss/Imitation', avg_il_loss, global_step)
+            writer.add_scalar('Loss/Entropy', avg_ent_loss, global_step)
+            writer.add_scalar('Loss/AutoEncoder', avg_ae_loss, global_step)
+            writer.add_scalar('Loss/Reward', avg_reward_loss, global_step)
+            writer.add_scalar('Loss/Termination', avg_termi_loss, global_step)
+            writer.add_scalar('Metrics/Entropy', avg_ent, global_step)
+            writer.add_scalar('Rollout/_Global/Average_Return', global_stats['avg_return'], global_step)
+            writer.add_scalar('Rollout/_Global/Average_Episode_Length', global_stats['avg_ep_len'], global_step)
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
             writer.add_scalar('System/Avg_Step_Time', avg_step_time, global_step)
@@ -872,7 +861,7 @@ def main():
 
             last_log_time = current_time
 
-    print(f"\n成功完成 {TRAIN_ITERS} 次训练与同步循环！")
+    print(f"\n成功完成 {TRAIN_ITERS} 次训练！")
     writer.close()
     ray.shutdown()
 
