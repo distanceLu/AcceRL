@@ -11,6 +11,7 @@ import tensorflow as tf
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 from enum import Enum
+import torch
 
 import torch
 
@@ -37,7 +38,8 @@ class GenerateConfig:
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
     pretrained_checkpoint: Union[str, Path] = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"     # Pretrained checkpoint path
-
+    device: Union[str, torch.device] = "cuda"
+    
     use_l1_regression: bool = False                  # If True, uses continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, uses continuous action head with diffusion modeling objective (DDIM)
     num_diffusion_steps_train: int = 50              # (When `diffusion==True`) Number of diffusion steps used for training
@@ -50,6 +52,7 @@ class GenerateConfig:
     num_open_loop_steps: int = 8                     # Number of actions to execute open-loop before requerying policy
 
     # LoRA
+    use_lora: bool = True                            # If True, uses LoRA fine-tuning
     lora_rank: int = 32                              # Rank of LoRA weight matrix
     lora_dropout: float = 0.0                        # Dropout applied to LoRA weights
 
