@@ -45,7 +45,7 @@ class StochasticTransformerKVCache(nn.Module):
     def __init__(self, stoch_dim, action_dim, instruction_dim, feat_dim, num_layers, num_heads, max_length, dropout, dist):
         super().__init__()
         self.action_dim = action_dim
-        self.feat_dim = feat_dim # 512
+        self.feat_dim = feat_dim
         self.instruction_dim = instruction_dim
         self.dist = dist
 
@@ -63,12 +63,16 @@ class StochasticTransformerKVCache(nn.Module):
         ])
         self.layer_norm = nn.LayerNorm(feat_dim, eps=1e-6)  # TODO: check if this is necessary
 
-    def forward(self, samples, action, mask):
+    def forward(self, samples, action, mask, instruction):
         '''
         Normal forward pass
         '''
-   
-        feats = self.stem(torch.cat([samples, action], dim=-1))
+        if self.dist == "onehot":
+            action = F.one_hot(action.long(), self.action_dim).float()
+        if self.instruction_dim == 0:
+            feats = self.stem(torch.cat([samples, action], dim=-1))
+        else:
+            feats = self.stem(torch.cat([samples, action, instruction], dim=-1))
         feats = self.position_encoding(feats)
         feats = self.layer_norm(feats)
 
@@ -85,14 +89,19 @@ class StochasticTransformerKVCache(nn.Module):
         for layer in self.layer_stack:
             self.kv_cache_list.append(torch.zeros(size=(batch_size, 0, self.feat_dim), dtype=dtype, device="cuda"))
 
-    def forward_with_kv_cache(self, samples, action):
+    def forward_with_kv_cache(self, samples, action, instruction):
         '''
         Forward pass with kv_cache, cache stored in self.kv_cache_list
-        ''' 
+        '''
         assert samples.shape[1] == 1
         mask = get_vector_mask(self.kv_cache_list[0].shape[1]+1, samples.device)
         
-        feats = self.stem(torch.cat([samples, action], dim=-1))
+        if self.dist == "onehot":
+            action = F.one_hot(action.long(), self.action_dim).float()
+        if self.instruction_dim == 0:
+            feats = self.stem(torch.cat([samples, action], dim=-1))
+        else:
+            feats = self.stem(torch.cat([samples, action, instruction], dim=-1))
         feats = self.position_encoding.forward_with_position(feats, position=self.kv_cache_list[0].shape[1])
         feats = self.layer_norm(feats)
 

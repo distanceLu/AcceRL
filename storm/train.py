@@ -19,14 +19,12 @@ import os
 
 from utils import seed_np_torch, Logger, load_config
 from replay_buffer import ReplayBuffer
-import env_wrapper
+from storm import env_wrapper
 import agents
-from sub_models.functions_losses import symexp
-from sub_models.world_models import WorldModel, MSELoss
+from storm.functions_losses import symexp
+from storm.world_models import WorldModel, MSELoss
 import time
 
-import ale_py
-gymnasium.register_envs(ale_py)
 
 import os
 os.environ["MUJOCO_GL"] = "osmesa"
@@ -43,24 +41,10 @@ def build_single_env(env_name, image_size, seed, skip):
     elif isinstance(image_size, list):
         image_size = tuple(image_size)  # Convert list to tuple
 
-    if  "v5" in env_name:
-        env = gymnasium.make(env_name, full_action_space=False, render_mode="rgb_array", frameskip=1)
-        env = env_wrapper.SeedEnvWrapper(env, seed=seed)
-        env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=skip)
-        env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
-        env = env_wrapper.LifeLossInfo(env)
-    elif "google" in env_name:
-        import simpler_env
-        env = simpler_env.make(env_name)
-        env = env_wrapper.SimplerWrapper(env)
-        env = env_wrapper.SeedEnvWrapper(env, seed=seed)
-        env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=skip)
-        env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
-    elif "v3" in env_name:
+    if "v3" in env_name:
         import metaworld
         env = gymnasium.make('Meta-World/MT1', env_name=env_name, seed=seed, render_mode="rgb_array", camera_name="corner", width=image_size[0], height=image_size[1]) # MT1 with the reach environment
-        # env = env_wrapper.MetaWorldWrapper(env, env_name=env_name, shape=image_size)
-        env = env_wrapper.MetaWorldStateWrapper(env)
+        env = env_wrapper.MetaWorldWrapper(env, env_name=env_name, shape=image_size)
         env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=skip)
     else:
         raise NotImplementedError(env_name)
@@ -78,7 +62,7 @@ def build_vec_env(env_names, image_size, num_envs, seed, skip):
 
 
 def train_world_model_step(replay_buffer: ReplayBuffer, world_model: WorldModel, batch_size, demonstration_batch_size, batch_length, logger, train_steps):
-    obs, action, reward, termination, instruction = replay_buffer.sample(batch_size, demonstration_batch_size, batch_length) # [batch(16), batch_length(64), dim]
+    obs, action, reward, termination, instruction = replay_buffer.sample(batch_size, demonstration_batch_size, batch_length) # (batch, batch_length, dim)
     world_model.update(obs, action, reward, termination, instruction, train_steps, logger=logger)
 
 
@@ -149,21 +133,21 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
                     model_context_action = np.stack(list(context_action), axis=1) # (num_envs, len(context_action), 4)
                     model_context_action = torch.Tensor(model_context_action).cuda()
                     model_context_instruction = torch.cat(list(context_instruction), dim=1)
-                    prior_flattened_sample, last_dist_feat = world_model.calc_last_dist_feat(context_latent, model_context_action, model_context_instruction) # z_{t+1}, h_t
+                    prior_flattened_sample, last_dist_feat = world_model.calc_last_dist_feat(context_latent, model_context_action, model_context_instruction)
                     # print('prior_flattened_sample', prior_flattened_sample.shape) # (num_envs, 1, 1024)
                     action = agent.sample_as_env_action(
                         torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
                         greedy=False
-                    ) # (z_{t+1}, h_t)
+                    )
 
-            # context_obs.append(rearrange(torch.Tensor(current_obs).cuda(), "B H W C -> B 1 C H W")/255) # (1, 64, 64, 3) -> (1, 1, 3, 64, 64)
-            context_obs.append(rearrange(torch.Tensor(current_obs).cuda(), "B D -> B 1 D")) # (1, 64, 64, 3) -> (1, 1, 3, 64, 64)
+            context_obs.append(rearrange(torch.Tensor(current_obs).cuda(), "B H W C -> B 1 C H W")/255) # (1, 64, 64, 3) -> (1, 1, 3, 64, 64)
             context_action.append(action) # (num_envs, 4)
             context_instruction.append(instruction) # (num_envs, 1, dim)
         else:
             action = vec_env.action_space.sample()
 
         obs, reward, done, truncated, info = vec_env.step(action) # (num_envs, dim)
+        # print('obs', obs.shape)
         replay_buffer.append(current_obs, action, reward, np.logical_or(done, info["life_loss"]))
         
         print(f"sample time: {(time.time() - start_time)*1000:.2f}ms")
@@ -215,8 +199,7 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
         start_time = time.time()
         if replay_buffer.ready() and total_steps % (train_agent_every_steps//num_envs) == 0 and total_steps*num_envs >= 0:
             if total_steps % (save_every_steps//num_envs) == 0:
-                # log_video = True
-                log_video = False
+                log_video = True
             else:
                 log_video = False
 
@@ -253,10 +236,9 @@ def joint_train_world_model_agent(env_name, max_steps, num_envs, image_size,
             torch.save(agent.state_dict(), f"ckpt/{args.n}/agent_{total_steps}.pth")
 
 
-def build_world_model(conf, args, action_dim, obs_dim):
+def build_world_model(conf, args, action_dim):
     return WorldModel(
-        # in_channels=conf.Models.WorldModel.InChannels,
-        in_channels=obs_dim,
+        in_channels=conf.Models.WorldModel.InChannels,
         action_dim=action_dim,
         instruction_dim=384 if args.use_instruction else 0,
         transformer_max_length=conf.Models.WorldModel.TransformerMaxLength,
@@ -269,7 +251,7 @@ def build_world_model(conf, args, action_dim, obs_dim):
 
 def build_agent(conf, args, action_dim):
     return agents.ActorCriticAgent(
-        feat_dim=16*16+conf.Models.WorldModel.TransformerHiddenDim,
+        feat_dim=32*32+conf.Models.WorldModel.TransformerHiddenDim,
         num_layers=conf.Models.Agent.NumLayers,
         hidden_dim=conf.Models.Agent.HiddenDim,
         action_dim=action_dim,
@@ -291,7 +273,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-n", type=str, default="test-envs1-skip4-h16-100k-seed1")
     parser.add_argument("-seed", type=int, default=1)
-    parser.add_argument("-config_path", type=str, default="config_files/STORM.yaml")
+    parser.add_argument("-config_path", type=str, default="storm/config_files/STORM.yaml")
     parser.add_argument("-env_name", type=str, default="reach-v3")
     parser.add_argument("-trajectory_path", type=str, default="D_TRAJ/reach-v3.pkl")
     parser.add_argument("-dist", type=str, default="normal")
@@ -309,9 +291,9 @@ if __name__ == "__main__":
     # set seed
     seed_np_torch(seed=args.seed)
     # tensorboard writer
-    logger = Logger(path=f"runs/{args.n}")
+    logger = Logger(path=f"storm_runs/{args.n}")
     # copy config file
-    shutil.copy(args.config_path, f"runs/{args.n}/config.yaml")
+    shutil.copy(args.config_path, f"storm_runs/{args.n}/config.yaml")
 
     envs_list = args.env_name.split()
     if len(envs_list) > 1:
@@ -355,10 +337,8 @@ if __name__ == "__main__":
         else:
             action_dim = dummy_env.action_space.shape[0]
 
-        obs_dim = dummy_env.observation_space.shape[0]
-        print("obs_dim", obs_dim)
         # build world model and agent
-        world_model = build_world_model(conf, args, action_dim, obs_dim)
+        world_model = build_world_model(conf, args, action_dim)
         agent = build_agent(conf, args, action_dim)
 
         world_model_params = sum(p.numel() for p in world_model.parameters())
@@ -367,8 +347,7 @@ if __name__ == "__main__":
 
         # build replay buffer
         replay_buffer = ReplayBuffer(
-            # obs_shape=(conf.BasicSettings.ImageSize, conf.BasicSettings.ImageSize, 3),
-            obs_shape=(obs_dim,),
+            obs_shape=(conf.BasicSettings.ImageSize, conf.BasicSettings.ImageSize, 3),
             num_envs=conf.JointTrainAgent.NumEnvs,
             action_dim=action_dim,
             dist=args.dist,
