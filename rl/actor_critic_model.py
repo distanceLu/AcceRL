@@ -35,8 +35,6 @@ import torch
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
-DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-
 
 def get_vla(cfg: Any) -> torch.nn.Module:
     """
@@ -73,7 +71,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
 
     # 5) 未量化时放到目标设备
     if not cfg.load_in_8bit and not cfg.load_in_4bit:
-        vla = vla.to(DEVICE)
+        vla = vla.to(cfg.device)
 
     # 6) 加载数据集统计（归一化/反归一化用）
     from experiments.robot.openvla_utils import _load_dataset_stats
@@ -225,6 +223,9 @@ class ActorCritic(nn.Module):
           - 基本一致性检查
           - 序列右侧 padding 并拼 batch
         """
+        inputs_list = inputs_list.copy()
+        for i, it in enumerate(inputs_list):
+            inputs_list[i] = it.copy()
         # Normalize proprio for each sample and run per-sample checks
         for it in inputs_list:
             # Normalize proprio using internal norm stats
@@ -258,6 +259,8 @@ class ActorCritic(nn.Module):
         action_mask = current_action_mask | next_actions_mask
 
         num_patches = self._compute_num_patches()
+        if 'this_act_emb' in batch:
+            num_patches += 1
         text_hidden_states = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
 
         B, _, D = text_hidden_states.shape
@@ -287,6 +290,7 @@ class ActorCritic(nn.Module):
                 noisy_action_projector=None,
                 diffusion_timestep_embeddings=None,
                 use_film=self.cfg.use_film,
+                this_act_emb=batch.get("this_act_emb", None),  # (B, 1, 4096) or None
             )
         return output
 
@@ -295,7 +299,7 @@ class ActorCritic(nn.Module):
         value = self.value_head(pooled.to(self.model_dtype)).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
-    def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
           actions_all: (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
@@ -333,8 +337,10 @@ class ActorCritic(nn.Module):
 
         # 5) Value from hidden states
         value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)
-
-        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
+        if return_vit_out:
+            return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32), output.projector_features.to(torch.float32)
+        else:
+            return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
 
 
 if __name__ == "__main__":
@@ -373,6 +379,7 @@ if __name__ == "__main__":
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
+        device=torch.device("cuda:0")
     )
 
     # Create ActorCritic policy
