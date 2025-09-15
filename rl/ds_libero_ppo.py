@@ -56,10 +56,10 @@ ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 32
-ACCUMULATION_STEPS = 16
+TRAIN_BATCH_SIZE = 24
+ACCUMULATION_STEPS = 21
 SUPER_BATCH_SIZE = 512
-TRAIN_ITERS = 100000
+TRAIN_ITERS = 10000
 
 # PPO
 GAMMA = 0.99
@@ -717,6 +717,9 @@ def build_openvla_cfg() -> GenerateConfig:
         num_open_loop_steps=NUM_ACTIONS_CHUNK,  # 与常量保持一致
         unnorm_key="libero_spatial_no_noops",
         device="cuda",
+        use_lora=True,
+        lora_rank=32,
+        lora_dropout=0.0,
     )
     return cfg
 
@@ -728,7 +731,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_normal_32_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_lora_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")

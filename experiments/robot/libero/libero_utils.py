@@ -50,6 +50,7 @@ class GenerateConfig:
     num_open_loop_steps: int = 8                     # Number of actions to execute open-loop before requerying policy
 
     # LoRA
+    use_lora: bool = True                            # If True, uses LoRA fine-tuning
     lora_rank: int = 32                              # Rank of LoRA weight matrix
     lora_dropout: float = 0.0                        # Dropout applied to LoRA weights
 

@@ -132,6 +132,7 @@ class ActorCritic(nn.Module):
             nn.ReLU(),
             nn.Linear(self.vla.llm_dim, 1),
         ).to(self.device).to(dtype=self.model_dtype)
+        self.setup_finetuning(cfg.lora_rank, cfg.lora_dropout)
 
     def setup_finetuning(self, lora_rank: int, lora_dropout: float):
         """为微调准备模型，注入 LoRA 适配器。"""
@@ -159,24 +160,17 @@ class ActorCritic(nn.Module):
 
         if self._vla_is_lora_tuned:
             lora_params = [p for p in self.vla.parameters() if p.requires_grad]
-
+            policy_params += lora_params
         
         # 确保没有遗漏任何可训练参数
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
         grouped_params = set(policy_params) | set(value_params) | (set(lora_params) if self._vla_is_lora_tuned else set())
         assert all_trainable_params == grouped_params, "并非所有可训练参数都被分组！"
 
-        if self._vla_is_lora_tuned:
-            return [
-                {"name": "policy", "params": policy_params},
-                {"name": "value", "params": value_params},
-                {"name": "lora", "params": lora_params},
-            ]
-        else:
-            return [
-                {"name": "policy", "params": policy_params},
-                {"name": "value", "params": value_params},
-            ]
+        return [
+            {"name": "policy", "params": policy_params},
+            {"name": "value", "params": value_params},
+        ]
 
     def normalize_proprio(self, proprio: Any) -> np.ndarray:
         """
@@ -365,7 +359,7 @@ class ActorCritic(nn.Module):
         # 5) Value from hidden states
         value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)
 
-        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all, value.to(torch.float32)
+        return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
     
     def load_log_std(self, checkpoint_dir: str, step: int|str):
         # --- 加载 Log_Std parameter ---
@@ -405,7 +399,6 @@ if __name__ == "__main__":
     import time
     from experiments.robot.robot_utils import set_seed_everywhere
     
-
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
     from rl.utils import prepare_one_obs, check_unnorm_key
