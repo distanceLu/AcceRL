@@ -71,9 +71,9 @@ def get_vla(cfg: Any) -> torch.nn.Module:
 
     vla.eval()
 
-    # # 5) 未量化时放到目标设备
-    # if not cfg.load_in_8bit and not cfg.load_in_4bit:
-    #     vla = vla.to(DEVICE)
+    # 5) 未量化时放到目标设备
+    if not cfg.load_in_8bit and not cfg.load_in_4bit:
+        vla = vla.to(cfg.device)
 
     # 6) 加载数据集统计（归一化/反归一化用）
     from experiments.robot.openvla_utils import _load_dataset_stats
