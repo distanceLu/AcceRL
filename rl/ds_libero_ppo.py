@@ -4,7 +4,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,5,6,7"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -20,7 +20,7 @@ import numpy as np
 
 import ray
 import torch
-from torch.distributions import Normal, TransformedDistribution
+from torch.distributions import Normal, TransformedDistribution, kl
 from torch.distributions.transforms import TanhTransform
 import deepspeed
 import torch.distributed as distributed # 新增：为了分布式通信
@@ -49,16 +49,16 @@ from ds_com import TrainerActorCom, InferenceActorCom
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 2
+NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 20
 ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 24
-ACCUMULATION_STEPS = 21
-SUPER_BATCH_SIZE = 512
+TRAIN_BATCH_SIZE = 20
+ACCUMULATION_STEPS = 13
+SUPER_BATCH_SIZE = 260
 TRAIN_ITERS = 10000
 
 # PPO
@@ -205,9 +205,9 @@ class RolloutWorkerActor:
             print(err_info, flush=True)  # ray可能不会打印报错信息，所以这里用print及时打印
             raise ValueError(err_info)
         task_suite = benchmark_dict[self.benchmark_name]()
-        # task_id = int(wid % task_suite.n_tasks)
+        task_id = int(wid % 10)
         # print(f"RolloutWorker {wid} 正在加载任务: {task_id} ({task_suite.get_task(task_id).name})")
-        task_id = 5
+        # task_id = 5
         self.env = LiberoEnvWrapper(
             benchmark_name=self.benchmark_name,
             task_id=task_id,
@@ -625,6 +625,7 @@ class TrainerActor(TrainerActorCom):
 
         # 记录本周期的所有损失和指标
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses = [], [], [], []
+        epoch_ent, epoch_kl_divs = [], []
         
         num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE
         
@@ -659,6 +660,7 @@ class TrainerActor(TrainerActorCom):
                 loss = value_loss
                 policy_loss = torch.tensor(0.0, device=loss.device)
                 ent_loss = torch.tensor(0.0, device=loss.device)
+                kl_div = 0.0
             else:
                 # 阶段二: 训练所有组件
                 std = torch.exp(log_std)
@@ -673,13 +675,15 @@ class TrainerActor(TrainerActorCom):
                     base_dist_old = Normal(mini_mu_old, std_old)
                     # dist_old = TransformedDistribution(base_dist_old, [TanhTransform(cache_size=1)])
                     logp_old = base_dist_old.log_prob(mini_act)
+                    kl_div = torch.mean(kl.kl_divergence(base_dist_old, base_dist)).item()
 
                 ratio = torch.exp(logp - logp_old)
                 adv_unsqueezed = normalized_adv.unsqueeze(-1).unsqueeze(-1)
                 surr1 = ratio * adv_unsqueezed
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
-                ent_loss = -ENT_COEF * torch.mean(base_dist.entropy())
+                ent = torch.mean(base_dist.entropy())
+                ent_loss = -ENT_COEF * ent
                 loss = policy_loss + value_loss + ent_loss
 
             self.model.backward(loss)
@@ -688,14 +692,18 @@ class TrainerActor(TrainerActorCom):
             epoch_p_losses.append(policy_loss.item())
             epoch_v_losses.append(value_loss.item())
             epoch_e_losses.append(ent_loss.item())
+            epoch_ent.append(ent.item())
+            epoch_kl_divs.append(kl_div)
             if self.model.is_gradient_accumulation_boundary():
                 self.global_step += 1
         avg_loss = np.mean(epoch_losses)
         avg_p_loss = np.mean(epoch_p_losses)
         avg_v_loss = np.mean(epoch_v_losses)
         avg_e_loss = np.mean(epoch_e_losses)
+        avg_ent = np.mean(epoch_ent)
+        avg_kl_div = np.mean(epoch_kl_divs)
 
-        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, current_lrs, self.global_step
+        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, current_lrs, self.global_step, avg_ent, avg_kl_div
 
 
 def build_openvla_cfg() -> GenerateConfig:
@@ -727,7 +735,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_push_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_10tasks_attn_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
@@ -815,6 +823,7 @@ def main():
     print("\n--- 步骤 6: 开始主训练与同步循环 ---")
     start_time = time.time()
     last_log_time = time.time()
+    last_log_global_step = 0
     global_step = 0
     while global_step < TRAIN_ITERS:
         # 每个 trainer 独立运行一个训练周期
@@ -823,7 +832,7 @@ def main():
         
         # 从结果中解包 (现在返回的是整个周期的平均值)
         # 注意：global_step 现在由 trainer 内部管理和返回
-        _, _, _, _, current_lrs, global_step = results[0]
+        _, _, _, _, current_lrs, global_step, _, _ = results[0]
 
         # 广播权重到推理器
         broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
@@ -834,13 +843,17 @@ def main():
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:
             all_stats = ray.get(stats_actor.get_stats.remote())
 
+            elapsed_log_time = current_time - last_log_time
+            steps_since_last_log = global_step - last_log_global_step
+            training_speed_steps_per_sec = steps_since_last_log / elapsed_log_time if elapsed_log_time > 0 else 0.0
+
             global_stats = all_stats.pop("_global_")
             avg_return = global_stats["avg_return"]
             avg_ep_len = global_stats["avg_ep_len"]
             total_episodes = global_stats["total_episodes_processed"]
             avg_step_time = global_stats["avg_step_time"]
 
-            total_losses, p_losses, v_losses, e_losses, lrs_list, _ = zip(*results)
+            total_losses, p_losses, v_losses, e_losses, lrs_list, _, ents, avg_kl_divs = zip(*results)
             # lrs_list 是一个元组，每个元素是一个字典: ({'value': lr_v, 'policy': lr_p}, ...)
             # 我们从第一个 worker 的结果中获取学习率
             current_lrs = lrs_list[0]
@@ -865,6 +878,10 @@ def main():
             writer.add_scalar('Loss/Value', np.mean(v_losses), global_step)
             writer.add_scalar('Loss/Entropy', np.mean(e_losses), global_step)
 
+            writer.add_scalar('Metrics/Entropy', np.mean(ents), global_step)
+            writer.add_scalar('Metrics/KL_Divergence', np.mean(avg_kl_divs), global_step)
+            writer.add_scalar('Metrics/Training_Speed_Steps_per_Sec', training_speed_steps_per_sec, global_step)
+
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
@@ -879,6 +896,7 @@ def main():
                 writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
 
             last_log_time = current_time
+            last_log_global_step = global_step
 
     print(f"\n成功完成 {TRAIN_ITERS} 次训练与同步循环！")
     writer.close()

@@ -125,6 +125,10 @@ class ActorCritic(nn.Module):
         # Condition-independent log_std parameter (float32 for stability)
         self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
 
+        self.attn_pool = nn.Sequential(
+            nn.Linear(self.vla.llm_dim, 1),
+        ).to(self.device).to(dtype=self.model_dtype)
+
         # Value head: mean-pool over text tokens from the last hidden layer -> scalar
         self.value_head = nn.Sequential(
             nn.LayerNorm(self.vla.llm_dim),
@@ -156,7 +160,7 @@ class ActorCritic(nn.Module):
         这对于为不同组件设置不同的学习率至关重要。
         """
         policy_params = list(self.action_head.parameters()) + [self.log_std_param] + list(self.proprio_projector.parameters())
-        value_params = list(self.value_head.parameters())
+        value_params = list(self.value_head.parameters()) + list(self.attn_pool.parameters())
 
         if self._vla_is_lora_tuned:
             lora_params = [p for p in self.vla.parameters() if p.requires_grad]
@@ -321,8 +325,22 @@ class ActorCritic(nn.Module):
         return output
 
     def _compute_value_from_hidden(self, actions_hidden_states: torch.Tensor) -> torch.Tensor:
-        pooled = actions_hidden_states[:, -2]  # -2这个位置的state比较靠后了，一般用不到
-        value = self.value_head(pooled.to(self.model_dtype)).squeeze(-1)  # (B,)
+        """
+        使用注意力池化计算状态价值
+        actions_hidden_states: (B, C * A_dim, D), 
+        """
+        # 1. 计算注意力分数
+        # actions_hidden_states 的类型需要与 attn_pool 匹配
+        scores = self.attn_pool(actions_hidden_states)  # (B, num_tokens, 1)
+        
+        # 2. 应用softmax获取注意力权重
+        weights = torch.softmax(scores, dim=1)  # (B, num_tokens, 1)
+        
+        # 3. 加权平均得到池化表示
+        pooled = torch.sum(weights * actions_hidden_states, dim=1)  # (B, D)
+        
+        # 4. 通过价值头计算最终价值
+        value = self.value_head(pooled).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
     def forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
