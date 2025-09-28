@@ -63,7 +63,7 @@ class StochasticTransformerKVCache(nn.Module):
         ])
         self.layer_norm = nn.LayerNorm(feat_dim, eps=1e-6)  # TODO: check if this is necessary
 
-    def forward(self, samples, action, mask, instruction):
+    def forward(self, samples, action, mask, instruction=None):
         '''
         Normal forward pass
         '''
@@ -89,7 +89,7 @@ class StochasticTransformerKVCache(nn.Module):
         for layer in self.layer_stack:
             self.kv_cache_list.append(torch.zeros(size=(batch_size, 0, self.feat_dim), dtype=dtype, device="cuda"))
 
-    def forward_with_kv_cache(self, samples, action, instruction):
+    def forward_with_kv_cache(self, samples, action, instruction=None):
         '''
         Forward pass with kv_cache, cache stored in self.kv_cache_list
         '''

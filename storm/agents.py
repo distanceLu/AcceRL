@@ -9,6 +9,7 @@ from torch.cuda.amp import autocast
 
 from storm.functions_losses import SymLogTwoHotLoss
 from storm.utils import EMAScalar
+from rl.modules import AttentionPool
 
 
 def percentile(x, percentage):
@@ -35,7 +36,7 @@ def calc_lambda_return(rewards, values, termination, gamma, lam, dtype=torch.flo
 
 
 class ActorCriticAgent(nn.Module):
-    def __init__(self, feat_dim, num_layers, hidden_dim, action_dim, gamma, lambd, entropy_coef, dist) -> None:
+    def __init__(self, feat_dim, num_layers, hidden_dim, action_dim, gamma, lambd, entropy_coef, dist, is_pool=False) -> None:
         super().__init__()
         self.gamma = gamma
         self.lambd = lambd
@@ -50,6 +51,7 @@ class ActorCriticAgent(nn.Module):
         self.action_dim = action_dim
 
         actor = [
+            AttentionPool(feat_dim) if is_pool else nn.Identity(),
             nn.Linear(feat_dim, hidden_dim, bias=False),
             nn.LayerNorm(hidden_dim),
             nn.ReLU()
@@ -66,6 +68,7 @@ class ActorCriticAgent(nn.Module):
         )
 
         critic = [
+            AttentionPool(feat_dim) if is_pool else nn.Identity(),
             nn.Linear(feat_dim, hidden_dim, bias=False),
             nn.LayerNorm(hidden_dim),
             nn.ReLU()
@@ -149,6 +152,74 @@ class ActorCriticAgent(nn.Module):
             return action.detach().cpu().squeeze(-1).numpy()
         else:
             return action.detach().cpu().squeeze(-2).float().numpy()
+        
+    def imitate(self, latent, teacher_action, reward, termination, train_steps, logger=None):
+        '''
+        Imitate expert action
+        '''
+        self.train()
+        target_mask, predict_mask = get_extraction_mask(termination)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            mean, std, raw_value = self.get_logits_raw_value(latent)
+            if self.dist == "onehot":
+                raise NotImplementedError('Not implemented for onehot distribution')
+            else:
+                std = (self._max_std - self._min_std) * torch.sigmoid(
+                    std + 2.0
+                ) + self._min_std
+                dist = distributions.normal.Normal(mean[predict_mask], std[predict_mask])
+                log_prob = torch.sum(dist.log_prob(teacher_action[target_mask]), dim=-1)
+                imitation_loss = -log_prob.mean()
+                mse_loss = F.mse_loss(mean[predict_mask], teacher_action[target_mask])
+            
+            # 计算策略的熵，用于正则化
+            entropy = dist.entropy().mean()
+
+            # --- 3. 计算 Critic 损失 (价值评估) ---
+            # 这部分逻辑与 `update` 函数中的强化学习更新相同
+            # 解码价值，计算 lambda 返回值
+            slow_value = self.slow_value(latent)
+            slow_lambda_return = calc_lambda_return(reward, slow_value, termination, self.gamma, self.lambd)
+            
+            value = self.symlog_twohot_loss.decode(raw_value)
+            lambda_return = calc_lambda_return(reward, value, termination, self.gamma, self.lambd)
+
+            # 使用 SymLogTwoHotLoss 计算价值损失
+            value_loss = self.symlog_twohot_loss(raw_value, lambda_return.detach())
+            slow_value_regularization_loss = self.symlog_twohot_loss(raw_value, slow_lambda_return.detach())
+
+            # --- 4. 计算总损失 ---
+            # 总损失 = 模仿损失 + 价值损失 + 慢速价值正则化
+            loss = mse_loss  # + value_loss + slow_value_regularization_loss
+
+        # --- 5. 梯度下降和优化器步骤 ---
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)  # 用于梯度裁剪
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=100.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        # --- 6. 更新慢速评论家网络 ---
+        self.update_slow_critic()
+
+        # --- 7. 记录指标 ---
+        if logger is not None:
+            # 为了记录，计算 S 和 norm_ratio
+            # with torch.no_grad():
+            #     lower_bound = self.lowerbound_ema(percentile(lambda_return, 0.05))
+            #     upper_bound = self.upperbound_ema(percentile(lambda_return, 0.95))
+            #     S = upper_bound - lower_bound
+            #     norm_ratio = torch.max(torch.ones_like(S), S)
+
+            logger.log('Imitate/imitation_loss', imitation_loss.item(), train_steps)
+            logger.log('Imitate/mse_loss', mse_loss.item(), train_steps)
+            # logger.log('Imitate/value_loss', value_loss.item(), train_steps)
+            # logger.log('Imitate/slow_value_reg_loss', slow_value_regularization_loss.item(), train_steps)
+            logger.log('Imitate/entropy_loss', entropy.item(), train_steps)
+            # logger.log('Imitate/S', S.item(), train_steps)
+            # logger.log('Imitate/norm_ratio', norm_ratio.item(), train_steps)
+            logger.log('Imitate/total_loss', loss.item(), train_steps)
 
     def update(self, latent, action, old_logprob, old_value, reward, termination, train_steps, logger=None):
         '''
@@ -207,3 +278,45 @@ class ActorCriticAgent(nn.Module):
             logger.log('ActorCritic/S', S.item(), train_steps)
             logger.log('ActorCritic/norm_ratio', norm_ratio.item(), train_steps)
             logger.log('ActorCritic/total_loss', loss.item(), train_steps)
+
+
+
+def get_extraction_mask(termination):
+    '''
+    Given a termination tensor of shape [bs, bl], generate an extraction mask
+    that indicates which observations to keep based on the following rules:
+    1. Discard the first observation in each sequence (t=0).
+    2. Discard the observation immediately following a termination signal (if termination[b, t-1] == 1, discard obs at t).
+    如果termination是：
+    tensor([[0., 0., 0., 1., 0., 0., 0., 0.],
+            [0., 0., 1., 0., 0., 0., 1., 0.]])
+    ------------------------------
+    那么生成的target_action提取掩码 (Extraction Mask):
+    tensor([[False, True, True, True, False, True, True, True],
+            [False, True, True, False, True, True, True, False]])
+    也就是说一条数据中，每个episode片段的第一个会被舍弃，其他会保留。一条数据中有t个termination为1，会舍弃t+1个
+    ------------------------------
+    而的predict_action提取掩码 (Extraction Mask):
+    tensor([[True, True, True, False, True, True, True, False],
+            [True, True, False, True, True, True, False, False]])
+    Args:
+        termination (torch.Tensor): A tensor of shape [bs, bl] with binary values (0 or 1) indicating termination signals.
+
+    Returns:
+        torch.Tensor: A boolean tensor of shape [bs, bl] where True indicates the observation should be kept.
+    '''
+    # Create a boolean discard mask initialized to False
+    discard_mask = torch.zeros_like(termination, dtype=torch.bool)
+
+    # Rule 1: Discard the first observation in each sequence
+    discard_mask[:, 0] = True
+
+    # Rule 2: Discard the observation immediately following a termination signal
+    discard_mask[:, 1:] = discard_mask[:, 1:] | (termination[:, :-1] == 1)
+
+    # The extraction mask is the logical NOT of the discard mask
+    target_mask = ~discard_mask
+
+    predict_mask = termination == 0
+    predict_mask[:, -1] = False
+    return target_mask, predict_mask

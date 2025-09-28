@@ -395,21 +395,21 @@ class WorldModel(nn.Module):
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
-            embedding = self.encoder(obs)
-            post_logits = self.dist_head.forward_post(embedding)
-            sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
-            flattened_sample = self.flatten_sample(sample)
+            embedding = self.encoder(obs)  # [bs, bl, 4096]
+            post_logits = self.dist_head.forward_post(embedding)  # [bs, bl, 32, 32]
+            sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")  # [bs, bl, 32, 32] 
+            flattened_sample = self.flatten_sample(sample)  # [bs, bl, 1024]
 
             # decoding image
-            obs_hat = self.image_decoder(flattened_sample)
+            obs_hat = self.image_decoder(flattened_sample)  # [bs, bl, 3, 64, 64]
 
             # transformer
-            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask, instruction)
-            prior_logits = self.dist_head.forward_prior(dist_feat)
+            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)  # [1, bl, bl]
+            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask, instruction)  # [bs, bl, 512(hidden_dim)]
+            prior_logits = self.dist_head.forward_prior(dist_feat)  # [bs, bl, 32, 32]
             # decoding reward and termination with dist_feat
-            reward_hat = self.reward_decoder(dist_feat)
-            termination_hat = self.termination_decoder(dist_feat)
+            reward_hat = self.reward_decoder(dist_feat)  # [bs, bl, 255]]
+            termination_hat = self.termination_decoder(dist_feat)  # [bs, bl]
 
             # env loss
             reconstruction_loss = self.mse_loss_func(obs_hat, obs)

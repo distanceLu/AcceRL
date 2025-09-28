@@ -176,6 +176,32 @@ class LiberoEnvWrapper(gym.Env):
     def get_name(self) -> str:
         """返回当前任务的名称。"""
         return f"{self.task.name} (ID: {self.task_id})"
+    
+
+class LiberoEnvChunk(LiberoEnvWrapper):
+    def __init__(
+        self,
+        benchmark_name: str,
+        task_id: int,
+        image_size: int = 224,
+        model_family: str = "openvla",
+        render_mode: str = "rgb_array",
+        num_steps_wait: int = 10,
+        chunk_num: int = 8,
+    ):
+        super().__init__(benchmark_name, task_id, image_size, model_family, render_mode, num_steps_wait)
+        self.chunk_num = chunk_num
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(7*chunk_num,), dtype=np.float32)
+    
+    def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
+        action_reshape = action.reshape(self.chunk_num, -1)
+        total_reward = 0.0
+        for sub_act in action_reshape:
+            obs, reward, terminated, truncated, info = super().step(sub_act)
+            total_reward += reward
+            if terminated or truncated:
+                break
+        return obs, float(total_reward), terminated, truncated, info
 
 
 if __name__ == '__main__':
