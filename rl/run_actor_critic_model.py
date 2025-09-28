@@ -84,7 +84,7 @@ if __name__ == "__main__":
     set_seed_everywhere(cfg.seed)
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
-    actor.load_log_std(cfg.pretrained_checkpoint, step="latest")
+    # actor.load_log_std(cfg.pretrained_checkpoint, step="latest")
 
     check_unnorm_key(cfg, actor.vla)
     actor.get_parameter_groups()
@@ -129,6 +129,7 @@ if __name__ == "__main__":
     # 用于统计最终成功率
     total_episodes_finished = 0
     total_successes = 0
+    truncated_episodes = 0
 
     print("\n开始并行执行所有环境...")
 
@@ -151,8 +152,8 @@ if __name__ == "__main__":
             
             with torch.no_grad():
                 sample_all, mu_all, _, _ = actor.forward(inputs_batch)
-                # action_all_norm = torch.clamp(sample_all, -1.0, 1.0)
-                action_all_norm = torch.clamp(mu_all, -1.0, 1.0)
+                action_all_norm = torch.clamp(sample_all, -1.0, 1.0)
+                # action_all_norm = torch.clamp(mu_all, -1.0, 1.0)
 
             # 3. 将生成的动作块（chunks）填充到对应的队列中
             actions_unnorm = actor.vla._unnormalize_actions(action_all_norm.cpu().numpy(), cfg.unnorm_key)
@@ -185,6 +186,9 @@ if __name__ == "__main__":
 
             # 5. 检查环境是否完成
             if terminated or truncated:
+                if truncated:
+                    truncated_episodes += 1
+                    print(f"环境 {env_idx} 因达到最大步数而截断。累计截断次数: {truncated_episodes}")
                 active_envs[env_idx] = False # 标记环境为非活动
                 is_success = info.get('is_success', False)
                 total_successes += int(is_success)

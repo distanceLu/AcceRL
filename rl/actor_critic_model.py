@@ -7,6 +7,7 @@ import numpy as np
 
 from torch.distributions import Normal, TransformedDistribution
 from torch.distributions.transforms import TanhTransform
+from experiments.robot.openvla_utils import L1RegressionActionHead
 
 from peft import LoraConfig, get_peft_model
 
@@ -123,7 +124,9 @@ class ActorCritic(nn.Module):
         self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
 
         # Condition-independent log_std parameter (float32 for stability)
-        self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
+        # self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
+        # self.log_std_param = L1RegressionActionHead(input_dim=self.vla.llm_dim, hidden_dim=self.vla.llm_dim, action_dim=ACTION_DIM).to(self.device).to(dtype=self.model_dtype)
+        self.register_buffer('log_std_param', torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2.0, dtype=self.model_dtype))
 
         self.attn_pool = nn.Sequential(
             nn.Linear(self.vla.llm_dim, 1),
@@ -159,7 +162,7 @@ class ActorCritic(nn.Module):
         将可训练参数分为 'policy' 和 'value' 两组。
         这对于为不同组件设置不同的学习率至关重要。
         """
-        policy_params = list(self.action_head.parameters()) + [self.log_std_param] + list(self.proprio_projector.parameters())
+        policy_params = list(self.action_head.parameters()) + list(self.proprio_projector.parameters())
         value_params = list(self.value_head.parameters()) + list(self.attn_pool.parameters())
 
         if self._vla_is_lora_tuned:
@@ -372,6 +375,7 @@ class ActorCritic(nn.Module):
         B = mu_all.size(0)
         log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
         log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
+        # log_std_all = self.log_std_param.predict_action(actions_hidden_states) - 2
 
         # 4) Squashed Gaussian sampling to (-1, 1) for all chunks
         std_all = torch.exp(log_std_all)  # (B, T, A)
@@ -381,7 +385,7 @@ class ActorCritic(nn.Module):
         actions_all = dist.sample()                                  # (B, T, A) in (-1, 1)
 
         # 5) Value from hidden states
-        value = self._compute_value_from_hidden(actions_hidden_states)   # (B,)
+        value = self._compute_value_from_hidden(actions_hidden_states.detach())   # (B,)
 
         if return_vit_out:
             return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32), output.projector_features.to(torch.float32)
