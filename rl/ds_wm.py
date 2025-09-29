@@ -17,8 +17,7 @@ import torch.nn.functional as F
 
 import ray
 import torch
-from torch.distributions import Normal, TransformedDistribution
-from torch.distributions.transforms import TanhTransform
+from torch.distributions import Normal
 import deepspeed
 import torch.distributed as distributed
 from torch.utils.tensorboard import SummaryWriter
@@ -408,18 +407,19 @@ class InferenceActor(InferenceActorCom):
                     student_mu, student_log_std, student_value, _, _, _, _ = self.model.forward(inputs_batch)
                     _, teacher_action_norm_chunks, _, _, teacher_proj_features = self.teacher_model.forward(inputs_batch, return_vit_out=True)
                 
-                # 只使用第一个动作块
+                dist = Normal(student_mu, torch.exp(student_log_std))
+                action_norm = dist.sample()
                 student_mu_chunk = student_mu.to(torch.float32).detach().cpu().numpy()
                 student_log_std_chunk = student_log_std.to(torch.float32).detach().cpu().numpy()
                 student_values = student_value.to(torch.float32).detach().cpu().numpy()
 
                 # 将学生动作反归一化以用于环境
                 student_actions_env = []
-                for i in range(student_mu.shape[0]):
+                for i in range(action_norm.shape[0]):
                     # 创建一个分布来采样或直接使用均值
-                    dist = TransformedDistribution(Normal(student_mu[i], torch.exp(student_log_std[i])), [TanhTransform(cache_size=1)])
-                    action_norm_i = dist.sample() # or student_mu[i] for deterministic action
-                    action_norm_i = torch.tanh(student_mu[i]) # 确定性动作
+                    # dist = Normal(student_mu[i], torch.exp(student_log_std[i]))
+                    # action_norm_i = dist.sample() # or student_mu[i] for deterministic action
+                    action_norm_i = action_norm[i]
                     a_env = self.model.vla._unnormalize_actions(action_norm_i.cpu().numpy(), self.cfg.unnorm_key)
                     student_actions_env.append(a_env.astype(np.float32))
 
@@ -430,7 +430,7 @@ class InferenceActor(InferenceActorCom):
                 for i in range(len(promises_to_process)):
                     promises_to_process[i].set_result((
                         student_actions_env[i],      # 用于环境的动作
-                        torch.tanh(student_mu)[i].cpu().numpy(), # 学生动作 (normalized, for experience)
+                        action_norm[i].cpu().numpy(), # 学生动作 (normalized, for experience)
                         student_mu_chunk[i],         # 学生策略 mu
                         student_log_std_chunk[i],    # 学生策略 log_std
                         student_values[i],           # 学生价值估计
@@ -641,22 +641,23 @@ class TrainerActor(TrainerActorCom):
                 ae_loss = torch.tensor(0.0, device=loss.device)
             else:
                 # 2. PPO 策略损失
-                dist = TransformedDistribution(Normal(mu, torch.exp(log_std)), [TanhTransform(cache_size=1)])
-                logp = dist.log_prob(torch.clamp(mini_act, -1.0 + 1e-6, 1.0 - 1e-6))
+                dist = Normal(mu, torch.exp(log_std))
+                logp = dist.log_prob(mini_act)
                 with torch.no_grad():
-                    dist_old = TransformedDistribution(Normal(mini_mu_old, torch.exp(mini_log_std_old)), [TanhTransform(cache_size=1)])
-                    logp_old = dist_old.log_prob(torch.clamp(mini_act, -1.0 + 1e-6, 1.0 - 1e-6))
+                    dist_old = Normal(mini_mu_old, torch.exp(mini_log_std_old))
+                    logp_old = dist_old.log_prob(mini_act)
                 
                 ratio = torch.exp(logp - logp_old)
                 adv_unsqueezed = normalized_adv.unsqueeze(-1).unsqueeze(-1)
                 surr1 = ratio * adv_unsqueezed
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
-                ent = torch.mean(dist.base_dist.entropy())
+                ent = torch.mean(dist.entropy())
                 ent_loss = -ENT_COEF * ent
 
                 # 3. 模仿学习损失
-                imitation_loss = F.mse_loss(torch.tanh(mu), mini_teacher_act)
+                imitation_loss = F.mse_loss(mu, mini_teacher_act)
+                neg_log_loss = -dist.log_prob(mini_teacher_act).mean()
                 loss1 = imitation_loss
                 self.model.backward(loss1)  # backward掉，释放显存
                 self.model.step()
@@ -697,6 +698,7 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["reward_mean"].append(reward_mean.item())
             epoch_losses["termi_acc"].append(termi_acc.item())
             epoch_losses["termi_mean"].append(termi_mean.item())
+            epoch_losses["neg_log_loss"].append(neg_log_loss.item())
             
             if self.model.is_gradient_accumulation_boundary():
                 self.global_step += 1
@@ -729,7 +731,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_reward_loss_0d3_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_sample_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
