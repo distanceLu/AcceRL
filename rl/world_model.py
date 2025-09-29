@@ -30,8 +30,10 @@ class WorldModel(ActorCritic):
     此版本已修改，forward 函数返回中间张量，损失计算在外部进行。
     """
 
-    def __init__(self, cfg, torch_dtype: torch.dtype, device):
-        super().__init__(cfg, torch_dtype, device)
+    def __init__(self, cfg, torch_dtype: torch.dtype):
+        cfg.use_lora = False
+        super().__init__(cfg, torch_dtype)
+        cfg.use_lora = True  # 恢复 cfg 中的 use_lora 标志
         hidden_size = self.vla.llm_dim
         lora_config = LoraConfig(
             r=cfg.lora_rank,
@@ -64,17 +66,19 @@ class WorldModel(ActorCritic):
             nn.Linear(ACTION_DIM * NUM_ACTIONS_CHUNK, hidden_size),
         ).to(self.device).to(dtype=self.model_dtype)
         # 注意力池化层
-        self.reward_decoder = AttentionPoolHead(hidden_size, 1).to(self.device).to(dtype=self.model_dtype)
+        rew_num_classes = 255
+        self.reward_decoder = AttentionPoolHead(hidden_size, rew_num_classes).to(self.device).to(dtype=self.model_dtype)
         self.termi_pool = AttentionPool(hidden_size).to(self.device).to(dtype=self.model_dtype)
         self.termi_decoder = nn.Sequential(
             nn.Linear(hidden_size+16, hidden_size, bias=False),
             nn.LayerNorm(hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, 2)
+            nn.Linear(hidden_size, 1)
         ).to(self.device).to(dtype=self.model_dtype)
         self.step_count_emb = nn.Embedding(500, 16).to(self.device).to(dtype=self.model_dtype)
-        self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=2, lower_bound=0, upper_bound=1).to(self.device).to(dtype=self.model_dtype)
-        # self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
+        self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=rew_num_classes, lower_bound=-20, upper_bound=20)
+        self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
+        self.to(self.device, dtype=self.model_dtype)
 
     def get_trainable_params(self) -> List[Dict[str, Any]]:
         for param in self.action_head.parameters():
@@ -98,13 +102,13 @@ class WorldModel(ActorCritic):
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
         """
         为优化器提供参数分组，以应用不同的学习率。
-        这对于稳定 PPO 训练至关重要。
+        此版本增强了检查功能，可以打印出任何未被分组的可训练参数的具体名称，以便于调试。
         """
         # 策略部分：动作头和学习标准差
-        policy_params = list(self.action_head.parameters()) + [self.log_std_param]
+        policy_params = list(self.action_head.parameters())
         
         # 价值部分：价值头
-        value_params = list(self.value_head.parameters())
+        value_params = list(self.value_head.parameters()) + list(self.attn_pool.parameters())
 
         # 世界模型/语言模型部分：可训练的语言模型层和新的投影层
         lan_params = list(filter(lambda p: p.requires_grad, self.language_model.parameters()))
@@ -115,23 +119,62 @@ class WorldModel(ActorCritic):
                              list(self.reward_decoder.parameters()) + \
                              list(self.termi_decoder.parameters()) + \
                              list(self.step_count_emb.parameters())
+        
         lan_params_count = sum(p.numel() for p in lan_params)
         print(f"WorldModel 中可训练的语言模型参数数量: {lan_params_count:,}")
 
-        # 将世界模型参数合并到策略参数中进行训练，或为其创建单独的组
-        # 这里为了简化，我们将其与策略部分合并
+        # 将世界模型参数合并到策略参数中进行训练
         combined_policy_params = policy_params + world_model_params
         
-        # 确保没有遗漏任何可训练参数
+        # 1. 获取模型中所有实际为可训练状态的参数，作为“真实情况”的集合
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
-        grouped_params = set(combined_policy_params) | set(value_params)
-        if all_trainable_params != grouped_params:
-            print("警告: 并非所有可训练参数都被分组！")
-            print(f"遗漏的参数: {all_trainable_params - grouped_params}")
+        
+        # 2. 获取所有被手动分组到 'policy' 或 'value' 组的参数，作为“分组情况”的集合
+        grouped_params_set = set(combined_policy_params) | set(value_params)
+        
+        # 3. 比较两个集合，如果不相等，则启动详细的诊断流程
+        if all_trainable_params != grouped_params_set:
+            
+            # 为了通过参数对象找到其名称，我们创建一个从参数到其名称的反向映射
+            param_to_name_map = {p: name for name, p in self.named_parameters()}
+            
+            # 使用集合的差集运算找出被遗漏的参数
+            missed_params = all_trainable_params.difference(grouped_params_set)
+            
+            # 打印一个清晰的、引人注目的错误报告
+            print("\n" + "="*70)
+            print("【严重错误】: 参数分组不完整！模型中存在未被分组的可训练参数。")
+            print("这意味着这些参数将不会被优化器更新。")
+            
+            if missed_params:
+                print("\n以下参数是可训练的 (requires_grad=True)，但【未被分配】到任何优化器组：")
+                for param in missed_params:
+                    # 从映射中查找参数名，如果找不到则提供一个默认提示
+                    name = param_to_name_map.get(param, "未知名称 (可能在未命名的子模块中)")
+                    print(f"  --> 名称: {name}")
+                    print(f"      形状: {param.shape}, 元素数量: {param.numel()}")
+            else:
+                unnecessary_params = grouped_params_set.difference(all_trainable_params)
+                print("\n所有可训练参数均已分组，但以下参数【不应】被分组，因为它们不可训练 (requires_grad=False)：")
+                for param in unnecessary_params:
+                    name = param_to_name_map.get(param, "未知名称 (可能在未命名的子模块中)")
+                    print(f"  --> 名称: {name}")
+                    print(f"      形状: {param.shape}, 元素数量: {param.numel()}")
+                raise RuntimeError("分组中包含不可训练的参数！请检查代码逻辑。")
+            
+            print("="*70 + "\n")
+            
+            # 抛出异常以中断执行，强制开发者修复此问题
+            raise AssertionError(
+                "参数分组不完整。请检查上面的日志，并将列出的 '未被分配' 的参数"
+                "添加到 get_parameter_groups 函数的相应分组中。"
+            )
 
+        # 如果检查通过，打印成功的消息
         trainable_params_count = sum(p.numel() for p in all_trainable_params)
-        print(f"WorldModel 中可训练参数总量: {trainable_params_count:,}")
+        print(f"WorldModel 中所有可训练参数已成功分组。总量: {trainable_params_count:,}")
 
+        # 返回为优化器准备的参数组
         return [
             {"name": "policy", "params": combined_policy_params},
             {"name": "value", "params": value_params},
@@ -178,7 +221,7 @@ class WorldModel(ActorCritic):
             post_patch_embeddings = recon_hidden_states[:, 1:num_patches+1]
             reward_logits = None
             termin_hat = None
-        post_patch_embeddings = self.patch_proj(post_patch_embeddings)
+        post_patch_proj = self.patch_proj(post_patch_embeddings)
         projector_features = output.projector_features
 
         # 3) 预测连续动作
@@ -202,7 +245,7 @@ class WorldModel(ActorCritic):
             mu_all.to(torch.float32), 
             log_std_all.to(torch.float32), 
             value.to(torch.float32), 
-            post_patch_embeddings.to(torch.float32), 
+            post_patch_proj.to(torch.float32), 
             projector_features.to(torch.float32),
             reward_logits.to(torch.float32) if reward_logits is not None else None,
             termin_hat.to(torch.float32) if termin_hat is not None else None
@@ -331,11 +374,12 @@ if __name__ == "__main__":
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
         lora_rank=32, # 为 LoRA 添加 rank
+        device=torch.device("cuda:1"),
     )
 
     # Create ActorCritic policy
-    actor = WorldModel(cfg, TORCH_DTYPE, torch.device("cuda:1"))
-    teacher_actor = ActorCritic(cfg, TORCH_DTYPE, torch.device("cuda:1"))
+    actor = WorldModel(cfg, TORCH_DTYPE)
+    teacher_actor = ActorCritic(cfg, TORCH_DTYPE)
     teacher_actor.eval()
     check_unnorm_key(cfg, actor.vla)
     actor.train()

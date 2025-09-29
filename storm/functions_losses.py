@@ -33,7 +33,7 @@ class SymLogTwoHotLoss(nn.Module):
         # use register buffer so that bins move with .cuda() automatically
         self.bins: torch.Tensor
         self.register_buffer(
-            'bins', torch.linspace(-20, 20, num_classes), persistent=False)
+            'bins', torch.linspace(self.lower_bound, self.upper_bound, num_classes), persistent=False)
 
     def forward(self, output, target):
         target = symlog(target)
@@ -52,6 +52,7 @@ class SymLogTwoHotLoss(nn.Module):
         return loss.mean()
 
     def decode(self, output):
+        output = output.to(self.bins.dtype)
         return symexp(F.softmax(output, dim=-1) @ self.bins)
 
 

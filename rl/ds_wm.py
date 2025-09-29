@@ -2,7 +2,7 @@ import os
 os.environ["MUJOCO_GL"] = "osmesa"
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
 
 import time
 import random
@@ -33,6 +33,7 @@ from rl.world_model import WorldModel
 from rl.actor_critic_model import ActorCritic
 from rl.utils import prepare_one_obs
 from ds_com import TrainerActorCom, InferenceActorCom
+from storm.functions_losses import SymLogTwoHotLoss
 
 # ================================================================
 # 0. 超参数与配置
@@ -62,6 +63,7 @@ ENT_COEF = 0.01
 
 # AE 和 IL 损失的系数
 TERMINATION_LOSS_COEF = 0.3
+REWARD_LOSS_COEF = 0.3
 
 # 奖励缩放
 REWARD_SCALE = 1.0
@@ -660,19 +662,25 @@ class TrainerActor(TrainerActorCom):
                 self.model.step()
 
                 mini_inputs['this_action'] = mini_act  # 用于自编码器损失
-                _, _, _, post_patch_embeddings, _, reward_hat, termi_hat = self.model(mini_inputs)
+                _, _, _, post_patch_proj, _, reward_hat, termi_hat = self.model(mini_inputs)
                 non_terminal_mask = ~mini_done.squeeze()
                 if torch.any(non_terminal_mask):
                     ae_loss = F.mse_loss(
-                        post_patch_embeddings[non_terminal_mask],
+                        post_patch_proj[non_terminal_mask],
                         mini_next_teacher_proj_feat[non_terminal_mask]
                     )  # 自编码器损失 (仅对非终止状态)
                 else:
                     ae_loss = torch.tensor(0.0, device=value_loss.device)
+                self.model.symlog_twohot_loss_func: SymLogTwoHotLoss
                 reward_loss = self.model.symlog_twohot_loss_func(reward_hat, mini_reward)
-                termi_loss = self.model.symlog_twohot_loss_func(termi_hat, mini_done.float())
-
-                loss = ae_loss + reward_loss + TERMINATION_LOSS_COEF * termi_loss
+                reward_predict = self.model.symlog_twohot_loss_func.decode(reward_hat)
+                reward_mae = F.l1_loss(reward_predict, mini_reward)
+                reward_mean = mini_reward.mean()
+                termi_loss = self.model.bce_with_logits_loss_func(termi_hat.squeeze(), mini_done.float())
+                termi_predict = termi_hat > 0
+                termi_acc = (termi_predict.squeeze() == mini_done).float().mean()
+                termi_mean = mini_done.float().mean()
+                loss = ae_loss + REWARD_LOSS_COEF * reward_loss + TERMINATION_LOSS_COEF * termi_loss
 
             self.model.backward(loss)
             self.model.step()
@@ -685,6 +693,10 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["reward_loss"].append(reward_loss.item())
             epoch_losses["ae_loss"].append(ae_loss.item())
             epoch_losses["termi_loss"].append(termi_loss.item())
+            epoch_losses["reward_mae"].append(reward_mae.item())
+            epoch_losses["reward_mean"].append(reward_mean.item())
+            epoch_losses["termi_acc"].append(termi_acc.item())
+            epoch_losses["termi_mean"].append(termi_mean.item())
             
             if self.model.is_gradient_accumulation_boundary():
                 self.global_step += 1
@@ -717,7 +729,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_1e-4_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_reward_loss_0d3_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
@@ -815,15 +827,11 @@ def main():
             total_episodes = global_stats["total_episodes_processed"]
             avg_step_time = global_stats["avg_step_time"]            
             # 平均所有训练器的损失
-            avg_total_loss = np.mean([d['total_loss'] for d in avg_losses_list])
-            avg_v_loss = np.mean([d['value_loss'] for d in avg_losses_list])
-            avg_p_loss = np.mean([d['policy_loss'] for d in avg_losses_list])
-            avg_il_loss = np.mean([d['imitation_loss'] for d in avg_losses_list])
-            avg_ae_loss = np.mean([d['ae_loss'] for d in avg_losses_list])
-            avg_ent = np.mean([d['entropy'] for d in avg_losses_list])
-            avg_ent_loss = np.mean([d['entropy_loss'] for d in avg_losses_list])
-            avg_reward_loss = np.mean([d['reward_loss'] for d in avg_losses_list])
-            avg_termi_loss = np.mean([d['termi_loss'] for d in avg_losses_list])
+            avg_losses = {}
+            for k in avg_losses_list[0].keys():
+                v_mean = np.mean([d[k] for d in avg_losses_list])
+                avg_losses[k] = v_mean
+                writer.add_scalar(f'Loss/{k.capitalize()}', v_mean, global_step)
             current_lrs = lrs_list[0]
 
             elapsed_time = current_time - start_time
@@ -831,21 +839,21 @@ def main():
 
             print(f"更新步 {global_step}/{TRAIN_ITERS} | 时间: {elapsed_time:.1f}s | "
                   f"奖励: {global_stats['avg_return']:.2f} | 幕长: {global_stats['avg_ep_len']:.1f} | "
-                  f"总损失: {avg_total_loss:.4f} | V Loss: {avg_v_loss:.4f} | P Loss: {avg_p_loss:.4f} | "
-                  f"IL Loss: {avg_il_loss:.4f} | AE Loss: {avg_ae_loss:.4f} | "
+                  f"总损失: {avg_losses['total_loss']:.4f} | V Loss: {avg_losses['value_loss']:.4f} | P Loss: {avg_losses['policy_loss']:.4f} | "
+                  f"IL Loss: {avg_losses['imitation_loss']:.4f} | AE Loss: {avg_losses['ae_loss']:.4f} | "
                   f"LR(V/P): {current_lrs['value']:.7f}/{current_lrs['policy']:.7f}")
 
             writer.add_scalar('Train/Learning_Rate/Value', current_lrs['value'], global_step)
             writer.add_scalar('Train/Learning_Rate/Policy', current_lrs['policy'], global_step)
-            writer.add_scalar('Loss/Total', avg_total_loss, global_step)
-            writer.add_scalar('Loss/Policy', avg_p_loss, global_step)
-            writer.add_scalar('Loss/Value', avg_v_loss, global_step)
-            writer.add_scalar('Loss/Imitation', avg_il_loss, global_step)
-            writer.add_scalar('Loss/Entropy', avg_ent_loss, global_step)
-            writer.add_scalar('Loss/AutoEncoder', avg_ae_loss, global_step)
-            writer.add_scalar('Loss/Reward', avg_reward_loss, global_step)
-            writer.add_scalar('Loss/Termination', avg_termi_loss, global_step)
-            writer.add_scalar('Metrics/Entropy', avg_ent, global_step)
+            writer.add_scalar('Loss/Total', avg_losses['total_loss'], global_step)
+            writer.add_scalar('Loss/Policy', avg_losses['policy_loss'], global_step)
+            writer.add_scalar('Loss/Value', avg_losses['value_loss'], global_step)
+            writer.add_scalar('Loss/Imitation', avg_losses['imitation_loss'], global_step)
+            writer.add_scalar('Loss/Entropy', avg_losses['entropy_loss'], global_step)
+            writer.add_scalar('Loss/AutoEncoder', avg_losses['ae_loss'], global_step)
+            writer.add_scalar('Loss/Reward', avg_losses['reward_loss'], global_step)
+            writer.add_scalar('Loss/Termination', avg_losses['termi_loss'], global_step)
+            writer.add_scalar('Metrics/Entropy', avg_losses['entropy'], global_step)
             writer.add_scalar('Rollout/_Global/Average_Return', global_stats['avg_return'], global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', global_stats['avg_ep_len'], global_step)
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
