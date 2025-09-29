@@ -204,7 +204,6 @@ class WorldModel(ActorCritic):
 
         # 1) VLA 前向传播以获取隐藏状态
         output = self._forward_vla(inputs_batch)
-        last_hidden_states = output.hidden_states[-1]
         recon_hidden_states = output.hidden_states[-1]  # len(output.hidden_states): 33
         num_patches = self._compute_num_patches()
         if 'step_count' in inputs_batch:
@@ -217,39 +216,32 @@ class WorldModel(ActorCritic):
             reward_logits = self.reward_decoder(post_patch_embeddings)  # (B, 2)
             termi_pooled = self.termi_pool(post_patch_embeddings)
             termin_hat = self.termi_decoder(torch.cat((termi_pooled, step_emb), dim=1)).squeeze(-1)
+            post_patch_proj = self.patch_proj(post_patch_embeddings)
+            mu_all = None
+            log_std_all = None
+            value = None
         else:
             post_patch_embeddings = recon_hidden_states[:, 1:num_patches+1]
+            mu_all = self.action_head(post_patch_embeddings).reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
+            # Condition-independent log_std broadcast across chunks
+            B = mu_all.size(0)
+            log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
+            log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
+            value = self._compute_value_from_hidden(post_patch_embeddings)
             reward_logits = None
             termin_hat = None
-        post_patch_proj = self.patch_proj(post_patch_embeddings)
-        projector_features = output.projector_features
+            post_patch_proj = None
 
-        # 3) 预测连续动作
-        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, inputs_batch)
-        # predicted_actions = self.action_head.predict_action(actions_hidden_states)
-        predicted_actions = self.action_head(post_patch_embeddings).reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
-        if predicted_actions.dim() == 3:
-            mu_all = predicted_actions
-        else:
-            raise ValueError(f"Unexpected predicted_actions shape: {predicted_actions.shape}")
-
-        # 3) Condition-independent log_std broadcast across chunks
-        B = mu_all.size(0)
-        log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
-        log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
-
-        # 5) Value from hidden states
-        value = self._compute_value_from_hidden(actions_hidden_states)
-        # 4) 返回用于外部损失计算的张量
-        return (
-            mu_all.to(torch.float32), 
-            log_std_all.to(torch.float32), 
-            value.to(torch.float32), 
-            post_patch_proj.to(torch.float32), 
-            projector_features.to(torch.float32),
-            reward_logits.to(torch.float32) if reward_logits is not None else None,
-            termin_hat.to(torch.float32) if termin_hat is not None else None
-            )
+        res = [
+            mu_all, 
+            log_std_all, 
+            value, 
+            post_patch_proj, 
+            reward_logits,
+            termin_hat
+            ]
+        res = tuple(tmp if tmp is None else tmp.float() for tmp in res)
+        return res
 
 
 class ReplayBuffer:

@@ -404,7 +404,7 @@ class InferenceActor(InferenceActorCom):
             try:
                 inputs_batch = self.model.prepare_inputs_batch(requests_to_process)
                 with torch.inference_mode():
-                    student_mu, student_log_std, student_value, _, _, _, _ = self.model.forward(inputs_batch)
+                    student_mu, student_log_std, student_value, _, _, _ = self.model.forward(inputs_batch)
                     _, teacher_action_norm_chunks, _, _, teacher_proj_features = self.teacher_model.forward(inputs_batch, return_vit_out=True)
                 
                 dist = Normal(student_mu, torch.exp(student_log_std))
@@ -628,12 +628,11 @@ class TrainerActor(TrainerActorCom):
             normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
 
             # --- 修改: 前向传播和损失计算 ---
-            mu, log_std, value, _, _, _, _ = self.model(mini_inputs)
+            mu, log_std, value, _, _, _ = self.model.forward(mini_inputs)
             # 1. PPO 价值损失
             value_loss = VF_COEF * F.mse_loss(value.squeeze(), mini_v_targ)
             
             if self.global_step < POLICY_TRAIN_START_STEP:
-                loss = value_loss
                 policy_loss = torch.tensor(0.0, device=loss.device)
                 ent_loss = torch.tensor(0.0, device=loss.device)
                 ent = torch.tensor(0.0, device=loss.device)
@@ -655,33 +654,33 @@ class TrainerActor(TrainerActorCom):
                 ent = torch.mean(dist.entropy())
                 ent_loss = -ENT_COEF * ent
 
-                # 3. 模仿学习损失
-                imitation_loss = F.mse_loss(mu, mini_teacher_act)
-                neg_log_loss = -dist.log_prob(mini_teacher_act).mean()
-                loss1 = imitation_loss
-                self.model.backward(loss1)  # backward掉，释放显存
-                self.model.step()
+            # 3. 模仿学习损失
+            imitation_loss = F.mse_loss(mu, mini_teacher_act)
+            neg_log_loss = -dist.log_prob(mini_teacher_act).mean()
+            loss1 = neg_log_loss
+            self.model.backward(loss1)  # backward掉，释放显存
+            self.model.step()
 
-                mini_inputs['this_action'] = mini_act  # 用于自编码器损失
-                _, _, _, post_patch_proj, _, reward_hat, termi_hat = self.model(mini_inputs)
-                non_terminal_mask = ~mini_done.squeeze()
-                if torch.any(non_terminal_mask):
-                    ae_loss = F.mse_loss(
-                        post_patch_proj[non_terminal_mask],
-                        mini_next_teacher_proj_feat[non_terminal_mask]
-                    )  # 自编码器损失 (仅对非终止状态)
-                else:
-                    ae_loss = torch.tensor(0.0, device=value_loss.device)
-                self.model.symlog_twohot_loss_func: SymLogTwoHotLoss
-                reward_loss = self.model.symlog_twohot_loss_func(reward_hat, mini_reward)
-                reward_predict = self.model.symlog_twohot_loss_func.decode(reward_hat)
-                reward_mae = F.l1_loss(reward_predict, mini_reward)
-                reward_mean = mini_reward.mean()
-                termi_loss = self.model.bce_with_logits_loss_func(termi_hat.squeeze(), mini_done.float())
-                termi_predict = termi_hat > 0
-                termi_acc = (termi_predict.squeeze() == mini_done).float().mean()
-                termi_mean = mini_done.float().mean()
-                loss = ae_loss + REWARD_LOSS_COEF * reward_loss + TERMINATION_LOSS_COEF * termi_loss
+            mini_inputs['this_action'] = mini_act  # 用于自编码器损失
+            _, _, _, post_patch_proj, reward_hat, termi_hat = self.model.forward(mini_inputs)
+            non_terminal_mask = ~mini_done.squeeze()
+            if torch.any(non_terminal_mask):
+                ae_loss = F.mse_loss(
+                    post_patch_proj[non_terminal_mask],
+                    mini_next_teacher_proj_feat[non_terminal_mask]
+                )  # 自编码器损失 (仅对非终止状态)
+            else:
+                ae_loss = torch.tensor(0.0, device=value_loss.device)
+            self.model.symlog_twohot_loss_func: SymLogTwoHotLoss
+            reward_loss = self.model.symlog_twohot_loss_func(reward_hat, mini_reward)
+            reward_predict = self.model.symlog_twohot_loss_func.decode(reward_hat)
+            reward_mae = F.l1_loss(reward_predict, mini_reward)
+            reward_mean = mini_reward.mean()
+            termi_loss = self.model.bce_with_logits_loss_func(termi_hat.squeeze(), mini_done.float())
+            termi_predict = termi_hat > 0
+            termi_acc = (termi_predict.squeeze() == mini_done).float().mean()
+            termi_mean = mini_done.float().mean()
+            loss = ae_loss + REWARD_LOSS_COEF * reward_loss + TERMINATION_LOSS_COEF * termi_loss
 
             self.model.backward(loss)
             self.model.step()
@@ -731,7 +730,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_sample_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_neg_log2_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
