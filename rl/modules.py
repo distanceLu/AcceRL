@@ -13,8 +13,10 @@ class AttentionPoolHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, out_size))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, add_emb: torch.Tensor = None) -> torch.Tensor:
         pooled = self.attn_pool(hidden_states)
+        if add_emb is not None:
+            pooled = pooled + add_emb
         out = self.mlp(pooled)
         return out
 

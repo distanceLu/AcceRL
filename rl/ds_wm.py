@@ -451,6 +451,7 @@ class InferenceActor(InferenceActorCom):
         with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
             observation = pickle.load(file)
         inputs_t = prepare_one_obs(self.cfg, self.processor, observation, observation['task_description'], TORCH_DTYPE)
+        inputs_t['step_count'] = torch.tensor([0], dtype=torch.long)  # 添加 step_count 信息
         inputs_batch = self.model.prepare_inputs_batch([inputs_t])
         with torch.no_grad():
             self.model(inputs_batch)
@@ -657,7 +658,7 @@ class TrainerActor(TrainerActorCom):
             # 3. 模仿学习损失
             imitation_loss = F.mse_loss(mu, mini_teacher_act)
             neg_log_loss = -dist.log_prob(mini_teacher_act).mean()
-            loss1 = neg_log_loss
+            loss1 = neg_log_loss + value_loss
             self.model.backward(loss1)  # backward掉，释放显存
             self.model.step()
 
@@ -730,7 +731,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_neg_log2_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_step_emb_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")

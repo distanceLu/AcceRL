@@ -50,6 +50,9 @@ class WorldModel(ActorCritic):
         #     param.requires_grad = True
         del self.action_head
         self.action_head = AttentionPoolHead(hidden_size, NUM_ACTIONS_CHUNK * ACTION_DIM).to(self.device).to(dtype=self.model_dtype)
+        del self.value_head
+        del self.attn_pool
+        self.value_head = AttentionPoolHead(hidden_size, 1)
         for param in self.action_head.parameters():
             param.requires_grad = True
         for param in self.proprio_projector.parameters():
@@ -68,14 +71,8 @@ class WorldModel(ActorCritic):
         # 注意力池化层
         rew_num_classes = 255
         self.reward_decoder = AttentionPoolHead(hidden_size, rew_num_classes).to(self.device).to(dtype=self.model_dtype)
-        self.termi_pool = AttentionPool(hidden_size).to(self.device).to(dtype=self.model_dtype)
-        self.termi_decoder = nn.Sequential(
-            nn.Linear(hidden_size+16, hidden_size, bias=False),
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, 1)
-        ).to(self.device).to(dtype=self.model_dtype)
-        self.step_count_emb = nn.Embedding(500, 16).to(self.device).to(dtype=self.model_dtype)
+        self.termi_decoder = AttentionPoolHead(hidden_size, 1)
+        self.step_count_emb = nn.Embedding(500, hidden_size).to(self.device).to(dtype=self.model_dtype)
         self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=rew_num_classes, lower_bound=-20, upper_bound=20)
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
         self.to(self.device, dtype=self.model_dtype)
@@ -108,14 +105,13 @@ class WorldModel(ActorCritic):
         policy_params = list(self.action_head.parameters())
         
         # 价值部分：价值头
-        value_params = list(self.value_head.parameters()) + list(self.attn_pool.parameters())
+        value_params = list(self.value_head.parameters())
 
         # 世界模型/语言模型部分：可训练的语言模型层和新的投影层
         lan_params = list(filter(lambda p: p.requires_grad, self.language_model.parameters()))
         world_model_params = lan_params + \
                              list(self.patch_proj.parameters()) + \
                              list(self.act_proj.parameters()) + \
-                             list(self.termi_pool.parameters()) + \
                              list(self.reward_decoder.parameters()) + \
                              list(self.termi_decoder.parameters()) + \
                              list(self.step_count_emb.parameters())
@@ -213,9 +209,8 @@ class WorldModel(ActorCritic):
         # 2) 准备用于 AE 损失的张量
         if 'this_act_emb' in inputs_batch:
             post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
-            reward_logits = self.reward_decoder(post_patch_embeddings)  # (B, 2)
-            termi_pooled = self.termi_pool(post_patch_embeddings)
-            termin_hat = self.termi_decoder(torch.cat((termi_pooled, step_emb), dim=1)).squeeze(-1)
+            reward_logits = self.reward_decoder.forward(post_patch_embeddings, step_emb)  # (B, 255)
+            termin_hat = self.termi_decoder.forward(post_patch_embeddings, step_emb).squeeze(-1)
             post_patch_proj = self.patch_proj(post_patch_embeddings)
             mu_all = None
             log_std_all = None
@@ -227,7 +222,7 @@ class WorldModel(ActorCritic):
             B = mu_all.size(0)
             log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
             log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
-            value = self._compute_value_from_hidden(post_patch_embeddings)
+            value = self.value_head.forward(post_patch_embeddings, step_emb).squeeze(-1)  # (B,)
             reward_logits = None
             termin_hat = None
             post_patch_proj = None
