@@ -58,7 +58,10 @@ GAMMA = 0.99
 LAMBDA = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 0.5
-ENT_COEF = 0.01
+ENT_COEF = 0.0
+
+# 在此步数内，策略损失的系数会从0线性增加到1
+POLICY_LOSS_WARMUP_STEPS = 10000
 
 # AE 和 IL 损失的系数
 TERMINATION_LOSS_COEF = 0.3
@@ -68,10 +71,10 @@ REWARD_LOSS_COEF = 0.3
 REWARD_SCALE = 1.0
 
 # 学习率调度参数
-VALUE_LR = 1e-4
-POLICY_LR = 1e-4
-VALUE_WARMUP_STEPS = 0
-POLICY_WARMUP_STEPS = 0
+WORLD_LR = 1e-4
+POLICY_LR = 3e-5
+WORLD_WARMUP_STEPS = 500
+POLICY_WARMUP_STEPS = 500
 POLICY_TRAIN_START_STEP = 0
 
 # 日志
@@ -505,7 +508,7 @@ class TrainerActor(TrainerActorCom):
 
         param_groups = self.base_model.get_parameter_groups()
         optimizer_params = [
-            {"params": pg["params"], "name": pg["name"], "lr": POLICY_LR if pg["name"] == "policy" else VALUE_LR}
+            {"params": pg["params"], "name": pg["name"], "lr": POLICY_LR if pg["name"] == "policy" else WORLD_LR}
             for pg in param_groups
         ]
         
@@ -579,10 +582,10 @@ class TrainerActor(TrainerActorCom):
 
         # 更新学习率
         current_lrs = {}
-        value_lr = self._get_current_lr(self.global_step, VALUE_LR, VALUE_WARMUP_STEPS, TRAIN_ITERS)
+        world_lr = self._get_current_lr(self.global_step, WORLD_LR, WORLD_WARMUP_STEPS, TRAIN_ITERS)
         policy_lr = self._get_current_lr(self.global_step, POLICY_LR, POLICY_WARMUP_STEPS, TRAIN_ITERS, start_step=POLICY_TRAIN_START_STEP)
         for param_group in self.optimizer.param_groups:
-            if param_group['name'] == 'value': param_group['lr'] = value_lr; current_lrs['value'] = value_lr
+            if param_group['name'] == 'world': param_group['lr'] = world_lr; current_lrs['world'] = world_lr
             elif param_group['name'] == 'policy': param_group['lr'] = policy_lr; current_lrs['policy'] = policy_lr
         
         if self.next_ready_batch is None:
@@ -633,15 +636,20 @@ class TrainerActor(TrainerActorCom):
             # 1. PPO 价值损失
             value_loss = VF_COEF * F.mse_loss(value.squeeze(), mini_v_targ)
             
+            # 策略损失的系数在 POLICY_LOSS_WARMUP_STEPS 步内从 0 线性增加到 1
+            policy_loss_coef = min(1.0, self.global_step / POLICY_LOSS_WARMUP_STEPS)
+            # 模仿损失的系数相应地从 1 减少到 0
+            neg_log_loss_coef = 1.0 - policy_loss_coef
+
+            # 创建策略分布
+            dist = Normal(mu, torch.exp(log_std))
+
             if self.global_step < POLICY_TRAIN_START_STEP:
-                policy_loss = torch.tensor(0.0, device=loss.device)
-                ent_loss = torch.tensor(0.0, device=loss.device)
-                ent = torch.tensor(0.0, device=loss.device)
-                imitation_loss = torch.tensor(0.0, device=loss.device)
-                ae_loss = torch.tensor(0.0, device=loss.device)
+                policy_loss = torch.tensor(0.0, device=value_loss.device)
+                ent_loss = torch.tensor(0.0, device=value_loss.device)
+                ent = torch.tensor(0.0, device=value_loss.device)
             else:
-                # 2. PPO 策略损失
-                dist = Normal(mu, torch.exp(log_std))
+                # 2. PPO 策略损失 (强化学习部分)
                 logp = dist.log_prob(mini_act)
                 with torch.no_grad():
                     dist_old = Normal(mini_mu_old, torch.exp(mini_log_std_old))
@@ -658,7 +666,10 @@ class TrainerActor(TrainerActorCom):
             # 3. 模仿学习损失
             imitation_loss = F.mse_loss(mu, mini_teacher_act)
             neg_log_loss = -dist.log_prob(mini_teacher_act).mean()
-            loss1 = neg_log_loss + value_loss
+            loss1 = (policy_loss_coef * policy_loss) + \
+                    (neg_log_loss_coef * neg_log_loss) + \
+                    value_loss + \
+                    ent_loss
             self.model.backward(loss1)  # backward掉，释放显存
             self.model.step()
 
@@ -699,6 +710,8 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["termi_acc"].append(termi_acc.item())
             epoch_losses["termi_mean"].append(termi_mean.item())
             epoch_losses["neg_log_loss"].append(neg_log_loss.item())
+            epoch_losses["policy_loss_coef"].append(policy_loss_coef)
+            epoch_losses["neg_log_loss_coef"].append(neg_log_loss_coef)
             
             if self.model.is_gradient_accumulation_boundary():
                 self.global_step += 1
@@ -731,7 +744,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_step_emb_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_plr3e-5_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
@@ -843,18 +856,10 @@ def main():
                   f"奖励: {global_stats['avg_return']:.2f} | 幕长: {global_stats['avg_ep_len']:.1f} | "
                   f"总损失: {avg_losses['total_loss']:.4f} | V Loss: {avg_losses['value_loss']:.4f} | P Loss: {avg_losses['policy_loss']:.4f} | "
                   f"IL Loss: {avg_losses['imitation_loss']:.4f} | AE Loss: {avg_losses['ae_loss']:.4f} | "
-                  f"LR(V/P): {current_lrs['value']:.7f}/{current_lrs['policy']:.7f}")
+                  f"LR(W/P): {current_lrs['world']:.7f}/{current_lrs['policy']:.7f}")
 
-            writer.add_scalar('Train/Learning_Rate/Value', current_lrs['value'], global_step)
+            writer.add_scalar('Train/Learning_Rate/World', current_lrs['world'], global_step)
             writer.add_scalar('Train/Learning_Rate/Policy', current_lrs['policy'], global_step)
-            writer.add_scalar('Loss/Total', avg_losses['total_loss'], global_step)
-            writer.add_scalar('Loss/Policy', avg_losses['policy_loss'], global_step)
-            writer.add_scalar('Loss/Value', avg_losses['value_loss'], global_step)
-            writer.add_scalar('Loss/Imitation', avg_losses['imitation_loss'], global_step)
-            writer.add_scalar('Loss/Entropy', avg_losses['entropy_loss'], global_step)
-            writer.add_scalar('Loss/AutoEncoder', avg_losses['ae_loss'], global_step)
-            writer.add_scalar('Loss/Reward', avg_losses['reward_loss'], global_step)
-            writer.add_scalar('Loss/Termination', avg_losses['termi_loss'], global_step)
             writer.add_scalar('Metrics/Entropy', avg_losses['entropy'], global_step)
             writer.add_scalar('Rollout/_Global/Average_Return', global_stats['avg_return'], global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', global_stats['avg_ep_len'], global_step)

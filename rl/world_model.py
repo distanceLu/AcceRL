@@ -120,13 +120,13 @@ class WorldModel(ActorCritic):
         print(f"WorldModel 中可训练的语言模型参数数量: {lan_params_count:,}")
 
         # 将世界模型参数合并到策略参数中进行训练
-        combined_policy_params = policy_params + world_model_params
+        combined_world_params = world_model_params + value_params
         
         # 1. 获取模型中所有实际为可训练状态的参数，作为“真实情况”的集合
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
         
         # 2. 获取所有被手动分组到 'policy' 或 'value' 组的参数，作为“分组情况”的集合
-        grouped_params_set = set(combined_policy_params) | set(value_params)
+        grouped_params_set = set(combined_world_params) | set(policy_params)
         
         # 3. 比较两个集合，如果不相等，则启动详细的诊断流程
         if all_trainable_params != grouped_params_set:
@@ -172,8 +172,8 @@ class WorldModel(ActorCritic):
 
         # 返回为优化器准备的参数组
         return [
-            {"name": "policy", "params": combined_policy_params},
-            {"name": "value", "params": value_params},
+            {"name": "world", "params": combined_world_params},
+            {"name": "policy", "params": policy_params},
         ]
 
     def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
