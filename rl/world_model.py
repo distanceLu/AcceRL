@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any, Tuple, List
 import numpy as np
+import gc
 
 import collections
 import random
@@ -10,6 +11,7 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.tensorboard import SummaryWriter
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from storm.functions_losses import SymLogTwoHotLoss
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
 # Constants
 from prismatic.vla.constants import (
@@ -24,6 +26,53 @@ from rl.actor_critic_model import ActorCritic
 from rl.modules import AttentionPool, AttentionPoolHead
 
 
+class Agent(ActorCritic):
+    def __init__(self, cfg, torch_dtype: torch.dtype):
+        cfg.use_lora = False
+        super().__init__(cfg, torch_dtype)
+        cfg.use_lora = True  # 恢复 cfg 中的 use_lora 标志
+        self.vla: OpenVLAForActionPrediction
+        lora_config = LoraConfig(
+            r=cfg.lora_rank,
+            lora_alpha=min(cfg.lora_rank, 16),
+            lora_dropout=0,
+            target_modules="all-linear",
+            init_lora_weights="gaussian",
+        )
+        self.language_model = get_peft_model(self.vla.language_model, lora_config)
+        self.language_model.print_trainable_parameters()
+        self.language_model: LlamaForCausalLM
+        for param in self.proprio_projector.parameters():
+            param.requires_grad = False
+
+    def forward(self, attention_mask, inputs_embeds):
+        language_model_output = self.language_model(
+            input_ids=None,
+            attention_mask=attention_mask,
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=inputs_embeds,
+            labels=None,
+            use_cache=None,
+            output_attentions=False,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        last_hidden_states = language_model_output.hidden_states[-1]
+        # 2) Predict continuous actions mean (mu) using action-related hidden states
+        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, inputs_batch)
+        predicted_actions = self.action_head.predict_action(actions_hidden_states)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM) or flat
+        mu_all = predicted_actions
+
+        # 3) Condition-independent log_std broadcast across chunks
+        B = mu_all.size(0)
+        log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
+        log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
+
+        value = self._compute_value_from_hidden(actions_hidden_states.detach())   # (B,)
+        return mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
+
+
 class WorldModel(ActorCritic):
     """
     基于 OpenVLA 的 Actor-Critic 模型，用于连续控制。
@@ -34,6 +83,7 @@ class WorldModel(ActorCritic):
         cfg.use_lora = False
         super().__init__(cfg, torch_dtype)
         cfg.use_lora = True  # 恢复 cfg 中的 use_lora 标志
+        self.agent = Agent(cfg, torch_dtype)
         hidden_size = self.vla.llm_dim
         lora_config = LoraConfig(
             r=cfg.lora_rank,
@@ -44,22 +94,15 @@ class WorldModel(ActorCritic):
         )
         self.language_model = get_peft_model(self.vla.language_model, lora_config)
         self.language_model.print_trainable_parameters()
-        # self.language_model = self.vla.language_model
         self.language_model: LlamaForCausalLM
-        # for param in self.language_model.model.layers[0].parameters():
-        #     param.requires_grad = True
         del self.action_head
-        self.action_head = AttentionPoolHead(hidden_size, NUM_ACTIONS_CHUNK * ACTION_DIM).to(self.device).to(dtype=self.model_dtype)
         del self.value_head
         del self.attn_pool
-        self.value_head = AttentionPoolHead(hidden_size, 1)
-        for param in self.action_head.parameters():
-            param.requires_grad = True
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         for param in self.proprio_projector.parameters():
             param.requires_grad = False
-        for param in self.value_head.parameters():
-            param.requires_grad = True
-        self.log_std_param.requires_grad = True
         self.patch_proj = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
@@ -77,36 +120,11 @@ class WorldModel(ActorCritic):
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
         self.to(self.device, dtype=self.model_dtype)
 
-    def get_trainable_params(self) -> List[Dict[str, Any]]:
-        for param in self.action_head.parameters():
-            param.requires_grad = False
-        for param in self.value_head.parameters():
-            param.requires_grad = False
-        self.log_std_param.requires_grad = False
-        auto_encoder_params = list(filter(lambda p: p.requires_grad, self.language_model.parameters())) + \
-                              list(self.patch_proj.parameters()) + \
-                              list(self.act_proj.parameters())
-        
-        # 确保没有遗漏任何可训练参数
-        all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
-        grouped_params = set(auto_encoder_params)
-        assert all_trainable_params == grouped_params, "并非所有可训练参数都被分组！"
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"可训练参数数量: {trainable_params}")
-
-        return auto_encoder_params
-
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
         """
         为优化器提供参数分组，以应用不同的学习率。
         此版本增强了检查功能，可以打印出任何未被分组的可训练参数的具体名称，以便于调试。
         """
-        # 策略部分：动作头和学习标准差
-        policy_params = list(self.action_head.parameters())
-        
-        # 价值部分：价值头
-        value_params = list(self.value_head.parameters())
-
         # 世界模型/语言模型部分：可训练的语言模型层和新的投影层
         lan_params = list(filter(lambda p: p.requires_grad, self.language_model.parameters()))
         world_model_params = lan_params + \
@@ -116,12 +134,11 @@ class WorldModel(ActorCritic):
                              list(self.termi_decoder.parameters()) + \
                              list(self.step_count_emb.parameters())
         
-        lan_params_count = sum(p.numel() for p in lan_params)
-        print(f"WorldModel 中可训练的语言模型参数数量: {lan_params_count:,}")
-
         # 将世界模型参数合并到策略参数中进行训练
-        combined_world_params = world_model_params + value_params
+        combined_world_params = world_model_params
         
+        policy_params = list(filter(lambda p: p.requires_grad, self.agent.parameters()))
+
         # 1. 获取模型中所有实际为可训练状态的参数，作为“真实情况”的集合
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
         
@@ -169,14 +186,63 @@ class WorldModel(ActorCritic):
         # 如果检查通过，打印成功的消息
         trainable_params_count = sum(p.numel() for p in all_trainable_params)
         print(f"WorldModel 中所有可训练参数已成功分组。总量: {trainable_params_count:,}")
+        return [{"name": "world", "params": combined_world_params}, {"name": "policy", "params": policy_params}]
 
-        # 返回为优化器准备的参数组
-        return [
-            {"name": "world", "params": combined_world_params},
-            {"name": "policy", "params": policy_params},
-        ]
+    def forward_policy_from_embeddings(self, embeddings: torch.Tensor, step_count: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """根据给定的隐状态嵌入预测动作分布和价值。"""
+        with torch.autocast("cuda", dtype=self.model_dtype):
+            step_emb = self.step_count_emb(step_count)
+            
+            # 动作头
+            mu = self.action_head(embeddings).reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            
+            # 价值头
+            value = self.value_head.forward(embeddings, step_emb).squeeze(-1)
+            
+            # 对数标准差
+            B = mu.size(0)
+            log_std = self.log_std_param
+            log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            
+        return mu.float(), log_std_all.float(), value.float()
 
-    def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward_world_model(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """根据当前状态和动作，预测下一个隐状态、奖励和终止符。"""
+        # 1. 准备输入
+        b_s = inputs_batch['this_action'].size(0)
+        this_action = inputs_batch['this_action'].reshape(b_s, -1).to(self.model_dtype)
+        this_act_emb = self.act_proj(this_action)
+        inputs_batch['this_act_emb'] = this_act_emb.unsqueeze(dim=1)
+
+        # 2. VLA 前向传播
+        output = self._forward_vla(inputs_batch)
+        recon_hidden_states = output.hidden_states[-1]
+        num_patches = self._compute_num_patches()
+        
+        # 3. 提取和解码
+        # 当 'this_act_emb' 存在时，图像嵌入在第2个位置之后
+        post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
+        
+        step_count = inputs_batch['step_count']
+        step_emb = self.step_count_emb(step_count)
+        
+        reward_logits = self.reward_decoder.forward(post_patch_embeddings, step_emb)
+        termin_hat = self.termi_decoder.forward(post_patch_embeddings, step_emb).squeeze(-1)
+        
+        # 4. 投影以获得下一个状态的嵌入
+        next_embeddings = self.patch_proj(post_patch_embeddings)
+        
+        return next_embeddings.float(), reward_logits.float(), termin_hat.float()
+
+    def get_post_emb(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, ...]:
+        # 1) VLA 前向传播以获取隐藏状态
+        output = self._forward_vla(inputs_batch)
+        recon_hidden_states = output.hidden_states[-1]  # len(output.hidden_states): 33
+        num_patches = self._compute_num_patches()
+        post_patch_embeddings = recon_hidden_states[:, 1:num_patches+1]
+        return post_patch_embeddings
+
+    def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, ...]:
         """
         修改后的前向传播函数。
         返回计算 PPO、AE 和 IL 损失所需的所有张量。
@@ -192,11 +258,10 @@ class WorldModel(ActorCritic):
             if k not in inputs_batch:
                 raise KeyError(f"inputs_batch missing key: {k}")
         
-        if 'this_action' in inputs_batch:
-            b_s = inputs_batch['this_action'].size(0)
-            this_action = inputs_batch['this_action'].reshape(b_s, -1).to(self.model_dtype)  # (B, ACTION_DIM * NUM_ACTIONS_CHUNK)
-            this_act_emb = self.act_proj(this_action)  # (B, 4096)
-            inputs_batch['this_act_emb'] = this_act_emb.unsqueeze(dim=1)  # (B, 1, 4096)
+        b_s = inputs_batch['this_action'].size(0)
+        this_action = inputs_batch['this_action'].reshape(b_s, -1).to(self.model_dtype)  # (B, ACTION_DIM * NUM_ACTIONS_CHUNK)
+        this_act_emb = self.act_proj(this_action)  # (B, 4096)
+        inputs_batch['this_act_emb'] = this_act_emb.unsqueeze(dim=1)  # (B, 1, 4096)
 
         # 1) VLA 前向传播以获取隐藏状态
         output = self._forward_vla(inputs_batch)
@@ -207,36 +272,22 @@ class WorldModel(ActorCritic):
             step_emb = self.step_count_emb(step_count)  # (B, 16)
         
         # 2) 准备用于 AE 损失的张量
-        if 'this_act_emb' in inputs_batch:
-            post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
-            reward_logits = self.reward_decoder.forward(post_patch_embeddings, step_emb)  # (B, 255)
-            termin_hat = self.termi_decoder.forward(post_patch_embeddings, step_emb).squeeze(-1)
-            post_patch_proj = self.patch_proj(post_patch_embeddings)
-            mu_all = None
-            log_std_all = None
-            value = None
-        else:
-            post_patch_embeddings = recon_hidden_states[:, 1:num_patches+1]
-            mu_all = self.action_head(post_patch_embeddings).reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
-            # Condition-independent log_std broadcast across chunks
-            B = mu_all.size(0)
-            log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
-            log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
-            value = self.value_head.forward(post_patch_embeddings, step_emb).squeeze(-1)  # (B,)
-            reward_logits = None
-            termin_hat = None
-            post_patch_proj = None
+        post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
+        reward_logits = self.reward_decoder.forward(post_patch_embeddings, step_emb)  # (B, 255)
+        termin_hat = self.termi_decoder.forward(post_patch_embeddings, step_emb).squeeze(-1)
+        post_patch_proj = self.patch_proj(post_patch_embeddings)
 
         res = [
-            mu_all, 
-            log_std_all, 
-            value, 
             post_patch_proj, 
             reward_logits,
             termin_hat
             ]
         res = tuple(tmp if tmp is None else tmp.float() for tmp in res)
         return res
+    
+    def agent_super_forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """仅使用 Agent 的前向传播来获取策略和价值。"""
+        return ActorCritic.forward(self.agent, inputs_batch, return_vit_out)
 
 
 class ReplayBuffer:
@@ -366,6 +417,7 @@ if __name__ == "__main__":
 
     # Create ActorCritic policy
     actor = WorldModel(cfg, TORCH_DTYPE)
+    actor.get_parameter_groups()
     teacher_actor = ActorCritic(cfg, TORCH_DTYPE)
     teacher_actor.eval()
     check_unnorm_key(cfg, actor.vla)

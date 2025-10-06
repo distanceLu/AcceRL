@@ -379,22 +379,14 @@ class ActorCritic(nn.Module):
         B = mu_all.size(0)
         log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
         log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
-        # log_std_all = self.log_std_param.predict_action(actions_hidden_states) - 2
-
-        # 4) Squashed Gaussian sampling to (-1, 1) for all chunks
-        std_all = torch.exp(log_std_all)  # (B, T, A)
-        base_dist = Normal(mu_all.to(torch.float32), std_all)        # fp32 sampling for stability
-        # dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-        dist = base_dist
-        actions_all = dist.sample()                                  # (B, T, A) in (-1, 1)
 
         # 5) Value from hidden states
         value = self._compute_value_from_hidden(actions_hidden_states.detach(), inputs_batch["step_count"])   # (B,)
 
         if return_vit_out:
-            return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32), output.projector_features.to(torch.float32)
+            return mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32), output.projector_features.to(torch.float32)
         else:
-            return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
+            return mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
 
     def load_log_std(self, checkpoint_dir: str, step: int|str):
         # --- 加载 Log_Std parameter ---
@@ -465,12 +457,12 @@ if __name__ == "__main__":
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
-        device=torch.device("cuda:0")
+        device=torch.device("cuda:2")
     )
     set_seed_everywhere(cfg.seed)
     # Create ActorCritic policy
     actor = ActorCritic(cfg, TORCH_DTYPE)
-    actor.load_log_std(cfg.pretrained_checkpoint, step="latest")
+    # actor.load_log_std(cfg.pretrained_checkpoint, step="latest")
 
     check_unnorm_key(cfg, actor.vla)
     actor.get_parameter_groups()
