@@ -190,6 +190,7 @@ class ActorCritic(nn.Module):
                     if param is p:
                         print(f"  - {n}")
                         break
+            raise ValueError("参数分组不完整！请检查未分组的参数。")
         
         return [
             {"name": "policy", "params": policy_params},
@@ -379,7 +380,7 @@ class ActorCritic(nn.Module):
         action_logits, actions_hidden_states = self._extract_actions_hidden(last_hidden_states, logits, inputs_batch)
 
         # 2. 计算价值函数
-        value = self._compute_value_from_hidden(actions_hidden_states)  # (B,)
+        value = self._compute_value_from_hidden(actions_hidden_states.detach())  # (B,)
 
         return action_logits, value.to(torch.float32)
 

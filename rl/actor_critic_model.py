@@ -116,21 +116,21 @@ class ActorCritic(nn.Module):
 
         # Heads
         self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim)
-        self.action_head = self.action_head.to(self.device).to(dtype=self.model_dtype)
+        self.action_head = self.action_head
 
         self.proprio_projector = get_proprio_projector(
             cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
         )
-        self.proprio_projector = self.proprio_projector.to(self.device).to(dtype=self.model_dtype)
+        self.proprio_projector = self.proprio_projector
 
         # Condition-independent log_std parameter (float32 for stability)
         # self.log_std_param = nn.Parameter(torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2, dtype=self.model_dtype, device=self.device))
-        # self.log_std_param = L1RegressionActionHead(input_dim=self.vla.llm_dim, hidden_dim=self.vla.llm_dim, action_dim=ACTION_DIM).to(self.device).to(dtype=self.model_dtype)
+        # self.log_std_param = L1RegressionActionHead(input_dim=self.vla.llm_dim, hidden_dim=self.vla.llm_dim, action_dim=ACTION_DIM)
         self.register_buffer('log_std_param', torch.full((NUM_ACTIONS_CHUNK, ACTION_DIM), -2.0, dtype=self.model_dtype))
 
-        self.attn_pool = nn.Sequential(
-            nn.Linear(self.vla.llm_dim, 1),
-        ).to(self.device).to(dtype=self.model_dtype)
+        self.attn_pool = nn.Linear(self.vla.llm_dim, 1)
+
+        self.step_count_emb =nn.Embedding(500,4096)
 
         # Value head: mean-pool over text tokens from the last hidden layer -> scalar
         self.value_head = nn.Sequential(
@@ -138,8 +138,10 @@ class ActorCritic(nn.Module):
             nn.Linear(self.vla.llm_dim, self.vla.llm_dim),
             nn.ReLU(),
             nn.Linear(self.vla.llm_dim, 1),
-        ).to(self.device).to(dtype=self.model_dtype)
+        )
         self.setup_finetuning(cfg.lora_rank, cfg.lora_dropout)
+
+        self.to(self.device, dtype=self.model_dtype)
 
     def setup_finetuning(self, lora_rank: int, lora_dropout: float):
         """为微调准备模型，注入 LoRA 适配器。"""
@@ -163,7 +165,7 @@ class ActorCritic(nn.Module):
         这对于为不同组件设置不同的学习率至关重要。
         """
         policy_params = list(self.action_head.parameters()) + list(self.proprio_projector.parameters())
-        value_params = list(self.value_head.parameters()) + list(self.attn_pool.parameters())
+        value_params = list(self.value_head.parameters()) + list(self.attn_pool.parameters()) + list(self.step_count_emb.parameters())
 
         if self._vla_is_lora_tuned:
             lora_params = [p for p in self.vla.parameters() if p.requires_grad]
@@ -327,7 +329,7 @@ class ActorCritic(nn.Module):
             )
         return output
 
-    def _compute_value_from_hidden(self, actions_hidden_states: torch.Tensor) -> torch.Tensor:
+    def _compute_value_from_hidden(self, actions_hidden_states: torch.Tensor, step_counts_batch: torch.Tensor) -> torch.Tensor:
         """
         使用注意力池化计算状态价值
         actions_hidden_states: (B, C * A_dim, D), 
@@ -341,9 +343,11 @@ class ActorCritic(nn.Module):
         
         # 3. 加权平均得到池化表示
         pooled = torch.sum(weights * actions_hidden_states, dim=1)  # (B, D)
-        
+        step_embedding  = self.step_count_emb(step_counts_batch)  # (B, D)
+        pooled_step  = pooled + step_embedding   # (B, D)     
+
         # 4. 通过价值头计算最终价值
-        value = self.value_head(pooled).squeeze(-1)  # (B,)
+        value = self.value_head(pooled_step).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
     def forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -385,14 +389,14 @@ class ActorCritic(nn.Module):
         actions_all = dist.sample()                                  # (B, T, A) in (-1, 1)
 
         # 5) Value from hidden states
-        value = self._compute_value_from_hidden(actions_hidden_states.detach())   # (B,)
+        value = self._compute_value_from_hidden(actions_hidden_states.detach(), inputs_batch["step_count"])   # (B,)
 
         if return_vit_out:
             return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32), output.projector_features.to(torch.float32)
         else:
             return actions_all.to(torch.float32), mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
 
-def load_log_std(self, checkpoint_dir: str, step: int|str):
+    def load_log_std(self, checkpoint_dir: str, step: int|str):
         # --- 加载 Log_Std parameter ---
         log_std_head_path = os.path.join(checkpoint_dir, f"log_std_head--{step}_checkpoint.pt")
         if not os.path.exists(log_std_head_path):

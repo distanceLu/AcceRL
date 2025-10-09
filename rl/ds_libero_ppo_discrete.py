@@ -4,7 +4,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3,4,5,6,7"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -21,6 +21,7 @@ import numpy as np
 import ray
 import torch
 import torch.distributions
+from torch.distributions import kl
 import deepspeed
 import torch.distributed as distributed 
 from torch.utils.tensorboard import SummaryWriter
@@ -44,24 +45,24 @@ from ds_com import TrainerActorCom, InferenceActorCom
 BENCHMARK = "libero_spatial"   
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 2
+NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
-NUM_ROLLOUT_WORKERS = 20
+NUM_ROLLOUT_WORKERS = 40
 ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 16
-ACCUMULATION_STEPS = 32
-SUPER_BATCH_SIZE = 512
-TRAIN_ITERS = 100000
+TRAIN_BATCH_SIZE = 20
+ACCUMULATION_STEPS = 13
+TRAIN_ITERS = 30000
 
 # PPO
 GAMMA = 0.99
 LAMBDA = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 0.5
-ENT_COEF = 0.01
+ENT_COEF = 0.00
+KL_COEF = 0.1
 
 # 奖励缩放
 REWARD_SCALE = 1.0
@@ -70,7 +71,7 @@ REWARD_SCALE = 1.0
 # 学习率调度参数
 # ================================================================
 VALUE_LR = 1e-4
-POLICY_LR = 1e-5
+POLICY_LR = 3e-6
 VALUE_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
 POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
@@ -111,7 +112,8 @@ class StatsActor:
             "step_times": deque(maxlen=window_size),
             "episode_lengths": deque(maxlen=window_size),
             "successes": deque(maxlen=window_size),
-            "total_episodes_processed": 0
+            "total_episodes_processed": 0,
+            "total_env_steps": 0
         })
 
     def add_episode_return(self, env_name: str, ep_return: float, step_time: float, ep_length: int, success: float):
@@ -121,14 +123,17 @@ class StatsActor:
         env_stats["episode_lengths"].append(ep_length)
         env_stats["successes"].append(success)
         env_stats["total_episodes_processed"] += 1
+        env_stats["total_env_steps"] += ep_length
 
     def get_stats(self) -> Dict[str, Dict[str, float]]:
         per_env_stats = {}
         all_returns, all_lengths, all_step_times = [], [], []
         total_episodes_processed = 0
+        total_env_steps = 0
 
         for env_name, env_data in self.stats.items():
             total_episodes_processed += env_data["total_episodes_processed"]
+            total_env_steps += env_data["total_env_steps"]
             all_returns.extend(env_data["episode_returns"])
             all_lengths.extend(env_data["episode_lengths"])
             all_step_times.extend(env_data["step_times"])
@@ -151,6 +156,7 @@ class StatsActor:
             "avg_ep_len": np.mean(all_lengths) if all_lengths else 0.0,
             "avg_step_time": np.mean(all_step_times) if all_step_times else 0.0,
             "total_episodes_processed": total_episodes_processed,
+            "total_env_steps": total_env_steps
         }
         return per_env_stats
 
@@ -192,25 +198,45 @@ class RolloutWorkerActor:
         self.benchmark_name = benchmark_name
         from rl.libero_env import LiberoEnvWrapper
 
-        task_id = 5
-        self.env = LiberoEnvWrapper(
-            benchmark_name=self.benchmark_name,
-            task_id=task_id,
-            image_size=224,
-            render_mode="rgb_array",
-        )
+        # 1. 初始化所有10个任务的环境
+        self.num_tasks = 10
+        print(f"Worker {wid}: 正在初始化 {self.num_tasks} 个 Libero 环境...")
+        self.envs = [
+            LiberoEnvWrapper(
+                benchmark_name=self.benchmark_name,
+                task_id=i,
+                image_size=224,
+                render_mode="rgb_array",
+            ) for i in range(self.num_tasks)
+        ]
+        print(f"Worker {wid}: 环境初始化完成。")
+        # 2. 初始化所有环境的采样权重，初始值均为1
+        self.env_weights = np.ones(self.num_tasks, dtype=np.float32)
+        # 3. 用于存储当前活动环境的占位符
+        self.env = None               # 指向当前选择的 env 对象
+        self.current_env_idx = -1     # 当前选择的 env 在列表中的索引
+
         self.wid = wid
         self.local_buffer = []
         self.task_description = None
         self.current_env_name = None
 
+    def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
+        """
+        根据权重随机选择一个环境并重置它。
+        """
+        probabilities = self.env_weights / np.sum(self.env_weights)
+        self.current_env_idx = np.random.choice(self.num_tasks, p=probabilities)
+        self.env = self.envs[self.current_env_idx]
+        obs, info = self.env.reset(seed=seed)
+        self.task_description = self.env.task_description
+        self.current_env_name = self.env.get_name()
+        return obs, info
+
     def run(self):
         try:
             current_seed = int(time.time() * 1000) + self.wid + os.getpid()
-            obs, info = self.env.reset(seed=current_seed)
-
-            self.task_description = self.env.task_description
-            self.current_env_name = self.env.get_name()
+            obs, info = self._reset_and_select_env(seed=current_seed)
 
             reward_sum = 0.0
             time_start = time.time()
@@ -241,6 +267,11 @@ class RolloutWorkerActor:
                 if done:
                     step_time = (time.time() - time_start) / max(step_count_total, 1)
                     success = float(info.get('is_success', 0.0))
+
+                    # 如果任务失败，增加对应环境的权重
+                    if success < 1.0:
+                        self.env_weights[self.current_env_idx] += 1
+
                     self.stats_actor.add_episode_return.remote(
                         self.current_env_name, reward_sum, step_time, step_count_total, success
                     )
@@ -249,9 +280,8 @@ class RolloutWorkerActor:
                         self._process_traj(self.local_buffer, 0.0)
                     self.local_buffer.clear()
                     current_seed = int(time.time() * 1000) + self.wid + os.getpid()
-                    obs, info = self.env.reset(seed=current_seed)
-                    self.task_description = self.env.task_description
-                    self.current_env_name = self.env.get_name()
+                    obs, info = self._reset_and_select_env(seed=current_seed)
+                    
                     time_start = time.time()
                     step_count_total = 0
                 elif len(self.local_buffer) == ROLLOUT_LOCAL_BUF + 1:
@@ -278,7 +308,6 @@ class RolloutWorkerActor:
         advs_np = np.array(advs, dtype=np.float32)
 
         batch: List[Experience] = []
-        # ############################# 核心修改：创建新的 Experience 对象 ##############################
         for i, (s, a_token, _, logits, _) in enumerate(traj_segment):
             batch.append(
                 Experience(
@@ -289,7 +318,6 @@ class RolloutWorkerActor:
                     value_target=float(rets[i]),
                 )
             )
-        # ##########################################################################################
         self.replay.add_batch.remote(batch)
 
 # ================================================================
@@ -430,7 +458,7 @@ class TrainerActor(TrainerActorCom):
         self.data_dtype = None
         self.next_ready_batch: Optional[Tuple] = None
         self.data_fetching_task = None
-        self.super_batch_size = SUPER_BATCH_SIZE
+        self.super_batch_size = TRAIN_BATCH_SIZE * ACCUMULATION_STEPS
         self.global_step = 0
 
         print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()}")
@@ -571,7 +599,9 @@ class TrainerActor(TrainerActorCom):
         global_std = torch.sqrt(global_var)
         # ========================================================
 
-        epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses = [], [], [], []
+        epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses, epoch_kl_losses = [], [], [], [], []
+        epoch_ent, epoch_kl_divs = [], []   
+        
         num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE
         
         for i in range(num_updates_in_epoch):
@@ -601,6 +631,8 @@ class TrainerActor(TrainerActorCom):
                 loss = value_loss
                 policy_loss = torch.tensor(0.0, device=loss.device)
                 ent_loss = torch.tensor(0.0, device=loss.device)
+                kl_loss = torch.tensor(0.0, device=loss.device) 
+                kl_div = 0.0
             else:
                 # 策略与熵损失 (离散版本)
                 dist = torch.distributions.Categorical(logits=action_logits_reshape)
@@ -610,14 +642,19 @@ class TrainerActor(TrainerActorCom):
                     dist_old = torch.distributions.Categorical(logits=mini_logits_old)
                     logp_old = dist_old.log_prob(mini_act_token)
 
+                kl_div_tensor = kl.kl_divergence(dist_old, dist)
+                kl_div = torch.mean(kl_div_tensor).item() # 作为指标
+                kl_loss = KL_COEF * torch.mean(kl_div_tensor) # 作为损失
+
                 ratio = torch.exp(logp - logp_old)
                 adv_unsqueezed = normalized_adv.unsqueeze(dim=-1).unsqueeze(dim=-1)
                 surr1 = ratio * adv_unsqueezed
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
+                ent = torch.mean(dist.entropy())
+                ent_loss = -ENT_COEF * ent
                 
-                ent_loss = -ENT_COEF * torch.mean(dist.entropy())
-                loss = policy_loss + value_loss + ent_loss
+                loss = policy_loss + value_loss + ent_loss + kl_loss
 
             self.model.backward(loss)
             self.model.step()
@@ -625,6 +662,9 @@ class TrainerActor(TrainerActorCom):
             epoch_p_losses.append(policy_loss.item())
             epoch_v_losses.append(value_loss.item())
             epoch_e_losses.append(ent_loss.item())
+            epoch_kl_losses.append(kl_loss.item())
+            epoch_ent.append(ent.item())
+            epoch_kl_divs.append(kl_div)
             if self.model.is_gradient_accumulation_boundary():
                 self.global_step += 1
 
@@ -632,8 +672,11 @@ class TrainerActor(TrainerActorCom):
         avg_p_loss = np.mean(epoch_p_losses)
         avg_v_loss = np.mean(epoch_v_losses)
         avg_e_loss = np.mean(epoch_e_losses)
+        avg_kl_loss = np.mean(epoch_kl_losses)
+        avg_ent = np.mean(epoch_ent)
+        avg_kl_div = np.mean(epoch_kl_divs)
 
-        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, current_lrs, self.global_step
+        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, avg_kl_loss, current_lrs, self.global_step, avg_ent, avg_kl_div
 
 # ================================================================
 # 5. 主逻辑
@@ -662,7 +705,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_indep_clip_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_spatial_balance_env_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
@@ -735,7 +778,7 @@ def main():
     for w in rollout_workers: w.run.remote()
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
-    min_buffer_size_for_start = SUPER_BATCH_SIZE
+    min_buffer_size_for_start = TRAIN_BATCH_SIZE * ACCUMULATION_STEPS
     assert min_buffer_size_for_start < REPLAY_CAPACITY, "初始填充量必须小于回放池总容量"
     while not all(size >= min_buffer_size_for_start for size in ray.get([rb.size.remote() for rb in replay_buffers])):
         sizes = ray.get([rb.size.remote() for rb in replay_buffers])
@@ -746,11 +789,12 @@ def main():
     print("\n--- 步骤 6: 开始主训练与同步循环 ---")
     start_time = time.time()
     last_log_time = time.time()
+    last_log_global_step = 0
     global_step = 0
     while global_step < TRAIN_ITERS:
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
-        _, _, _, _, _, global_step = results[0]
+        _, _, _, _, _, _, global_step, _, _ = results[0]
 
         broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
         receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
@@ -759,13 +803,19 @@ def main():
         current_time = time.time()
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:
             all_stats = ray.get(stats_actor.get_stats.remote())
+
+            elapsed_log_time = current_time - last_log_time
+            steps_since_last_log = global_step - last_log_global_step
+            training_speed_steps_per_sec = steps_since_last_log / elapsed_log_time if elapsed_log_time > 0 else 0.0
+
             global_stats = all_stats.pop("_global_")
             avg_return = global_stats["avg_return"]
             avg_ep_len = global_stats["avg_ep_len"]
             total_episodes = global_stats["total_episodes_processed"]
+            total_env_steps = global_stats["total_env_steps"]
             avg_step_time = global_stats["avg_step_time"]
 
-            total_losses, p_losses, v_losses, e_losses, lrs_list, _ = zip(*results)
+            total_losses, p_losses, v_losses, e_losses, kl_losses, lrs_list, _, ents, avg_kl_divs = zip(*results)
             current_lrs = lrs_list[0]
 
             elapsed_time = current_time - start_time
@@ -782,10 +832,17 @@ def main():
             writer.add_scalar('Loss/Policy', np.mean(p_losses), global_step)
             writer.add_scalar('Loss/Value', np.mean(v_losses), global_step)
             writer.add_scalar('Loss/Entropy', np.mean(e_losses), global_step)
+            writer.add_scalar('Loss/KL', np.mean(kl_losses), global_step)
+
+            writer.add_scalar('Metrics/Entropy', np.mean(ents), global_step)
+            writer.add_scalar('Metrics/KL_Divergence', np.mean(avg_kl_divs), global_step)
+            writer.add_scalar('Metrics/Training_Speed_Steps_per_Sec', training_speed_steps_per_sec, global_step)
+
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
+            writer.add_scalar('System/Total_Env_Steps', total_env_steps, global_step)
             writer.add_scalar('System/Avg_Step_Time', avg_step_time, global_step)
 
             for env_name, env_stats in all_stats.items():
@@ -796,6 +853,7 @@ def main():
                 writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
 
             last_log_time = current_time
+            last_log_global_step = global_step
 
     print(f"\n成功完成 {TRAIN_ITERS} 次训练与同步循环！")
     writer.close()

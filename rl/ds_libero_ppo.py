@@ -4,7 +4,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3,4,5,6,7"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -242,6 +242,7 @@ class RolloutWorkerActor:
             while True:
                 # 2) 用 prepare_one_obs 生成单条样本
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
+                inputs_t["step_count"] = torch.tensor([step_count], dtype=torch.long)
                 # 3) 发给 InferenceActor：它返回 env 动作（已 unnormalize），以及标准化动作与策略信息
                 action_env, action_norm, mu, log_std, value = ray.get(self.infer.request.remote(inputs_t))
                 chunk_reward = 0.0
@@ -426,6 +427,7 @@ class InferenceActor(InferenceActorCom):
         with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
             observation = pickle.load(file)
         inputs_t = prepare_one_obs(self.cfg, self.processor, observation, observation['task_description'], TORCH_DTYPE)
+        inputs_t["step_count"] = torch.tensor([0], dtype=torch.long)
         inputs_batch = self.model.prepare_inputs_batch([inputs_t])
         with torch.no_grad():
             actions_all, mu_all, log_std_all, value = self.model(inputs_batch)
@@ -767,7 +769,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_10tasks_lstd-3_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_spatial_step_emb_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
