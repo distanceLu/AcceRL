@@ -49,7 +49,7 @@ INFERENCE_BATCH = 2
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 24
-ACCUMULATION_STEPS = 21
+ACCUMULATION_STEPS = 1
 TRAIN_ITERS = 100000
 
 # PPO
@@ -63,7 +63,7 @@ ENT_COEF = 0.0
 POLICY_LOSS_WARMUP_STEPS = 10000
 
 # 世界模型想象步数
-IMAGINE_STEP = 5
+IMAGINE_STEP = 1
 IMAGINATION_LOSS_COEF = 0.5 # 想象损失的权重系数
 
 # AE 和 IL 损失的系数
@@ -559,64 +559,6 @@ class TrainerActor(TrainerActorCom):
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
 
-    def imagine(self, mini_inputs: Dict[str, torch.Tensor]) -> Tuple:
-        """
-        在学习到的世界模型中进行想象。
-        从 mini_inputs 中的真实状态开始，向前滚动 IMAGINE_STEP 步。
-        返回轨迹和策略分布参数。
-        """
-        model_module = self.model.module
-        
-        # 存储想象轨迹的容器
-        imagined_logps = []
-        imagined_values = []
-        imagined_rewards = []
-        imagined_dones = []
-        imagined_mus = []
-        imagined_log_stds = []
-
-        with torch.no_grad():
-            # 1. 从真实状态 mini_inputs 获取初始隐状态 (embeddings)
-            current_embeddings = model_module.get_post_emb(mini_inputs)
-        
-        const_inputs = mini_inputs.copy()
-        
-        # 2. 开始想象循环
-        for step in range(IMAGINE_STEP):
-            step_count = mini_inputs['step_count'] + step
-            mu, log_std, value = model_module.forward_policy_from_embeddings(current_embeddings, step_count)
-            
-            dist = Normal(mu, torch.exp(log_std))
-            action = dist.sample()
-            log_p = dist.log_prob(action)
-
-            imagined_logps.append(log_p)
-            imagined_values.append(value)
-            imagined_mus.append(mu)
-            imagined_log_stds.append(log_std)
-
-            const_inputs['this_action'] = action
-            const_inputs['step_count'] = step_count
-            with torch.no_grad():
-                next_embeddings, reward_hat, termi_hat = model_module.forward_world_model(const_inputs)
-            
-            predicted_reward = model_module.symlog_twohot_loss_func.decode(reward_hat)
-            predicted_done = (termi_hat > 0).squeeze()
-
-            imagined_rewards.append(predicted_reward)
-            imagined_dones.append(predicted_done)
-            
-            current_embeddings = next_embeddings
-
-        step_count = mini_inputs['step_count'] + IMAGINE_STEP
-        with torch.no_grad():
-            _, _, last_value = model_module.forward_policy_from_embeddings(current_embeddings, step_count)
-
-        return (torch.stack(imagined_logps), torch.stack(imagined_values), 
-                torch.stack(imagined_rewards), torch.stack(imagined_dones), 
-                torch.stack(imagined_mus), torch.stack(imagined_log_stds),
-                last_value)
-
     def compute_imagined_gae(self, rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         为想象出的轨迹计算 GAE (Generalized Advantage Estimation)。
@@ -657,6 +599,28 @@ class TrainerActor(TrainerActorCom):
             valid_mask_flat = valid_mask.reshape(-1)
             num_valid_steps = valid_mask_flat.sum().clamp(min=1.0)
         return valid_mask_flat, num_valid_steps
+    
+    def compute_imagine_loss(self, mini_inputs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        # --- 3. 想象数据 RL 损失 ---
+        (imagined_logps, imagined_values, imagined_rewards, imagined_dones, imagined_mus, imagined_log_stds, last_value) = self.model.imagine(mini_inputs, IMAGINE_STEP)
+        valid_mask_flat, num_valid_steps = self._create_validity_mask(imagined_dones)
+        imagined_advs, imagined_rets = self.compute_imagined_gae(imagined_rewards, imagined_values, imagined_dones, last_value)
+        
+        imagined_advs_flat, imagined_rets_flat, imagined_values_flat = \
+            imagined_advs.reshape(-1), imagined_rets.reshape(-1), imagined_values.reshape(-1)
+        last_two_dim = imagined_logps.shape[-1] * imagined_logps.shape[-2]
+        imagined_logps_flat = imagined_logps.reshape(-1, last_two_dim)
+        
+        with torch.no_grad():
+            valid_advs = torch.masked_select(imagined_advs_flat, valid_mask_flat)
+            adv_mean, adv_std = valid_advs.mean(), valid_advs.std() + 1e-8
+            normalized_imagined_advs = (imagined_advs_flat - adv_mean) / adv_std
+        
+        policy_loss_terms = -(normalized_imagined_advs.unsqueeze(dim=-1).detach() * imagined_logps_flat)
+        imagination_policy_loss = (policy_loss_terms * valid_mask_flat.unsqueeze(dim=-1)).sum() / num_valid_steps
+        value_loss_terms = F.mse_loss(imagined_values_flat, imagined_rets_flat.detach(), reduction='none')
+        imagination_value_loss = (value_loss_terms * valid_mask_flat).sum() / num_valid_steps
+        return imagination_policy_loss, imagination_value_loss
 
     async def run_training_epoch(self) -> Tuple[Dict[str, float], Dict[str, int]]:
         if self.next_ready_batch is None:
@@ -703,35 +667,37 @@ class TrainerActor(TrainerActorCom):
             mini_act, mini_adv, mini_mu_old, mini_log_std_old, mini_v_targ, mini_done, mini_next_teacher_proj_feat, mini_reward = \
                 act_t[start:end], adv_t[start:end], mu_old_t[start:end], log_std_old_t[start:end], v_targ_t[start:end], done_t[start:end], next_teacher_proj_feat_t[start:end], reward_t[start:end]
             
-            # --- 1. 真实数据 RL & IL 损失 ---
-            # 第一个前向传播：仅基于状态获取策略和价值
-            mu, log_std, value = self.model.agent_super_forward(mini_inputs)
+            # # --- 1. 真实数据 RL & IL 损失 ---
+            # # 第一个前向传播：仅基于状态获取策略和价值
+            # mu, log_std, value = self.model.agent_super_forward(mini_inputs)
             
-            real_value_loss = VF_COEF * F.mse_loss(value.squeeze(), mini_v_targ)
-            policy_loss_coef = min(1.0, self.global_step / POLICY_LOSS_WARMUP_STEPS)
-            # 模仿损失的系数相应地从 1 减少到 0
-            neg_log_loss_coef = 1.0 - policy_loss_coef
+            # real_value_loss = VF_COEF * F.mse_loss(value.squeeze(), mini_v_targ)
+            # policy_loss_coef = min(1.0, self.global_step / POLICY_LOSS_WARMUP_STEPS)
+            # # 模仿损失的系数相应地从 1 减少到 0
+            # neg_log_loss_coef = 1.0 - policy_loss_coef
 
-            # 创建策略分布
-            dist = Normal(mu, torch.exp(log_std))
+            # # 创建策略分布
+            # dist = Normal(mu, torch.exp(log_std))
             
-            if self.global_step >= POLICY_TRAIN_START_STEP:
-                normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
-                logp = dist.log_prob(mini_act)
-                with torch.no_grad():
-                    dist_old = Normal(mini_mu_old, torch.exp(mini_log_std_old))
-                    logp_old = dist_old.log_prob(mini_act)
-                ratio = torch.exp(logp - logp_old)
-                adv_unsqueezed = normalized_adv.unsqueeze(-1).unsqueeze(-1)
-                surr1, surr2 = ratio * adv_unsqueezed, torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
-                real_policy_loss = -torch.mean(torch.min(surr1, surr2))
-                real_ent = torch.mean(dist.entropy())
-                real_ent_loss = -ENT_COEF * real_ent
-            else:
-                real_policy_loss, real_ent_loss, real_ent = torch.tensor(0.0, device=value.device), torch.tensor(0.0, device=value.device), torch.tensor(0.0, device=value.device)
-            real_rl_im_loss = policy_loss_coef * real_policy_loss + real_ent_loss + real_value_loss
-            self.model.backward(real_rl_im_loss)  # 节省显存
-            self.model.step()
+            # if self.global_step >= POLICY_TRAIN_START_STEP:
+            #     normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
+            #     logp = dist.log_prob(mini_act)
+            #     with torch.no_grad():
+            #         dist_old = Normal(mini_mu_old, torch.exp(mini_log_std_old))
+            #         logp_old = dist_old.log_prob(mini_act)
+            #     ratio = torch.exp(logp - logp_old)
+            #     adv_unsqueezed = normalized_adv.unsqueeze(-1).unsqueeze(-1)
+            #     surr1, surr2 = ratio * adv_unsqueezed, torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
+            #     real_policy_loss = -torch.mean(torch.min(surr1, surr2))
+            #     real_ent = torch.mean(dist.entropy())
+            #     real_ent_loss = -ENT_COEF * real_ent
+            # else:
+            #     real_policy_loss, real_ent_loss, real_ent = torch.tensor(0.0, device=value.device), torch.tensor(0.0, device=value.device), torch.tensor(0.0, device=value.device)
+            # real_rl_im_loss = policy_loss_coef * real_policy_loss + real_ent_loss + real_value_loss
+            # self.model.backward(real_rl_im_loss)  # 节省显存
+            # self.model.step()
+            real_value_loss = torch.tensor(0.0, device=act_t.device)
+            real_policy_loss, real_ent_loss, real_ent = torch.tensor(0.0, device=act_t.device), torch.tensor(0.0, device=act_t.device), torch.tensor(0.0, device=act_t.device)
             # --- 2. 世界模型损失 ---
             # 第二个前向传播：基于状态和动作获取世界模型预测
             post_patch_proj, reward_hat, termi_hat = self.model.forward({**mini_inputs, 'this_action': mini_act})
@@ -743,7 +709,7 @@ class TrainerActor(TrainerActorCom):
                     mini_next_teacher_proj_feat[non_terminal_mask]
                 )  # 自编码器损失 (仅对非终止状态)
             else:
-                ae_loss = torch.tensor(0.0, device=value.device)
+                ae_loss = torch.tensor(0.0, device=post_patch_proj.device)
             self.model.symlog_twohot_loss_func: SymLogTwoHotLoss
             reward_loss = self.model.symlog_twohot_loss_func(reward_hat, mini_reward)
             reward_predict = self.model.symlog_twohot_loss_func.decode(reward_hat)
@@ -754,34 +720,12 @@ class TrainerActor(TrainerActorCom):
             termi_acc = (termi_predict.squeeze() == mini_done).float().mean()
             termi_mean = mini_done.float().mean()
             world_model_loss = ae_loss + REWARD_LOSS_COEF * reward_loss + TERMINATION_LOSS_COEF * termi_loss
+            self.model.backward(world_model_loss)  # 节省显存
+            self.model.step()
 
-            # # --- 3. 想象数据 RL 损失 ---
-            # (imagined_logps, imagined_values, imagined_rewards, imagined_dones, imagined_mus, imagined_log_stds, last_value) = self.imagine(mini_inputs)
-            # valid_mask_flat, num_valid_steps = self._create_validity_mask(imagined_dones)
-            # imagined_advs, imagined_rets = self.compute_imagined_gae(imagined_rewards, imagined_values, imagined_dones, last_value)
-            
-            # imagined_advs_flat, imagined_rets_flat, imagined_values_flat = \
-            #     imagined_advs.reshape(-1), imagined_rets.reshape(-1), imagined_values.reshape(-1)
-            # last_two_dim = imagined_logps.shape[-1] * imagined_logps.shape[-2]
-            # imagined_logps_flat = imagined_logps.reshape(-1, last_two_dim)
-            
-            # with torch.no_grad():
-            #     valid_advs = torch.masked_select(imagined_advs_flat, valid_mask_flat)
-            #     adv_mean, adv_std = valid_advs.mean(), valid_advs.std() + 1e-8
-            #     normalized_imagined_advs = (imagined_advs_flat - adv_mean) / adv_std
-            
-            # policy_loss_terms = -(normalized_imagined_advs.unsqueeze(dim=-1).detach() * imagined_logps_flat)
-            # imagination_policy_loss = (policy_loss_terms * valid_mask_flat.unsqueeze(dim=-1)).sum() / num_valid_steps
-            # value_loss_terms = F.mse_loss(imagined_values_flat, imagined_rets_flat.detach(), reduction='none')
-            # imagination_value_loss = (value_loss_terms * valid_mask_flat).sum() / num_valid_steps
-            imagination_policy_loss = torch.tensor(0.0, device=value.device)
-            imagination_value_loss = torch.tensor(0.0, device=value.device)
             # --- 4. 组合所有损失并进行单次反向传播和优化 ---
-            total_loss = (
-                world_model_loss +
-                IMAGINATION_LOSS_COEF * (imagination_policy_loss + imagination_value_loss)
-            )
-            
+            imagination_policy_loss, imagination_value_loss = self.compute_imagine_loss(mini_inputs)
+            total_loss = imagination_value_loss
             self.model.backward(total_loss)
             self.model.step()
             
@@ -798,8 +742,8 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["reward_mean"].append(reward_mean.item())
             epoch_losses["termi_acc"].append(termi_acc.item())
             epoch_losses["termi_mean"].append(termi_mean.item())
-            epoch_losses["policy_loss_coef"].append(policy_loss_coef)
-            epoch_losses["neg_log_loss_coef"].append(neg_log_loss_coef)
+            # epoch_losses["policy_loss_coef"].append(policy_loss_coef)
+            # epoch_losses["neg_log_loss_coef"].append(neg_log_loss_coef)
             epoch_losses["imagination_policy_loss"].append(imagination_policy_loss.item())
             epoch_losses["imagination_value_loss"].append(imagination_value_loss.item())
             
@@ -834,7 +778,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_agent_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_wm_vlr_3e-6_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")

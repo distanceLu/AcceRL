@@ -494,6 +494,99 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             )
             return torch.cat([labels[:, :1], projected_patch_labels, labels[:, 1:]], dim=1)
         return None
+    
+    def forward_vision(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_projector_features: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        proprio=None,
+        proprio_projector=None,
+        noisy_actions=None,
+        noisy_action_projector=None,
+        diffusion_timestep_embeddings=None,
+        use_film: bool = False,
+        this_act_emb: torch.FloatTensor = None,
+    ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        output_projector_features = output_projector_features if output_projector_features is not None else False
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # Respect `use_cache` only if not training (even if `gradient_checkpointing` is off)
+        use_cache = use_cache and not self.training
+
+        # Instantiate Placeholder for Projector Features
+        projected_patch_embeddings = None
+        assert past_key_values is None, "Unexpected key `past_key_values` provided during multimodal forward!"
+
+        # Get input embeddings (from language model embeddings)
+        input_embeddings = self.get_input_embeddings()(input_ids)  # (B, seq_len, D)
+
+        # Extract action masks
+        all_actions_mask = self._process_action_masks(labels)
+
+        # Extract the language portion of the input embeddings (i.e. remove the action tokens portion)
+        language_embeddings = input_embeddings[~all_actions_mask].reshape(
+            input_embeddings.shape[0], -1, input_embeddings.shape[2]
+        )  # (B, lang_seq_len, llm_dim)
+
+        # Get visual features
+        projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
+
+        # Add proprioceptive state if provided
+        projected_patch_embeddings = self._process_proprio_features(
+            projected_patch_embeddings, proprio, proprio_projector
+        )
+
+        # [Diffusion] Add diffusion timestep embedding if provided
+        if diffusion_timestep_embeddings is not None:
+            # For simplicity, just append diffusion timestep embedding to the end of projected vision patch tokens
+            projected_patch_embeddings = torch.cat(
+                (projected_patch_embeddings, diffusion_timestep_embeddings), dim=1
+            )
+
+        if this_act_emb is not None:
+            # For simplicity, just append last action embedding to the end of projected vision patch tokens
+            projected_patch_embeddings = torch.cat((this_act_emb, projected_patch_embeddings), dim=1)
+
+        # Process action embeddings
+        if noisy_actions is not None:
+            # Get mask corresponding to all action tokens
+            all_actions_mask = self._process_action_masks(labels)
+
+            # Reshape noisy actions into individual action tokens
+            # noisy_actions: (B, chunk_len, action_dim) -> (B, chunk_len * action_dim, 1)
+            B = noisy_actions.shape[0]
+            noisy_actions = noisy_actions.reshape(B, -1).unsqueeze(-1)
+
+            # Project noisy action tokens into language model embedding space
+            noisy_action_features = noisy_action_projector(noisy_actions)  # (B, chunk_len * action_dim, llm_dim)
+
+            # Replace embeddings of the action tokens with noisy action embeddings
+            input_embeddings = self._replace_input_embeddings(
+                input_embeddings, all_actions_mask, noisy_action_features
+            )
+        else:
+            # Replace the embeddings of the action tokens with zeros
+            # (Later on, the positional embeddings will be added to them)
+            all_actions_mask = all_actions_mask.unsqueeze(-1)  # (B, seq_len, 1)
+            input_embeddings = input_embeddings * ~all_actions_mask
+
+        # Build multimodal embeddings & attention mask
+        multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
+            input_embeddings, projected_patch_embeddings, attention_mask
+        )
+        return multimodal_embeddings, multimodal_attention_mask
 
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(

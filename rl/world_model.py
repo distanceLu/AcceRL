@@ -3,7 +3,7 @@ import torch.nn as nn
 from typing import Dict, Any, Tuple, List
 import numpy as np
 import gc
-
+from torch.distributions import Normal
 import collections
 import random
 
@@ -45,7 +45,7 @@ class Agent(ActorCritic):
         for param in self.proprio_projector.parameters():
             param.requires_grad = False
 
-    def forward(self, attention_mask, inputs_embeds):
+    def forward(self, attention_mask, inputs_embeds, labels):
         language_model_output = self.language_model(
             input_ids=None,
             attention_mask=attention_mask,
@@ -60,7 +60,7 @@ class Agent(ActorCritic):
         )
         last_hidden_states = language_model_output.hidden_states[-1]
         # 2) Predict continuous actions mean (mu) using action-related hidden states
-        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, inputs_batch)
+        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, labels, False)
         predicted_actions = self.action_head.predict_action(actions_hidden_states)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM) or flat
         mu_all = predicted_actions
 
@@ -133,11 +133,12 @@ class WorldModel(ActorCritic):
                              list(self.reward_decoder.parameters()) + \
                              list(self.termi_decoder.parameters()) + \
                              list(self.step_count_emb.parameters())
-        
-        # 将世界模型参数合并到策略参数中进行训练
+        value_params = list(self.agent.value_head.parameters()) + list(self.agent.attn_pool.parameters())
         combined_world_params = world_model_params
         
-        policy_params = list(filter(lambda p: p.requires_grad, self.agent.parameters()))
+        policy_lang = list(filter(lambda p: p.requires_grad, self.agent.language_model.parameters()))
+        action_params = list(self.agent.action_head.parameters())
+        policy_params = policy_lang + action_params + value_params
 
         # 1. 获取模型中所有实际为可训练状态的参数，作为“真实情况”的集合
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
@@ -188,34 +189,31 @@ class WorldModel(ActorCritic):
         print(f"WorldModel 中所有可训练参数已成功分组。总量: {trainable_params_count:,}")
         return [{"name": "world", "params": combined_world_params}, {"name": "policy", "params": policy_params}]
 
-    def forward_policy_from_embeddings(self, embeddings: torch.Tensor, step_count: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """根据给定的隐状态嵌入预测动作分布和价值。"""
-        with torch.autocast("cuda", dtype=self.model_dtype):
-            step_emb = self.step_count_emb(step_count)
-            
-            # 动作头
-            mu = self.action_head(embeddings).reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)
-            
-            # 价值头
-            value = self.value_head.forward(embeddings, step_emb).squeeze(-1)
-            
-            # 对数标准差
-            B = mu.size(0)
-            log_std = self.log_std_param
-            log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)
-            
-        return mu.float(), log_std_all.float(), value.float()
-
-    def forward_world_model(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def predict_next(self, multimodal_emb, multimodal_att_mask, this_action, step_count) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """根据当前状态和动作，预测下一个隐状态、奖励和终止符。"""
-        # 1. 准备输入
-        b_s = inputs_batch['this_action'].size(0)
-        this_action = inputs_batch['this_action'].reshape(b_s, -1).to(self.model_dtype)
-        this_act_emb = self.act_proj(this_action)
-        inputs_batch['this_act_emb'] = this_act_emb.unsqueeze(dim=1)
-
-        # 2. VLA 前向传播
-        output = self._forward_vla(inputs_batch)
+        b_s = multimodal_emb.size(0)
+        this_action = this_action.reshape(b_s, 1, -1).to(self.model_dtype)  # (B, 1, ACTION_DIM * NUM_ACTIONS_CHUNK)
+        this_act_emb = self.act_proj(this_action)  # (B, 1, 4096)
+        act_att_mask = torch.full(
+                (b_s, 1),
+                fill_value=True,
+                dtype=multimodal_emb.dtype,
+                device=multimodal_emb.device,
+            )
+        multimodal_emb = torch.cat([multimodal_emb[:, :1, :], this_act_emb, multimodal_emb[:, 1:, :]], dim=1)
+        multimodal_att_mask = torch.cat([multimodal_att_mask[:, :1], act_att_mask, multimodal_att_mask[:, 1:]], dim=1)
+        output = self.language_model(
+            input_ids=None,
+            attention_mask=multimodal_att_mask,
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=multimodal_emb,
+            labels=None,
+            use_cache=None,
+            output_attentions=False,
+            output_hidden_states=True,
+            return_dict=True,
+        )
         recon_hidden_states = output.hidden_states[-1]
         num_patches = self._compute_num_patches()
         
@@ -223,7 +221,6 @@ class WorldModel(ActorCritic):
         # 当 'this_act_emb' 存在时，图像嵌入在第2个位置之后
         post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
         
-        step_count = inputs_batch['step_count']
         step_emb = self.step_count_emb(step_count)
         
         reward_logits = self.reward_decoder.forward(post_patch_embeddings, step_emb)
@@ -233,14 +230,25 @@ class WorldModel(ActorCritic):
         next_embeddings = self.patch_proj(post_patch_embeddings)
         
         return next_embeddings.float(), reward_logits.float(), termin_hat.float()
-
-    def get_post_emb(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, ...]:
-        # 1) VLA 前向传播以获取隐藏状态
-        output = self._forward_vla(inputs_batch)
-        recon_hidden_states = output.hidden_states[-1]  # len(output.hidden_states): 33
-        num_patches = self._compute_num_patches()
-        post_patch_embeddings = recon_hidden_states[:, 1:num_patches+1]
-        return post_patch_embeddings
+    
+    def forward_vision(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
+        with torch.autocast("cuda", dtype=self.model_dtype):
+            self.vla: OpenVLAForActionPrediction
+            multimodal_emb, multimodal_att_mask = self.vla.forward_vision(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                pixel_values=batch["pixel_values"].to(self.model_dtype),
+                labels=batch["labels"],  # for mask derivation and potential loss
+                output_hidden_states=True,
+                proprio=batch["proprio"].to(self.model_dtype) if self.cfg.use_proprio else None,
+                proprio_projector=self.proprio_projector if self.cfg.use_proprio else None,
+                noisy_actions=None,
+                noisy_action_projector=None,
+                diffusion_timestep_embeddings=None,
+                use_film=self.cfg.use_film,
+                this_act_emb=batch.get("this_act_emb", None),  # (B, 1, 4096) or None
+            )
+        return multimodal_emb, multimodal_att_mask
 
     def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, ...]:
         """
@@ -288,6 +296,59 @@ class WorldModel(ActorCritic):
     def agent_super_forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """仅使用 Agent 的前向传播来获取策略和价值。"""
         return ActorCritic.forward(self.agent, inputs_batch, return_vit_out)
+
+    def imagine(self, mini_inputs: Dict[str, torch.Tensor], imagine_step) -> Tuple:
+        """
+        在学习到的世界模型中进行想象。
+        从 mini_inputs 中的真实状态开始，向前滚动 IMAGINE_STEP 步。
+        返回轨迹和策略分布参数。
+        """
+        # 存储想象轨迹的容器
+        imagined_logps = []
+        imagined_values = []
+        imagined_rewards = []
+        imagined_dones = []
+        imagined_mus = []
+        imagined_log_stds = []
+        num_patches = self._compute_num_patches()
+
+        with torch.no_grad():
+            # 1. 从真实状态 mini_inputs 获取初始隐状态 (embeddings)
+            multimodal_emb, multimodal_att_mask = self.forward_vision(mini_inputs)
+        
+        # 2. 开始想象循环
+        for step in range(imagine_step):
+            step_count = mini_inputs['step_count'] + step
+            mu, log_std, value = self.agent.forward(multimodal_att_mask, multimodal_emb, mini_inputs['labels'])
+            
+            dist = Normal(mu, torch.exp(log_std))
+            action = dist.sample()
+            log_p = dist.log_prob(action)
+
+            imagined_logps.append(log_p)
+            imagined_values.append(value)
+            imagined_mus.append(mu)
+            imagined_log_stds.append(log_std)
+
+            with torch.no_grad():
+                next_embeddings, reward_hat, termi_hat = self.predict_next(multimodal_emb, multimodal_att_mask, action, step_count)
+            
+            predicted_reward = self.symlog_twohot_loss_func.decode(reward_hat)
+            predicted_done = (termi_hat > 0).squeeze()
+
+            imagined_rewards.append(predicted_reward)
+            imagined_dones.append(predicted_done)
+            
+            multimodal_emb[:, 1:num_patches+1, :] = next_embeddings
+
+        step_count = mini_inputs['step_count'] + imagine_step
+        with torch.no_grad():
+            _, _, last_value = self.agent.forward(multimodal_att_mask, multimodal_emb, mini_inputs['labels'])
+
+        return (torch.stack(imagined_logps), torch.stack(imagined_values), 
+                torch.stack(imagined_rewards), torch.stack(imagined_dones), 
+                torch.stack(imagined_mus), torch.stack(imagined_log_stds),
+                last_value)
 
 
 class ReplayBuffer:

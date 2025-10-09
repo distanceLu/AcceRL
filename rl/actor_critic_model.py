@@ -283,18 +283,18 @@ class ActorCritic(nn.Module):
             num_patches += 1
         return num_patches
 
-    def _extract_actions_hidden(self, last_hidden_states: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _extract_actions_hidden(self, last_hidden_states: torch.Tensor, labels, has_act_emb) -> torch.Tensor:
         """
         From last_hidden_states, extract the text-token hiddens corresponding
         to current + next actions, as (B, NUM_ACTIONS_CHUNK*ACTION_DIM, D).
         """
-        ground_truth_token_ids = batch["labels"][:, 1:].to(self.device)  # (B, text_len-1)
+        ground_truth_token_ids = labels[:, 1:].to(self.device)  # (B, text_len-1)
         current_action_mask = get_current_action_mask(ground_truth_token_ids)  # (B, text_len-1)
         next_actions_mask = get_next_actions_mask(ground_truth_token_ids)      # (B, text_len-1)
         action_mask = current_action_mask | next_actions_mask
 
         num_patches = self._compute_num_patches()
-        if 'this_act_emb' in batch:
+        if has_act_emb:
             num_patches += 1
         text_hidden_states = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
 
@@ -368,7 +368,7 @@ class ActorCritic(nn.Module):
         last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
 
         # 2) Predict continuous actions mean (mu) using action-related hidden states
-        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, inputs_batch)
+        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, inputs_batch['labels'], has_act_emb=("this_act_emb" in inputs_batch))
         predicted_actions = self.action_head.predict_action(actions_hidden_states)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM) or flat
         if predicted_actions.dim() == 3:
             mu_all = predicted_actions
