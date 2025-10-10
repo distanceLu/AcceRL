@@ -2,7 +2,7 @@ import os
 os.environ["MUJOCO_GL"] = "osmesa"
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
 import time
 import random
@@ -11,6 +11,9 @@ from collections import deque, defaultdict
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 import math
+import shutil
+import socket
+import contextlib
 
 import numpy as np
 import torch.nn.functional as F
@@ -40,7 +43,7 @@ from storm.functions_losses import SymLogTwoHotLoss
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 2
+NUM_TRAINER_GPUS = 3
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 10
 ROLLOUT_LOCAL_BUF = 64
@@ -82,16 +85,16 @@ POLICY_TRAIN_START_STEP = 3000
 # 日志
 MOVING_AVG_WINDOW = 1000
 LOG_INTERVAL_SECONDS = 10
+SAVE_INTERVAL_STEPS = 1000
 
 # 通信组
-TRAIN_GROUP_PORT = 42364
 BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
-BROADCAST_GROUP_PORT = 43265
 
 # OpenVLA 加载配置
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/" # 例如: "/path/to/your/checkpoint_dir"
 
 # ================================================================
 # 数据结构
@@ -468,6 +471,24 @@ class TrainerActor(TrainerActorCom):
         self.global_step = 0
         print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()}")
 
+    def get_rank(self):
+        """返回当前 actor 的 rank。"""
+        return self.rank
+
+    def save_model(self, save_dir: str):
+        """由 rank 0 调用，用于保存模型。"""
+        if self.rank != 0:
+            print(f"警告: save_model 应该只在 rank 0 上调用，但被 rank {self.rank} 调用。跳过。")
+            return
+        
+        # self.model.module 是底层的 WorldModel
+        # 我们只从 rank 0 发起并处理文件IO。
+        # 获取底层的模型
+        model_to_save = self.model.module if hasattr(self.model, 'module') else self.model
+        print(f"\nTrainer Rank 0: 正在保存模型到 '{save_dir}'...")
+        model_to_save.save_checkpoint(save_dir)
+        print(f"Trainer Rank 0: 模型保存完成。")
+
     def get_model_keys(self):
         if self.model is None:
             print("模型尚未初始化。请先调用 setup_deepspeed_group()。")
@@ -491,6 +512,32 @@ class TrainerActor(TrainerActorCom):
         print(f"Trainer {self.rank}: 正在加载 OpenVLA WorldModel...")
         model = WorldModel(self.cfg, torch_dtype=TORCH_DTYPE)
         self.base_model = model
+
+        # 根据需求，在模型初始化后、DeepSpeed包装前加载检查点。
+        # 这段代码在所有训练器rank上都会执行，确保模型状态一致。
+        # 我们只在 rank 0 上打印日志，避免日志混乱。
+        if self.cfg.checkpoint2 and os.path.exists(self.cfg.checkpoint2):
+            if self.rank == 0:
+                print(f"\n{'='*50}")
+                print(f"Trainer Rank 0: 发现检查点，正在从 '{self.cfg.checkpoint2}' 加载...")
+                print(f"{'='*50}\n")
+            
+            # 所有 rank 都必须加载自己的模型分片
+            model.load_checkpoint(self.cfg.checkpoint2)
+            
+            if self.rank == 0:
+                print(f"\n{'='*50}")
+                print("Trainer Rank 0: 检查点加载完成。")
+                print(f"{'='*50}\n")
+        elif self.rank == 0:
+            # 即使不加载，也打印一条信息，让用户知道程序行为。
+            print(f"\n{'='*50}")
+            if self.cfg.checkpoint2:
+                print(f"Trainer Rank 0: 未找到检查点路径 '{self.cfg.checkpoint2}'。")
+            else:
+                print("Trainer Rank 0: 未提供检查点路径 (CHECKPOINT2 is None)。")
+            print("将使用 OpenVLA 预训练权重从头开始训练世界模型。")
+            print(f"{'='*50}\n")
 
         param_groups = self.base_model.get_parameter_groups()
         optimizer_params = [
@@ -705,7 +752,18 @@ def build_openvla_cfg() -> GenerateConfig:
         num_open_loop_steps=NUM_ACTIONS_CHUNK,  # 与常量保持一致
         unnorm_key="libero_spatial_no_noops",
     )
+    cfg.checkpoint2 = CHECKPOINT2
     return cfg
+
+
+def find_free_port() -> int:
+    """
+    利用 socket 绑定到端口 0 的技巧，由操作系统找到一个当前未被使用的临时端口。
+    """
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
 
 
 def main():
@@ -715,10 +773,14 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_3k_start_{int(time.time())}"
+    exp_name = f"WorldModel_ds_bs1024_{int(time.time())}"
+    save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
+    log_dir = f"runs/wm/{exp_name}"
+    os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
+    print(f"模型检查点将保存在: {save_dir}")
 
     cfg = build_openvla_cfg()
 
@@ -736,9 +798,17 @@ def main():
         ) for i in range(NUM_ROLLOUT_WORKERS)
     ]
 
+    print("\n--- 正在为通信组查找空闲端口... ---")
+    train_group_port = find_free_port()
+    broadcast_group_port = find_free_port()
+    # 确保两个端口不同，尽管可能性极小
+    while broadcast_group_port == train_group_port:
+        broadcast_group_port = find_free_port()
+    print(f"找到端口: 训练组 = {train_group_port}, 广播组 = {broadcast_group_port}")
+
     print("\n--- 步骤 2: 建立 DeepSpeed 训练组 ---")
     trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
-    ray.get([actor.setup_deepspeed_group.remote(trainer_master_addr, TRAIN_GROUP_PORT) for actor in trainer_group])
+    ray.get([actor.setup_deepspeed_group.remote(trainer_master_addr, train_group_port) for actor in trainer_group])
     print("DeepSpeed 训练组建立完成。")
 
     print(f"\n--- 步骤 3: 建立共享广播组 ---")
@@ -747,7 +817,7 @@ def main():
     broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
     ray.get([
         actor.setup_broadcast_group.remote(
-            master_addr=broadcast_master_addr, master_port=BROADCAST_GROUP_PORT,
+            master_addr=broadcast_master_addr, master_port=broadcast_group_port,
             group_name=BROADCAST_GROUP_NAME, group_world_size=broadcast_group_world_size,
             my_rank_in_group=rank) for rank, actor in enumerate(broadcast_participants)
     ])
@@ -795,6 +865,7 @@ def main():
     start_time = time.time()
     last_log_time = time.time()
     global_step = 0
+    last_saved_step = -1
     while global_step < TRAIN_ITERS:
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
@@ -805,6 +876,30 @@ def main():
         broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
         receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
         ray.get([broadcast_task] + receive_tasks)
+
+        # 每 SAVE_INTERVAL_STEPS 步保存一次模型，且只保留最新的一个
+        if global_step > 0 and global_step % SAVE_INTERVAL_STEPS == 0 and global_step != last_saved_step:
+            # 确保我们只在主进程中执行文件IO操作
+            if ray.get(trainer_group[0].get_rank.remote()) == 0:
+                
+                # 1. 定义当前和之前检查点的目录
+                current_checkpoint_dir = os.path.join(save_dir, f"checkpoint_{global_step}")
+                previous_checkpoint_dir = os.path.join(save_dir, f"checkpoint_{last_saved_step}") if last_saved_step > 0 else None
+                
+                # 2. 调用 rank 0 的 trainer 保存模型到新目录
+                ray.get(trainer_group[0].save_model.remote(current_checkpoint_dir))
+                
+                # 3. 删除上一个检查点目录（如果存在且有效）
+                if previous_checkpoint_dir and os.path.exists(previous_checkpoint_dir):
+                    print(f"主进程: 删除旧的检查点目录: {previous_checkpoint_dir}")
+                    try:
+                        shutil.rmtree(previous_checkpoint_dir)
+                        print(f"主进程: 成功删除 {previous_checkpoint_dir}")
+                    except OSError as e:
+                        print(f"主进程: 删除旧检查点时出错: {e}")
+                
+                # 4. 更新最后保存的步骤
+                last_saved_step = global_step
 
         current_time = time.time()
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:

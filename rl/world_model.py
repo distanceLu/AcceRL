@@ -9,7 +9,6 @@ import random
 import torch.nn.functional as F
 
 from peft import LoraConfig, get_peft_model
-from torch.utils.tensorboard import SummaryWriter
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from storm.functions_losses import SymLogTwoHotLoss
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
@@ -24,7 +23,9 @@ import torch
 
 # 显式类：避免依赖 auto_map
 from rl.actor_critic_model import ActorCritic
-from rl.modules import AttentionPool, AttentionPoolHead
+from rl.modules import AttentionPoolHead
+# import os
+from pathlib import Path
 
 
 class Agent(ActorCritic):
@@ -135,11 +136,11 @@ class WorldModel(ActorCritic):
                              list(self.termi_decoder.parameters()) + \
                              list(self.step_count_emb.parameters())
         value_params = list(self.agent.value_head.parameters()) + list(self.agent.attn_pool.parameters())
-        combined_world_params = world_model_params
+        combined_world_params = world_model_params + value_params
         
         policy_lang = list(filter(lambda p: p.requires_grad, self.agent.language_model.parameters()))
         action_params = list(self.agent.action_head.parameters())
-        policy_params = policy_lang + action_params + value_params
+        policy_params = policy_lang + action_params
 
         # 1. 获取模型中所有实际为可训练状态的参数，作为“真实情况”的集合
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
@@ -345,6 +346,130 @@ class WorldModel(ActorCritic):
         return (torch.stack(imagined_logps), torch.stack(imagined_values), 
                 torch.stack(imagined_rewards), torch.stack(imagined_dones), 
                 last_value)
+    
+    def save_checkpoint(self, save_dir: str, epoch: int = None):
+        """
+        保存 WorldModel 的所有可训练参数
+        
+        Args:
+            save_dir: 保存目录
+            epoch: 可选的 epoch 编号，用于文件命名
+        """
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        # 1. 保存 WorldModel 的 LoRA 权重
+        world_lora_path = save_path / f"world_lora{'_epoch_' + str(epoch) if epoch else ''}"
+        self.language_model.save_pretrained(world_lora_path)
+        print(f"✓ WorldModel LoRA 权重已保存到: {world_lora_path}")
+        
+        # 2. 保存 WorldModel 的额外层
+        world_extra_layers = {
+            'patch_proj': self.patch_proj.state_dict(),
+            'act_proj': self.act_proj.state_dict(),
+            'reward_decoder': self.reward_decoder.state_dict(),
+            'termi_decoder': self.termi_decoder.state_dict(),
+            'step_count_emb': self.step_count_emb.state_dict(),
+        }
+        world_extra_path = save_path / f"world_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        torch.save(world_extra_layers, world_extra_path)
+        print(f"✓ WorldModel 额外层已保存到: {world_extra_path}")
+        
+        # 3. 保存 Agent 的 LoRA 权重
+        agent_lora_path = save_path / f"agent_lora{'_epoch_' + str(epoch) if epoch else ''}"
+        self.agent.language_model.save_pretrained(agent_lora_path)
+        print(f"✓ Agent LoRA 权重已保存到: {agent_lora_path}")
+        
+        # 4. 保存 Agent 的额外层
+        agent_extra_layers = {
+            'action_head': self.agent.action_head.state_dict(),
+            'value_head': self.agent.value_head.state_dict(),
+            'attn_pool': self.agent.attn_pool.state_dict(),
+            'log_std_param': self.agent.log_std_param,
+        }
+        agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        torch.save(agent_extra_layers, agent_extra_path)
+        print(f"✓ Agent 额外层已保存到: {agent_extra_path}")
+        
+        # 5. 保存训练配置（可选但推荐）
+        config_dict = {
+            'lora_rank': self.cfg.lora_rank,
+            'use_proprio': self.cfg.use_proprio,
+            'use_film': self.cfg.use_film,
+            # 添加其他重要配置
+        }
+        config_path = save_path / "training_config.pt"
+        torch.save(config_dict, config_path)
+        print(f"✓ 训练配置已保存到: {config_path}")
+        
+        print(f"\n{'='*80}")
+        print(f"所有检查点已成功保存到: {save_path}")
+        print(f"{'='*80}\n")
+    
+    def load_checkpoint(self, save_dir: str, epoch: int = None):
+        """
+        加载 WorldModel 的所有可训练参数
+        
+        Args:
+            save_dir: 保存目录
+            epoch: 可选的 epoch 编号
+        """
+        save_path = Path(save_dir)
+        device = self.device # 使用模型自身的设备
+
+        # --- 1. 加载 WorldModel 的 LoRA 权重 ---
+        world_lora_path = save_path / f"world_lora{'_epoch_' + str(epoch) if epoch else ''}"
+        world_adapter_weights_path = world_lora_path / "adapter_model.bin"
+
+        if world_adapter_weights_path.exists():
+            # 安全加载：加载权重到现有模型，而不是替换模型对象
+            adapter_weights = torch.load(world_adapter_weights_path, map_location=device)
+            self.language_model.load_state_dict(adapter_weights, strict=False)
+            print(f"✓ WorldModel LoRA 权重已从 {world_lora_path} 就地加载")
+        else:
+            print(f"⚠️  警告: 未找到 WorldModel LoRA 权重文件: {world_adapter_weights_path}")
+
+        # --- 2. 加载 WorldModel 的额外层 ---
+        world_extra_path = save_path / f"world_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        if world_extra_path.exists():
+            world_extra_layers = torch.load(world_extra_path, map_location=device)
+            self.patch_proj.load_state_dict(world_extra_layers['patch_proj'])
+            self.act_proj.load_state_dict(world_extra_layers['act_proj'])
+            self.reward_decoder.load_state_dict(world_extra_layers['reward_decoder'])
+            self.termi_decoder.load_state_dict(world_extra_layers['termi_decoder'])
+            self.step_count_emb.load_state_dict(world_extra_layers['step_count_emb'])
+            print(f"✓ WorldModel 额外层已从 {world_extra_path} 加载")
+        else:
+            print(f"⚠️  警告: 未找到 WorldModel 额外层: {world_extra_path}")
+
+        # --- 3. 加载 Agent 的 LoRA 权重 ---
+        agent_lora_path = save_path / f"agent_lora{'_epoch_' + str(epoch) if epoch else ''}"
+        agent_adapter_weights_path = agent_lora_path / "adapter_model.bin"
+
+        if agent_adapter_weights_path.exists():
+            # 安全加载：加载权重到现有模型
+            adapter_weights = torch.load(agent_adapter_weights_path, map_location=device)
+            self.agent.language_model.load_state_dict(adapter_weights, strict=False)
+            print(f"✓ Agent LoRA 权重已从 {agent_lora_path} 就地加载")
+        else:
+            print(f"⚠️  警告: 未找到 Agent LoRA 权重文件: {agent_adapter_weights_path}")
+
+        # --- 4. 加载 Agent 的额外层 ---
+        agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        if agent_extra_path.exists():
+            agent_extra_layers = torch.load(agent_extra_path, map_location=device)
+            self.agent.action_head.load_state_dict(agent_extra_layers['action_head'])
+            self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
+            self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
+            # log_std_param 是一个独立的张量，不是 state_dict 的一部分，直接赋值
+            self.agent.log_std_param.data.copy_(agent_extra_layers['log_std_param'])
+            print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
+        else:
+            print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
+
+        print(f"\n{'='*80}")
+        print(f"所有检查点已成功从 {save_path} 加载完毕。")
+        print(f"{'='*80}\n")
 
 
 def compute_imagined_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -546,6 +671,10 @@ if __name__ == "__main__":
     
     # Create WorldModel
     world_model = WorldModel(cfg, TORCH_DTYPE)
+
+    # 模拟保存和加载模型
+    world_model.save_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
+    world_model.load_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
     
     print("\n检查参数分组...")
     param_groups = world_model.get_parameter_groups()
