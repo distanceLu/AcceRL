@@ -28,8 +28,7 @@ from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 from experiments.robot.libero.libero_utils import GenerateConfig
 
 # --- 修改: 导入 WorldModel 和 原始的 ActorCritic ---
-from rl.world_model import WorldModel
-from rl.actor_critic_model import ActorCritic
+from rl.world_model import WorldModel, compute_imagine_loss
 from rl.utils import prepare_one_obs
 from ds_com import TrainerActorCom, InferenceActorCom
 from storm.functions_losses import SymLogTwoHotLoss
@@ -63,7 +62,7 @@ ENT_COEF = 0.0
 POLICY_LOSS_WARMUP_STEPS = 10000
 
 # 世界模型想象步数
-IMAGINE_STEP = 1
+IMAGINE_STEP = 6
 IMAGINATION_LOSS_COEF = 0.5 # 想象损失的权重系数
 
 # AE 和 IL 损失的系数
@@ -78,7 +77,7 @@ WORLD_LR = 1e-4
 POLICY_LR = 3e-6
 WORLD_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 0
+POLICY_TRAIN_START_STEP = 3000
 
 # 日志
 MOVING_AVG_WINDOW = 1000
@@ -559,69 +558,6 @@ class TrainerActor(TrainerActorCom):
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
 
-    def compute_imagined_gae(self, rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        为想象出的轨迹计算 GAE (Generalized Advantage Estimation)。
-        输入张量的第一维是时间步 (IMAGINE_STEP)。
-        由于批次中的序列可能在不同时间点终止，因此需要小心处理。
-        """
-        advantages = []
-        returns = []
-        gae = 0.0
-        
-        # 下一步的价值，从最后一个状态的引导价值开始
-        next_val = last_value
-
-        # 从后向前遍历想象出的时间步
-        for t in reversed(range(IMAGINE_STEP)):
-            # dones[t] 是一个布尔张量，(1.0 - dones[t].float()) 会在终止状态处将 next_val 清零
-            # 这确保了终止状态的下一个价值为0
-            delta = rewards[t] + GAMMA * next_val * (1.0 - dones[t].float()) - values[t]
-            
-            # GAE的计算同样要考虑终止状态
-            gae = delta + GAMMA * LAMBDA * gae * (1.0 - dones[t].float())
-            
-            # 存储每个时间步的 GAE 和回报
-            advantages.insert(0, gae)
-            returns.insert(0, gae + values[t])
-            
-            # 更新下一个价值为当前步的价值
-            next_val = values[t]
-
-        return torch.stack(advantages), torch.stack(returns)
-
-    def _create_validity_mask(self, imagined_dones: torch.Tensor) -> Tuple[torch.Tensor, float]:
-        """根据想象的终止信号创建有效性掩码。"""
-        with torch.no_grad():
-            cumulative_dones = torch.cumsum(imagined_dones.long(), dim=0)
-            padded_cumulative_dones = F.pad(cumulative_dones, (0, 0, 1, 0))[:-1]
-            valid_mask = (padded_cumulative_dones == 0)
-            valid_mask_flat = valid_mask.reshape(-1)
-            num_valid_steps = valid_mask_flat.sum().clamp(min=1.0)
-        return valid_mask_flat, num_valid_steps
-    
-    def compute_imagine_loss(self, mini_inputs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        # --- 3. 想象数据 RL 损失 ---
-        (imagined_logps, imagined_values, imagined_rewards, imagined_dones, imagined_mus, imagined_log_stds, last_value) = self.model.imagine(mini_inputs, IMAGINE_STEP)
-        valid_mask_flat, num_valid_steps = self._create_validity_mask(imagined_dones)
-        imagined_advs, imagined_rets = self.compute_imagined_gae(imagined_rewards, imagined_values, imagined_dones, last_value)
-        
-        imagined_advs_flat, imagined_rets_flat, imagined_values_flat = \
-            imagined_advs.reshape(-1), imagined_rets.reshape(-1), imagined_values.reshape(-1)
-        last_two_dim = imagined_logps.shape[-1] * imagined_logps.shape[-2]
-        imagined_logps_flat = imagined_logps.reshape(-1, last_two_dim)
-        
-        with torch.no_grad():
-            valid_advs = torch.masked_select(imagined_advs_flat, valid_mask_flat)
-            adv_mean, adv_std = valid_advs.mean(), valid_advs.std() + 1e-8
-            normalized_imagined_advs = (imagined_advs_flat - adv_mean) / adv_std
-        
-        policy_loss_terms = -(normalized_imagined_advs.unsqueeze(dim=-1).detach() * imagined_logps_flat)
-        imagination_policy_loss = (policy_loss_terms * valid_mask_flat.unsqueeze(dim=-1)).sum() / num_valid_steps
-        value_loss_terms = F.mse_loss(imagined_values_flat, imagined_rets_flat.detach(), reduction='none')
-        imagination_value_loss = (value_loss_terms * valid_mask_flat).sum() / num_valid_steps
-        return imagination_policy_loss, imagination_value_loss
-
     async def run_training_epoch(self) -> Tuple[Dict[str, float], Dict[str, int]]:
         if self.next_ready_batch is None:
             print(f"Trainer {self.rank}: 等待初始超级批次...", flush=True)  # 打印代码不要删
@@ -724,8 +660,9 @@ class TrainerActor(TrainerActorCom):
             self.model.step()
 
             # --- 4. 组合所有损失并进行单次反向传播和优化 ---
-            imagination_policy_loss, imagination_value_loss = self.compute_imagine_loss(mini_inputs)
-            total_loss = imagination_value_loss
+            policy_loss_coef = min(1.0, max((self.global_step - POLICY_TRAIN_START_STEP) / POLICY_LOSS_WARMUP_STEPS, 0.0))
+            imagination_policy_loss, imagination_value_loss = compute_imagine_loss(mini_inputs, self.model, IMAGINE_STEP, GAMMA, LAMBDA)
+            total_loss = imagination_value_loss + policy_loss_coef * imagination_policy_loss
             self.model.backward(total_loss)
             self.model.step()
             
@@ -742,7 +679,7 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["reward_mean"].append(reward_mean.item())
             epoch_losses["termi_acc"].append(termi_acc.item())
             epoch_losses["termi_mean"].append(termi_mean.item())
-            # epoch_losses["policy_loss_coef"].append(policy_loss_coef)
+            epoch_losses["policy_loss_coef"].append(policy_loss_coef)
             # epoch_losses["neg_log_loss_coef"].append(neg_log_loss_coef)
             epoch_losses["imagination_policy_loss"].append(imagination_policy_loss.item())
             epoch_losses["imagination_value_loss"].append(imagination_value_loss.item())
@@ -778,7 +715,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/wm/WorldModel_ds_wm_vlr_3e-6_{int(time.time())}"
+    log_dir = f"runs/wm/WorldModel_ds_3k_start_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")

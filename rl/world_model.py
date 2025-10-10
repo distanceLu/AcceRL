@@ -6,6 +6,7 @@ import gc
 from torch.distributions import Normal
 import collections
 import random
+import torch.nn.functional as F
 
 from peft import LoraConfig, get_peft_model
 from torch.utils.tensorboard import SummaryWriter
@@ -308,8 +309,6 @@ class WorldModel(ActorCritic):
         imagined_values = []
         imagined_rewards = []
         imagined_dones = []
-        imagined_mus = []
-        imagined_log_stds = []
         num_patches = self._compute_num_patches()
 
         with torch.no_grad():
@@ -327,8 +326,6 @@ class WorldModel(ActorCritic):
 
             imagined_logps.append(log_p)
             imagined_values.append(value)
-            imagined_mus.append(mu)
-            imagined_log_stds.append(log_std)
 
             with torch.no_grad():
                 next_embeddings, reward_hat, termi_hat = self.predict_next(multimodal_emb, multimodal_att_mask, action, step_count)
@@ -347,8 +344,77 @@ class WorldModel(ActorCritic):
 
         return (torch.stack(imagined_logps), torch.stack(imagined_values), 
                 torch.stack(imagined_rewards), torch.stack(imagined_dones), 
-                torch.stack(imagined_mus), torch.stack(imagined_log_stds),
                 last_value)
+
+
+def compute_imagined_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    为想象出的轨迹计算 GAE (Generalized Advantage Estimation)。
+    输入张量的第一维是时间步 (IMAGINE_STEP)。
+    由于批次中的序列可能在不同时间点终止，因此需要小心处理。
+    """
+    advantages = []
+    returns = []
+    gae = 0.0
+    next_val = last_value
+    for t in reversed(range(imagine_step)):
+        delta = rewards[t] + gamma * next_val * (1.0 - dones[t].float()) - values[t]
+        gae = delta + gamma * lamb * gae * (1.0 - dones[t].float())
+        advantages.insert(0, gae)
+        returns.insert(0, gae + values[t])
+        next_val = values[t]
+    return torch.stack(advantages), torch.stack(returns)
+
+
+def create_validity_mask(imagined_dones: torch.Tensor) -> Tuple[torch.Tensor, float]:
+    """根据想象的终止信号创建有效性掩码。"""
+    with torch.no_grad():
+        cumulative_dones = torch.cumsum(imagined_dones.long(), dim=0)
+        padded_cumulative_dones = F.pad(cumulative_dones, (0, 0, 1, 0))[:-1]
+        valid_mask = (padded_cumulative_dones == 0)
+        valid_mask_flat = valid_mask.reshape(-1)
+        num_valid_steps = valid_mask_flat.sum().clamp(min=1.0)
+    return valid_mask_flat, num_valid_steps
+
+
+def compute_imagine_loss(mini_inputs: Dict[str, torch.Tensor], model, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:
+    # --- 3. 想象数据 RL 损失 ---
+    mini_sub = random_pick_and_repeat(mini_inputs, 4)  # 类似于GRPO，一个样本采样若干条轨迹
+    # mini_sub = mini_inputs
+    (imagined_logps, imagined_values, imagined_rewards, imagined_dones, last_value) = model.imagine(mini_sub, imagine_step)
+    valid_mask_flat, num_valid_steps = create_validity_mask(imagined_dones)
+    imagined_advs, imagined_rets = compute_imagined_gae(imagined_rewards, imagined_values, imagined_dones, last_value, imagine_step, gamma, lamb)
+    
+    imagined_advs_flat, imagined_rets_flat, imagined_values_flat = \
+        imagined_advs.reshape(-1), imagined_rets.reshape(-1), imagined_values.reshape(-1)
+    last_two_dim = imagined_logps.shape[-1] * imagined_logps.shape[-2]
+    imagined_logps_flat = imagined_logps.reshape(-1, last_two_dim)
+    
+    with torch.no_grad():
+        valid_advs = torch.masked_select(imagined_advs_flat, valid_mask_flat)
+        adv_mean, adv_std = valid_advs.mean(), valid_advs.std() + 1e-8
+        normalized_imagined_advs = (imagined_advs_flat - adv_mean) / adv_std
+    
+    policy_loss_terms = -(normalized_imagined_advs.unsqueeze(dim=-1).detach() * imagined_logps_flat)
+    imagination_policy_loss = (policy_loss_terms * valid_mask_flat.unsqueeze(dim=-1)).sum() / num_valid_steps
+    value_loss_terms = F.mse_loss(imagined_values_flat, imagined_rets_flat.detach(), reduction='none')
+    imagination_value_loss = (value_loss_terms * valid_mask_flat).sum() / num_valid_steps
+    return imagination_policy_loss, imagination_value_loss
+
+
+def random_pick_and_repeat(inputs_batch: dict, repeats: int = 4):
+    """从每个张量的第0维随机采样一个元素，并在该维度上重复指定次数。"""
+    outputs = {}
+    for key, tensor in inputs_batch.items():
+        if not torch.is_tensor(tensor):
+            raise TypeError(f"键 '{key}' 对应的值不是张量：{type(tensor)}")
+        if tensor.size(0) == 0:
+            raise ValueError(f"键 '{key}' 对应的张量在 dim=0 上为空，无法采样。")
+        idx = torch.randint(0, tensor.size(0), (), device=tensor.device)
+        sample = tensor[idx:idx+1]             # shape: (1, ...)
+        repeat_shape = (repeats,) + (1,) * (tensor.dim() - 1)
+        outputs[key] = sample.repeat(repeat_shape)
+    return outputs
 
 
 class ReplayBuffer:
@@ -449,16 +515,14 @@ if __name__ == "__main__":
     USE_BF16: bool = True
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
-    # 在这里设置要并行处理的环境数量
-    ENVS_ID = [5]
-    envs_num = len(ENVS_ID)
+    # 测试配置
     BENCHMARK = TaskSuite.LIBERO_SPATIAL
-    REPLAY_CAPACITY_PER_ENV = 1000  # 每个环境的缓冲区容量
-    BATCH_SIZE = 8                  # 训练时的批次大小
-    MIN_BUFFER_SIZE_FOR_TRAINING = 8 # 开始训练所需的最少样本数
-    TRAINING_STEPS_PER_INTERACTION = 1 # 每次交互后执行的训练步数
+    TEST_ENV_IDS = [5, 6, 7, 8]  # 使用多个环境
+    NUM_ENVS = len(TEST_ENV_IDS)
+    NUM_TEST_ITERATIONS = 30  # 测试迭代次数
 
     unnorm_key = f"{BENCHMARK}_no_noops"
+    
     # Instantiate config
     cfg = GenerateConfig(
         pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/",
@@ -472,200 +536,281 @@ if __name__ == "__main__":
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
-        lora_rank=32, # 为 LoRA 添加 rank
-        device=torch.device("cuda:1"),
+        lora_rank=32,
+        device=torch.device("cuda:2"),
     )
 
-    # Create ActorCritic policy
-    actor = WorldModel(cfg, TORCH_DTYPE)
-    actor.get_parameter_groups()
-    teacher_actor = ActorCritic(cfg, TORCH_DTYPE)
-    teacher_actor.eval()
-    check_unnorm_key(cfg, actor.vla)
-    actor.train()
-    import torch.optim as optim
-    optimizer = optim.AdamW(actor.get_trainable_params(), lr=1e-4)
-    criterion = nn.MSELoss()
+    print("=" * 80)
+    print("初始化 WorldModel...")
+    print("=" * 80)
     
-    # 初始化 TensorBoard writer
-    log_dir = f"runs/wm/ae_act_emb_rand_act_indep_backward_{int(time.time())}"
-    writer = SummaryWriter(log_dir)
-    print(f"TensorBoard 日志将保存在: {log_dir}")
-
-    for key, value in actor.named_parameters():
-        if value.dtype != TORCH_DTYPE:
-            print(f"警告: 参数 {key} 的数据类型是 {value.dtype}, 但期望的是 {TORCH_DTYPE}.")
-    print("策略初始化完成。")
-
-    # --- 初始化回放缓冲区 ---
-    replay_buffer = ReplayBuffer(envs_num, REPLAY_CAPACITY_PER_ENV)
-    print(f"回放缓冲区已初始化，每个环境容量为 {REPLAY_CAPACITY_PER_ENV}。")
-
-    # --- 并行初始化多个环境 ---
-    print(f"正在初始化 {len(ENVS_ID)} 个并行的 Libero 环境...")
-    envs = [
-        LiberoEnvWrapper(
+    # Create WorldModel
+    world_model = WorldModel(cfg, TORCH_DTYPE)
+    
+    print("\n检查参数分组...")
+    param_groups = world_model.get_parameter_groups()
+    for group in param_groups:
+        num_params = sum(p.numel() for p in group['params'])
+        print(f"  - {group['name']}: {num_params:,} 参数")
+    
+    check_unnorm_key(cfg, world_model.vla)
+    world_model.eval()
+    
+    print("\n" + "=" * 80)
+    print(f"初始化 {NUM_ENVS} 个测试环境...")
+    print("=" * 80)
+    
+    # 初始化多个环境用于测试
+    envs = []
+    observations = []
+    task_descriptions = []
+    
+    for i, env_id in enumerate(TEST_ENV_IDS):
+        env = LiberoEnvWrapper(
             benchmark_name=BENCHMARK,
             task_id=env_id,
             image_size=224,
             render_mode="rgb_array",
         )
-        for env_id in ENVS_ID
-    ]
-    print("所有环境初始化完成。")
-
-    # --- 初始化所有环境的状态 ---
-    observations = []
-    task_descriptions = []
-    for i, env in enumerate(envs):
-        obs, info = env.reset(seed=int(time.time()) + i)
-        observations.append(obs)
-        task_descriptions.append(env.task_description)
-        print(f"环境 {i}: 任务 ID = {env.task_id}, 任务描述 = {env.task_description}")
-
-    active_envs = [True] * envs_num
-    total_rewards = [0.0] * envs_num
-    episode_steps = [0] * envs_num
-
-    total_episodes_finished = 0
-    total_successes = 0
-    training_step = 0
-
-    print("\n开始并行执行所有环境并收集数据...")
-
-    # --- 主循环：数据收集与训练 ---
-    while any(active_envs):
-        # 1. 从所有【活动】的环境中收集输入数据
-        inputs_t_list = []
-        active_indices_this_step = []
-        for i in range(envs_num):
-            if active_envs[i]:
-                inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
-                inputs_t_list.append(inputs_t)
-                active_indices_this_step.append(i)
-
-        if not inputs_t_list:
-            break
-
-        # 2. 批处理输入数据
-        inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
-
-        # 3. 使用教师模型生成目标动作和目标视觉特征 (无梯度)
-        with torch.no_grad():
-            _, teacher_actions_b, _, _, teacher_projector_features_b = teacher_actor.forward(inputs_batch, return_vit_out=True)
-
-        # 4. 使用学生模型生成用于与环境交互的动作 (无梯度，以加速交互)
-        # with torch.no_grad():
-        #     student_actions_b = actor.forward(inputs_batch)[0]
-        b_s = inputs_batch['input_ids'].size(0)
-        student_actions_b = torch.rand(b_s, 8, 7) * 2 - 1
-
-        # 5. 在环境中执行动作并将经验存入回放缓冲区
-        for i, env_idx in enumerate(active_indices_this_step):
-            # 从批次中分离出单个数据
-            inputs_t = inputs_t_list[i]
-            teacher_action = teacher_actions_b[i].cpu()
-            teacher_proj_feature = teacher_projector_features_b[i].cpu()
-            
-            # 使用学生模型的预测动作与环境交互
-            behavior_action = student_actions_b[i].cpu().numpy()
-            action_env = actor.vla._unnormalize_actions(behavior_action, cfg.unnorm_key)
-            
-            reward = 0
-            terminated, truncated = False, False
-            for sub_act in action_env:
-                obs, t_rew, terminated, truncated, info = envs[env_idx].step(sub_act)
-                reward += t_rew
-                episode_steps[env_idx] += 1
-                if terminated or truncated:
-                    break
-
-            done = terminated or truncated
-            observations[env_idx] = obs
-            total_rewards[env_idx] += float(reward)
-
-            # 将经验(inputs, teacher_action, teacher_proj_feature, done)存入缓冲区
-            experience = (inputs_t, teacher_action, teacher_proj_feature, done, student_actions_b[i].cpu())
-            replay_buffer.add(env_idx, experience)
-
-            # 检查环境是否完成
-            if done:
-                is_success = info.get('is_success', False)
-                total_successes += is_success
-                total_episodes_finished += 1
-                
-                print("-" * 40)
-                print(f"环境 {env_idx} 已完成 (任务: {envs[env_idx].task_description[:50]}...)")
-                print(f"  总步数: {episode_steps[env_idx]}, 总奖励: {total_rewards[env_idx]:.4f}, 是否成功: {is_success}")
-                
-                current_success_rate = total_successes / total_episodes_finished if total_episodes_finished > 0 else 0.0
-                print(f"当前成功率: {current_success_rate:.2%}, 已完成回合数: {total_episodes_finished}")
-                print("-" * 40)
-
-                # 记录回合级别的统计数据
-                writer.add_scalar('Episode/Reward', total_rewards[env_idx], total_episodes_finished)
-                writer.add_scalar('Episode/Steps', episode_steps[env_idx], total_episodes_finished)
-                writer.add_scalar('Episode/Success_Rate', current_success_rate, total_episodes_finished)
-                
-                # 重置环境
-                episode_steps[env_idx] = 0
-                total_rewards[env_idx] = 0
-                obs, info = envs[env_idx].reset(seed=random.randint(0, 1000))
-                observations[env_idx] = obs
+        obs, info = env.reset(seed=42 + i)
+        task_description = env.task_description
         
-        # ==================================================================
-        #  Part 2: 从回放缓冲区采样并训练模型
-        # ==================================================================
-        if len(replay_buffer) > MIN_BUFFER_SIZE_FOR_TRAINING:
-            for _ in range(TRAINING_STEPS_PER_INTERACTION):
-                # 1. 从缓冲区采样一个批次
-                sampled_experiences = replay_buffer.sample(BATCH_SIZE)
-                if not sampled_experiences:
-                    continue
-
-                # 2. 整理批次数据
-                inputs_list_train = [exp[0] for exp in sampled_experiences]
-                teacher_actions_train = torch.stack([exp[1] for exp in sampled_experiences]).to(actor.device)
-                teacher_proj_features_train = torch.stack([exp[2] for exp in sampled_experiences]).to(actor.device)
-                old_student_act = torch.stack([exp[3] for exp in sampled_experiences]).to(actor.device)
-                
-                training_inputs_batch = actor.prepare_inputs_batch(inputs_list_train)
-
-                # 3. 学生模型前向传播
-                # predicted_actions, _, _, post_patch_embeddings, _ = actor.forward(training_inputs_batch)
-                predicted_actions, _, _, _, _ = actor.forward(training_inputs_batch)
-                # 模仿学习损失：使用当前时刻教师模型的动作作为目标
-                imitation_loss = criterion(predicted_actions, teacher_actions_train.detach())
-                optimizer.zero_grad()
-                imitation_loss.backward()
-                optimizer.step()
-
-                training_inputs_batch['this_action'] = old_student_act
-                post_patch_embeddings = actor.forward(training_inputs_batch)[3]
-                # 自编码器损失：使用下一时刻教师模型的 projector_features 作为目标
-                ae_loss = criterion(post_patch_embeddings, teacher_proj_features_train.detach())
-                # 反向传播和优化
-                optimizer.zero_grad()
-                ae_loss.backward()
-                optimizer.step()
-
-                # 6. 使用 TensorBoard 记录指标
-                total_loss = ae_loss + imitation_loss
-                writer.add_scalar('Loss/Total', total_loss.item(), training_step)
-                writer.add_scalar('Loss/AutoEncoder', ae_loss.item(), training_step)
-                writer.add_scalar('Loss/Imitation', imitation_loss.item(), training_step)
-                
-                # 计算并记录相对误差
-                with torch.no_grad():
-                    embedding_norm = torch.norm(teacher_proj_features_train)
-                    relative_error = torch.norm(post_patch_embeddings - teacher_proj_features_train) / (embedding_norm + 1e-6)
-                    writer.add_scalar('Metrics/Relative_Error_Patch_Embeddings', relative_error.item(), training_step)
-
-                if training_step % 10 == 0:
-                    print(f"[Train Step {training_step}] Total Loss: {total_loss.item():.6f}, AE Loss: {ae_loss.item():.6f}, Imitation Loss: {imitation_loss.item():.6f}")
-                
-                training_step += 1
-
-    # 关闭 writer
-    writer.close()
-    print("所有环境已完成，训练结束。")
+        envs.append(env)
+        observations.append(obs)
+        task_descriptions.append(task_description)
+        
+        print(f"环境 {i} (任务ID {env_id}): {task_description}")
+    
+    # =========================================================================
+    # 主测试循环
+    # =========================================================================
+    for iteration in range(NUM_TEST_ITERATIONS):
+        print("\n" + "█" * 80)
+        print(f"█  测试迭代 {iteration + 1}/{NUM_TEST_ITERATIONS}")
+        print("█" * 80)
+        
+        # 如果不是第一次迭代，在环境中执行随机动作以改变状态
+        if iteration > 0:
+            for i in range(NUM_ENVS):
+                random_action = np.random.uniform(-1, 1, size=7)
+                obs, reward, terminated, truncated, info = envs[i].step(random_action)
+                if terminated or truncated:
+                    obs, info = envs[i].reset()
+                    print(f"环境 {i} 已重置")
+                observations[i] = obs
+        
+        # ---------------------------------------------------------------------
+        # 测试 1: 准备输入数据
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 1: 准备输入数据 (batch_size={NUM_ENVS})")
+        print("=" * 80)
+        
+        # 为每个环境准备输入
+        inputs_list = []
+        for i in range(NUM_ENVS):
+            inputs_t = prepare_one_obs(cfg, world_model.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
+            inputs_list.append(inputs_t)
+        
+        print(f"✓ {NUM_ENVS} 个输入准备完成")
+        print(f"  - 单个 input_ids shape: {inputs_list[0]['input_ids'].shape}")
+        print(f"  - 单个 pixel_values shape: {inputs_list[0]['pixel_values'].shape}")
+        print(f"  - 单个 proprio shape: {inputs_list[0]['proprio'].shape}")
+        
+        # 创建批次
+        inputs_batch = world_model.prepare_inputs_batch(inputs_list)
+        print(f"\n✓ 批次输入准备完成 (batch_size={NUM_ENVS})")
+        print(f"  - input_ids shape: {inputs_batch['input_ids'].shape}")
+        print(f"  - pixel_values shape: {inputs_batch['pixel_values'].shape}")
+        print(f"  - proprio shape: {inputs_batch['proprio'].shape}")
+        
+        # ---------------------------------------------------------------------
+        # 测试 2: WorldModel.forward_vision
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 2: WorldModel.forward_vision")
+        print("=" * 80)
+        
+        with torch.no_grad():
+            multimodal_emb, multimodal_att_mask = world_model.forward_vision(inputs_batch)
+        
+        print(f"✓ forward_vision 成功")
+        print(f"  - multimodal_emb shape: {multimodal_emb.shape}")
+        print(f"  - multimodal_att_mask shape: {multimodal_att_mask.shape}")
+        print(f"  - multimodal_emb 范围: [{multimodal_emb.min():.4f}, {multimodal_emb.max():.4f}]")
+        
+        # ---------------------------------------------------------------------
+        # 测试 3: WorldModel.forward (完整前向传播)
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 3: WorldModel.forward (完整前向传播)")
+        print("=" * 80)
+        
+        # 添加必要的字段
+        inputs_batch['this_action'] = torch.randn(NUM_ENVS, NUM_ACTIONS_CHUNK, ACTION_DIM).to(cfg.device)
+        inputs_batch['step_count'] = torch.tensor([0] * NUM_ENVS, dtype=torch.long).to(cfg.device)
+        
+        with torch.no_grad():
+            post_patch_proj, reward_logits, termin_hat = world_model.forward(inputs_batch)
+        
+        print(f"✓ WorldModel.forward 成功")
+        print(f"  - post_patch_proj shape: {post_patch_proj.shape}")
+        print(f"  - reward_logits shape: {reward_logits.shape}")
+        print(f"  - termin_hat shape: {termin_hat.shape}")
+        
+        # 解码奖励
+        decoded_reward = world_model.symlog_twohot_loss_func.decode(reward_logits)
+        print(f"  - 预测奖励: {decoded_reward}")
+        print(f"  - 预测终止概率: {torch.sigmoid(termin_hat)}")
+        
+        # ---------------------------------------------------------------------
+        # 测试 4: WorldModel.predict_next
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 4: WorldModel.predict_next")
+        print("=" * 80)
+        
+        test_action = torch.randn(NUM_ENVS, NUM_ACTIONS_CHUNK * ACTION_DIM).to(cfg.device)
+        step_count = torch.tensor([0] * NUM_ENVS, dtype=torch.long).to(cfg.device)
+        
+        with torch.no_grad():
+            next_emb, next_reward, next_termin = world_model.predict_next(
+                multimodal_emb, multimodal_att_mask, test_action, step_count
+            )
+        
+        print(f"✓ predict_next 成功")
+        print(f"  - next_embeddings shape: {next_emb.shape}")
+        print(f"  - reward_logits shape: {next_reward.shape}")
+        print(f"  - termin_hat shape: {next_termin.shape}")
+        
+        decoded_next_reward = world_model.symlog_twohot_loss_func.decode(next_reward)
+        print(f"  - 预测下一步奖励: {decoded_next_reward}")
+        print(f"  - 预测下一步终止概率: {torch.sigmoid(next_termin)}")
+        
+        # ---------------------------------------------------------------------
+        # 测试 5: WorldModel.agent_super_forward
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 5: WorldModel.agent_super_forward")
+        print("=" * 80)
+        
+        with torch.no_grad():
+            mu_agent, log_std_agent, value_agent = world_model.agent_super_forward(inputs_batch)
+        
+        print(f"✓ agent_super_forward 成功")
+        print(f"  - mu shape: {mu_agent.shape}")
+        print(f"  - log_std shape: {log_std_agent.shape}")
+        print(f"  - value shape: {value_agent.shape}")
+        print(f"  - value 值: {value_agent}")
+        print(f"  - mu 范围: [{mu_agent.min():.4f}, {mu_agent.max():.4f}]")
+        print(f"  - log_std 范围: [{log_std_agent.min():.4f}, {log_std_agent.max():.4f}]")
+        
+        # ---------------------------------------------------------------------
+        # 测试 6: WorldModel.imagine (批量，使用 inputs_batch)
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 6: WorldModel.imagine (批量，batch_size={NUM_ENVS})")
+        print("=" * 80)
+        
+        # 准备 inputs_batch 用于想象（需要确保有 step_count）
+        imagine_inputs = inputs_batch.copy()
+        imagine_inputs.pop('this_act_emb')
+        if 'step_count' not in imagine_inputs:
+            imagine_inputs['step_count'] = torch.tensor([0] * NUM_ENVS, dtype=torch.long).to(cfg.device)
+        
+        imagine_steps = 5
+        print(f"对 {NUM_ENVS} 个环境批量想象 {imagine_steps} 步...")
+        
+        with torch.no_grad():
+            compute_imagine_loss(imagine_inputs, world_model, imagine_steps, 0.99, 0.95)
+            imagined_results = world_model.imagine(imagine_inputs, imagine_steps)
+        
+        (imagined_logps, imagined_values, imagined_rewards, 
+         imagined_dones, last_value) = imagined_results
+        
+        print(f"✓ imagine 成功")
+        print(f"  - imagined_logps shape: {imagined_logps.shape}")
+        print(f"  - imagined_values shape: {imagined_values.shape}")
+        print(f"  - imagined_rewards shape: {imagined_rewards.shape}")
+        print(f"  - imagined_dones shape: {imagined_dones.shape}")
+        print(f"  - last_value shape: {last_value.shape}")
+        
+        # 打印每个环境的想象轨迹详情
+        print(f"\n  各环境想象轨迹详情:")
+        for env_idx in range(NUM_ENVS):
+            print(f"    环境 {env_idx}:")
+            env_rewards = imagined_rewards[:, env_idx]
+            env_values = imagined_values[:, env_idx]
+            env_dones = imagined_dones[:, env_idx]
+            
+            print(f"      - 累计奖励: {env_rewards.sum().item():.4f}")
+            print(f"      - 平均价值: {env_values.mean().item():.4f}")
+            print(f"      - 最终价值: {last_value[env_idx].item():.4f}")
+            print(f"      - 终止次数: {env_dones.sum().item()}")
+            
+            # 打印每一步的详情
+            for step in range(imagine_steps):
+                print(f"        Step {step}: reward={env_rewards[step].item():.4f}, "
+                      f"value={env_values[step].item():.4f}, done={env_dones[step].item()}")
+        
+        # ---------------------------------------------------------------------
+        # 测试 7: 检查数值范围
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 7: 检查数值范围")
+        print("=" * 80)
+        
+        print(f"Reward logits 范围: [{reward_logits.min():.4f}, {reward_logits.max():.4f}]")
+        print(f"Predicted reward 范围: [{decoded_reward.min():.4f}, {decoded_reward.max():.4f}]")
+        print(f"Termination logits 范围: [{termin_hat.min():.4f}, {termin_hat.max():.4f}]")
+        print(f"Value 范围: [{value_agent.min():.4f}, {value_agent.max():.4f}]")
+        print(f"Action 范围: [{mu_agent.min():.4f}, {mu_agent.max():.4f}]")
+        print(f"Post patch proj 范围: [{post_patch_proj.min():.4f}, {post_patch_proj.max():.4f}]")
+        print(f"Imagined rewards 范围: [{imagined_rewards.min():.4f}, {imagined_rewards.max():.4f}]")
+        print(f"Imagined values 范围: [{imagined_values.min():.4f}, {imagined_values.max():.4f}]")
+        
+        # 打印每个环境的具体数值
+        print(f"\n  各环境详细数值:")
+        for env_idx in range(NUM_ENVS):
+            print(f"    环境 {env_idx}:")
+            print(f"      - 当前奖励: {decoded_reward[env_idx].item():.4f}")
+            print(f"      - 当前价值: {value_agent[env_idx].item():.4f}")
+            print(f"      - 终止概率: {torch.sigmoid(termin_hat[env_idx]).item():.4f}")
+            print(f"      - 想象累计奖励: {imagined_rewards[:, env_idx].sum().item():.4f}")
+        
+        # 检查是否有NaN或Inf
+        has_nan = any([
+            torch.isnan(post_patch_proj).any(),
+            torch.isnan(reward_logits).any(),
+            torch.isnan(termin_hat).any(),
+            torch.isnan(mu_agent).any(),
+            torch.isnan(value_agent).any(),
+            torch.isnan(imagined_rewards).any(),
+            torch.isnan(imagined_values).any(),
+        ])
+        has_inf = any([
+            torch.isinf(post_patch_proj).any(),
+            torch.isinf(reward_logits).any(),
+            torch.isinf(termin_hat).any(),
+            torch.isinf(mu_agent).any(),
+            torch.isinf(value_agent).any(),
+            torch.isinf(imagined_rewards).any(),
+            torch.isinf(imagined_values).any(),
+        ])
+        
+        if has_nan:
+            print("\n⚠️  警告: 检测到 NaN 值!")
+        if has_inf:
+            print("\n⚠️  警告: 检测到 Inf 值!")
+        if not has_nan and not has_inf:
+            print("\n✓ 所有数值正常 (无 NaN 或 Inf)")
+    
+    # =========================================================================
+    # 测试总结
+    # =========================================================================
+    print("\n" + "█" * 80)
+    print("█  所有测试迭代完成!")
+    print("█" * 80)
+    print(f"\n总共完成 {NUM_TEST_ITERATIONS} 次迭代测试")
+    print(f"使用了 {NUM_ENVS} 个并行环境")
+    print("所有 WorldModel 功能运行正常 ✓")
