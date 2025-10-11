@@ -384,16 +384,27 @@ class ActorCritic(nn.Module):
 
         return action_logits, value.to(torch.float32)
 
-    def post_process(self, logits):
-        batch_dist = torch.distributions.Categorical(logits=logits)  # 批量创建分布
-        # 采样时 (替代原来的循环采样)
-        action_token_ids = batch_dist.sample()  # shape = (B, num_dims)
-        actions_all = self.vla.config.n_action_bins - action_token_ids  # shape = (B, num_dims)
+    def post_process(self, logits: torch.Tensor, deterministic: List[bool]) -> Tuple[torch.distributions.Categorical, torch.Tensor, np.ndarray]:
+         # 创建分布并计算两种动作
+        dist = torch.distributions.Categorical(logits=logits)
+        stochastic_tokens = dist.sample()
+        deterministic_tokens = torch.argmax(logits, dim=-1)
+        is_deterministic_tensor = torch.tensor(
+            deterministic, dtype=torch.bool, device=logits.device
+        )
+        is_deterministic_tensor = is_deterministic_tensor.unsqueeze(1)
+        action_token_ids = torch.where(
+            is_deterministic_tensor, deterministic_tokens, stochastic_tokens
+        )
 
-        discretized_actions = np.clip(actions_all.cpu().numpy(), a_min=0, a_max=self.bin_centers.shape[0] - 1)
-        normalized_actions = self.bin_centers[discretized_actions]  # (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
-        normalized_actions = normalized_actions.reshape(normalized_actions.shape[0], NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
-        return batch_dist, action_token_ids, normalized_actions
+        actions_from_tokens = self.vla.config.n_action_bins - action_token_ids
+        discretized = np.clip(actions_from_tokens.cpu().numpy(), a_min=0, a_max=self.bin_centers.shape[0] - 1)
+        normalized_actions = self.bin_centers[discretized]  # 形状 (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
+        normalized_actions = normalized_actions.reshape(
+            normalized_actions.shape[0], NUM_ACTIONS_CHUNK, ACTION_DIM
+        )
+        
+        return dist, action_token_ids, normalized_actions
 
 if __name__ == "__main__":
     import sys

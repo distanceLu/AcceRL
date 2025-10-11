@@ -4,7 +4,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "3,4,5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -45,15 +45,16 @@ from ds_com import TrainerActorCom, InferenceActorCom
 BENCHMARK = "libero_spatial"   
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 4
+NUM_TRAINER_GPUS = 3
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 40
+NUM_EVAL_WORKERS = 1
 ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 20
-ACCUMULATION_STEPS = 13
+TRAIN_BATCH_SIZE = 12
+ACCUMULATION_STEPS = 28
 TRAIN_ITERS = 30000
 
 # PPO
@@ -74,7 +75,7 @@ VALUE_LR = 1e-4
 POLICY_LR = 3e-6
 VALUE_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
+POLICY_TRAIN_START_STEP = 500 # 策略网络从第500个 *更新步* 开始训练
 
 # 日志
 MOVING_AVG_WINDOW = 1000
@@ -130,33 +131,54 @@ class StatsActor:
         all_returns, all_lengths, all_step_times = [], [], []
         total_episodes_processed = 0
         total_env_steps = 0
+        
+        eval_returns, eval_lengths, eval_step_times = [], [], []
+        eval_total_episodes_processed = 0
+        eval_total_env_steps = 0
 
         for env_name, env_data in self.stats.items():
-            total_episodes_processed += env_data["total_episodes_processed"]
-            total_env_steps += env_data["total_env_steps"]
-            all_returns.extend(env_data["episode_returns"])
-            all_lengths.extend(env_data["episode_lengths"])
-            all_step_times.extend(env_data["step_times"])
             if not env_data["episode_returns"]:
-                per_env_stats[env_name] = {
-                    "avg_return": 0.0, "avg_ep_len": 0.0, "avg_success_rate": 0.0,
-                    "num_episodes_in_avg": 0, "total_episodes": env_data["total_episodes_processed"]
-                }
+                per_env_stats[env_name] = { 
+                    "avg_return": 0.0, 
+                    "avg_ep_len": 0.0, 
+                    "avg_success_rate": 0.0, 
+                    "num_episodes_in_avg": 0, 
+                    "total_episodes": env_data["total_episodes_processed"]}
+                continue
+            
+            per_env_stats[env_name] = {
+                "avg_return": np.mean(env_data["episode_returns"]),
+                "avg_ep_len": np.mean(env_data["episode_lengths"]),
+                "avg_success_rate": np.mean(env_data["successes"]),
+                "num_episodes_in_avg": len(env_data["episode_returns"]),
+                "total_episodes": env_data["total_episodes_processed"]
+            }
+            if env_name.startswith("eval_"):
+                eval_total_episodes_processed += env_data["total_episodes_processed"]
+                eval_total_env_steps += env_data["total_env_steps"]
+                eval_returns.extend(env_data["episode_returns"])
+                eval_lengths.extend(env_data["episode_lengths"])
+                eval_step_times.extend(env_data["step_times"])
             else:
-                per_env_stats[env_name] = {
-                    "avg_return": np.mean(env_data["episode_returns"]),
-                    "avg_ep_len": np.mean(env_data["episode_lengths"]),
-                    "avg_success_rate": np.mean(env_data["successes"]),
-                    "num_episodes_in_avg": len(env_data["episode_returns"]),
-                    "total_episodes": env_data["total_episodes_processed"]
-                }
+                total_episodes_processed += env_data["total_episodes_processed"]
+                total_env_steps += env_data["total_env_steps"]
+                all_returns.extend(env_data["episode_returns"])
+                all_lengths.extend(env_data["episode_lengths"])
+                all_step_times.extend(env_data["step_times"])
 
-        per_env_stats["_global_"] = {
+        per_env_stats["_global_rollout_"] = {
             "avg_return": np.mean(all_returns) if all_returns else 0.0,
             "avg_ep_len": np.mean(all_lengths) if all_lengths else 0.0,
             "avg_step_time": np.mean(all_step_times) if all_step_times else 0.0,
             "total_episodes_processed": total_episodes_processed,
             "total_env_steps": total_env_steps
+        }
+        per_env_stats["_global_eval_"] = {
+            "avg_return": np.mean(eval_returns) if eval_returns else 0.0,
+            "avg_ep_len": np.mean(eval_lengths) if eval_lengths else 0.0,
+            "avg_step_time": np.mean(eval_step_times) if eval_step_times else 0.0,
+            "total_episodes_processed": eval_total_episodes_processed,
+            "total_env_steps": eval_total_env_steps
         }
         return per_env_stats
 
@@ -186,11 +208,11 @@ class ReplayBufferActor:
         return obs_list, action_token, adv, logits_old, v_targ
     # ################################################################################
 
-
-@ray.remote
-class RolloutWorkerActor:
+class BaseWorkerActor:
+    """rollout 和 eval worker 的共享逻辑。"""
     def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
-        self.infer, self.replay = infer, replay
+        self.infer = infer
+        self.replay = replay
         self.stats_actor = stats_actor
         self.cfg = cfg
         # 仅需 processor，Worker 不加载大模型
@@ -198,34 +220,34 @@ class RolloutWorkerActor:
         self.benchmark_name = benchmark_name
         from rl.libero_env import LiberoEnvWrapper
 
-        # 1. 初始化所有10个任务的环境
         self.num_tasks = 10
-        print(f"Worker {wid}: 正在初始化 {self.num_tasks} 个 Libero 环境...")
+        print(f"BaseWorker {wid}: 正在初始化 {self.num_tasks} 个 Libero 环境...")
         self.envs = [
             LiberoEnvWrapper(
                 benchmark_name=self.benchmark_name,
                 task_id=i,
                 image_size=224,
-                render_mode="rgb_array",
-            ) for i in range(self.num_tasks)
-        ]
-        print(f"Worker {wid}: 环境初始化完成。")
-        # 2. 初始化所有环境的采样权重，初始值均为1
-        self.env_weights = np.ones(self.num_tasks, dtype=np.float32)
-        # 3. 用于存储当前活动环境的占位符
-        self.env = None               # 指向当前选择的 env 对象
-        self.current_env_idx = -1     # 当前选择的 env 在列表中的索引
-
+                render_mode="rgb_array"
+            ) for i in range(self.num_tasks)]
+        print(f"BaseWorker {wid}: 环境初始化完成。")
+        
+        self.env = None
+        self.current_env_idx = -1
         self.wid = wid
-        self.local_buffer = []
         self.task_description = None
         self.current_env_name = None
 
+@ray.remote
+class RolloutWorkerActor(BaseWorkerActor):
+    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
+        super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
+        self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
+        self.local_buffer = []
+
     def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
-        """
-        根据权重随机选择一个环境并重置它。
-        """
-        probabilities = self.env_weights / np.sum(self.env_weights)
+        failure_counts = np.array([sum(history) for history in self.env_outcome])
+        env_weights = failure_counts + 1
+        probabilities = env_weights / np.sum(env_weights)
         self.current_env_idx = np.random.choice(self.num_tasks, p=probabilities)
         self.env = self.envs[self.current_env_idx]
         obs, info = self.env.reset(seed=seed)
@@ -237,62 +259,37 @@ class RolloutWorkerActor:
         try:
             current_seed = int(time.time() * 1000) + self.wid + os.getpid()
             obs, info = self._reset_and_select_env(seed=current_seed)
-
-            reward_sum = 0.0
-            time_start = time.time()
-            step_count_total = 0
-
+            reward_sum, time_start, step_count_total = 0.0, time.time(), 0
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
-                
-                action_env, action_token, logits, value = ray.get(self.infer.request.remote(inputs_t))
-                chunk_reward = 0.0
-                # 假设action_env的形状是(8, action_dim)，循环执行每个动作
-                done = False
+                action_env, action_token, logits, value = ray.get(self.infer.request.remote(inputs_t, deterministic=False))
+                chunk_reward, done = 0.0, False
                 for i in range(len(action_env)):
-                    single_action = action_env[i]  # 取出第i个动作
+                    single_action = action_env[i]
                     nxt, r, term, trunc, info = self.env.step(single_action)
-                
                     reward_sum += r
-                    r_scaled = r * REWARD_SCALE
-                    chunk_reward += r_scaled
-                
+                    chunk_reward += r * REWARD_SCALE
                     step_count_total += 1
-                    if term or trunc:
-                        done = True
-                        break
+                    if term or trunc: done = True; break
                 self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
                 obs = nxt
 
                 if done:
                     step_time = (time.time() - time_start) / max(step_count_total, 1)
                     success = float(info.get('is_success', 0.0))
-
-                    # 如果任务失败，增加对应环境的权重
-                    if success < 1.0:
-                        self.env_weights[self.current_env_idx] += 1
-
-                    self.stats_actor.add_episode_return.remote(
-                        self.current_env_name, reward_sum, step_time, step_count_total, success
-                    )
+                    self.env_outcome[self.current_env_idx].append(1.0 - success)
+                    self.stats_actor.add_episode_return.remote(self.current_env_name, reward_sum, step_time, step_count_total, success)
                     reward_sum = 0.0
-                    if self.local_buffer:
-                        self._process_traj(self.local_buffer, 0.0)
+                    if self.local_buffer: self._process_traj(self.local_buffer, 0.0)
                     self.local_buffer.clear()
                     current_seed = int(time.time() * 1000) + self.wid + os.getpid()
                     obs, info = self._reset_and_select_env(seed=current_seed)
-                    
-                    time_start = time.time()
-                    step_count_total = 0
+                    time_start, step_count_total = time.time(), 0
                 elif len(self.local_buffer) == ROLLOUT_LOCAL_BUF + 1:
                     _, _, _, _, bootstrap_val = self.local_buffer[-1]
                     self._process_traj(self.local_buffer[:-1], bootstrap_val)
                     self.local_buffer = [self.local_buffer[-1]]
-        except Exception as e:
-            import traceback
-            print(f"[ERROR] RolloutWorker {self.wid} run() 崩溃: {e}", flush=True)
-            traceback.print_exc()
-            raise
+        except Exception as e: import traceback; print(f"[ERROR] RolloutWorker {self.wid} run() 崩溃: {e}", flush=True); traceback.print_exc(); raise
 
     def _process_traj(self, traj_segment, bootstrap_val):
         rets, advs = [], []
@@ -319,6 +316,42 @@ class RolloutWorkerActor:
                 )
             )
         self.replay.add_batch.remote(batch)
+
+@ray.remote
+class EvaluationWorkerActor(BaseWorkerActor): # <--- 继承自 BaseWorkerActor
+    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
+        super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
+        print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
+
+    def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
+        self.current_env_idx = (self.current_env_idx + 1) % self.num_tasks
+        self.env = self.envs[self.current_env_idx]
+        obs, info = self.env.reset(seed=seed)
+        self.task_description = self.env.task_description
+        self.current_env_name = self.env.get_name()
+        return obs, info
+
+    def run(self):
+        try:
+            current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
+            obs, info = self._reset_and_select_env(seed=current_seed)
+            while True:
+                reward_sum, time_start, step_count_total, done = 0.0, time.time(), 0, False
+                while not done:
+                    inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
+                    action_env, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
+                    for i in range(len(action_env)):
+                        single_action = action_env[i]
+                        obs, r, term, trunc, info = self.env.step(single_action)
+                        reward_sum += r; step_count_total += 1
+                        if term or trunc: done = True; break
+                step_time = (time.time() - time_start) / max(step_count_total, 1)
+                success = float(info.get('is_success', 0.0))
+                self.stats_actor.add_episode_return.remote(f"eval_{self.current_env_name}", reward_sum, step_time, step_count_total, success)
+                current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
+                obs, info = self._reset_and_select_env(seed=current_seed)
+        except Exception as e: import traceback; print(f"[ERROR] EvaluationWorker {self.wid} run() 崩溃: {e}", flush=True); traceback.print_exc(); raise
+
 
 # ================================================================
 # 3. 推理器 (InferenceActor)
@@ -361,10 +394,10 @@ class InferenceActor(InferenceActorCom):
             print(f"[ERROR] InferenceActor {self.actor_id} 后台任务异常: {e}", flush=True)
             traceback.print_exc()
 
-    async def request(self, inputs_t: Dict[str, torch.Tensor]):
+    async def request(self, inputs_t: Dict[str, torch.Tensor], deterministic: bool = False):
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
-        self.requests.append(inputs_t)
+        self.requests.append((inputs_t, deterministic))
         self.promises.append(fut)
         return await fut
 
@@ -382,16 +415,19 @@ class InferenceActor(InferenceActorCom):
             promises_to_process = self.promises
             self.requests, self.promises = [], []
             self.last_process_time = time.time()
-
+            
+            inputs_list = [r[0] for r in requests_to_process]
+            deterministic_flags = [r[1] for r in requests_to_process]
+            
             try:
-                inputs_batch = self.model.prepare_inputs_batch(requests_to_process)
+                inputs_batch = self.model.prepare_inputs_batch(inputs_list)
                 with torch.inference_mode():
                     # ############################# 核心修改：使用新的模型接口 ##############################
                     # 1. 前向传播获取 logits 和 value
                     action_logits, value = self.model(inputs_batch)
 
                     # 2. 后处理以采样动作 tokens 和对应的归一化连续动作
-                    _, action_tokens_all, normalized_actions_all = self.model.post_process(action_logits)
+                    _, action_tokens_all, normalized_actions_all = self.model.post_process(action_logits, deterministic=deterministic_flags)
                     
                     # action_tokens_all 的形状是 (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
                     action_tokens = action_tokens_all.view(
@@ -633,6 +669,7 @@ class TrainerActor(TrainerActorCom):
                 ent_loss = torch.tensor(0.0, device=loss.device)
                 kl_loss = torch.tensor(0.0, device=loss.device) 
                 kl_div = 0.0
+                ent = torch.tensor(0.0, device=loss.device)
             else:
                 # 策略与熵损失 (离散版本)
                 dist = torch.distributions.Categorical(logits=action_logits_reshape)
@@ -705,7 +742,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_spatial_balance_env_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_spatial_winbalance_eval_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")
@@ -725,6 +762,12 @@ def main():
             replay_buffers[i % NUM_TRAINER_GPUS], i, stats_actor, cfg,
         ) for i in range(NUM_ROLLOUT_WORKERS)
     ]
+    eval_workers = [
+        EvaluationWorkerActor.remote(
+            inference_pool[i % NUM_INFERENCE_ACTORS], f"eval_{i}", stats_actor, cfg
+        ) for i in range(NUM_EVAL_WORKERS)
+    ]
+    print(f"已创建 {NUM_ROLLOUT_WORKERS} 个 Rollout workers 和 {NUM_EVAL_WORKERS} 个 Evaluation workers。")
 
     print("\n--- 步骤 2: 建立独立的 DeepSpeed 训练组 ---")
     trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
@@ -776,6 +819,7 @@ def main():
 
     print("\n--- 步骤 4: 启动 Rollout Workers 进行数据收集 ---")
     for w in rollout_workers: w.run.remote()
+    for w in eval_workers: w.run.remote()
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
     min_buffer_size_for_start = TRAIN_BATCH_SIZE * ACCUMULATION_STEPS
@@ -808,12 +852,20 @@ def main():
             steps_since_last_log = global_step - last_log_global_step
             training_speed_steps_per_sec = steps_since_last_log / elapsed_log_time if elapsed_log_time > 0 else 0.0
 
-            global_stats = all_stats.pop("_global_")
+            global_stats = all_stats.pop("_global_rollout_")
+            eval_stats = all_stats.pop("_global_eval_")
             avg_return = global_stats["avg_return"]
             avg_ep_len = global_stats["avg_ep_len"]
             total_episodes = global_stats["total_episodes_processed"]
             total_env_steps = global_stats["total_env_steps"]
             avg_step_time = global_stats["avg_step_time"]
+
+            eval_avg_return = eval_stats["avg_return"]
+            eval_avg_ep_len = eval_stats["avg_ep_len"]
+            eval_total_episodes = eval_stats["total_episodes_processed"]
+            eval_env_steps = eval_stats["total_env_steps"]
+            eval_avg_step_time = eval_stats["avg_step_time"]
+
 
             total_losses, p_losses, v_losses, e_losses, kl_losses, lrs_list, _, ents, avg_kl_divs = zip(*results)
             current_lrs = lrs_list[0]
@@ -822,7 +874,7 @@ def main():
             total_buffer_size = sum(ray.get([rb.size.remote() for rb in replay_buffers]))
 
             print(f"更新步 {global_step}/{TRAIN_ITERS} | 时间: {elapsed_time:.1f}s | "
-                  f"全局平均奖励: {avg_return:.2f} | 全局平均幕长: {avg_ep_len:.1f} | "
+                  f"全局平均奖励: {avg_return:.2f} | 全局平均幕长: {avg_ep_len:.1f} | Eval奖励: {eval_avg_return:.2f} | "
                   f"value loss: {np.mean(v_losses):.4f} | LR(V/P): {current_lrs['value']:.7f}/{current_lrs['policy']:.7f} | "
                   f"Episodes数量: {total_episodes:,} | Step平均时间: {avg_step_time:.3f}s")
 
@@ -840,17 +892,30 @@ def main():
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
+            writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
+            writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
+
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
             writer.add_scalar('System/Total_Env_Steps', total_env_steps, global_step)
             writer.add_scalar('System/Avg_Step_Time', avg_step_time, global_step)
+            writer.add_scalar('System/Eval_Total_Episodes_Processed', eval_total_episodes, global_step)
+            writer.add_scalar('System/Eval_Total_Env_Steps', eval_env_steps, global_step)
+            writer.add_scalar('System/Eval_Avg_Step_Time', eval_avg_step_time, global_step)
 
             for env_name, env_stats in all_stats.items():
-                tag_prefix = f"Rollout/{env_name}"
-                writer.add_scalar(f'{tag_prefix}/Average_Return', env_stats['avg_return'], global_step)
-                writer.add_scalar(f'{tag_prefix}/Average_Episode_Length', env_stats['avg_ep_len'], global_step)
-                writer.add_scalar(f'{tag_prefix}/Success_Rate', env_stats['avg_success_rate'], global_step)
-                writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
+                if env_name.startswith("eval_"):
+                    tag_prefix = f"Eval/{env_name.replace('eval_', '')}"
+                    writer.add_scalar(f'{tag_prefix}/Average_Return', env_stats['avg_return'], global_step)
+                    writer.add_scalar(f'{tag_prefix}/Average_Episode_Length', env_stats['avg_ep_len'], global_step)
+                    writer.add_scalar(f'{tag_prefix}/Success_Rate', env_stats['avg_success_rate'], global_step)
+                    writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
+                else:
+                    tag_prefix = f"Rollout/{env_name}"
+                    writer.add_scalar(f'{tag_prefix}/Average_Return', env_stats['avg_return'], global_step)
+                    writer.add_scalar(f'{tag_prefix}/Average_Episode_Length', env_stats['avg_ep_len'], global_step)
+                    writer.add_scalar(f'{tag_prefix}/Success_Rate', env_stats['avg_success_rate'], global_step)
+                    writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
 
             last_log_time = current_time
             last_log_global_step = global_step
