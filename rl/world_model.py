@@ -26,6 +26,20 @@ from rl.actor_critic_model import ActorCritic
 from rl.modules import AttentionPoolHead
 # import os
 from pathlib import Path
+from peft import PeftModel
+from peft.utils import set_peft_model_state_dict
+from safetensors.torch import load_file
+
+
+def _load_lora_inplace(peft_model: PeftModel, lora_dir: Path):
+    st_path = lora_dir / "adapter_model.safetensors"
+    if st_path.exists():
+        sd = load_file(str(st_path), device="cpu")
+    else:
+        sd = torch.load(lora_dir / "adapter_model.bin", map_location="cpu")
+    set_peft_model_state_dict(peft_model, sd)  # 就地覆盖权重
+    peft_model.set_adapter("default")
+    peft_model.print_trainable_parameters()
 
 
 class Agent(ActorCritic):
@@ -81,7 +95,7 @@ class WorldModel(ActorCritic):
     此版本已修改，forward 函数返回中间张量，损失计算在外部进行。
     """
 
-    def __init__(self, cfg, torch_dtype: torch.dtype):
+    def __init__(self, cfg, torch_dtype: torch.dtype, checkpoint_dir: str = None, checkpoint_epoch: int = None):
         cfg.use_lora = False
         super().__init__(cfg, torch_dtype)
         cfg.use_lora = True  # 恢复 cfg 中的 use_lora 标志
@@ -120,6 +134,8 @@ class WorldModel(ActorCritic):
         self.step_count_emb = nn.Embedding(500, hidden_size).to(self.device).to(dtype=self.model_dtype)
         self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=rew_num_classes, lower_bound=-20, upper_bound=20)
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
+        if checkpoint_dir:
+            self.load_checkpoint(save_dir=checkpoint_dir, epoch=checkpoint_epoch)
         self.to(self.device, dtype=self.model_dtype)
 
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
@@ -347,6 +363,26 @@ class WorldModel(ActorCritic):
                 torch.stack(imagined_rewards), torch.stack(imagined_dones), 
                 last_value)
     
+    def compute_world_model_loss(self, wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward):
+        post_patch_proj, reward_hat, termi_hat = self.forward(wm_inp)
+        non_terminal_mask = ~mini_done.squeeze()
+        if torch.any(non_terminal_mask):
+            ae_loss = F.mse_loss(
+                post_patch_proj[non_terminal_mask],
+                mini_next_teacher_proj_feat[non_terminal_mask]
+            )  # 自编码器损失 (仅对非终止状态)
+        else:
+            ae_loss = torch.tensor(0.0, device=post_patch_proj.device)
+        reward_loss = self.symlog_twohot_loss_func(reward_hat, mini_reward)
+        reward_predict = self.symlog_twohot_loss_func.decode(reward_hat)
+        reward_mae = F.l1_loss(reward_predict, mini_reward)
+        reward_mean = mini_reward.mean()
+        termi_loss = self.bce_with_logits_loss_func(termi_hat.squeeze(), mini_done.float())
+        termi_predict = termi_hat > 0
+        termi_acc = (termi_predict.squeeze() == mini_done).float().mean()
+        termi_mean = mini_done.float().mean()
+        return ae_loss, reward_loss, termi_loss, reward_mae, reward_mean, termi_acc, termi_mean
+    
     def save_checkpoint(self, save_dir: str, epoch: int = None):
         """
         保存 WorldModel 的所有可训练参数
@@ -415,24 +451,20 @@ class WorldModel(ActorCritic):
             epoch: 可选的 epoch 编号
         """
         save_path = Path(save_dir)
-        device = self.device # 使用模型自身的设备
-
-        # --- 1. 加载 WorldModel 的 LoRA 权重 ---
+        
+        # 1. 加载 WorldModel 的 LoRA 权重
         world_lora_path = save_path / f"world_lora{'_epoch_' + str(epoch) if epoch else ''}"
-        world_adapter_weights_path = world_lora_path / "adapter_model.bin"
-
-        if world_adapter_weights_path.exists():
-            # 安全加载：加载权重到现有模型，而不是替换模型对象
-            adapter_weights = torch.load(world_adapter_weights_path, map_location=device)
-            self.language_model.load_state_dict(adapter_weights, strict=False)
-            print(f"✓ WorldModel LoRA 权重已从 {world_lora_path} 就地加载")
+        if world_lora_path.exists():
+            assert isinstance(self.language_model, PeftModel)
+            _load_lora_inplace(self.language_model, world_lora_path)
+            print(f"✓ WorldModel LoRA 权重已安全加载")
         else:
-            print(f"⚠️  警告: 未找到 WorldModel LoRA 权重文件: {world_adapter_weights_path}")
-
-        # --- 2. 加载 WorldModel 的额外层 ---
+            print(f"⚠️  警告: 未找到 WorldModel LoRA 权重: {world_lora_path}")
+        
+        # 2. 加载 WorldModel 的额外层
         world_extra_path = save_path / f"world_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
         if world_extra_path.exists():
-            world_extra_layers = torch.load(world_extra_path, map_location=device)
+            world_extra_layers = torch.load(world_extra_path, map_location=self.device)
             self.patch_proj.load_state_dict(world_extra_layers['patch_proj'])
             self.act_proj.load_state_dict(world_extra_layers['act_proj'])
             self.reward_decoder.load_state_dict(world_extra_layers['reward_decoder'])
@@ -441,35 +473,27 @@ class WorldModel(ActorCritic):
             print(f"✓ WorldModel 额外层已从 {world_extra_path} 加载")
         else:
             print(f"⚠️  警告: 未找到 WorldModel 额外层: {world_extra_path}")
-
-        # --- 3. 加载 Agent 的 LoRA 权重 ---
+        
+        # 3. 加载 Agent 的 LoRA 权重
         agent_lora_path = save_path / f"agent_lora{'_epoch_' + str(epoch) if epoch else ''}"
-        agent_adapter_weights_path = agent_lora_path / "adapter_model.bin"
-
-        if agent_adapter_weights_path.exists():
-            # 安全加载：加载权重到现有模型
-            adapter_weights = torch.load(agent_adapter_weights_path, map_location=device)
-            self.agent.language_model.load_state_dict(adapter_weights, strict=False)
-            print(f"✓ Agent LoRA 权重已从 {agent_lora_path} 就地加载")
+        if agent_lora_path.exists():
+            assert isinstance(self.agent.language_model, PeftModel)
+            _load_lora_inplace(self.agent.language_model, agent_lora_path)
+            print(f"✓ Agent LoRA 权重已安全加载")
         else:
-            print(f"⚠️  警告: 未找到 Agent LoRA 权重文件: {agent_adapter_weights_path}")
-
-        # --- 4. 加载 Agent 的额外层 ---
+            print(f"⚠️  警告: 未找到 Agent LoRA 权重: {agent_lora_path}")
+        
+        # 4. 加载 Agent 的额外层
         agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
         if agent_extra_path.exists():
-            agent_extra_layers = torch.load(agent_extra_path, map_location=device)
+            agent_extra_layers = torch.load(agent_extra_path, map_location=self.device)
             self.agent.action_head.load_state_dict(agent_extra_layers['action_head'])
             self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
             self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
-            # log_std_param 是一个独立的张量，不是 state_dict 的一部分，直接赋值
-            self.agent.log_std_param.data.copy_(agent_extra_layers['log_std_param'])
+            self.agent.log_std_param = agent_extra_layers['log_std_param'].to(self.device)
             print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
         else:
             print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
-
-        print(f"\n{'='*80}")
-        print(f"所有检查点已成功从 {save_path} 加载完毕。")
-        print(f"{'='*80}\n")
 
 
 def compute_imagined_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -662,7 +686,7 @@ if __name__ == "__main__":
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
         lora_rank=32,
-        device=torch.device("cuda:2"),
+        device=torch.device("cuda:3"),
     )
 
     print("=" * 80)
@@ -670,11 +694,11 @@ if __name__ == "__main__":
     print("=" * 80)
     
     # Create WorldModel
-    world_model = WorldModel(cfg, TORCH_DTYPE)
+    world_model = WorldModel(cfg, TORCH_DTYPE, '/cpfs01/lcx_workspace/models/WorldModel_ds_noly_wm_1760153209/checkpoint_7000/')
 
     # 模拟保存和加载模型
-    world_model.save_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
-    world_model.load_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
+    # world_model.save_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
+    # world_model.load_checkpoint('/cpfs01/lcx_workspace/models/WorldModel_ds_noly_wm_1760153209/checkpoint_7000/')
     
     print("\n检查参数分组...")
     param_groups = world_model.get_parameter_groups()

@@ -45,12 +45,14 @@ BENCHMARK = "libero_spatial"
 # 分布式系统参数
 NUM_TRAINER_GPUS = 3
 NUM_INFERENCE_ACTORS = 1
-NUM_ROLLOUT_WORKERS = 10
+NUM_ROLLOUT_WORKERS = 9
 ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 2
 INFERENCE_TIMEOUT_MS = 300
-REPLAY_CAPACITY = 1000
+REPLAY_CAPACITY = 10000
 TRAIN_BATCH_SIZE = 24
+WORLD_ACCUM = 2
+AGENT_ACCUM = 14
 ACCUMULATION_STEPS = 1
 TRAIN_ITERS = 100000
 
@@ -94,7 +96,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/" # 例如: "/path/to/your/checkpoint_dir"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/WorldModel_ds_noly_wm_1760153209/checkpoint_7000/" # 例如: "/path/to/your/checkpoint_dir"
 
 # ================================================================
 # 数据结构
@@ -214,27 +216,46 @@ class RolloutWorkerActor:
         self.processor = get_processor(cfg)
         self.benchmark_name = benchmark_name
         from rl.libero_env import LiberoEnvWrapper
-        from libero.libero import benchmark
 
-        benchmark_dict = benchmark.get_benchmark_dict()
-        task_suite = benchmark_dict[self.benchmark_name]()
-        task_id = wid % 10
-        self.env = LiberoEnvWrapper(
-            benchmark_name=self.benchmark_name,
-            task_id=task_id,
-            image_size=224,
-            render_mode="rgb_array",
-        )
+        # 1. 初始化所有10个任务的环境
+        self.num_tasks = 10
+        print(f"Worker {wid}: 正在初始化 {self.num_tasks} 个 Libero 环境...")
+        self.envs = [
+            LiberoEnvWrapper(
+                benchmark_name=self.benchmark_name,
+                task_id=i,
+                image_size=224,
+                render_mode="rgb_array",
+            ) for i in range(self.num_tasks)
+        ]
+        print(f"Worker {wid}: 环境初始化完成。")
+        # 2. 初始化所有环境的采样权重，初始值均为1
+        self.env_weights = np.ones(self.num_tasks, dtype=np.float32)
+        # 3. 用于存储当前活动环境的占位符
+        self.env = None               # 指向当前选择的 env 对象
+        self.current_env_idx = -1     # 当前选择的 env 在列表中的索引
+
         self.wid = wid
         self.local_buffer = []
         self.task_description = None
         self.current_env_name = None
 
+    def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
+        """
+        根据权重随机选择一个环境并重置它。
+        """
+        probabilities = self.env_weights / np.sum(self.env_weights)
+        self.current_env_idx = np.random.choice(self.num_tasks, p=probabilities)
+        self.env = self.envs[self.current_env_idx]
+        obs, info = self.env.reset(seed=seed)
+        self.task_description = self.env.task_description
+        self.current_env_name = self.env.get_name()
+        return obs, info
+
     def run(self):
         try:
-            obs, info = self.env.reset(seed=self.wid)
-            self.task_description = self.env.task_description
-            self.current_env_name = self.env.get_name()
+            current_seed = int(time.time() * 1000) + self.wid + os.getpid()
+            obs, info = self._reset_and_select_env(seed=current_seed)
 
             reward_sum = 0.0
             step_count = 0
@@ -269,6 +290,11 @@ class RolloutWorkerActor:
                 if done:
                     step_time = (time.time() - time_start) / max(step_count, 1)
                     success = float(info.get('is_success', 0.0))
+
+                    # 如果任务失败，增加对应环境的权重
+                    if success < 1.0:
+                        self.env_weights[self.current_env_idx] += 1
+
                     self.stats_actor.add_episode_return.remote(
                         self.current_env_name, reward_sum, step_time, step_count, success
                     )
@@ -277,9 +303,8 @@ class RolloutWorkerActor:
                         self._process_traj(self.local_buffer, 0.0, None)
                     self.local_buffer.clear()
                     
-                    obs, info = self.env.reset()
-                    self.task_description = self.env.task_description
-                    self.current_env_name = self.env.get_name()
+                    current_seed = int(time.time() * 1000) + self.wid + os.getpid()
+                    obs, info = self._reset_and_select_env(seed=current_seed)
                     reward_sum = 0.0
                     step_count = 0
                     time_start = time.time()
@@ -345,7 +370,7 @@ class InferenceActor(InferenceActorCom):
         # 加载学生模型(WorldModel)和教师模型(ActorCritic)
         print(f"InferenceActor {actor_id}: 正在加载 WorldModel (学生)...")
         # InferenceActorCom会调用self.model，要更新的模型名字必须是self.model。不要删除本注释！
-        self.model = WorldModel(cfg, torch_dtype=TORCH_DTYPE)  
+        self.model = WorldModel(cfg, torch_dtype=TORCH_DTYPE, checkpoint_dir=cfg.checkpoint2)  
         self.model.cuda()
         self.model.eval()
 
@@ -510,7 +535,7 @@ class TrainerActor(TrainerActorCom):
 
         # 使用 WorldModel 进行训练
         print(f"Trainer {self.rank}: 正在加载 OpenVLA WorldModel...")
-        model = WorldModel(self.cfg, torch_dtype=TORCH_DTYPE)
+        model = WorldModel(self.cfg, torch_dtype=TORCH_DTYPE, checkpoint_dir=self.cfg.checkpoint2)
         self.base_model = model
 
         # 根据需求，在模型初始化后、DeepSpeed包装前加载检查点。
@@ -519,15 +544,7 @@ class TrainerActor(TrainerActorCom):
         if self.cfg.checkpoint2 and os.path.exists(self.cfg.checkpoint2):
             if self.rank == 0:
                 print(f"\n{'='*50}")
-                print(f"Trainer Rank 0: 发现检查点，正在从 '{self.cfg.checkpoint2}' 加载...")
-                print(f"{'='*50}\n")
-            
-            # 所有 rank 都必须加载自己的模型分片
-            model.load_checkpoint(self.cfg.checkpoint2)
-            
-            if self.rank == 0:
-                print(f"\n{'='*50}")
-                print("Trainer Rank 0: 检查点加载完成。")
+                print(f"Trainer Rank 0: 发现检查点，已从 '{self.cfg.checkpoint2}' 加载...")
                 print(f"{'='*50}\n")
         elif self.rank == 0:
             # 即使不加载，也打印一条信息，让用户知道程序行为。
@@ -536,7 +553,6 @@ class TrainerActor(TrainerActorCom):
                 print(f"Trainer Rank 0: 未找到检查点路径 '{self.cfg.checkpoint2}'。")
             else:
                 print("Trainer Rank 0: 未提供检查点路径 (CHECKPOINT2 is None)。")
-            print("将使用 OpenVLA 预训练权重从头开始训练世界模型。")
             print(f"{'='*50}\n")
 
         param_groups = self.base_model.get_parameter_groups()
@@ -682,35 +698,21 @@ class TrainerActor(TrainerActorCom):
             real_value_loss = torch.tensor(0.0, device=act_t.device)
             real_policy_loss, real_ent_loss, real_ent = torch.tensor(0.0, device=act_t.device), torch.tensor(0.0, device=act_t.device), torch.tensor(0.0, device=act_t.device)
             # --- 2. 世界模型损失 ---
-            # 第二个前向传播：基于状态和动作获取世界模型预测
-            post_patch_proj, reward_hat, termi_hat = self.model.forward({**mini_inputs, 'this_action': mini_act})
-            
-            non_terminal_mask = ~mini_done.squeeze()
-            if torch.any(non_terminal_mask):
-                ae_loss = F.mse_loss(
-                    post_patch_proj[non_terminal_mask],
-                    mini_next_teacher_proj_feat[non_terminal_mask]
-                )  # 自编码器损失 (仅对非终止状态)
-            else:
-                ae_loss = torch.tensor(0.0, device=post_patch_proj.device)
-            self.model.symlog_twohot_loss_func: SymLogTwoHotLoss
-            reward_loss = self.model.symlog_twohot_loss_func(reward_hat, mini_reward)
-            reward_predict = self.model.symlog_twohot_loss_func.decode(reward_hat)
-            reward_mae = F.l1_loss(reward_predict, mini_reward)
-            reward_mean = mini_reward.mean()
-            termi_loss = self.model.bce_with_logits_loss_func(termi_hat.squeeze(), mini_done.float())
-            termi_predict = termi_hat > 0
-            termi_acc = (termi_predict.squeeze() == mini_done).float().mean()
-            termi_mean = mini_done.float().mean()
+            # 基于状态和动作获取世界模型预测
+            wm_inp = mini_inputs.copy()
+            wm_inp['this_action'] = mini_act
+
+            ae_loss, reward_loss, termi_loss, reward_mae, reward_mean, termi_acc, termi_mean = self.model.compute_world_model_loss(wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward)
             world_model_loss = ae_loss + REWARD_LOSS_COEF * reward_loss + TERMINATION_LOSS_COEF * termi_loss
             self.model.backward(world_model_loss)  # 节省显存
-            self.model.step()
 
             # --- 4. 组合所有损失并进行单次反向传播和优化 ---
             policy_loss_coef = min(1.0, max((self.global_step - POLICY_TRAIN_START_STEP) / POLICY_LOSS_WARMUP_STEPS, 0.0))
-            imagination_policy_loss, imagination_value_loss = compute_imagine_loss(mini_inputs, self.model, IMAGINE_STEP, GAMMA, LAMBDA)
-            total_loss = imagination_value_loss + policy_loss_coef * imagination_policy_loss
-            self.model.backward(total_loss)
+            # imagination_policy_loss, imagination_value_loss = compute_imagine_loss(mini_inputs, self.model, IMAGINE_STEP, GAMMA, LAMBDA)
+            # total_loss = imagination_value_loss
+            # self.model.backward(total_loss)
+            imagination_policy_loss, imagination_value_loss, total_loss = torch.tensor(0.0, device=ae_loss.device), torch.tensor(0.0, device=ae_loss.device), torch.tensor(0.0, device=ae_loss.device)
+            
             self.model.step()
             
             # --- 5. 记录所有损失 ---
@@ -773,7 +775,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    exp_name = f"WorldModel_ds_bs1024_{int(time.time())}"
+    exp_name = f"WorldModel_ds_only_wm_restore_{int(time.time())}"
     save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
     log_dir = f"runs/wm/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
