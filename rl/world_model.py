@@ -303,44 +303,63 @@ class WorldModel(ActorCritic):
         termin_hat = self.termi_decoder.forward(post_patch_embeddings, step_emb).squeeze(-1)
         post_patch_proj = self.patch_proj(post_patch_embeddings)
 
-        res = [
-            post_patch_proj, 
-            reward_logits,
-            termin_hat
-            ]
-        res = tuple(tmp if tmp is None else tmp.float() for tmp in res)
-        return res
+        return post_patch_proj, reward_logits.float(), termin_hat.float()
     
     def agent_super_forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """仅使用 Agent 的前向传播来获取策略和价值。"""
         return ActorCritic.forward(self.agent, inputs_batch, return_vit_out)
 
-    def imagine(self, mini_inputs: Dict[str, torch.Tensor], imagine_step) -> Tuple:
+    def imagine(self, start_states: Dict[str, torch.Tensor], max_horizon: int) -> Tuple:
         """
-        在学习到的世界模型中进行想象。
-        从 mini_inputs 中的真实状态开始，向前滚动 IMAGINE_STEP 步。
-        返回轨迹和策略分布参数。
+        在学习到的世界模型中进行想象，直到所有轨迹终止或达到最大视界。
+        
+        Args:
+            start_states: 包含初始状态信息的字典，与 'forward_vision' 的输入格式相同。
+            max_horizon: 想象的最大步数。
+
+        Returns:
+            一个元组，包含想象轨迹的完整信息：
+            - imagined_logps (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            - imagined_values (torch.Tensor): (T, B)
+            - imagined_rewards (torch.Tensor): (T, B)
+            - imagined_dones (torch.Tensor): (T, B)
+            - last_value (torch.Tensor): (B,)
+            - imagined_actions (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            - imagined_multimodal_embs (torch.Tensor): (T, B, SeqLen, Dim)
+            - imagined_att_masks (torch.Tensor): (T, B, SeqLen)
         """
         # 存储想象轨迹的容器
-        imagined_logps = []
-        imagined_values = []
-        imagined_rewards = []
-        imagined_dones = []
+        imagined_logps, imagined_values, imagined_rewards, imagined_dones = [], [], [], []
+        imagined_actions, imagined_multimodal_embs, imagined_att_masks = [], [], []
+        
         num_patches = self._compute_num_patches()
+        B = start_states['input_ids'].size(0)
+        device = self.device
 
         with torch.no_grad():
-            # 1. 从真实状态 mini_inputs 获取初始隐状态 (embeddings)
-            multimodal_emb, multimodal_att_mask = self.forward_vision(mini_inputs)
+            # 1. 从真实状态获取初始隐状态 (embeddings)
+            multimodal_emb, multimodal_att_mask = self.forward_vision(start_states)
         
+        active_mask = torch.ones(B, dtype=torch.bool, device=device)
+
         # 2. 开始想象循环
-        for step in range(imagine_step):
-            step_count = mini_inputs['step_count'] + step
-            mu, log_std, value = self.agent.forward(multimodal_att_mask, multimodal_emb, mini_inputs['labels'])
+        for step in range(max_horizon):
+            if not active_mask.any():
+                break  # 如果所有轨迹都已终止，提前退出
+
+            step_count = start_states['step_count'] + step
+            
+            # 使用当前隐状态获取策略和价值
+            mu, log_std, value = self.agent.forward(multimodal_att_mask, multimodal_emb, start_states['labels'])
             
             dist = Normal(mu, torch.exp(log_std))
             action = dist.sample()
             log_p = dist.log_prob(action)
 
+            # 存储当前步的信息
+            imagined_multimodal_embs.append(multimodal_emb)
+            imagined_att_masks.append(multimodal_att_mask)
+            imagined_actions.append(action)
             imagined_logps.append(log_p)
             imagined_values.append(value)
 
@@ -348,20 +367,24 @@ class WorldModel(ActorCritic):
                 next_embeddings, reward_hat, termi_hat = self.predict_next(multimodal_emb, multimodal_att_mask, action, step_count)
             
             predicted_reward = self.symlog_twohot_loss_func.decode(reward_hat)
-            predicted_done = (termi_hat > 0).squeeze()
+            predicted_done = (termi_hat > 0).squeeze(-1) if termi_hat.ndim > 1 else (termi_hat > 0)
 
             imagined_rewards.append(predicted_reward)
             imagined_dones.append(predicted_done)
             
             multimodal_emb[:, 1:num_patches+1, :] = next_embeddings
 
-        step_count = mini_inputs['step_count'] + imagine_step
+            # 更新活跃掩码
+            active_mask.logical_and_(~predicted_done)
+
+        # 获取最后一步的价值，用于 GAE 计算
         with torch.no_grad():
-            _, _, last_value = self.agent.forward(multimodal_att_mask, multimodal_emb, mini_inputs['labels'])
+            _, _, last_value = self.agent.forward(multimodal_att_mask, multimodal_emb, start_states['labels'])
 
         return (torch.stack(imagined_logps), torch.stack(imagined_values), 
                 torch.stack(imagined_rewards), torch.stack(imagined_dones), 
-                last_value)
+                last_value, torch.stack(imagined_actions),
+                torch.stack(imagined_multimodal_embs), torch.stack(imagined_att_masks))
     
     def compute_world_model_loss(self, wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward):
         post_patch_proj, reward_hat, termi_hat = self.forward(wm_inp)
@@ -373,6 +396,7 @@ class WorldModel(ActorCritic):
             )  # 自编码器损失 (仅对非终止状态)
         else:
             ae_loss = torch.tensor(0.0, device=post_patch_proj.device)
+            print(f"non_terminal_mask全为0: {non_terminal_mask}", flush=True)
         reward_loss = self.symlog_twohot_loss_func(reward_hat, mini_reward)
         reward_predict = self.symlog_twohot_loss_func.decode(reward_hat)
         reward_mae = F.l1_loss(reward_predict, mini_reward)
@@ -496,27 +520,34 @@ class WorldModel(ActorCritic):
             print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
 
 
-def compute_imagined_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:
+def compute_imagined_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor, gamma: float, lamb: float) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     为想象出的轨迹计算 GAE (Generalized Advantage Estimation)。
-    输入张量的第一维是时间步 (IMAGINE_STEP)。
-    由于批次中的序列可能在不同时间点终止，因此需要小心处理。
+    输入张量的第一维是时间步 (T)。
     """
     advantages = []
-    returns = []
+    T = rewards.size(0)
     gae = 0.0
     next_val = last_value
-    for t in reversed(range(imagine_step)):
+    for t in reversed(range(T)):
+        # dones[t] 是布尔值，需要转为浮点数
         delta = rewards[t] + gamma * next_val * (1.0 - dones[t].float()) - values[t]
         gae = delta + gamma * lamb * gae * (1.0 - dones[t].float())
         advantages.insert(0, gae)
-        returns.insert(0, gae + values[t])
         next_val = values[t]
-    return torch.stack(advantages), torch.stack(returns)
+    
+    advantages = torch.stack(advantages)
+    returns = advantages + values
+    return advantages, returns
 
 
 def create_validity_mask(imagined_dones: torch.Tensor) -> Tuple[torch.Tensor, float]:
-    """根据想象的终止信号创建有效性掩码。"""
+    """
+    根据想象的终止信号创建有效性掩码。
+    一条轨迹在第一次 done=True 之后的所有步骤都是无效的。
+    输入 imagined_dones: (T, B)
+    返回 valid_mask: (T, B)
+    """
     with torch.no_grad():
         cumulative_dones = torch.cumsum(imagined_dones.long(), dim=0)
         padded_cumulative_dones = F.pad(cumulative_dones, (0, 0, 1, 0))[:-1]
@@ -524,6 +555,43 @@ def create_validity_mask(imagined_dones: torch.Tensor) -> Tuple[torch.Tensor, fl
         valid_mask_flat = valid_mask.reshape(-1)
         num_valid_steps = valid_mask_flat.sum().clamp(min=1.0)
     return valid_mask_flat, num_valid_steps
+
+
+def compute_ppo_loss(
+    mu: torch.Tensor, 
+    log_std: torch.Tensor, 
+    value: torch.Tensor, 
+    old_logp: torch.Tensor, 
+    action: torch.Tensor, 
+    advantage: torch.Tensor, 
+    value_target: torch.Tensor, 
+    clip_eps: float, 
+    vf_coef: float, 
+    ent_coef: float
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    计算 PPO 损失。
+    所有输入的张量都应该是扁平化的 (N,) 或 (N, D)。
+    """
+    dist = Normal(mu, torch.exp(log_std))
+    logp = dist.log_prob(action)
+    
+    # PPO 策略损失
+    ratio = torch.exp(logp - old_logp)
+    # 优势已经被归一化
+    adv_unsqueezed = advantage.unsqueeze(-1).unsqueeze(-1)
+    surr1 = ratio * adv_unsqueezed
+    surr2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv_unsqueezed
+    policy_loss = -torch.mean(torch.min(surr1, surr2))
+    
+    # 价值损失
+    value_loss = F.mse_loss(value.squeeze(), value_target.squeeze())
+    
+    # 熵损失
+    entropy = torch.mean(dist.entropy())
+    entropy_loss = -ent_coef * entropy
+    
+    return policy_loss, vf_coef * value_loss, entropy_loss, entropy
 
 
 def compute_imagine_loss(mini_inputs: Dict[str, torch.Tensor], model, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:

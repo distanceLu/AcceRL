@@ -214,13 +214,17 @@ class ActorCritic(nn.Module):
         )
         return normalized_proprio
 
-    def batch_process_obs(self, inputs_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    def batch_process_obs(self, inputs_list: List[Dict[str, Any]], max_len=None) -> Dict[str, torch.Tensor]:
         """
         Right-pad variable-length sequences across a list of samples and stack into a batch on self.vla.device.
         Expects each item to contain: input_ids, attention_mask, labels, pixel_values, proprio, etc.
         """
         # 目标序列最大长度（对齐到同一个 max_len，确保各 key 同长）
-        max_len = max(it["input_ids"].size(1) for it in inputs_list)
+        max_len_t = max(it["input_ids"].size(1) for it in inputs_list)
+        if max_len and max_len_t > max_len:
+            print(f"Warning! input_ids size{max_len_t}, max_len: {max_len}")
+        else:
+            max_len = max_len_t
         pad_id = int(self.vla.pad_token_id)
 
         # 对每条样本进行右侧 padding
@@ -251,7 +255,7 @@ class ActorCritic(nn.Module):
         inputs["proprio"] = inputs["proprio"].to(torch.float32)
         return inputs
 
-    def prepare_inputs_batch(self, inputs_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    def prepare_inputs_batch(self, inputs_list: List[Dict[str, Any]], max_len=None) -> Dict[str, torch.Tensor]:
         """
         对多条样本执行：
           - 归一化 proprio 到 [-1, 1]
@@ -272,7 +276,7 @@ class ActorCritic(nn.Module):
                 "Per-sample sequence lengths of input_ids/attention_mask/labels must match."
 
         # Batchify
-        return self.batch_process_obs(inputs_list)
+        return self.batch_process_obs(inputs_list, max_len)
 
     def _compute_num_patches(self) -> int:
         num_patches = (
