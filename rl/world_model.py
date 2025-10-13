@@ -319,7 +319,8 @@ class WorldModel(ActorCritic):
 
         Returns:
             一个元组，包含想象轨迹的完整信息：
-            - imagined_logps (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            - imagined_mus (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            - imagined_log_stds (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
             - imagined_values (torch.Tensor): (T, B)
             - imagined_rewards (torch.Tensor): (T, B)
             - imagined_dones (torch.Tensor): (T, B)
@@ -329,7 +330,7 @@ class WorldModel(ActorCritic):
             - imagined_att_masks (torch.Tensor): (T, B, SeqLen)
         """
         # 存储想象轨迹的容器
-        imagined_logps, imagined_values, imagined_rewards, imagined_dones = [], [], [], []
+        imagined_mus, imagined_log_stds, imagined_values, imagined_rewards, imagined_dones = [], [], [], [], []
         imagined_actions, imagined_multimodal_embs, imagined_att_masks = [], [], []
         
         num_patches = self._compute_num_patches()
@@ -354,13 +355,13 @@ class WorldModel(ActorCritic):
             
             dist = Normal(mu, torch.exp(log_std))
             action = dist.sample()
-            log_p = dist.log_prob(action)
 
             # 存储当前步的信息
             imagined_multimodal_embs.append(multimodal_emb)
             imagined_att_masks.append(multimodal_att_mask)
             imagined_actions.append(action)
-            imagined_logps.append(log_p)
+            imagined_mus.append(mu)
+            imagined_log_stds.append(log_std)
             imagined_values.append(value)
 
             with torch.no_grad():
@@ -381,7 +382,7 @@ class WorldModel(ActorCritic):
         with torch.no_grad():
             _, _, last_value = self.agent.forward(multimodal_att_mask, multimodal_emb, start_states['labels'])
 
-        return (torch.stack(imagined_logps), torch.stack(imagined_values), 
+        return (torch.stack(imagined_mus), torch.stack(imagined_log_stds), torch.stack(imagined_values), 
                 torch.stack(imagined_rewards), torch.stack(imagined_dones), 
                 last_value, torch.stack(imagined_actions),
                 torch.stack(imagined_multimodal_embs), torch.stack(imagined_att_masks))
@@ -561,14 +562,16 @@ def compute_ppo_loss(
     mu: torch.Tensor, 
     log_std: torch.Tensor, 
     value: torch.Tensor, 
-    old_logp: torch.Tensor, 
+    old_mu: torch.Tensor,
+    old_log_std: torch.Tensor,
     action: torch.Tensor, 
     advantage: torch.Tensor, 
     value_target: torch.Tensor, 
     clip_eps: float, 
     vf_coef: float, 
-    ent_coef: float
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ent_coef: float,
+    kl_coef: float
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     计算 PPO 损失。
     所有输入的张量都应该是扁平化的 (N,) 或 (N, D)。
@@ -576,7 +579,12 @@ def compute_ppo_loss(
     dist = Normal(mu, torch.exp(log_std))
     logp = dist.log_prob(action)
     
-    # PPO 策略损失
+    # 旧策略的分布和 log_prob (不计算梯度)
+    with torch.no_grad():
+        old_dist = Normal(old_mu, torch.exp(old_log_std))
+        old_logp = old_dist.log_prob(action)
+
+    # PPO 策略损失 (Clipped Surrogate Objective)
     ratio = torch.exp(logp - old_logp)
     # 优势已经被归一化
     adv_unsqueezed = advantage.unsqueeze(-1).unsqueeze(-1)
@@ -590,8 +598,10 @@ def compute_ppo_loss(
     # 熵损失
     entropy = torch.mean(dist.entropy())
     entropy_loss = -ent_coef * entropy
+    kl_div_metric = torch.distributions.kl.kl_divergence(old_dist, dist).mean()
+    kl_loss = kl_coef * kl_div_metric
     
-    return policy_loss, vf_coef * value_loss, entropy_loss, entropy
+    return policy_loss, vf_coef * value_loss, entropy_loss, kl_loss, entropy, kl_div_metric
 
 
 def compute_imagine_loss(mini_inputs: Dict[str, torch.Tensor], model, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:

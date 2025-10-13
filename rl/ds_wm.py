@@ -62,6 +62,7 @@ LAMBDA = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 0.5
 ENT_COEF = 0.0
+KL_COEF = 0.02
 
 # # 在此步数内，策略损失的系数会从0线性增加到1
 # POLICY_LOSS_WARMUP_STEPS = 10000
@@ -83,7 +84,7 @@ WORLD_LR = 3e-5
 POLICY_LR = 1e-6
 WORLD_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 100
+POLICY_TRAIN_START_STEP = 10
 
 # 日志
 MOVING_AVG_WINDOW = 1000
@@ -109,8 +110,8 @@ class Experience:
     obs: Dict[str, torch.Tensor]
     action: np.ndarray                      # 学生动作 (normalized)
     advantage: float
-    behaviour_mu: np.ndarray
-    behaviour_log_std: np.ndarray
+    old_mu: np.ndarray 
+    old_log_std: np.ndarray
     value_target: float
     done: bool                              # 结束标志
     next_teacher_projector_features: Optional[np.ndarray] # 下一状态的教师视觉特征
@@ -122,7 +123,8 @@ class ImaginedExperience:
     attention_mask: np.ndarray
     labels: np.ndarray
     action: np.ndarray
-    logp_old: np.ndarray
+    old_mu: np.ndarray 
+    old_log_std: np.ndarray
     advantage: float
     value_target: float
 
@@ -203,8 +205,8 @@ class ReplayBufferActor:
         obs_list = [b.obs for b in batch]
         act = np.stack([b.action for b in batch])
         adv = np.asarray([b.advantage for b in batch], np.float32)
-        mu_old = np.stack([b.behaviour_mu for b in batch])
-        log_std_old = np.stack([b.behaviour_log_std for b in batch])
+        old_mu = np.stack([b.old_mu for b in batch])
+        old_log_std = np.stack([b.old_log_std for b in batch])
         v_targ = np.asarray([b.value_target for b in batch], np.float32)
         done = np.asarray([b.done for b in batch], np.bool_)
         # 如果 next_teacher_projector_features 为 None (在 done=True 时)，用零填充
@@ -221,7 +223,7 @@ class ReplayBufferActor:
                 raise RuntimeError(print_str)
         next_teacher_proj_feat = np.stack([b.next_teacher_projector_features for b in batch])
         reward = np.asarray([b.reward for b in batch], np.float32)
-        return obs_list, act, adv, mu_old, log_std_old, v_targ, done, next_teacher_proj_feat, reward
+        return obs_list, act, adv, old_mu, old_log_std, v_targ, done, next_teacher_proj_feat, reward
 
 @ray.remote
 class ImaginationBufferActor:
@@ -246,7 +248,8 @@ class ImaginationBufferActor:
             "attention_mask": np.stack([b.attention_mask for b in batch]),
             "labels": np.stack([b.labels for b in batch]),
             "action": np.stack([b.action for b in batch]),
-            "logp_old": np.stack([b.logp_old for b in batch]),
+            "old_mu": np.stack([b.old_mu for b in batch]),
+            "old_log_std": np.stack([b.old_log_std for b in batch]),
             "advantage": np.array([b.advantage for b in batch], dtype=np.float32),
             "value_target": np.array([b.value_target for b in batch], dtype=np.float32)
         }
@@ -392,8 +395,8 @@ class RolloutWorkerActor:
                     obs=s,
                     action=a_norm.astype(np.float32),
                     advantage=float(advs_np[i]),
-                    behaviour_mu=mu.astype(np.float32),
-                    behaviour_log_std=log_std.astype(np.float32),
+                    old_mu=mu.astype(np.float32),
+                    old_log_std=log_std.astype(np.float32),
                     value_target=float(rets[i]),
                     done=done,
                     next_teacher_projector_features=next_teacher_features.astype(np.float32) if next_teacher_features is not None else None,
@@ -555,7 +558,7 @@ class ImaginationRolloutActor(InferenceActorCom):
 
                 # 2. 进行想象
                 with torch.inference_mode():
-                    (imagined_logps, imagined_values, imagined_rewards, imagined_dones, 
+                    (imagined_mus, imagined_log_stds, imagined_values, imagined_rewards, imagined_dones, 
                      last_value, imagined_actions, imagined_multimodal_embs, 
                      imagined_att_masks) = self.model.imagine(start_states_batch, IMAGINE_MAX_HORIZON)
 
@@ -568,7 +571,8 @@ class ImaginationRolloutActor(InferenceActorCom):
                 imagined_multimodal_embs_flat = imagined_multimodal_embs.view(T * B, *imagined_multimodal_embs.shape[2:])
                 imagined_att_masks_flat = imagined_att_masks.view(T * B, *imagined_att_masks.shape[2:])
                 imagined_actions_flat = imagined_actions.view(T * B, *imagined_actions.shape[2:])
-                imagined_logps_flat = imagined_logps.view(T * B, *imagined_logps.shape[2:])
+                imagined_mus_flat = imagined_mus.view(T * B, *imagined_mus.shape[2:])
+                imagined_log_stds_flat = imagined_log_stds.view(T * B, *imagined_log_stds.shape[2:])
                 imagined_advs_flat = imagined_advs.view(T * B)
                 imagined_rets_flat = imagined_rets.view(T * B)
                 valid_mask_flat = valid_mask.view(T * B)
@@ -583,7 +587,8 @@ class ImaginationRolloutActor(InferenceActorCom):
                             attention_mask=imagined_att_masks_flat[i].cpu().numpy(),
                             labels=labels_np[i % B],
                             action=imagined_actions_flat[i].cpu().numpy(),
-                            logp_old=imagined_logps_flat[i].cpu().numpy(),
+                            old_mu=imagined_mus_flat[i].cpu().numpy(),
+                            old_log_std=imagined_log_stds_flat[i].cpu().numpy(),
                             advantage=imagined_advs_flat[i].item(),
                             value_target=imagined_rets_flat[i].item()
                         ))
@@ -815,18 +820,28 @@ class TrainerActor(TrainerActorCom):
                                                                  mini_policy_batch["labels"])
             normalized_adv = (mini_policy_batch['advantage'] - adv_mean) / (adv_std + 1e-8)
             
-            policy_loss, value_loss, entropy_loss, entropy = compute_ppo_loss(
-                mu, log_std, value, mini_policy_batch['logp_old'], mini_policy_batch['action'],
-                normalized_adv, mini_policy_batch['value_target'], CLIP_EPS, VF_COEF, ENT_COEF
+            policy_loss, value_loss, entropy_loss, kl_loss, entropy, kl_div_metric = compute_ppo_loss(
+                mu, log_std, value, 
+                mini_policy_batch['old_mu'],
+                mini_policy_batch['old_log_std'],
+                mini_policy_batch['action'],
+                normalized_adv, 
+                mini_policy_batch['value_target'], 
+                CLIP_EPS, 
+                VF_COEF, 
+                ENT_COEF,
+                KL_COEF
             )
             
-            total_policy_loss = policy_loss + value_loss + entropy_loss
+            total_policy_loss = policy_loss + value_loss + entropy_loss + kl_loss
             self.model.backward(total_policy_loss / total_accum)
             
             epoch_losses["imagination_policy_loss"].append(policy_loss.item())
             epoch_losses["imagination_value_loss"].append(value_loss.item())
             epoch_losses["imagination_entropy_loss"].append(entropy_loss.item())
+            epoch_losses["imagination_kl_loss"].append(kl_loss.item())
             epoch_losses["imagination_entropy"].append(entropy.item())
+            epoch_losses["imagination_kl_div"].append(kl_div_metric.item())
 
         # === 阶段 3: 优化器步骤 ===
         self.model.step()
@@ -871,7 +886,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    exp_name = f"WorldModel_ds_bs1024_{int(time.time())}"
+    exp_name = f"WorldModel_ds_kl_{int(time.time())}"
     save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
     log_dir = f"runs/wm2/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
@@ -1034,6 +1049,7 @@ def main():
             writer.add_scalar('Train/Learning_Rate/World', current_lrs['world'], global_step)
             writer.add_scalar('Train/Learning_Rate/Policy', current_lrs['policy'], global_step)
             writer.add_scalar('Metrics/Imagination_Entropy', avg_losses.get('imagination_entropy', 0), global_step)
+            writer.add_scalar('Metrics/Imagination_KL_Divergence', avg_losses.get('imagination_kl_div', 0), global_step)
             writer.add_scalar('Rollout/_Global/Average_Return', global_stats['avg_return'], global_step)
             writer.add_scalar('Rollout/_Global/Average_Success_Rate', global_stats['avg_success_rate'], global_step)
             writer.add_scalar('System/Buffer_Size_Real', total_real_buffer, global_step)
