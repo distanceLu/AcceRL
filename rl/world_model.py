@@ -357,7 +357,7 @@ class WorldModel(ActorCritic):
             action = dist.sample()
 
             # 存储当前步的信息
-            imagined_multimodal_embs.append(multimodal_emb)
+            imagined_multimodal_embs.append(multimodal_emb.clone())
             imagined_att_masks.append(multimodal_att_mask)
             imagined_actions.append(action)
             imagined_mus.append(mu)

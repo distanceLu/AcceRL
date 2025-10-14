@@ -33,7 +33,6 @@ from experiments.robot.libero.libero_utils import GenerateConfig
 from rl.world_model import WorldModel, compute_imagined_gae, create_validity_mask, compute_ppo_loss
 from rl.utils import prepare_one_obs
 from ds_com import TrainerActorCom, InferenceActorCom
-from storm.functions_losses import SymLogTwoHotLoss
 
 # ================================================================
 # 0. 超参数与配置
@@ -52,7 +51,7 @@ INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
 IMAGINATION_REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 24
-WORLD_ACCUM = 4
+WORLD_ACCUM = 6
 AGENT_ACCUM = 21
 TRAIN_ITERS = 100000
 
@@ -84,7 +83,7 @@ WORLD_LR = 3e-5
 POLICY_LR = 1e-6
 WORLD_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 10
+POLICY_TRAIN_START_STEP = 100
 
 # 日志
 MOVING_AVG_WINDOW = 1000
@@ -98,7 +97,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/WorldModel_ds_only_wm_restore_1760191053/checkpoint_16000/" # 例如: "/path/to/your/checkpoint_dir"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/WorldModel_ds_only_wm_1760349259/checkpoint_1000/" # 例如: "/path/to/your/checkpoint_dir"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -210,10 +209,13 @@ class ReplayBufferActor:
         v_targ = np.asarray([b.value_target for b in batch], np.float32)
         done = np.asarray([b.done for b in batch], np.bool_)
         # 如果 next_teacher_projector_features 为 None (在 done=True 时)，用零填充
+        feasible_b = None
         for b in batch:
             if b.next_teacher_projector_features is not None:
                 feasible_b = b
                 break
+        if feasible_b is None:
+            return None
         for b in batch:
             if b.next_teacher_projector_features is None:
                 b.next_teacher_projector_features = np.zeros_like(feasible_b.next_teacher_projector_features)
@@ -242,6 +244,10 @@ class ImaginationBufferActor:
             return None
         
         batch = random.sample(self.buffer, batch_size)
+        first_sample = batch[0].multimodal_emb.shape
+        for b in batch:
+            if b.multimodal_emb.shape != first_sample:
+                print(f"b.shape: {b.multimodal_emb.shape}, first_sample shape: {first_sample}")
         
         return {
             "inputs_embeds": np.stack([b.multimodal_emb for b in batch]),
@@ -582,7 +588,7 @@ class ImaginationRolloutActor(InferenceActorCom):
                 all_new_experiences = []
                 for i in range(T * B):
                     if valid_mask_flat[i]:
-                        all_new_experiences.append(ImaginedExperience(
+                        exp = ImaginedExperience(
                             multimodal_emb=imagined_multimodal_embs_flat[i].float().cpu().numpy(),
                             attention_mask=imagined_att_masks_flat[i].cpu().numpy(),
                             labels=labels_np[i % B],
@@ -591,18 +597,14 @@ class ImaginationRolloutActor(InferenceActorCom):
                             old_log_std=imagined_log_stds_flat[i].cpu().numpy(),
                             advantage=imagined_advs_flat[i].item(),
                             value_target=imagined_rets_flat[i].item()
-                        ))
+                        )
+                        all_new_experiences.append(exp)
                 
-                # 6. 【核心修改】将数据分发到各个Buffer
                 if all_new_experiences:
-                    # 将经验分成 N 块，N=self.num_buffers
                     chunks = np.array_split(all_new_experiences, self.num_buffers)
                     for i, chunk in enumerate(chunks):
                         if len(chunk) > 0:
                             self.imagination_buffers[i].add_batch.remote(list(chunk))
-                
-                # 稍微等待，避免CPU满载
-                await asyncio.sleep(0.1)
 
             except Exception as e:
                 import traceback
@@ -748,7 +750,7 @@ class TrainerActor(TrainerActorCom):
         while True:
             try:
                 if self.next_policy_batch is not None:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
                     continue
 
                 while await self.imagination_buffer.size.remote() < TRAIN_BATCH_SIZE:
@@ -886,7 +888,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    exp_name = f"WorldModel_ds_kl_{int(time.time())}"
+    exp_name = f"WorldModel_ds_new_batch_{int(time.time())}"
     save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
     log_dir = f"runs/wm2/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)

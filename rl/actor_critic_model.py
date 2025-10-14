@@ -221,8 +221,9 @@ class ActorCritic(nn.Module):
         """
         # 目标序列最大长度（对齐到同一个 max_len，确保各 key 同长）
         max_len_t = max(it["input_ids"].size(1) for it in inputs_list)
-        if max_len and max_len_t > max_len:
-            print(f"Warning! input_ids size{max_len_t}, max_len: {max_len}")
+        if max_len:
+            if max_len_t > max_len:
+                print(f"Warning! input_ids size: {max_len_t}, max_len: {max_len}")
         else:
             max_len = max_len_t
         pad_id = int(self.vla.pad_token_id)
