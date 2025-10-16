@@ -428,10 +428,12 @@ def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int, dtype = torc
         state_dict = load_component_state_dict(proprio_projector_path)
         proprio_projector.load_state_dict(state_dict)
     else:
-        checkpoint_path = find_checkpoint_file(cfg.pretrained_checkpoint, "proprio_projector")
-        state_dict = load_component_state_dict(checkpoint_path)
-        proprio_projector.load_state_dict(state_dict)
-
+        try:
+            checkpoint_path = find_checkpoint_file(cfg.pretrained_checkpoint, "proprio_projector")
+            state_dict = load_component_state_dict(checkpoint_path)
+            proprio_projector.load_state_dict(state_dict)
+        except:
+            print(f"{cfg.pretrained_checkpoint}中未发现proprio_projector!")
     return proprio_projector
 
 

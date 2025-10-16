@@ -2,7 +2,7 @@ import os
 os.environ["MUJOCO_GL"] = "osmesa"
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
 
 import time
 import random
@@ -19,7 +19,6 @@ import numpy as np
 
 import ray
 import torch
-from torch.distributions import Normal
 import deepspeed
 from torch.utils.tensorboard import SummaryWriter
 
@@ -28,18 +27,18 @@ from experiments.robot.openvla_utils import get_processor
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 from experiments.robot.libero.libero_utils import GenerateConfig
 
-from rl.world_model import WorldModel, compute_imagined_gae, create_validity_mask, compute_ppo_loss
+from rl.world_model_discrete import WorldModel, compute_imagined_gae, create_validity_mask, compute_ppo_loss
 from rl.utils import prepare_one_obs
 from ds_com import TrainerActorCom, InferenceActorCom
 
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_agent_period3"
+EXP_NAME = "ppo_wm_discrete"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 2
+NUM_TRAINER_GPUS = 1
 NUM_INFERENCE_ACTORS = 1
 NUM_IMAGINATION_ACTORS = 1 # 使用1个专用的GPU Actor来生成想象数据
 NUM_ROLLOUT_WORKERS = 9
@@ -47,10 +46,10 @@ ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 4
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
-IMAGINATION_REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 10
-WORLD_ACCUM = 51
-AGENT_ACCUM = 51
+IMAGINATION_REPLAY_CAPACITY = 2000
+TRAIN_BATCH_SIZE = 22
+WORLD_ACCUM = 46
+AGENT_ACCUM = 46
 TRAIN_ITERS = 100000
 
 # PPO
@@ -64,9 +63,8 @@ KL_COEF = 0.02
 # 世界模型想象步数
 IMAGINE_MAX_HORIZON = 10 
 
-# AE 和 IL 损失的系数
-RT_LOSS_COEF = 1.0  # reward-termination分类损失系数
-
+# AE 和 RT 损失的系数
+RT_LOSS_COEF = 1.0
 AE_LOSS_COEF = 1.0
 
 # 学习率调度参数
@@ -76,13 +74,10 @@ WORLD_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
 POLICY_TRAIN_START_STEP = 100
 
-# 训练周期控制
-AGENT_TRAIN_PERIOD = 3
-
 # 日志
 MOVING_AVG_WINDOW = 1000
 LOG_INTERVAL_SECONDS = 10
-SAVE_INTERVAL_STEPS = 1000
+SAVE_INTERVAL_STEPS = 500
 
 # 通信组
 BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
@@ -90,8 +85,9 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 # OpenVLA 加载配置
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
-PRETRAINED_CHECKPOINT = "/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_bs1k_1760886359/checkpoint_1000"
+PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_check_1th_mu_1760789366/checkpoint_1000"
+
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
 # ================================================================
@@ -100,10 +96,9 @@ INP_MAX_LEN = 100  # 输入input_id的最大长度
 @dataclass
 class Experience:
     obs: Dict[str, torch.Tensor]
-    action: np.ndarray                      # 学生动作 (normalized)
+    action: np.ndarray                      # 离散动作token (NUM_ACTIONS_CHUNK,)
     advantage: float
-    old_mu: np.ndarray 
-    old_log_std: np.ndarray
+    old_logits: np.ndarray                  # (NUM_ACTIONS_CHUNK, VOCAB_SIZE)
     value_target: float
     done: bool                              # 结束标志
     next_teacher_projector_features: Optional[np.ndarray] # 下一状态的教师视觉特征
@@ -114,9 +109,8 @@ class ImaginedExperience:
     multimodal_emb: np.ndarray
     attention_mask: np.ndarray
     labels: np.ndarray
-    action: np.ndarray
-    old_mu: np.ndarray 
-    old_log_std: np.ndarray
+    action: np.ndarray                      # 离散动作token
+    old_logits: np.ndarray                  # (NUM_ACTIONS_CHUNK, VOCAB_SIZE)
     advantage: float
     value_target: float
     step_count: int 
@@ -196,10 +190,9 @@ class ReplayBufferActor:
             return None
         batch = random.sample(self.buffer, batch_size)
         obs_list = [b.obs for b in batch]
-        act = np.stack([b.action for b in batch])
+        act = np.stack([b.action for b in batch])  # (N, NUM_ACTIONS_CHUNK)
         adv = np.asarray([b.advantage for b in batch], np.float32)
-        old_mu = np.stack([b.old_mu for b in batch])
-        old_log_std = np.stack([b.old_log_std for b in batch])
+        old_logits = np.stack([b.old_logits for b in batch])  # (N, NUM_ACTIONS_CHUNK, VOCAB_SIZE)
         v_targ = np.asarray([b.value_target for b in batch], np.float32)
         done = np.asarray([b.done for b in batch], np.bool_)
         # 如果 next_teacher_projector_features 为 None (在 done=True 时)，用零填充
@@ -219,7 +212,7 @@ class ReplayBufferActor:
                 raise RuntimeError(print_str)
         next_teacher_proj_feat = np.stack([b.next_teacher_projector_features for b in batch])
         reward = np.asarray([b.reward for b in batch], np.float32)
-        return obs_list, act, adv, old_mu, old_log_std, v_targ, done, next_teacher_proj_feat, reward
+        return obs_list, act, adv, old_logits, v_targ, done, next_teacher_proj_feat, reward
 
 @ray.remote
 class ImaginationBufferActor:
@@ -248,8 +241,7 @@ class ImaginationBufferActor:
             "attention_mask": np.stack([b.attention_mask for b in batch]),
             "labels": np.stack([b.labels for b in batch]),
             "action": np.stack([b.action for b in batch]),
-            "old_mu": np.stack([b.old_mu for b in batch]),
-            "old_log_std": np.stack([b.old_log_std for b in batch]),
+            "old_logits": np.stack([b.old_logits for b in batch]),
             "advantage": np.array([b.advantage for b in batch], dtype=np.float32),
             "value_target": np.array([b.value_target for b in batch], dtype=np.float32),
             "step_count": np.array([b.step_count for b in batch], dtype=np.int64)
@@ -315,13 +307,13 @@ class RolloutWorkerActor:
 
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.dtype)
-                inputs_t['step_count'] = torch.tensor([step_count], dtype=torch.long)  # 添加 step_count 信息
-                (student_action_env, student_action_norm, mu, log_std, value, teacher_proj_features) = ray.get(self.infer.request.remote(inputs_t))
+                inputs_t['step_count'] = torch.tensor([step_count], dtype=torch.long)
+                (action_token, continuous_action, logits, value, teacher_proj_features) = ray.get(self.infer.request.remote(inputs_t))
 
                 chunk_reward = 0.0
                 done = False
-                for i in range(len(student_action_env)):
-                    single_action = student_action_env[i]
+                for i in range(len(continuous_action)):
+                    single_action = continuous_action[i]
                     nxt, r, term, trunc, info = self.env.step(single_action)
                 
                     reward_sum += r
@@ -334,7 +326,7 @@ class RolloutWorkerActor:
                 
                 # 存储所有信息，包括教师信号和结束标志
                 self.local_buffer.append((
-                    inputs_t, student_action_norm, chunk_reward, mu, log_std, value, teacher_proj_features, done
+                    inputs_t, action_token, chunk_reward, logits, value, teacher_proj_features, done
                 ))
                 obs = nxt 
                 if done:
@@ -359,8 +351,7 @@ class RolloutWorkerActor:
                     step_count = 0
                     time_start = time.time()
                 elif len(self.local_buffer) == self.local_buff_len + 1:
-                    # 使用最后一个状态的信息进行引导
-                    _, _, _, _, _, bootstrap_val, bootstrap_proj_feat, _ = self.local_buffer[-1]
+                    _, _, _, _, bootstrap_val, bootstrap_proj_feat, _ = self.local_buffer[-1]
                     self._process_traj(self.local_buffer[:-1], bootstrap_val, bootstrap_proj_feat)
                     self.local_buffer = [self.local_buffer[-1]]
         except Exception as e:
@@ -374,8 +365,8 @@ class RolloutWorkerActor:
         gae = 0.0
         # 从后向前计算 GAE
         for i in reversed(range(len(traj_segment))):
-            _, _, r, _, _, v, _, done_flag = traj_segment[i]
-            nv = bootstrap_val if i == len(traj_segment) - 1 else traj_segment[i+1][5]
+            _, _, r, _, v, _, done_flag = traj_segment[i]
+            nv = bootstrap_val if i == len(traj_segment) - 1 else traj_segment[i+1][4]
             next_val = nv * (1.0 - float(done_flag))
             delta = r + self.gamma * next_val - v
             gae = delta + self.gamma * self.lamb * gae * (1.0 - float(done_flag))
@@ -385,22 +376,18 @@ class RolloutWorkerActor:
         advs_np = np.array(advs, dtype=np.float32)
 
         batch: List[Experience] = []
-        for i, (s, a_norm, rew, mu, log_std, _, _, done) in enumerate(traj_segment):
-            # 获取下一个状态的教师视觉特征
+        for i, (s, action_token, rew, logits_val, _, _, done) in enumerate(traj_segment):
             if i < len(traj_segment) - 1:
-                # 从轨迹的下一个时间步获取
-                next_teacher_features = traj_segment[i+1][6] 
+                next_teacher_features = traj_segment[i+1][5] 
             else:
-                # 这是段的末尾，使用引导特征 (如果 episode 没结束)
                 next_teacher_features = bootstrap_proj_features if not done else None
             
             batch.append(
                 Experience(
                     obs=s,
-                    action=a_norm.astype(np.float32),
+                    action=action_token.astype(np.int64),  # 离散动作token
                     advantage=float(advs_np[i]),
-                    old_mu=mu.astype(np.float32),
-                    old_log_std=log_std.astype(np.float32),
+                    old_logits=logits_val.astype(np.float32),
                     value_target=float(rets[i]),
                     done=done,
                     next_teacher_projector_features=next_teacher_features.astype(np.float32) if next_teacher_features is not None else None,
@@ -479,31 +466,29 @@ class InferenceActor(InferenceActorCom):
             try:
                 inputs_batch = self.model.prepare_inputs_batch(requests_to_process, self.max_len)
                 with torch.inference_mode():
-                    student_mu, student_log_std, student_value, teacher_proj_features = self.model.agent_super_forward(inputs_batch, return_vit_out=True)
+                    logits, value, teacher_proj_features = self.model.agent_super_forward(inputs_batch, return_vit_out=True)
                 
-                dist = Normal(student_mu, torch.exp(student_log_std))
-                action_norm = dist.sample()
-                student_mu_chunk = student_mu.to(torch.float32).detach().cpu().numpy()
-                student_log_std_chunk = student_log_std.to(torch.float32).detach().cpu().numpy()
-                student_values = student_value.to(torch.float32).detach().cpu().numpy()
-
-                # 将学生动作反归一化以用于环境
-                student_actions_env = []
-                for i in range(action_norm.shape[0]):
-                    action_norm_i = action_norm[i]
-                    a_env = self.model.vla._unnormalize_actions(action_norm_i.cpu().numpy(), self.cfg.unnorm_key)
-                    student_actions_env.append(a_env.astype(np.float32))
-
+                # 使用agent的post_process方法获取离散和连续动作
+                action_tokens = []
+                normalized_actions = []
+                _, action_tokens, normalized_actions = self.model.post_process(logits, deterministic=[False]*logits.shape[0])
+                action_tokens = action_tokens.detach().cpu().numpy()
+                logits_np = logits.to(torch.float32).detach().cpu().numpy()
+                values_np = value.to(torch.float32).detach().cpu().numpy()
                 teacher_proj_features_np = teacher_proj_features.to(torch.float32).detach().cpu().numpy()
-
+                # print(f"action_tokens: {action_tokens.shape}, normalized_actions: {normalized_actions.shape}, logits_np: {logits_np.shape}, values_np: {values_np.shape}, teacher_proj_features_np: {teacher_proj_features_np.shape}")
+                # 将标准化动作转换为环境动作
+                actions_env = []
+                for i in range(normalized_actions.shape[0]):
+                    a_env = self.model.vla._unnormalize_actions(normalized_actions[i], self.cfg.unnorm_key)
+                    actions_env.append(a_env.astype(np.float32))
                 for i in range(len(promises_to_process)):
                     promises_to_process[i].set_result((
-                        student_actions_env[i],      # 用于环境的动作
-                        action_norm[i].cpu().numpy(), # 学生动作 (normalized, for experience)
-                        student_mu_chunk[i],         # 学生策略 mu
-                        student_log_std_chunk[i],    # 学生策略 log_std
-                        student_values[i],           # 学生价值估计
-                        teacher_proj_features_np[i]  # 教师视觉特征
+                        action_tokens[i],           # 离散动作token
+                        actions_env[i],      # 连续动作（用于环境）
+                        logits_np[i],              # logits (NUM_ACTIONS_CHUNK, VOCAB_SIZE)
+                        values_np[i],              # 价值估计
+                        teacher_proj_features_np[i] # 教师视觉特征
                     ))
             except Exception as e:
                 import traceback
@@ -534,7 +519,7 @@ class ImaginationRolloutActor(InferenceActorCom):
         self.actor_id = actor_id
         self.cfg = cfg
         self.real_replay_buffer = real_replay_buffer
-        self.imagination_buffers = imagination_buffers # <--- 接收Buffer列表
+        self.imagination_buffers = imagination_buffers
         self.num_buffers = len(imagination_buffers)
         
         print(f"ImaginationRolloutActor {actor_id}: 正在加载 WorldModel...")
@@ -561,14 +546,14 @@ class ImaginationRolloutActor(InferenceActorCom):
                     continue
                 
                 start_obs_list = sample_list[0] 
-                old_mu = sample_list[3]
+                old_logits = sample_list[3]
                 start_states_batch = self.model.prepare_inputs_batch(start_obs_list, INP_MAX_LEN)
 
                 # 2. 进行想象
                 with torch.inference_mode():
-                    (imagined_mus, imagined_log_stds, imagined_values, imagined_rewards, imagined_dones, 
+                    (imagined_logits, imagined_values, imagined_rewards, imagined_dones, 
                      last_value, imagined_actions, imagined_multimodal_embs, 
-                     imagined_att_masks, imagined_step_counts) = self.model.imagine(start_states_batch, IMAGINE_MAX_HORIZON, old_mu)
+                     imagined_att_masks, imagined_step_counts) = self.model.imagine(start_states_batch, IMAGINE_MAX_HORIZON, old_logits)
 
                 # 3. 计算 GAE 和有效性掩码
                 imagined_advs, imagined_rets = compute_imagined_gae(imagined_rewards, imagined_values, imagined_dones, last_value, GAMMA, LAMBDA)
@@ -579,8 +564,7 @@ class ImaginationRolloutActor(InferenceActorCom):
                 imagined_multimodal_embs_flat = imagined_multimodal_embs.view(T * B, *imagined_multimodal_embs.shape[2:])
                 imagined_att_masks_flat = imagined_att_masks.view(T * B, *imagined_att_masks.shape[2:])
                 imagined_actions_flat = imagined_actions.view(T * B, *imagined_actions.shape[2:])
-                imagined_mus_flat = imagined_mus.view(T * B, *imagined_mus.shape[2:])
-                imagined_log_stds_flat = imagined_log_stds.view(T * B, *imagined_log_stds.shape[2:])
+                imagined_logits_flat = imagined_logits.view(T * B, *imagined_logits.shape[2:])
                 imagined_advs_flat = imagined_advs.view(T * B)
                 imagined_rets_flat = imagined_rets.view(T * B)
                 valid_mask_flat = valid_mask.view(T * B)
@@ -596,8 +580,7 @@ class ImaginationRolloutActor(InferenceActorCom):
                             attention_mask=imagined_att_masks_flat[i].cpu().numpy(),
                             labels=labels_np[i % B],
                             action=imagined_actions_flat[i].cpu().numpy(),
-                            old_mu=imagined_mus_flat[i].cpu().numpy(),
-                            old_log_std=imagined_log_stds_flat[i].cpu().numpy(),
+                            old_logits=imagined_logits_flat[i].cpu().numpy(),
                             advantage=imagined_advs_flat[i].item(),
                             value_target=imagined_rets_flat[i].item(),
                             step_count=int(imagined_step_counts_flat[i])
@@ -734,13 +717,13 @@ class TrainerActor(TrainerActorCom):
                 sampled_data = await self.replay_buffer.sample.remote(TRAIN_BATCH_SIZE)
                 if sampled_data is None: continue
                 
-                obs_list, act_np, _, _, _, _, done_np, next_teacher_proj_feat_np, reward_np = sampled_data
+                obs_list, act_np, _, _, _, done_np, next_teacher_proj_feat_np, reward_np = sampled_data
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list, INP_MAX_LEN)
                 device = self.model.device
                 
                 self.next_wm_batch = (
                     inputs_batch,
-                    torch.tensor(act_np, dtype=torch.float32, device=device),
+                    torch.tensor(act_np, dtype=torch.long, device=device),  # 离散动作
                     torch.tensor(done_np, dtype=torch.bool, device=device),
                     torch.tensor(next_teacher_proj_feat_np, dtype=self.data_dtype, device=device),
                     torch.tensor(reward_np, dtype=torch.float32, device=device)
@@ -792,7 +775,7 @@ class TrainerActor(TrainerActorCom):
             (wm_inputs, mini_act, mini_done, mini_next_teacher_proj_feat, mini_reward) = self.next_wm_batch
             self.next_wm_batch = None
             
-            wm_inp = {**wm_inputs, 'this_action': mini_act.to(self.data_dtype)}
+            wm_inp = {**wm_inputs, 'this_action': mini_act}
 
             ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss = \
                 self.model.module.compute_world_model_loss(wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward)
@@ -821,7 +804,7 @@ class TrainerActor(TrainerActorCom):
         adv_mean, adv_std = adv_all.mean(), adv_all.std()
         for mini_policy_batch in adv_batches:
             step_count_tensor = torch.tensor(mini_policy_batch['step_count'], dtype=torch.long, device=self.model.device)
-            mu, log_std, value = self.model.module.agent.forward(
+            logits, value = self.model.module.agent.forward(
                 mini_policy_batch["attention_mask"].to(self.data_dtype), 
                 mini_policy_batch["inputs_embeds"].to(self.data_dtype),
                 mini_policy_batch["labels"],
@@ -830,9 +813,8 @@ class TrainerActor(TrainerActorCom):
             normalized_adv = (mini_policy_batch['advantage'] - adv_mean) / (adv_std + 1e-8)
             
             policy_loss, value_loss, entropy_loss, kl_loss, entropy, kl_div_metric = compute_ppo_loss(
-                mu, log_std, value, 
-                mini_policy_batch['old_mu'],
-                mini_policy_batch['old_log_std'],
+                logits, value, 
+                mini_policy_batch['old_logits'],
                 mini_policy_batch['action'],
                 normalized_adv, 
                 mini_policy_batch['value_target'], 
@@ -841,10 +823,8 @@ class TrainerActor(TrainerActorCom):
                 ENT_COEF,
                 KL_COEF
             )
-            if self.global_step % AGENT_TRAIN_PERIOD == 0:
-                total_policy_loss = policy_loss + value_loss + entropy_loss + kl_loss
-            else:
-                total_policy_loss = value_loss  # 仅更新价值网络
+            
+            total_policy_loss = policy_loss + value_loss + entropy_loss + kl_loss
             self.model.backward(total_policy_loss / AGENT_ACCUM)
             
             epoch_losses["imagination_policy_loss"].append(policy_loss.item())

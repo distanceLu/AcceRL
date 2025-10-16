@@ -3,9 +3,7 @@ import torch.nn as nn
 from typing import Dict, Any, Tuple, List
 import numpy as np
 import gc
-from torch.distributions import Normal
-import collections
-import random
+from torch.distributions import Categorical
 import torch.nn.functional as F
 
 from peft import LoraConfig, get_peft_model
@@ -20,8 +18,7 @@ from prismatic.vla.constants import (
 from typing import Any
 import torch
 
-# 显式类：避免依赖 auto_map
-from rl.actor_critic_model import ActorCritic
+from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import load_lora_inplace, freeze_models
 from rl.modules import AttentionPoolHead
 # import os
@@ -61,18 +58,13 @@ class Agent(ActorCritic):
             return_dict=True,
         )
         last_hidden_states = language_model_output.hidden_states[-1]
-        # 2) Predict continuous actions mean (mu) using action-related hidden states
-        actions_hidden_states = self._extract_actions_hidden(last_hidden_states, labels, False)
-        predicted_actions = self.action_head.predict_action(actions_hidden_states)  # (B, NUM_ACTIONS_CHUNK, ACTION_DIM) or flat
-        mu_all = predicted_actions
+        logits = language_model_output.logits
+        action_logits, actions_hidden_states = self._extract_actions_hidden(last_hidden_states, logits, labels, has_act_emb=False)
 
-        # 3) Condition-independent log_std broadcast across chunks
-        B = mu_all.size(0)
-        log_std = self.log_std_param  # (NUM_ACTIONS_CHUNK, ACTION_DIM)
-        log_std_all = log_std.unsqueeze(dim=0).expand(B, NUM_ACTIONS_CHUNK, ACTION_DIM)  # (B, T, A)
+        # 2. 计算价值函数
+        value = self._compute_value_from_hidden(actions_hidden_states.detach())  # (B,)
 
-        value = self._compute_value_from_hidden(actions_hidden_states.detach(), step_count)   # (B,)
-        return mu_all.to(torch.float32), log_std_all.to(torch.float32), value.to(torch.float32)
+        return action_logits.float(), value.float()
 
 
 class WorldModel(ActorCritic):
@@ -101,7 +93,8 @@ class WorldModel(ActorCritic):
         self.language_model = get_peft_model(self.vla.language_model, lora_config)
         self.language_model.print_trainable_parameters()
         self.language_model: LlamaForCausalLM
-        del self.action_head
+        if hasattr(self, 'action_head'):
+            del self.action_head
         del self.value_head
         del self.attn_pool
         gc.collect()
@@ -149,13 +142,12 @@ class WorldModel(ActorCritic):
             value_params = []
             print('不训练value head')
         else:
-            value_params = list(self.agent.value_head.parameters()) + list(self.agent.attn_pool.parameters()) + list(self.agent.step_count_emb.parameters())
+            value_params = list(self.agent.value_head.parameters()) + list(self.agent.attn_pool.parameters())
             print('训练value head')
         combined_world_params = world_model_params + value_params
         
         policy_lang = list(filter(lambda p: p.requires_grad, self.agent.language_model.parameters()))
-        action_params = list(self.agent.action_head.parameters())
-        policy_params = policy_lang + action_params
+        policy_params = policy_lang
 
         # 1. 获取模型中所有实际为可训练状态的参数，作为“真实情况”的集合
         all_trainable_params = set(filter(lambda p: p.requires_grad, self.parameters()))
@@ -280,8 +272,8 @@ class WorldModel(ActorCritic):
         act_att_mask = torch.full(
                 (b_s, 1),
                 fill_value=True,
-                dtype=multimodal_emb.dtype,
-                device=multimodal_emb.device,
+                dtype=multimodal_att_mask.dtype,
+                device=multimodal_att_mask.device,
             )
         multimodal_emb = torch.cat([multimodal_emb[:, :1, :], this_act_emb, multimodal_emb[:, 1:, :]], dim=1)
         multimodal_att_mask = torch.cat([multimodal_att_mask[:, :1], act_att_mask, multimodal_att_mask[:, 1:]], dim=1)
@@ -345,7 +337,7 @@ class WorldModel(ActorCritic):
           - post_patch_proj: 经过 AE 投影层的图像嵌入，用于 AE 损失计算 (B, num_patches, D)
           - rt_logits: reward-termination分类的logits (B, 3)
         """
-        for k in ("input_ids", "attention_mask", "pixel_values", "labels", "proprio"):
+        for k in ("input_ids", "attention_mask", "pixel_values", "labels", "proprio", "this_action"):
             if k not in inputs_batch:
                 raise KeyError(f"inputs_batch missing key: {k}")
         
@@ -358,9 +350,8 @@ class WorldModel(ActorCritic):
         output = self._forward_vla(inputs_batch)
         recon_hidden_states = output.hidden_states[-1]  # len(output.hidden_states): 33
         num_patches = self._compute_num_patches()
-        if 'step_count' in inputs_batch:
-            step_count = inputs_batch['step_count']
-            step_emb = self.step_count_emb(step_count)  # (B, 16)
+        step_count = inputs_batch['step_count']
+        step_emb = self.step_count_emb(step_count)  # (B, 16)
         
         # 2) 准备用于 AE 损失的张量
         post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
@@ -376,7 +367,7 @@ class WorldModel(ActorCritic):
         """仅使用 Agent 的前向传播来获取策略和价值。"""
         return ActorCritic.forward(self.agent, inputs_batch, return_vit_out)
 
-    def imagine(self, start_states: Dict[str, torch.Tensor], max_horizon: int, old_mu: np.ndarray) -> Tuple:
+    def imagine(self, start_states: Dict[str, torch.Tensor], max_horizon: int, old_logits: torch.Tensor) -> Tuple:
         """
         在学习到的世界模型中进行想象，直到所有轨迹终止或达到最大视界。
         
@@ -386,23 +377,21 @@ class WorldModel(ActorCritic):
 
         Returns:
             一个元组，包含想象轨迹的完整信息：
-            - imagined_mus (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
-            - imagined_log_stds (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            - imagined_logits (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, VOCAB_SIZE) 离散动作logits
             - imagined_values (torch.Tensor): (T, B)
             - imagined_rewards (torch.Tensor): (T, B)
             - imagined_dones (torch.Tensor): (T, B)
             - last_value (torch.Tensor): (B,)
-            - imagined_actions (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+            - imagined_actions (torch.Tensor): (T, B, NUM_ACTIONS_CHUNK) 离散动作token
             - imagined_multimodal_embs (torch.Tensor): (T, B, SeqLen, Dim)
             - imagined_att_masks (torch.Tensor): (T, B, SeqLen)
-            - imagined_step_counts (torch.Tensor): (T, B) - 添加这个返回值
+            - imagined_step_counts (torch.Tensor): (T, B)
         """
         # 存储想象轨迹的容器
-        imagined_mus, imagined_log_stds, imagined_values, imagined_rewards, imagined_dones = [], [], [], [], []
+        imagined_logits, imagined_values, imagined_rewards, imagined_dones = [], [], [], []
         imagined_actions, imagined_multimodal_embs, imagined_att_masks = [], [], []
-        imagined_step_counts = []  # 添加这一行
+        imagined_step_counts = []
         
-        num_patches = self._compute_num_patches()
         B = start_states['input_ids'].size(0)
         device = self.device
 
@@ -419,44 +408,40 @@ class WorldModel(ActorCritic):
 
             step_count = start_states['step_count'] + step
             
-            # 使用当前隐状态获取策略和价值
-            mu, log_std, value = self.agent.forward(multimodal_att_mask, multimodal_emb, start_states['labels'], step_count)
-            if step == 0 and old_mu is not None:
-                print(f"mu: {mu[0][0]}, shape: {mu.shape}, max: {mu.max()}")
-                print(f"old mu: {old_mu[0][0]}, shape: {old_mu.shape}, max: {old_mu.max()}")
-                mu_diff = np.abs(mu.detach().cpu().numpy() - old_mu).max()
-                print(f"mu diff max: {mu_diff}")
-            dist = Normal(mu, torch.exp(log_std))
-            action = dist.sample()
+            # 1. Agent predicts discrete action logits
+            logits, value = self.agent.forward(multimodal_att_mask, multimodal_emb, start_states['labels'], step_count)
+            
+            # 2. Decode logits to get both discrete token and continuous action
+            # We use stochastic actions during imagination
+            _, action_token, continuous_action = self.agent.post_process(logits, deterministic=[False] * B)
+            continuous_action = torch.from_numpy(continuous_action).to(device)
 
             # 存储当前步的信息
             imagined_multimodal_embs.append(multimodal_emb.clone())
             imagined_att_masks.append(multimodal_att_mask)
-            imagined_actions.append(action)
-            imagined_mus.append(mu)
-            imagined_log_stds.append(log_std)
+            imagined_actions.append(action_token) # Store the DISCRETE action token
+            imagined_logits.append(logits)
             imagined_values.append(value)
-            imagined_step_counts.append(step_count)  # 添加这一行
+            imagined_step_counts.append(step_count)
 
             with torch.no_grad():
-                next_embeddings, reward_hat, termin_hat = self.predict_next(multimodal_emb, multimodal_att_mask, action, step_count)
+                next_embeddings, reward_hat, termin_hat = self.predict_next(multimodal_emb, multimodal_att_mask, continuous_action, step_count)
             
-            predicted_reward = reward_hat
-            predicted_done = termin_hat
-
-            imagined_rewards.append(predicted_reward)
-            imagined_dones.append(predicted_done)
+            imagined_rewards.append(reward_hat)
+            imagined_dones.append(termin_hat)
             
+            # Update state for the next imagination step
+            num_patches = self._compute_num_patches()
             multimodal_emb[:, 1:num_patches+1, :] = next_embeddings
 
             # 更新活跃掩码
-            active_mask.logical_and_(~predicted_done)
+            active_mask.logical_and_(~termin_hat)
 
         # 获取最后一步的价值，用于 GAE 计算
         with torch.no_grad():
-            _, _, last_value = self.agent.forward(multimodal_att_mask, multimodal_emb, start_states['labels'], step_count + 1)
+            _, last_value = self.agent.forward(multimodal_att_mask, multimodal_emb, start_states['labels'], step_count + 1)
 
-        return (torch.stack(imagined_mus), torch.stack(imagined_log_stds), torch.stack(imagined_values), 
+        return (torch.stack(imagined_logits), torch.stack(imagined_values), 
                 torch.stack(imagined_rewards), torch.stack(imagined_dones), 
                 last_value, torch.stack(imagined_actions),
                 torch.stack(imagined_multimodal_embs), torch.stack(imagined_att_masks),
@@ -537,26 +522,11 @@ class WorldModel(ActorCritic):
             'action_head': self.agent.action_head.state_dict(),
             'value_head': self.agent.value_head.state_dict(),
             'attn_pool': self.agent.attn_pool.state_dict(),
-            'log_std_param': self.agent.log_std_param,
+            'lm_head': self.agent.language_model.lm_head.state_dict(),
         }
         agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
         torch.save(agent_extra_layers, agent_extra_path)
         print(f"✓ Agent 额外层已保存到: {agent_extra_path}")
-        
-        # 5. 保存训练配置（可选但推荐）
-        config_dict = {
-            'lora_rank': self.cfg.lora_rank,
-            'use_proprio': self.cfg.use_proprio,
-            'use_film': self.cfg.use_film,
-            # 添加其他重要配置
-        }
-        config_path = save_path / "training_config.pt"
-        torch.save(config_dict, config_path)
-        print(f"✓ 训练配置已保存到: {config_path}")
-        
-        print(f"\n{'='*80}")
-        print(f"所有检查点已成功保存到: {save_path}")
-        print(f"{'='*80}\n")
     
     def load_checkpoint(self, save_dir: str, epoch: int = None):
         """
@@ -599,14 +569,14 @@ class WorldModel(ActorCritic):
         #     print(f"⚠️  警告: 未找到 Agent LoRA 权重: {agent_lora_path}")
         
         # 4. 加载 Agent 的额外层
-        agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
-        if agent_extra_path.exists():
-            agent_extra_layers = torch.load(agent_extra_path, map_location=self.device)
-            # self.agent.action_head.load_state_dict(agent_extra_layers['action_head'])
-            self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
-            self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
-            self.agent.log_std_param = agent_extra_layers['log_std_param'].to(self.device)
-            print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
+        # agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        # if agent_extra_path.exists():
+        #     agent_extra_layers = torch.load(agent_extra_path, map_location=self.device)
+        #     self.agent.action_head.load_state_dict(agent_extra_layers['action_head'])
+        #     self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
+        #     self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
+        #     self.agent.language_model.lm_head.load_state_dict(agent_extra_layers['lm_head'])
+        #     print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
         # else:
         #     print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
 
@@ -715,12 +685,12 @@ def compute_grpo_advantages(imagined_rewards: torch.Tensor, imagined_dones: torc
     return advantages_flat, trajectory_validity_mask
 
 
-def create_validity_mask(imagined_dones: torch.Tensor) -> Tuple[torch.Tensor, float]:
+def create_validity_mask(imagined_dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     根据想象的终止信号创建有效性掩码。
     一条轨迹在第一次 done=True 之后的所有步骤都是无效的。
     输入 imagined_dones: (T, B)
-    返回 valid_mask: (T, B)
+    返回 valid_mask_flat: (T*B,), num_valid_steps: scalar tensor
     """
     with torch.no_grad():
         cumulative_dones = torch.cumsum(imagined_dones.long(), dim=0)
@@ -732,10 +702,8 @@ def create_validity_mask(imagined_dones: torch.Tensor) -> Tuple[torch.Tensor, fl
 
 
 def compute_grpo_policy_loss(
-    mu: torch.Tensor, 
-    log_std: torch.Tensor, 
-    old_mu: torch.Tensor,
-    old_log_std: torch.Tensor,
+    logits: torch.Tensor,
+    old_logits: torch.Tensor,
     action: torch.Tensor, 
     advantage: torch.Tensor, 
     clip_eps: float, 
@@ -744,13 +712,26 @@ def compute_grpo_policy_loss(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     为 GRPO 计算策略损失，使用 PPO 的裁剪目标但没有价值损失。
+    适配离散动作空间（Categorical分布）。
+    
+    Args:
+        logits: (T*B, NUM_ACTIONS_CHUNK, VOCAB_SIZE) 当前策略的logits
+        old_logits: (T*B, NUM_ACTIONS_CHUNK, VOCAB_SIZE) 旧策略的logits（不计算梯度）
+        action: (T*B, NUM_ACTIONS_CHUNK) 采样的离散动作token
+        advantage: (B,) 每条轨迹的优势值（需要广播到时间步）
+        clip_eps: PPO裁剪范围
+        ent_coef: 熵损失系数
+        kl_coef: KL散度损失系数
+        
+    Returns:
+        policy_loss, value_loss, entropy_loss, kl_loss, entropy, kl_div_metric
     """
-    dist = Normal(mu, torch.exp(log_std))
+    dist = Categorical(logits=logits)
     logp = dist.log_prob(action)
     
     # 旧策略的分布和 log_prob (不计算梯度)
     with torch.no_grad():
-        old_dist = Normal(old_mu, torch.exp(old_log_std))
+        old_dist = Categorical(logits=old_logits)
         old_logp = old_dist.log_prob(action)
 
     # PPO 策略损失 (Clipped Surrogate Objective)
@@ -762,7 +743,7 @@ def compute_grpo_policy_loss(
     policy_loss = -torch.mean(torch.min(surr1, surr2))
     
     # 价值损失为0，因为价值网络被冻结
-    value_loss = torch.tensor(0.0, device=mu.device, dtype=mu.dtype)
+    value_loss = torch.tensor(0.0, device=policy_loss.device, dtype=policy_loss.dtype)
     
     # 熵损失
     entropy = torch.mean(dist.entropy())
@@ -774,11 +755,9 @@ def compute_grpo_policy_loss(
 
 
 def compute_ppo_loss(
-    mu: torch.Tensor, 
-    log_std: torch.Tensor, 
+    logits: torch.Tensor,
     value: torch.Tensor, 
-    old_mu: torch.Tensor,
-    old_log_std: torch.Tensor,
+    old_logits: torch.Tensor,
     action: torch.Tensor, 
     advantage: torch.Tensor, 
     value_target: torch.Tensor, 
@@ -788,15 +767,29 @@ def compute_ppo_loss(
     kl_coef: float
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    计算 PPO 损失。
-    所有输入的张量都应该是扁平化的 (N,) 或 (N, D)。
+    计算 PPO 损失。适配离散动作空间（Categorical分布）。
+    
+    Args:
+        logits: (N, NUM_ACTIONS_CHUNK, VOCAB_SIZE) 当前策略的logits
+        value: (N,) 当前价值估计
+        old_logits: (N, NUM_ACTIONS_CHUNK, VOCAB_SIZE) 旧策略的logits
+        action: (N, NUM_ACTIONS_CHUNK) 采样的离散动作token
+        advantage: (N,) 优势值
+        value_target: (N,) 目标价值（返回值）
+        clip_eps: PPO裁剪范围
+        vf_coef: 价值损失系数
+        ent_coef: 熵损失系数
+        kl_coef: KL散度损失系数
+        
+    Returns:
+        policy_loss, value_loss, entropy_loss, kl_loss, entropy, kl_div_metric
     """
-    dist = Normal(mu, torch.exp(log_std))
+    dist = Categorical(logits=logits)
     logp = dist.log_prob(action)
     
     # 旧策略的分布和 log_prob (不计算梯度)
     with torch.no_grad():
-        old_dist = Normal(old_mu, torch.exp(old_log_std))
+        old_dist = Categorical(logits=old_logits)
         old_logp = old_dist.log_prob(action)
 
     # PPO 策略损失 (Clipped Surrogate Objective)
@@ -819,142 +812,8 @@ def compute_ppo_loss(
     return policy_loss, vf_coef * value_loss, entropy_loss, kl_loss, entropy, kl_div_metric
 
 
-def compute_imagine_loss(mini_inputs: Dict[str, torch.Tensor], model, imagine_step, gamma, lamb) -> Tuple[torch.Tensor, torch.Tensor]:
-    # --- 3. 想象数据 RL 损失 ---
-    mini_sub = random_pick_and_repeat(mini_inputs, 4)  # 类似于GRPO，一个样本采样若干条轨迹
-
-    (imagined_mus, imagined_log_stds, imagined_values, imagined_rewards, imagined_dones, 
-     last_value, imagined_actions, _, _, _) = model.imagine(mini_sub, imagine_step)
-
-    dist = Normal(imagined_mus, torch.exp(imagined_log_stds))
-    imagined_logps = dist.log_prob(imagined_actions)
-
-    valid_mask_flat, num_valid_steps = create_validity_mask(imagined_dones)
-    imagined_advs, imagined_rets = compute_imagined_gae(imagined_rewards, imagined_values, imagined_dones, last_value, gamma, lamb)
-    
-    imagined_advs_flat, imagined_rets_flat, imagined_values_flat = \
-        imagined_advs.reshape(-1), imagined_rets.reshape(-1), imagined_values.reshape(-1)
-    
-    # The shape of logps is (T, B, Chunk, Dim). We need to sum over the last two dimensions
-    # to get the log probability of the full action sequence per step.
-    imagined_logps_flat = imagined_logps.sum(dim=[-1, -2]).reshape(-1)
-
-    with torch.no_grad():
-        valid_advs = torch.masked_select(imagined_advs_flat, valid_mask_flat)
-        adv_mean, adv_std = valid_advs.mean(), valid_advs.std() + 1e-8
-        normalized_imagined_advs = (imagined_advs_flat - adv_mean) / adv_std
-    
-    policy_loss_terms = -(normalized_imagined_advs.detach() * imagined_logps_flat)
-    imagination_policy_loss = (policy_loss_terms * valid_mask_flat).sum() / num_valid_steps
-    
-    value_loss_terms = F.mse_loss(imagined_values_flat, imagined_rets_flat.detach(), reduction='none')
-    imagination_value_loss = (value_loss_terms * valid_mask_flat).sum() / num_valid_steps
-    return imagination_policy_loss, imagination_value_loss
-
-
-def random_pick_and_repeat(inputs_batch: dict, repeats: int = 4):
-    """从每个张量的第0维随机采样一个元素，并在该维度上重复指定次数。"""
-    outputs = {}
-    for key, tensor in inputs_batch.items():
-        if not torch.is_tensor(tensor):
-            raise TypeError(f"键 '{key}' 对应的值不是张量：{type(tensor)}")
-        if tensor.size(0) == 0:
-            raise ValueError(f"键 '{key}' 对应的张量在 dim=0 上为空，无法采样。")
-        idx = torch.randint(0, tensor.size(0), (), device=tensor.device)
-        sample = tensor[idx:idx+1]             # shape: (1, ...)
-        repeat_shape = (repeats,) + (1,) * (tensor.dim() - 1)
-        outputs[key] = sample.repeat(repeat_shape)
-    return outputs
-
-
-class ReplayBuffer:
-    """一个用于多环境强化学习的回放缓冲区。"""
-
-    def __init__(self, num_envs: int, capacity_per_env: int):
-        """
-        初始化回放缓冲区。
-
-        Args:
-            num_envs (int): 并行环境的数量。
-            capacity_per_env (int): 每个环境要存储的最大经验数量。
-        """
-        self.num_envs = num_envs
-        self.capacity_per_env = capacity_per_env
-        # 为每个环境创建一个独立的双端队列，以隔离数据
-        self.buffers = [collections.deque(maxlen=capacity_per_env) for _ in range(num_envs)]
-
-    def add(self, env_idx: int, experience: Tuple[Dict[str, Any], torch.Tensor, torch.Tensor, bool]):
-        """
-        将经验添加到特定环境的缓冲区中。
-        经验应该是 (inputs_t, teacher_action, teacher_projector_features, done)。
-        为节省GPU内存，存入的张量应先移动到CPU。
-
-        Args:
-            env_idx (int): 环境的索引。
-            experience (Tuple): 要添加的经验元组。
-        """
-        assert len(experience[0]['proprio'].shape) == 1
-        self.buffers[env_idx].append(experience)
-
-    def sample(self, batch_size: int) -> List[Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]]:
-        """
-        从缓冲区中采样一批有效的状态转换。
-        一个有效的转换 (s_t, s_{t+1}) 要求 s_t 不是终止状态 (done=False)。
-        这用于需要下一状态信息的目标，例如预测下一状态的视觉特征。
-
-        Args:
-            batch_size (int): 要采样的转换数量。
-
-        Returns:
-            一个包含采样经验元组的列表，格式为
-            (inputs_t, teacher_action_t, teacher_projector_features_t+1)。
-        """
-        # 1. 识别所有有效的转换起始点
-        valid_transitions = []
-        for env_idx, buffer in enumerate(self.buffers):
-            # 只有当缓冲区长度至少为2时，才可能存在转换
-            if len(buffer) < 2:
-                continue
-            # 遍历到倒数第二个元素，因为每个元素都需要一个 '下一个' 元素
-            for i in range(len(buffer) - 1):
-                # 经验元组是 (inputs_t, teacher_action, teacher_projector_features, done)
-                is_terminal = buffer[i][3]
-                # 如果当前状态不是终止状态，这是一个有效的转换
-                if not is_terminal:
-                    valid_transitions.append((env_idx, i))
-
-        if not valid_transitions:
-            return []
-
-        # 2. 从有效转换中随机采样 (with replacement)
-        sampled_indices = random.choices(valid_transitions, k=batch_size)
-        
-        # 3. 构建批次
-        sampled_experiences = []
-        for env_idx, i in sampled_indices:
-            experience_t = self.buffers[env_idx][i]
-            experience_t_plus_1 = self.buffers[env_idx][i+1]
-            
-            inputs_t = experience_t[0]
-            teacher_action_t = experience_t[1]
-            # 从下一个经验中获取目标 projector features
-            teacher_projector_features_t_plus_1 = experience_t_plus_1[2]
-            student_act_t = experience_t[4]
-            
-            sampled_experiences.append((inputs_t, teacher_action_t, teacher_projector_features_t_plus_1, student_act_t))
-            
-        return sampled_experiences
-
-    def __len__(self) -> int:
-        """
-        返回缓冲区中存储的经验总数。
-        """
-        return sum(len(buf) for buf in self.buffers)
-
-
 if __name__ == "__main__":
     import numpy as np
-    import time
 
     # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
@@ -972,10 +831,11 @@ if __name__ == "__main__":
     NUM_TEST_ITERATIONS = 30  # 测试迭代次数
 
     unnorm_key = f"{BENCHMARK}_no_noops"
-    
+    pretrained_checkpoint = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
+    # pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/",
+        pretrained_checkpoint=pretrained_checkpoint,
         use_l1_regression=True,
         use_diffusion=False,
         use_film=False,
@@ -987,16 +847,17 @@ if __name__ == "__main__":
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
         lora_rank=32,
-        device=torch.device("cuda:7"),
+        device=torch.device("cuda:3"),
     )
 
     print("=" * 80)
     print("初始化 WorldModel...")
     print("=" * 80)
     checkpoint2 = "/cpfs01/lcx_workspace/models/WorldModel_ds_rew_termin_3class_1760519458/checkpoint_1000"
+    # checkpoint2 = None
     
     # Create WorldModel
-    world_model = WorldModel(cfg, TORCH_DTYPE, checkpoint2)
+    world_model = WorldModel(cfg, TORCH_DTYPE, checkpoint2, freeze_value=False)
 
     # 模拟保存和加载模型
     # world_model.save_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
@@ -1101,14 +962,17 @@ if __name__ == "__main__":
         print(f"  - multimodal_emb 范围: [{multimodal_emb.min():.4f}, {multimodal_emb.max():.4f}]")
         with torch.no_grad():
             # 使用 Test 2 中计算的 embeddings
-            # `agent.forward` 需要 (attention_mask, inputs_embeds, labels, step_count)
-            mu_b, log_std_b, value_b = world_model.agent.forward(
+            # `agent.forward` 返回 (logits, value) - 离散动作
+            logits_b, value_b = world_model.agent.forward(
                 multimodal_att_mask, 
                 multimodal_emb, 
                 inputs_batch['labels'], 
                 inputs_batch['step_count']
             )
-
+        print(f"  - logits_b shape: {logits_b.shape}, abs: {logits_b.abs().sum()}")
+        print(f"  - value_b shape: {value_b.shape}, abs: {value_b.abs().sum()}")
+        print(f"  - value 值: {value_b}")
+        print(f"  - logits_b 范围: [{logits_b.min():.4f}, {logits_b.max():.4f}]")
         # ---------------------------------------------------------------------
         # WorldModel.agent_super_forward
         # ---------------------------------------------------------------------
@@ -1117,32 +981,23 @@ if __name__ == "__main__":
         print("=" * 80)
         
         with torch.no_grad():
-            mu_agent, log_std_agent, value_agent = world_model.agent_super_forward(inputs_batch)
+            logits_agent, value_agent = world_model.agent_super_forward(inputs_batch)
         
         print(f"✓ agent_super_forward 成功")
-        print(f"  - mu shape: {mu_agent.shape}, abs: {mu_agent.abs().sum()}")
-        print(f"  - log_std shape: {log_std_agent.shape}")
+        print(f"  - logits shape: {logits_agent.shape}, abs: {logits_agent.abs().sum()}")
         print(f"  - value shape: {value_agent.shape}, abs: {value_agent.abs().sum()}")
         print(f"  - value 值: {value_agent}")
-        print(f"  - mu 范围: [{mu_agent.min():.4f}, {mu_agent.max():.4f}]")
-        print(f"  - log_std 范围: [{log_std_agent.min():.4f}, {log_std_agent.max():.4f}]")
+        print(f"  - logits 范围: [{logits_agent.min():.4f}, {logits_agent.max():.4f}]")
         
         # 比较结果
         print("\n  比较两条路径的输出:")
         atol = 1e-4 # 设置一个合理的容忍度以处理浮点精度差异
         
-        # 比较 mu
-        mu_match = torch.allclose(mu_agent, mu_b, atol=atol)
-        print(f"    - mu (动作均值) 是否匹配: {'✓ 是' if mu_match else '❌ 否'}")
-        diff = torch.abs(mu_agent - mu_b).max()
+        # 比较 logits
+        logits_match = torch.allclose(logits_agent, logits_b, atol=atol)
+        print(f"    - logits (动作logits) 是否匹配: {'✓ 是' if logits_match else '❌ 否'}")
+        diff = torch.abs(logits_agent - logits_b).max()
         print(f"      最大差异: {diff.item()}")
-
-        # 比较 log_std
-        log_std_match = torch.allclose(log_std_agent, log_std_b, atol=atol)
-        print(f"    - log_std (对数标准差) 是否匹配: {'✓ 是' if log_std_match else '❌ 否'}")
-        if not log_std_match:
-            diff = torch.abs(log_std_agent - log_std_b).max()
-            print(f"      最大差异: {diff.item()}")
             
         # 比较 value
         value_match = torch.allclose(value_agent, value_b, atol=atol)
@@ -1150,7 +1005,7 @@ if __name__ == "__main__":
         diff = torch.abs(value_agent - value_b).max()
         print(f"      最大差异: {diff.item()}")
 
-        if mu_match and log_std_match and value_match:
+        if logits_match and value_match:
             print("\n✓ 验证成功: 两条前向传播路径的计算结果等效！")
         else:
             print("\n❌ 验证失败: 两条前向传播路径的计算结果不一致！")
@@ -1215,15 +1070,16 @@ if __name__ == "__main__":
         print(f"对 {NUM_ENVS} 个环境批量想象 {imagine_steps} 步...")
         
         with torch.no_grad():
-            (imagined_mus, imagined_log_stds, imagined_values, imagined_rewards, 
+            (imagined_logits, imagined_values, imagined_rewards, 
              imagined_dones, last_value, imagined_actions, imagined_multimodal_embs, 
              imagined_att_masks, imagined_step_counts) = world_model.imagine(imagine_inputs, imagine_steps, None)
         
         print(f"✓ imagine 成功")
-        print(f"  - imagined_mus shape: {imagined_mus.shape}")
+        print(f"  - imagined_logits shape: {imagined_logits.shape}")
         print(f"  - imagined_values shape: {imagined_values.shape}")
         print(f"  - imagined_rewards shape: {imagined_rewards.shape}")
         print(f"  - imagined_dones shape: {imagined_dones.shape}")
+        print(f"  - imagined_actions shape: {imagined_actions.shape}")
         print(f"  - last_value shape: {last_value.shape}")
         
         # 打印每个环境的想象轨迹详情
@@ -1240,7 +1096,7 @@ if __name__ == "__main__":
             print(f"      - 终止次数: {env_dones.sum().item()}")
             
             # 打印每一步的详情
-            for step in range(imagine_steps):
+            for step in range(len(env_rewards)):
                 print(f"        Step {step}: reward={env_rewards[step].item():.4f}, "
                       f"value={env_values[step].item():.4f}, done={env_dones[step].item()}")
         
@@ -1253,7 +1109,7 @@ if __name__ == "__main__":
         
         print(f"Predicted reward 范围: [{decoded_reward.min():.4f}, {decoded_reward.max():.4f}]")
         print(f"Value 范围: [{value_agent.min():.4f}, {value_agent.max():.4f}]")
-        print(f"Action 范围: [{mu_agent.min():.4f}, {mu_agent.max():.4f}]")
+        print(f"Logits 范围: [{logits_agent.min():.4f}, {logits_agent.max():.4f}]")
         print(f"Post patch proj 范围: [{post_patch_proj.min():.4f}, {post_patch_proj.max():.4f}]")
         print(f"Imagined rewards 范围: [{imagined_rewards.min():.4f}, {imagined_rewards.max():.4f}]")
         print(f"Imagined values 范围: [{imagined_values.min():.4f}, {imagined_values.max():.4f}]")
@@ -1270,7 +1126,7 @@ if __name__ == "__main__":
         has_nan = any([
             torch.isnan(post_patch_proj).any(),
             torch.isnan(rt_logits).any(),
-            torch.isnan(mu_agent).any(),
+            torch.isnan(logits_agent).any(),
             torch.isnan(value_agent).any(),
             torch.isnan(imagined_rewards).any(),
             torch.isnan(imagined_values).any(),
@@ -1278,7 +1134,7 @@ if __name__ == "__main__":
         has_inf = any([
             torch.isinf(post_patch_proj).any(),
             torch.isinf(rt_logits).any(),
-            torch.isinf(mu_agent).any(),
+            torch.isinf(logits_agent).any(),
             torch.isinf(value_agent).any(),
             torch.isinf(imagined_rewards).any(),
             torch.isinf(imagined_values).any(),

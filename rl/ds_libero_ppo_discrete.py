@@ -196,7 +196,6 @@ class ReplayBufferActor:
     def size(self):
         return len(self.buffer)
     
-    # ############################# 核心修改：更新采样逻辑 ##############################
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
         # obs 是 prepare_one_obs 的字典，不能 stack，保持 list 返回
@@ -206,7 +205,6 @@ class ReplayBufferActor:
         logits_old = np.stack([b.behaviour_logits for b in batch])
         v_targ = np.asarray([b.value_target for b in batch], np.float32)
         return obs_list, action_token, adv, logits_old, v_targ
-    # ################################################################################
 
 class BaseWorkerActor:
     """rollout 和 eval worker 的共享逻辑。"""
@@ -318,7 +316,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.replay.add_batch.remote(batch)
 
 @ray.remote
-class EvaluationWorkerActor(BaseWorkerActor): # <--- 继承自 BaseWorkerActor
+class EvaluationWorkerActor(BaseWorkerActor):
     def __init__(self, infer, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
         super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
         print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
@@ -422,7 +420,6 @@ class InferenceActor(InferenceActorCom):
             try:
                 inputs_batch = self.model.prepare_inputs_batch(inputs_list)
                 with torch.inference_mode():
-                    # ############################# 核心修改：使用新的模型接口 ##############################
                     # 1. 前向传播获取 logits 和 value
                     action_logits, value = self.model(inputs_batch)
 
@@ -435,12 +432,11 @@ class InferenceActor(InferenceActorCom):
                     ).cpu().numpy()
 
                     # action_logits 的形状是 (B, NUM_ACTIONS_CHUNK * ACTION_DIM, VocabSize)
-                    logits_for_first_action = action_logits.view(
+                    logits = action_logits.view(
                         -1, NUM_ACTIONS_CHUNK, ACTION_DIM, action_logits.shape[-1]
                     ).float().cpu().numpy()
                     
                     values = value.to(torch.float32).cpu().numpy()
-                    # ####################################################################################
 
                 # 将标准化动作转换为环境动作
                 actions_env = []
@@ -449,14 +445,12 @@ class InferenceActor(InferenceActorCom):
                     actions_env.append(a_env.astype(np.float32))
 
                 for i in range(len(promises_to_process)):
-                    # ############################# 核心修改：返回新的数据 ##############################
                     promises_to_process[i].set_result((
                         actions_env[i],           # 反归一化的环境动作
                         action_tokens[i],         # 离散动作 token
-                        logits_for_first_action[i], # 对应的 logits
+                        logits[i], # 对应的 logits
                         values[i]                 # 价值估计
                     ))
-                    # ###############################################################################
             except Exception as e:
                 import traceback
                 print(f"[ERROR] InferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
@@ -576,22 +570,18 @@ class TrainerActor(TrainerActorCom):
                     print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size}...")
                     await asyncio.sleep(3)
 
-                # ############################# 核心修改：获取新的经验数据 ##############################
                 obs_list, action_token_np, adv_np, logits_old_np, v_targ_np = \
                     await self.replay_buffer.sample.remote(self.super_batch_size)
-                # ################################################################################
 
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
 
                 device = next(self.model.parameters()).device
-                # ############################# 核心修改：准备新的 Tensors ##############################
                 act_token_t = torch.tensor(action_token_np, dtype=torch.long, device=device) # Tokens 是 long 类型
                 adv_t = torch.tensor(adv_np, dtype=torch.float32, device=device)
                 logits_old_t = torch.tensor(logits_old_np, dtype=torch.float32, device=device)
                 v_targ_t = torch.tensor(v_targ_np, dtype=torch.float32, device=device)
 
                 self.next_ready_batch = (inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t)
-                # ####################################################################################
 
             except Exception as e:
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
@@ -615,9 +605,7 @@ class TrainerActor(TrainerActorCom):
         current_batch = self.next_ready_batch
         self.next_ready_batch = None
         
-        # ############################# 核心修改：解包新的批处理数据 ##############################
         inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t = current_batch
-        # ####################################################################################
 
         # 修正std 归一化（消融1）
         # 计算本地统计量
@@ -633,7 +621,6 @@ class TrainerActor(TrainerActorCom):
         global_mean = global_sum / torch.clamp(global_count, min=1.0)
         global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
         global_std = torch.sqrt(global_var)
-        # ========================================================
 
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses, epoch_kl_losses = [], [], [], [], []
         epoch_ent, epoch_kl_divs = [], []   
@@ -644,7 +631,6 @@ class TrainerActor(TrainerActorCom):
             start = i * TRAIN_BATCH_SIZE; end = start + TRAIN_BATCH_SIZE
             mini_inputs = {k: v[start:end] for k, v in inputs_batch.items()}
             
-            # ############################# 核心修改：切分新的小批次数据 ##############################
             mini_act_token = act_token_t[start:end]
             mini_adv = adv_t[start:end]
             mini_logits_old = logits_old_t[start:end]
