@@ -32,7 +32,7 @@ from experiments.robot.openvla_utils import (
 )
 
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
-from experiments.robot.libero.libero_utils import GenerateConfig
+from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
 from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs
 # 训练/推理通信（保持接口不变）
@@ -42,7 +42,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # 0. 超参数与配置
 # ================================================================
 # Libero benchmark
-BENCHMARK = "libero_spatial"   
+BENCHMARK = TaskSuite.LIBERO_SPATIAL
 
 # 分布式系统参数
 NUM_TRAINER_GPUS = 3
@@ -742,7 +742,7 @@ def main():
     os.environ["RAY_DEDUP_LOGS"] = "0"
     ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_spatial_winbalance_eval_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_cut_lm_head_{int(time.time())}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")

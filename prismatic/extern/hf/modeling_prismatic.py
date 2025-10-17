@@ -609,6 +609,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         diffusion_timestep_embeddings=None,
         use_film: bool = False,
         this_act_emb: torch.FloatTensor = None,
+        use_llm_loss: bool = True,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -733,7 +734,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 position_ids=None,
                 past_key_values=None,
                 inputs_embeds=multimodal_embeddings,
-                labels=multimodal_labels,
+                labels=multimodal_labels if use_llm_loss else None,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,

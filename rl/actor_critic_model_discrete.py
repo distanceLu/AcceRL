@@ -116,6 +116,47 @@ class ActorCritic(nn.Module):
         self.model_dtype = torch_dtype
         self.vla = self.vla.to(dtype=self.model_dtype)
 
+        # 计算有效的vocab范围
+        self.vocab_size = self.vla.config.text_config.vocab_size - self.vla.config.pad_to_multiple_of
+        self.n_action_bins = self.vla.config.n_action_bins
+        self.action_vocab_start = self.vocab_size - self.n_action_bins
+        
+        # 原地替换lm_head为精简版本
+        self.vla.language_model: LlamaForCausalLM
+        original_lm_head = self.vla.language_model.lm_head
+        
+        print(f"原始 lm_head 形状: weight={original_lm_head.weight.shape}, "
+              f"bias={original_lm_head.bias.shape if original_lm_head.bias is not None else None}")
+        
+        # 提取权重和偏置的有效部分 [action_vocab_start:vocab_size, :]
+        with torch.no_grad():
+            action_weight = original_lm_head.weight[self.action_vocab_start:self.vocab_size, :].clone()
+            if original_lm_head.bias is not None:
+                action_bias = original_lm_head.bias[self.action_vocab_start:self.vocab_size].clone()
+            else:
+                action_bias = None
+        
+        # 创建新的精简lm_head并原地替换
+        new_lm_head = nn.Linear(
+            original_lm_head.in_features,
+            self.n_action_bins,
+            bias=(action_bias is not None)
+        ).to(self.device).to(dtype=self.model_dtype)
+        
+        # 复制权重
+        with torch.no_grad():
+            new_lm_head.weight.copy_(action_weight)
+            if action_bias is not None:
+                new_lm_head.bias.copy_(action_bias)
+        
+        # 原地替换
+        self.vla.language_model.lm_head = new_lm_head
+        
+        print(f"精简后 lm_head 形状: weight={new_lm_head.weight.shape}, "
+              f"bias={new_lm_head.bias.shape if new_lm_head.bias is not None else None}")
+        print(f"lm_head 已从 ({original_lm_head.out_features}, {original_lm_head.in_features}) "
+              f"精简为 ({self.n_action_bins}, {original_lm_head.in_features})")
+
         # 应用LoRA配置（消融2）
         lora_config = LoraConfig(
             r=cfg.lora_rank,
@@ -135,11 +176,10 @@ class ActorCritic(nn.Module):
         # 打印可训练参数信息
         self.vla.print_trainable_parameters()
 
-        self.vocab_size = self.vla.config.text_config.vocab_size - self.vla.config.pad_to_multiple_of
-        self.bins = np.linspace(-1, 1, self.vla.config.n_action_bins)
+        self.bins = np.linspace(-1, 1, self.n_action_bins)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
-        # Keep processor for external preparation (forward 接收已组装好的 batch，但依旧保留 processor)
+        # Keep processor for external preparation
         self.processor = get_processor(cfg)
         self.proprio_projector = None
         
@@ -148,7 +188,7 @@ class ActorCritic(nn.Module):
             nn.Linear(self.vla.llm_dim, 1),
         ).to(self.device).to(dtype=self.model_dtype)
 
-        # Value head: mean-pool over text tokens from the last hidden layer -> scalar
+        # Value head
         self.value_head = nn.Sequential(
             nn.LayerNorm(self.vla.llm_dim),
             nn.Linear(self.vla.llm_dim, self.vla.llm_dim),
@@ -295,10 +335,14 @@ class ActorCritic(nn.Module):
             num_patches += 1
         return num_patches
 
-    def _extract_actions_hidden(self, last_hidden_states, logits: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _extract_actions_hidden(self, last_hidden_states: torch.Tensor, logits: torch.Tensor, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        From last_hidden_states, extract the text-token hiddens corresponding
-        to current + next actions, as (B, NUM_ACTIONS_CHUNK*ACTION_DIM, D).
+        从 last_hidden_states 和 logits 中提取动作相关的部分。
+        由于lm_head已经被精简为只输出n_action_bins，所以logits直接可用。
+        
+        返回:
+          action_logits: (B, NUM_ACTIONS_CHUNK * ACTION_DIM, n_action_bins)
+          actions_hidden_states: (B, NUM_ACTIONS_CHUNK * ACTION_DIM, D)
         """
         ground_truth_token_ids = batch["labels"][:, 1:].to(self.device)  # (B, text_len-1)
         current_action_mask = get_current_action_mask(ground_truth_token_ids)  # (B, text_len-1)
@@ -307,6 +351,7 @@ class ActorCritic(nn.Module):
 
         num_patches = self._compute_num_patches()
         text_hidden_states = last_hidden_states[:, num_patches:-1]  # (B, text_len, D)
+        text_logits = logits[:, num_patches:-1]  # (B, text_len, n_action_bins) - 已经是精简后的
 
         B, _, D = text_hidden_states.shape
         actions_hidden_states = (
@@ -314,11 +359,11 @@ class ActorCritic(nn.Module):
             .reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, D)
             .to(self.model_dtype)
         )
-        text_logits = logits[:, num_patches:-1]  # (B, text_len, D)
-        _, _, vocab_size = text_logits.shape
-        actions_logits = text_logits[action_mask].reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, vocab_size)
-        logits_cut = actions_logits[..., self.vocab_size-self.vla.config.n_action_bins:self.vocab_size]
-        return logits_cut, actions_hidden_states
+        
+        # 提取动作对应的logits（已经是精简后的256维）
+        action_logits = text_logits[action_mask].reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, self.n_action_bins)
+        
+        return action_logits, actions_hidden_states
 
     def _forward_vla(self, batch: Dict[str, torch.Tensor]):
         """
@@ -330,7 +375,7 @@ class ActorCritic(nn.Module):
             input_ids=batch["input_ids"].to(self.device),
             attention_mask=batch["attention_mask"].to(self.device),
             pixel_values=batch["pixel_values"].to(self.model_dtype).to(self.device),
-            labels=batch["labels"].to(self.device),  # for mask derivation and potential loss
+            labels=batch["labels"].to(self.device),
             output_hidden_states=True,
             proprio=batch["proprio"] if self.cfg.use_proprio else None,
             proprio_projector=self.proprio_projector if self.cfg.use_proprio else None,
@@ -338,6 +383,7 @@ class ActorCritic(nn.Module):
             noisy_action_projector=None,
             diffusion_timestep_embeddings=None,
             use_film=self.cfg.use_film,
+            use_llm_loss=False,
         )
         return output
 
@@ -359,33 +405,36 @@ class ActorCritic(nn.Module):
         value = self.value_head(pooled).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
-    def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
-          actions_all: (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
-          mu_all:      (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
-          log_std_all: (B, NUM_ACTIONS_CHUNK, ACTION_DIM)
-          value:       (B,)
+          action_logits: (B, NUM_ACTIONS_CHUNK * ACTION_DIM, n_action_bins)
+          value:         (B,)
         """
         # Sanity checks
         for k in ("input_ids", "attention_mask", "pixel_values", "labels"):
             if k not in inputs_batch:
                 raise KeyError(f"inputs_batch missing key: {k}")
 
-        # 1. 提取动作部分的原始logits（未argmax）   
+        # 1. VLA前向传播获取隐藏状态和logits
         output = self._forward_vla(inputs_batch)
         last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
+        logits = output.logits  # (B, seq_len, n_action_bins) - 已经是精简后的
 
-        logits = output.logits
+        # 2. 提取动作隐藏状态和logits
         action_logits, actions_hidden_states = self._extract_actions_hidden(last_hidden_states, logits, inputs_batch)
 
-        # 2. 计算价值函数
+        # 3. 计算价值函数
         value = self._compute_value_from_hidden(actions_hidden_states.detach())  # (B,)
 
         return action_logits, value.to(torch.float32)
 
     def post_process(self, logits: torch.Tensor, deterministic: List[bool]) -> Tuple[torch.distributions.Categorical, torch.Tensor, np.ndarray]:
-         # 创建分布并计算两种动作
+        """
+        后处理logits以生成动作。
+        注意：现在logits已经是精简后的 (B, num_dims, n_action_bins)，无需再截取。
+        """
+        # 创建分布并计算两种动作
         dist = torch.distributions.Categorical(logits=logits)
         stochastic_tokens = dist.sample()
         deterministic_tokens = torch.argmax(logits, dim=-1)
@@ -397,7 +446,8 @@ class ActorCritic(nn.Module):
             is_deterministic_tensor, deterministic_tokens, stochastic_tokens
         )
 
-        actions_from_tokens = self.vla.config.n_action_bins - action_token_ids
+        # 将token ID转换为bin索引（注意：现在action_token_ids范围是0到n_action_bins-1）
+        actions_from_tokens = self.n_action_bins - 1 - action_token_ids
         discretized = np.clip(actions_from_tokens.cpu().numpy(), a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized]  # 形状 (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
         normalized_actions = normalized_actions.reshape(
@@ -405,6 +455,7 @@ class ActorCritic(nn.Module):
         )
         
         return dist, action_token_ids, normalized_actions
+
 
 if __name__ == "__main__":
     import sys
@@ -513,7 +564,10 @@ if __name__ == "__main__":
                 
                 with torch.inference_mode():
                     action_logits, _ = actor.forward(inputs_batch)
-                _, _, normalized_actions = actor.post_process(action_logits)  # 形状 (b, 8, 7)
+                # _, _, normalized_actions = actor.post_process(action_logits)  # 形状 (b, 8, 7)
+                B = action_logits.size(0)
+                deterministic_flags = [False] * B  # 若需贪心推理，改为 [True] * B
+                _, _, normalized_actions = actor.post_process(action_logits, deterministic_flags)  # 形状 (B, 8, 7)
                 
                 # 将生成的动作序列添加到对应环境的队列中
                 for idx, env_idx in enumerate(need_generation_indices):
