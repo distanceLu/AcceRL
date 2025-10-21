@@ -27,6 +27,7 @@ from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq,
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
+from torch.utils.tensorboard import SummaryWriter
 
 from experiments.robot.openvla_utils import (
     check_model_logic_mismatch,
@@ -570,6 +571,12 @@ def log_metrics_to_wandb(metrics, prefix, step, wandb_entity) -> None:
             log_dict[f"{prefix}/{name.replace('_', ' ').title()}"] = value
     wandb_entity.log(log_dict, step=step)
 
+def log_metrics_to_tb(metrics, prefix, step, tb_writer: Optional[SummaryWriter]) -> None:
+    if tb_writer is None:
+        return
+    for name, value in metrics.items():
+        tag = f"{prefix}/Loss" if name == "loss_value" else f"{prefix}/{name.replace('_', ' ').title()}"
+        tb_writer.add_scalar(tag, value, step)
 
 def save_training_checkpoint(
     cfg,
@@ -678,6 +685,7 @@ def run_validation(
     log_step,
     distributed_state,
     val_time_limit,
+    tb_writer: Optional[SummaryWriter] = None,
 ) -> None:
     """
     Compute validation set metrics for logging.
@@ -748,7 +756,7 @@ def run_validation(
     # Log validation metrics to W&B
     if distributed_state.is_main_process:
         log_metrics_to_wandb(avg_val_metrics, "VLA Val", log_step, wandb)
-
+        log_metrics_to_tb(avg_val_metrics, "VLA Val", log_step, tb_writer) 
 
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
@@ -788,10 +796,21 @@ def finetune(cfg: FinetuneConfig) -> None:
     torch.cuda.set_device(device_id)
     torch.cuda.empty_cache()
 
-    # Initialize wandb logging
+    # Initialize wandb logging & tb logging
+    tb_writer = None
     if distributed_state.is_main_process:
         wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{run_id}")
-
+        
+        tb_log_dir = Path("/cpfs01/liuwei_workspace/openvla_oft_rl/runs/Libero/finetune_im") / run_id / "tensorboard"
+        os.makedirs(tb_log_dir, exist_ok=True)
+        tb_writer = SummaryWriter(log_dir=str(tb_log_dir))
+        tb_writer.add_text("run/config_summary",
+                           f"run_id: {run_id}\n"
+                           f"dataset: {cfg.dataset_name}\n"
+                           f"use_lora: {cfg.use_lora}, lora_rank: {cfg.lora_rank}\n"
+                           f"use_l1_regression: {cfg.use_l1_regression}, use_diffusion: {cfg.use_diffusion}\n"
+                           f"batch_size: {cfg.batch_size}, lr: {cfg.learning_rate}\n")
+        
     # Print detected constants
     print(
         "Detected constants:\n"
@@ -841,7 +860,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Set number of images in VLA input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
-
+    action_head = None
     # LoRA setup
     if cfg.use_lora:
         lora_config = LoraConfig(
@@ -1073,6 +1092,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             log_step = gradient_step_idx if not cfg.resume else cfg.resume_step + gradient_step_idx
             if distributed_state.is_main_process and log_step % cfg.wandb_log_freq == 0:
                 log_metrics_to_wandb(smoothened_metrics, "VLA Train", log_step, wandb)
+                log_metrics_to_tb(smoothened_metrics, "VLA Train", log_step, tb_writer)
 
             # [If applicable] Linearly warm up learning rate from 10% to 100% of original
             if cfg.lr_warmup_steps > 0:
@@ -1090,6 +1110,9 @@ def finetune(cfg: FinetuneConfig) -> None:
                     },
                     step=log_step,
                 )
+
+                if tb_writer is not None:
+                    tb_writer.add_scalar("VLA Train/Learning Rate", scheduler.get_last_lr()[0], log_step)  
 
             # Optimizer and LR scheduler step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
@@ -1128,6 +1151,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     log_step=log_step,
                     distributed_state=distributed_state,
                     val_time_limit=cfg.val_time_limit,
+                    tb_writer=tb_writer,
                 )
                 # Set model back to training mode after validation
                 vla.train()
@@ -1137,6 +1161,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
 
+    # 训练结束/提前退出时关闭 TB
+    if distributed_state.is_main_process and tb_writer is not None:
+        tb_writer.flush()
+        tb_writer.close()
 
 if __name__ == "__main__":
     finetune()
