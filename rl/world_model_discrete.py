@@ -519,7 +519,6 @@ class WorldModel(ActorCritic):
         
         # 4. 保存 Agent 的额外层
         agent_extra_layers = {
-            'action_head': self.agent.action_head.state_dict(),
             'value_head': self.agent.value_head.state_dict(),
             'attn_pool': self.agent.attn_pool.state_dict(),
             'lm_head': self.agent.language_model.lm_head.state_dict(),
@@ -847,21 +846,21 @@ if __name__ == "__main__":
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
         lora_rank=32,
-        device=torch.device("cuda:3"),
+        device=torch.device("cuda:4"),
     )
 
     print("=" * 80)
     print("初始化 WorldModel...")
     print("=" * 80)
-    checkpoint2 = "/cpfs01/lcx_workspace/models/WorldModel_ds_rew_termin_3class_1760519458/checkpoint_1000"
+    checkpoint2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_1761010174/checkpoint_500"
     # checkpoint2 = None
     
     # Create WorldModel
     world_model = WorldModel(cfg, TORCH_DTYPE, checkpoint2, freeze_value=False)
 
     # 模拟保存和加载模型
-    # world_model.save_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
-    # world_model.load_checkpoint('/cpfs01/lcx_workspace/models/WorldModel_ds_noly_wm_1760153209/checkpoint_7000/')
+    world_model.save_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
+    world_model.load_checkpoint('/cpfs01/lcx_workspace/models/openvla-7b-wm-test1/')
     
     print("\n检查参数分组...")
     param_groups = world_model.get_parameter_groups()

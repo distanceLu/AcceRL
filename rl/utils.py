@@ -542,6 +542,7 @@ def forward_vla(model, batch: Dict[str, torch.Tensor]):
             diffusion_timestep_embeddings=None,
             use_film=model.cfg.use_film,
             this_act_emb=batch.get("this_act_emb", None),  # (B, 1, 4096) or None
+            use_llm_loss=False,
         )
     return output
 

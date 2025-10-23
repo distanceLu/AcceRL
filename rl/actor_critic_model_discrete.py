@@ -251,7 +251,7 @@ class ActorCritic(nn.Module):
         value = self._compute_value_from_hidden(actions_hidden_states.detach())  # (B,)
 
         if return_vit_out:
-            return action_logits, value.to(torch.float32), output.projector_features.to(torch.float32)
+            return action_logits, value.to(torch.float32), output.projector_features
         else:
             return action_logits, value.to(torch.float32)
 
