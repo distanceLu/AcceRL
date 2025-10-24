@@ -447,8 +447,61 @@ class WorldModel(ActorCritic):
                 torch.stack(imagined_multimodal_embs), torch.stack(imagined_att_masks),
                 torch.stack(imagined_step_counts))
     
+        # 添加辅助方法供外部调用
+    
+    def get_initial_embeddings(self, start_states: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """获取初始状态的嵌入表示"""
+        with torch.inference_mode():
+            multimodal_emb, multimodal_att_mask = self.forward_vision(start_states)
+        return multimodal_emb, multimodal_att_mask
+    
+    def imagine_single_step(
+        self, 
+        multimodal_emb: torch.Tensor, 
+        multimodal_att_mask: torch.Tensor,
+        labels: torch.Tensor,
+        step_count: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        执行单步想象预测
+        
+        Returns:
+            - logits: (B, NUM_ACTIONS_CHUNK, VOCAB_SIZE)
+            - value: (B,)
+            - action_token: (B, NUM_ACTIONS_CHUNK) 离散动作token
+            - continuous_action: (B, NUM_ACTIONS_CHUNK, ACTION_DIM) 连续动作
+            - next_embeddings: (B, num_patches, D) 下一状态的嵌入
+            - reward_hat: (B,)
+            - termin_hat: (B,)
+        """
+        B = multimodal_emb.size(0)
+        
+        # 1. Agent预测动作
+        with torch.inference_mode():
+            logits, value = self.agent.forward(multimodal_att_mask, multimodal_emb, labels, step_count)
+            
+            # 2. 解码动作
+            _, action_token, continuous_action = self.agent.post_process(logits, deterministic=[False] * B)
+            continuous_action = torch.from_numpy(continuous_action).to(self.device)
+            
+            # 3. 预测下一状态
+            next_embeddings, reward_hat, termin_hat = self.predict_next(
+                multimodal_emb, multimodal_att_mask, continuous_action, step_count
+            )
+        
+        return logits, value, action_token, continuous_action, next_embeddings, reward_hat, termin_hat
+    
+    def update_embeddings(self, multimodal_emb: torch.Tensor, next_embeddings: torch.Tensor) -> torch.Tensor:
+        """更新嵌入表示的图像patch部分"""
+        num_patches = self._compute_num_patches()
+        multimodal_emb = multimodal_emb.clone()
+        multimodal_emb[:, 1:num_patches+1, :] = next_embeddings
+        return multimodal_emb
+    
     def compute_world_model_loss(self, wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward):
-        post_patch_proj, rt_logits = self.forward(wm_inp)
+        with torch.autocast("cuda", dtype=self.model_dtype):
+            post_patch_proj, rt_logits = self.forward(wm_inp)
+            post_patch_proj = post_patch_proj.float()
         
         non_terminal_mask = ~mini_done.squeeze()
         if torch.any(non_terminal_mask):

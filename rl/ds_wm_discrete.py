@@ -19,6 +19,7 @@ import numpy as np
 
 import ray
 import torch
+import torch.distributed as distributed
 import deepspeed
 from torch.utils.tensorboard import SummaryWriter
 
@@ -34,7 +35,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete_split_imagine"
+EXP_NAME = "ppo_wm_discrete_pre_fetch"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
@@ -585,7 +586,7 @@ class ImaginationRolloutActor(InferenceActorCom):
             multimodal_emb = self.model.update_embeddings(multimodal_emb, next_embeddings)
             active_mask.logical_and_(~termin_hat)
             
-            await asyncio.sleep(0)  # 让出事件循环控制权
+            await asyncio.sleep(0.1)  # 让出事件循环控制权
         
         # 获取最后一步的价值
         with torch.inference_mode():
@@ -780,6 +781,28 @@ class TrainerActor(TrainerActorCom):
         progress = min(progress, 1.0)
         return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
+    def _slice_and_to_gpu(self, data_cpu, start_idx, end_idx, device):
+        """将CPU上的数据切片并转移到GPU"""
+        result = {}
+        for k, v in data_cpu.items():
+            if k == 'inputs_batch':
+                # 特殊处理inputs_batch字典
+                result[k] = {}
+                for sub_k, sub_v in v.items():
+                    if isinstance(sub_v, torch.Tensor):
+                        result[k][sub_k] = sub_v[start_idx:end_idx].to(device)
+                    elif isinstance(sub_v, np.ndarray):
+                        result[k][sub_k] = torch.tensor(sub_v[start_idx:end_idx], device=device)
+                    else:
+                        result[k][sub_k] = sub_v
+            elif isinstance(v, torch.Tensor):
+                result[k] = v[start_idx:end_idx].to(device)
+            elif isinstance(v, np.ndarray):
+                result[k] = torch.tensor(v[start_idx:end_idx], device=device)
+            else:
+                result[k] = v
+        return result
+
     async def _wm_data_fetching_loop(self):
         print(f"Trainer {self.rank}: (WM)后台数据准备循环已启动。")
         while True:
@@ -788,74 +811,151 @@ class TrainerActor(TrainerActorCom):
                     await asyncio.sleep(0.1)
                     continue
 
-                while await self.replay_buffer.size.remote() < TRAIN_BATCH_SIZE:
+                required_samples = TRAIN_BATCH_SIZE * WORLD_ACCUM
+                while await self.replay_buffer.size.remote() < required_samples:
                     await asyncio.sleep(1)
 
-                sampled_data = await self.replay_buffer.sample.remote(TRAIN_BATCH_SIZE)
-                if sampled_data is None: continue
+                t_sample_start = time.time()
+                sampled_data = await self.replay_buffer.sample.remote(required_samples)
+                if sampled_data is None:
+                    continue
                 
                 obs_list, act_np, _, _, _, done_np, next_teacher_proj_feat_np, reward_np = sampled_data
-                inputs_batch = self.base_model.prepare_inputs_batch(obs_list, INP_MAX_LEN)
-                device = self.model.device
+                sample_time = time.time() - t_sample_start
                 
-                self.next_wm_batch = (
-                    inputs_batch,
-                    torch.tensor(act_np, dtype=torch.long, device=device),  # 离散动作
-                    torch.tensor(done_np, dtype=torch.bool, device=device),
-                    torch.tensor(next_teacher_proj_feat_np, dtype=self.data_dtype, device=device),
-                    torch.tensor(reward_np, dtype=torch.float32, device=device)
-                )
+                t_prep_start = time.time()
+                inputs_batch = self.base_model.prepare_inputs_batch(obs_list, INP_MAX_LEN)
+                prep_time = time.time() - t_prep_start
+                
+                # 存储完整宏批次（保持在CPU）
+                self.next_wm_batch = {
+                    'inputs_batch': inputs_batch,
+                    'actions': torch.tensor(act_np, dtype=torch.long),
+                    'dones': torch.tensor(done_np, dtype=torch.bool),
+                    'next_teacher_proj_feat': torch.tensor(next_teacher_proj_feat_np),
+                    'rewards': torch.tensor(reward_np, dtype=torch.float32),
+                    'sample_time': sample_time,
+                    'prep_time': prep_time
+                }
+                
+                if self.rank == 0 and random.random() < 0.1:
+                    print(f"Trainer {self.rank}: WM宏批次拉取完成 - 采样: {sample_time:.3f}s, 准备: {prep_time:.3f}s, 样本数: {required_samples}")
+                    
             except Exception as e:
                 print(f"Trainer {self.rank}: (WM)数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
 
     async def _policy_data_fetching_loop(self):
+        """后台任务：拉取完整宏批次的策略训练数据到CPU"""
         print(f"Trainer {self.rank}: (Policy)后台数据准备循环已启动。")
         while True:
             try:
                 if self.next_policy_batch is not None:
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.1)
                     continue
 
-                while await self.imagination_buffer.size.remote() < TRAIN_BATCH_SIZE:
+                required_samples = TRAIN_BATCH_SIZE * AGENT_ACCUM
+                while await self.imagination_buffer.size.remote() < required_samples:
                     await asyncio.sleep(1)
 
-                sampled_data = await self.imagination_buffer.sample.remote(TRAIN_BATCH_SIZE)
-                if sampled_data is None: continue
+                t_sample_start = time.time()
+                sampled_data = await self.imagination_buffer.sample.remote(required_samples)
+                if sampled_data is None:
+                    continue
                 
-                device = self.model.device
-                self.next_policy_batch = {k: torch.tensor(v, device=device) for k, v in sampled_data.items()}
-
+                sample_time = time.time() - t_sample_start
+                
+                t_prep_start = time.time()
+                macro_batch = {}
+                for k, v in sampled_data.items():
+                    if isinstance(v, np.ndarray):
+                        macro_batch[k] = torch.tensor(v)
+                    elif isinstance(v, torch.Tensor):
+                        macro_batch[k] = v.cpu()
+                    else:
+                        raise ValueError(f"Unsupported data type for key '{k}': {type(v)}")
+                prep_time = time.time() - t_prep_start
+                
+                # 存储完整宏批次（保持在CPU）
+                self.next_policy_batch = {
+                    'data': macro_batch,
+                    'sample_time': sample_time,
+                    'prep_time': prep_time
+                }
+                
+                if self.rank == 0 and random.random() < 0.1:
+                    print(f"Trainer {self.rank}: Policy宏批次拉取完成 - 采样: {sample_time:.3f}s, 准备: {prep_time:.3f}s, 样本数: {required_samples}")
+                    
             except Exception as e:
                 print(f"Trainer {self.rank}: (Policy)数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
 
-    async def run_training_epoch(self) -> Tuple[Dict[str, float], Dict[str, int], int]:
-        if self.next_wm_batch is None or self.next_policy_batch is None:
-            print(f"Trainer {self.rank}: 等待批次...", flush=True)
-            while self.next_wm_batch is None or self.next_policy_batch is None: await asyncio.sleep(0.2)
-            print(f"Trainer {self.rank}: 数据已收到，开始训练。", flush=True)
+    async def run_training_epoch(self) -> Tuple[Dict[str, float], Dict[str, int], int, Dict[str, float]]:
+        perf_timings = {}
+        
+        # 等待数据准备完成
+        t_wait_data_start = time.time()
+        while self.next_wm_batch is None or self.next_policy_batch is None:
+            await asyncio.sleep(0.1)
+        perf_timings["data_wait_time"] = time.time() - t_wait_data_start
 
+        # 获取批次数据并立即设为None以触发后台拉取
+        wm_batch = self.next_wm_batch
+        policy_batch = self.next_policy_batch
+        
+        perf_timings['wm_sample_time'] = wm_batch['sample_time']
+        perf_timings['wm_prep_time'] = wm_batch['prep_time']
+        perf_timings['policy_sample_time'] = policy_batch['sample_time']
+        perf_timings['policy_prep_time'] = policy_batch['prep_time']
+        
+        self.next_wm_batch = None
+        self.next_policy_batch = None
+
+        # 更新学习率
         current_lrs = {}
         world_lr = self._get_current_lr(self.global_step, WORLD_LR, WORLD_WARMUP_STEPS, TRAIN_ITERS)
         policy_lr = self._get_current_lr(self.global_step, POLICY_LR, POLICY_WARMUP_STEPS, TRAIN_ITERS, start_step=POLICY_TRAIN_START_STEP)
         for param_group in self.optimizer.param_groups:
-            if param_group['name'] == 'world': param_group['lr'] = world_lr; current_lrs['world'] = world_lr
-            elif param_group['name'] == 'policy': param_group['lr'] = policy_lr; current_lrs['policy'] = policy_lr
+            if param_group['name'] == 'world': 
+                param_group['lr'] = world_lr
+                current_lrs['world'] = world_lr
+            elif param_group['name'] == 'policy': 
+                param_group['lr'] = policy_lr
+                current_lrs['policy'] = policy_lr
         
         epoch_losses = defaultdict(list)
         self.model.train()
+        device = self.model.device
 
         # === 阶段 1: 世界模型训练 ===
-        for _ in range(WORLD_ACCUM):
-            while self.next_wm_batch is None: await asyncio.sleep(0.01)
-            (wm_inputs, mini_act, mini_done, mini_next_teacher_proj_feat, mini_reward) = self.next_wm_batch
-            self.next_wm_batch = None
+        t_wm_start = time.time()
+        wm_to_gpu_times = []
+        
+        wm_data_cpu = {
+            'inputs_batch': wm_batch['inputs_batch'],
+            'actions': wm_batch['actions'],
+            'dones': wm_batch['dones'],
+            'next_teacher_proj_feat': wm_batch['next_teacher_proj_feat'],
+            'rewards': wm_batch['rewards']
+        }
+        
+        for i in range(WORLD_ACCUM):
+            start_idx = i * TRAIN_BATCH_SIZE
+            end_idx = (i + 1) * TRAIN_BATCH_SIZE
             
-            wm_inp = {**wm_inputs, 'this_action': mini_act}
+            t_to_gpu_start = time.time()
+            wm_mini_batch = self._slice_and_to_gpu(wm_data_cpu, start_idx, end_idx, device)
+            wm_to_gpu_times.append(time.time() - t_to_gpu_start)
+            
+            wm_inp = {**wm_mini_batch['inputs_batch'], 'this_action': wm_mini_batch['actions']}
 
             ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss = \
-                self.model.module.compute_world_model_loss(wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward)
+                self.model.module.compute_world_model_loss(
+                    wm_inp, 
+                    wm_mini_batch['dones'], 
+                    wm_mini_batch['next_teacher_proj_feat'], 
+                    wm_mini_batch['rewards']
+                )
             
             world_model_loss = AE_LOSS_COEF * ae_loss + RT_LOSS_COEF * rt_loss
             self.model.backward(world_model_loss / WORLD_ACCUM)
@@ -869,36 +969,56 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["rt_classification_acc"].append(rt_acc.item())
             epoch_losses["mae_loss"].append(mae_loss.item())
 
-        # === 阶段 2: 策略训练 ===
-        # 预取所有批次以计算全局优势统计量
-        adv_batches = []
-        time1 = time.time()
-        for _ in range(AGENT_ACCUM):
-            while self.next_policy_batch is None: await asyncio.sleep(0.01)
-            adv_batches.append(self.next_policy_batch)
-            self.next_policy_batch = None
-        if random.random() < 0.01:
-            time2 = time.time()
-            print(f"Trainer {self.rank}: 预取 {AGENT_ACCUM} 个策略批次耗时 {time2 - time1:.2f} 秒。", flush=True)
+        perf_timings["wm_train_time"] = time.time() - t_wm_start
+        perf_timings["wm_to_gpu_time"] = np.mean(wm_to_gpu_times)
 
-        adv_all = torch.cat([b['advantage'] for b in adv_batches])
-        adv_mean, adv_std = adv_all.mean(), adv_all.std()
-        for mini_policy_batch in adv_batches:
-            step_count_tensor = torch.tensor(mini_policy_batch['step_count'], dtype=torch.long, device=self.model.device)
+        # === 阶段 2: 策略训练 ===
+        t_policy_start = time.time()
+        
+        # 计算advantage的全局mean和std
+        t_adv_stats_start = time.time()
+        macro_batch = policy_batch['data']
+        adv_t = macro_batch['advantage'].to(device)
+        local_sum = adv_t.sum()
+        local_sq_sum = (adv_t * adv_t).sum()
+        local_count = torch.tensor([adv_t.numel()], dtype=torch.float32).to(device)
+
+        stats_tensor = torch.stack([local_sum, local_sq_sum, local_count.squeeze(0)])
+        distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
+
+        global_sum, global_sq_sum, global_count = stats_tensor[0], stats_tensor[1], stats_tensor[2]
+        global_mean = global_sum / torch.clamp(global_count, min=1.0)
+        global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
+        global_std = torch.sqrt(global_var)
+        perf_timings["adv_stats_time"] = time.time() - t_adv_stats_start
+
+        # 逐个微批次训练
+        policy_to_gpu_times = []
+        for i in range(AGENT_ACCUM):
+            start_idx = i * TRAIN_BATCH_SIZE
+            end_idx = (i + 1) * TRAIN_BATCH_SIZE
+            
+            t_to_gpu_start = time.time()
+            mini_policy_batch_gpu = self._slice_and_to_gpu(macro_batch, start_idx, end_idx, device)
+            policy_to_gpu_times.append(time.time() - t_to_gpu_start)
+            
+            step_count_tensor = mini_policy_batch_gpu['step_count'].to(torch.long)
             logits, value = self.model.module.agent.forward(
-                mini_policy_batch["attention_mask"].to(self.data_dtype), 
-                mini_policy_batch["inputs_embeds"].to(self.data_dtype),
-                mini_policy_batch["labels"],
+                mini_policy_batch_gpu["attention_mask"].to(self.data_dtype), 
+                mini_policy_batch_gpu["inputs_embeds"].to(self.data_dtype),
+                mini_policy_batch_gpu["labels"],
                 step_count_tensor
             )
-            normalized_adv = (mini_policy_batch['advantage'] - adv_mean) / (adv_std + 1e-8)
+            
+            # 使用全局mean/std归一化advantage
+            normalized_adv = (mini_policy_batch_gpu['advantage'] - global_mean) / (global_std + 1e-8)
             
             policy_loss, value_loss, entropy_loss, kl_loss, entropy, kl_div_metric = compute_ppo_loss(
                 logits, value, 
-                mini_policy_batch['old_logits'],
-                mini_policy_batch['action'],
+                mini_policy_batch_gpu['old_logits'],
+                mini_policy_batch_gpu['action'],
                 normalized_adv, 
-                mini_policy_batch['value_target'], 
+                mini_policy_batch_gpu['value_target'], 
                 CLIP_EPS, 
                 VF_COEF, 
                 ENT_COEF,
@@ -915,12 +1035,15 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["imagination_entropy"].append(entropy.item())
             epoch_losses["imagination_kl_div"].append(kl_div_metric.item())
 
+        perf_timings["policy_train_time"] = time.time() - t_policy_start
+        perf_timings["policy_to_gpu_time"] = np.mean(policy_to_gpu_times)
+
         # === 阶段 3: 优化器步骤 ===
         self.model.step()
         self.global_step += 1
 
         avg_losses = {k: np.mean(v) for k, v in epoch_losses.items()}
-        return avg_losses, current_lrs, self.global_step
+        return avg_losses, current_lrs, self.global_step, perf_timings
 
 
 def build_openvla_cfg() -> GenerateConfig:
@@ -1081,15 +1204,20 @@ def main():
     global_step = 0
     last_saved_step = -1
     while global_step < TRAIN_ITERS:
+        t_train_start = time.time()
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
         
-        avg_losses_list, lrs_list, steps_list = zip(*results)
+        avg_losses_list, lrs_list, steps_list, perf_timings_list = zip(*results)
         global_step = steps_list[0]
+        train_time = time.time() - t_train_start
 
+        # 权重同步
+        t_sync_start = time.time()
         broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
         receive_tasks = [actor.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for actor in all_actors_for_broadcast]
         ray.get([broadcast_task] + receive_tasks)
+        sync_time = time.time() - t_sync_start
 
         # 每 SAVE_INTERVAL_STEPS 步保存一次模型，且只保留最新的一个
         if global_step > 0 and global_step % SAVE_INTERVAL_STEPS == 0 and global_step != last_saved_step:
@@ -1106,8 +1234,20 @@ def main():
             all_stats = ray.get(stats_actor.get_stats.remote())
             global_stats = all_stats.pop("_global_")
             avg_losses = {k: np.mean([d[k] for d in avg_losses_list]) for k in avg_losses_list[0]}
-            for k, v in avg_losses.items(): writer.add_scalar(f'Loss/{k}', v, global_step)
             
+            # 汇总性能指标
+            avg_perf_timings = {}
+            for key in perf_timings_list[0].keys():
+                avg_perf_timings[key] = np.mean([pt[key] for pt in perf_timings_list])
+            avg_perf_timings['sync_time'] = sync_time
+            avg_perf_timings['train_time'] = train_time
+            # 损失指标
+            for k, v in avg_losses.items():
+                writer.add_scalar(f'Loss/{k}', v, global_step)
+            # 记录性能监控指标
+            for k, v in avg_perf_timings.items():
+                writer.add_scalar(f'Performance/{k}', v, global_step)
+
             current_lrs = lrs_list[0]
             total_real_buffer = sum(ray.get([rb.size.remote() for rb in replay_buffers]))
             total_imagined_buffer = sum(ray.get([ib.size.remote() for ib in imagination_buffers]))
