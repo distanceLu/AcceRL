@@ -2,7 +2,7 @@ import os
 os.environ["MUJOCO_GL"] = "osmesa"
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,4,5,6"
 
 import time
 import random
@@ -34,11 +34,11 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete"
+EXP_NAME = "ppo_wm_discrete_split_imagine"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 1
+NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
 NUM_IMAGINATION_ACTORS = 1 # 使用1个专用的GPU Actor来生成想象数据
 NUM_ROLLOUT_WORKERS = 9
@@ -46,10 +46,10 @@ ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 4
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
-IMAGINATION_REPLAY_CAPACITY = 2000
+IMAGINATION_REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 22
-WORLD_ACCUM = 46
-AGENT_ACCUM = 46
+WORLD_ACCUM = 12
+AGENT_ACCUM = 12
 TRAIN_ITERS = 100000
 
 # PPO
@@ -86,7 +86,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_check_1th_mu_1760789366/checkpoint_1000"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_param_server_version_ctrl_1761221986/checkpoint_800"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -534,6 +534,78 @@ class ImaginationRolloutActor(InferenceActorCom):
         if self.model is None: return {}
         return {k: v.abs().sum().item() for k, v in self.model.state_dict().items()}
 
+    async def _imagine_batch(
+        self, 
+        start_obs_list: List[Dict[str, torch.Tensor]], 
+        max_horizon: int
+    ) -> Tuple:
+        """
+        在学习到的世界模型中进行想象，直到所有轨迹终止或达到最大视界。
+        此版本在循环内让出控制权，允许参数同步。
+        """
+        # 准备批次输入
+        start_states_batch = self.model.prepare_inputs_batch(start_obs_list, INP_MAX_LEN)
+        B = start_states_batch['input_ids'].size(0)
+        device = self.model.device
+        
+        # 存储想象轨迹的容器
+        imagined_logits, imagined_values, imagined_rewards, imagined_dones = [], [], [], []
+        imagined_actions, imagined_multimodal_embs, imagined_att_masks = [], [], []
+        imagined_step_counts = []
+        
+        # 1. 获取初始嵌入
+        multimodal_emb, multimodal_att_mask = self.model.get_initial_embeddings(start_states_batch)
+        active_mask = torch.ones(B, dtype=torch.bool, device=device)
+        
+        # 2. 想象循环
+        for step in range(max_horizon):
+            if not active_mask.any():
+                break
+            
+            step_count = start_states_batch['step_count'] + step
+            
+            # 执行单步预测
+            logits, value, action_token, continuous_action, next_embeddings, reward_hat, termin_hat = \
+                self.model.imagine_single_step(
+                    multimodal_emb, multimodal_att_mask, 
+                    start_states_batch['labels'], step_count
+                )
+            
+            # 存储当前步的信息
+            imagined_multimodal_embs.append(multimodal_emb.clone())
+            imagined_att_masks.append(multimodal_att_mask)
+            imagined_actions.append(action_token)
+            imagined_logits.append(logits)
+            imagined_values.append(value)
+            imagined_step_counts.append(step_count)
+            imagined_rewards.append(reward_hat)
+            imagined_dones.append(termin_hat)
+            
+            # 更新状态
+            multimodal_emb = self.model.update_embeddings(multimodal_emb, next_embeddings)
+            active_mask.logical_and_(~termin_hat)
+            
+            await asyncio.sleep(0)  # 让出事件循环控制权
+        
+        # 获取最后一步的价值
+        with torch.inference_mode():
+            _, last_value = self.model.agent.forward(
+                multimodal_att_mask, multimodal_emb, 
+                start_states_batch['labels'], step_count + 1
+            )
+        
+        return (
+            torch.stack(imagined_logits), 
+            torch.stack(imagined_values), 
+            torch.stack(imagined_rewards), 
+            torch.stack(imagined_dones), 
+            last_value, 
+            torch.stack(imagined_actions),
+            torch.stack(imagined_multimodal_embs), 
+            torch.stack(imagined_att_masks),
+            torch.stack(imagined_step_counts)
+        )
+
     async def run_generation_loop(self):
         print(f"ImaginationRolloutActor {self.actor_id}: 想象数据生成循环已启动。")
         while True:
@@ -545,18 +617,20 @@ class ImaginationRolloutActor(InferenceActorCom):
                     await asyncio.sleep(5)
                     continue
                 
-                start_obs_list = sample_list[0] 
-                old_logits = sample_list[3]
-                start_states_batch = self.model.prepare_inputs_batch(start_obs_list, INP_MAX_LEN)
-
-                # 2. 进行想象
-                with torch.inference_mode():
-                    (imagined_logits, imagined_values, imagined_rewards, imagined_dones, 
-                     last_value, imagined_actions, imagined_multimodal_embs, 
-                     imagined_att_masks, imagined_step_counts) = self.model.imagine(start_states_batch, IMAGINE_MAX_HORIZON, old_logits)
+                start_obs_list = sample_list[0]
+                
+                # 2. 进行想象（现在在外部实现，内部会让出控制权）
+                (imagined_logits, imagined_values, imagined_rewards, imagined_dones, 
+                 last_value, imagined_actions, imagined_multimodal_embs, 
+                 imagined_att_masks, imagined_step_counts) = await self._imagine_batch(
+                    start_obs_list, IMAGINE_MAX_HORIZON
+                )
 
                 # 3. 计算 GAE 和有效性掩码
-                imagined_advs, imagined_rets = compute_imagined_gae(imagined_rewards, imagined_values, imagined_dones, last_value, GAMMA, LAMBDA)
+                imagined_advs, imagined_rets = compute_imagined_gae(
+                    imagined_rewards, imagined_values, imagined_dones, 
+                    last_value, GAMMA, LAMBDA
+                )
                 valid_mask, _ = create_validity_mask(imagined_dones)
 
                 # 4. 展平并处理数据
@@ -568,6 +642,9 @@ class ImaginationRolloutActor(InferenceActorCom):
                 imagined_advs_flat = imagined_advs.view(T * B)
                 imagined_rets_flat = imagined_rets.view(T * B)
                 valid_mask_flat = valid_mask.view(T * B)
+                
+                # 获取标签
+                start_states_batch = self.model.prepare_inputs_batch(start_obs_list, INP_MAX_LEN)
                 labels_np = start_states_batch['labels'].cpu().numpy()
                 imagined_step_counts_flat = imagined_step_counts.view(T * B).cpu().numpy()
 
@@ -795,10 +872,14 @@ class TrainerActor(TrainerActorCom):
         # === 阶段 2: 策略训练 ===
         # 预取所有批次以计算全局优势统计量
         adv_batches = []
+        time1 = time.time()
         for _ in range(AGENT_ACCUM):
             while self.next_policy_batch is None: await asyncio.sleep(0.01)
             adv_batches.append(self.next_policy_batch)
             self.next_policy_batch = None
+        if random.random() < 0.01:
+            time2 = time.time()
+            print(f"Trainer {self.rank}: 预取 {AGENT_ACCUM} 个策略批次耗时 {time2 - time1:.2f} 秒。", flush=True)
 
         adv_all = torch.cat([b['advantage'] for b in adv_batches])
         adv_mean, adv_std = adv_all.mean(), adv_all.std()
