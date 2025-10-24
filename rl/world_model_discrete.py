@@ -469,7 +469,6 @@ class WorldModel(ActorCritic):
             - logits: (B, NUM_ACTIONS_CHUNK, VOCAB_SIZE)
             - value: (B,)
             - action_token: (B, NUM_ACTIONS_CHUNK) 离散动作token
-            - continuous_action: (B, NUM_ACTIONS_CHUNK, ACTION_DIM) 连续动作
             - next_embeddings: (B, num_patches, D) 下一状态的嵌入
             - reward_hat: (B,)
             - termin_hat: (B,)
@@ -489,7 +488,7 @@ class WorldModel(ActorCritic):
                 multimodal_emb, multimodal_att_mask, continuous_action, step_count
             )
         
-        return logits, value, action_token, continuous_action, next_embeddings, reward_hat, termin_hat
+        return logits, value, action_token, next_embeddings, reward_hat, termin_hat
     
     def update_embeddings(self, multimodal_emb: torch.Tensor, next_embeddings: torch.Tensor) -> torch.Tensor:
         """更新嵌入表示的图像patch部分"""
@@ -621,16 +620,16 @@ class WorldModel(ActorCritic):
         #     print(f"⚠️  警告: 未找到 Agent LoRA 权重: {agent_lora_path}")
         
         # 4. 加载 Agent 的额外层
-        # agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
-        # if agent_extra_path.exists():
-        #     agent_extra_layers = torch.load(agent_extra_path, map_location=self.device)
+        agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        if agent_extra_path.exists():
+            agent_extra_layers = torch.load(agent_extra_path, map_location=self.device)
         #     self.agent.action_head.load_state_dict(agent_extra_layers['action_head'])
-        #     self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
-        #     self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
+            self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
+            self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
         #     self.agent.language_model.lm_head.load_state_dict(agent_extra_layers['lm_head'])
         #     print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
-        # else:
-        #     print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
+        else:
+            print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
 
 
 def compute_imagined_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, last_value: torch.Tensor, gamma: float, lamb: float) -> Tuple[torch.Tensor, torch.Tensor]:

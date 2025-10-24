@@ -35,16 +35,16 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete_pre_fetch"
+EXP_NAME = "ppo_wm_discrete_ray_1TB"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
 NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
 NUM_IMAGINATION_ACTORS = 1 # 使用1个专用的GPU Actor来生成想象数据
-NUM_ROLLOUT_WORKERS = 9
+NUM_ROLLOUT_WORKERS = 12
 ROLLOUT_LOCAL_BUF = 64
-INFERENCE_BATCH = 4
+INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
 IMAGINATION_REPLAY_CAPACITY = 1000
@@ -78,7 +78,7 @@ POLICY_TRAIN_START_STEP = 100
 # 日志
 MOVING_AVG_WINDOW = 1000
 LOG_INTERVAL_SECONDS = 10
-SAVE_INTERVAL_STEPS = 500
+SAVE_INTERVAL_STEPS = 100
 
 # 通信组
 BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
@@ -87,7 +87,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_param_server_version_ctrl_1761221986/checkpoint_800"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_pre_fetch2_1761305753/checkpoint_100"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -129,6 +129,7 @@ class StatsActor:
             "successes": deque(maxlen=window_size),
             "total_episodes_processed": 0
         })
+        self.timings = defaultdict(lambda: deque(maxlen=window_size))
 
     def add_episode_return(self, env_name: str, ep_return: float, step_time: float, ep_length: int, success: float):
         env_stats = self.stats[env_name]
@@ -137,6 +138,10 @@ class StatsActor:
         env_stats["episode_lengths"].append(ep_length)
         env_stats["successes"].append(success)
         env_stats["total_episodes_processed"] += 1
+
+    def add_timing_metric(self, metric_name: str, value: float):
+        """记录一个通用的性能计时值 (例如，一个循环或函数的执行时间)"""
+        self.timings[metric_name].append(value)
 
     def get_stats(self) -> Dict[str, Dict[str, float]]:
         per_env_stats = {}
@@ -170,6 +175,15 @@ class StatsActor:
             "avg_success_rate": np.mean(all_successes) if all_successes else 0.0,
             "total_episodes_processed": total_episodes_processed,
         }
+        
+        timing_stats = {}
+        for name, deq in self.timings.items():
+            if deq:
+                timing_stats[name] = np.mean(deq)
+            else:
+                timing_stats[name] = 0.0
+        per_env_stats["_timings_"] = timing_stats
+        
         return per_env_stats
 
 # ================================================================
@@ -402,9 +416,10 @@ class RolloutWorkerActor:
 # ================================================================
 @ray.remote(num_gpus=1)
 class InferenceActor(InferenceActorCom):
-    def __init__(self, actor_id, cfg, dtype, infer_bs, infer_timeout, freeze_value, max_len):
+    def __init__(self, actor_id, cfg, dtype, infer_bs, infer_timeout, freeze_value, max_len, stats_actor):
         super().__init__()
         self.actor_id = actor_id
+        self.stats_actor = stats_actor
         # 加载学生模型(WorldModel)和教师模型(ActorCritic)
         print(f"InferenceActor {actor_id}: 正在加载 WorldModel (学生)...")
         # InferenceActorCom会调用self.model，要更新的模型名字必须是self.model。不要删除本注释！
@@ -463,6 +478,8 @@ class InferenceActor(InferenceActorCom):
             promises_to_process = self.promises
             self.requests, self.promises = [], []
             self.last_process_time = time.time()
+            
+            t_loop_start = time.time()
 
             try:
                 inputs_batch = self.model.prepare_inputs_batch(requests_to_process, self.max_len)
@@ -477,7 +494,6 @@ class InferenceActor(InferenceActorCom):
                 logits_np = logits.to(torch.float32).detach().cpu().numpy()
                 values_np = value.to(torch.float32).detach().cpu().numpy()
                 teacher_proj_features_np = teacher_proj_features.to(torch.float32).detach().cpu().numpy()
-                # print(f"action_tokens: {action_tokens.shape}, normalized_actions: {normalized_actions.shape}, logits_np: {logits_np.shape}, values_np: {values_np.shape}, teacher_proj_features_np: {teacher_proj_features_np.shape}")
                 # 将标准化动作转换为环境动作
                 actions_env = []
                 for i in range(normalized_actions.shape[0]):
@@ -491,6 +507,10 @@ class InferenceActor(InferenceActorCom):
                         values_np[i],              # 价值估计
                         teacher_proj_features_np[i] # 教师视觉特征
                     ))
+                
+                loop_duration = time.time() - t_loop_start
+                self.stats_actor.add_timing_metric.remote("Inference/loop_time_ms", loop_duration * 1000)
+
             except Exception as e:
                 import traceback
                 print(f"[ERROR] InferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
@@ -515,13 +535,14 @@ class InferenceActor(InferenceActorCom):
 @ray.remote(num_gpus=1)
 class ImaginationRolloutActor(InferenceActorCom):
     """这个Actor现在只负责生成想象数据，并将其分发到多个Buffer中"""
-    def __init__(self, actor_id: int, cfg: GenerateConfig, real_replay_buffer: ray.actor.ActorHandle, imagination_buffers: List[ray.actor.ActorHandle]):
+    def __init__(self, actor_id: int, cfg: GenerateConfig, real_replay_buffer: ray.actor.ActorHandle, imagination_buffers: List[ray.actor.ActorHandle], stats_actor: ray.actor.ActorHandle):
         super().__init__()
         self.actor_id = actor_id
         self.cfg = cfg
         self.real_replay_buffer = real_replay_buffer
         self.imagination_buffers = imagination_buffers
         self.num_buffers = len(imagination_buffers)
+        self.stats_actor = stats_actor
         
         print(f"ImaginationRolloutActor {actor_id}: 正在加载 WorldModel...")
         self.model = WorldModel(cfg, torch_dtype=TORCH_DTYPE, checkpoint_dir=cfg.checkpoint2, freeze_value=False)
@@ -544,6 +565,9 @@ class ImaginationRolloutActor(InferenceActorCom):
         在学习到的世界模型中进行想象，直到所有轨迹终止或达到最大视界。
         此版本在循环内让出控制权，允许参数同步。
         """
+        t_batch_start = time.time()
+        single_step_times = []
+
         # 准备批次输入
         start_states_batch = self.model.prepare_inputs_batch(start_obs_list, INP_MAX_LEN)
         B = start_states_batch['input_ids'].size(0)
@@ -565,12 +589,14 @@ class ImaginationRolloutActor(InferenceActorCom):
             
             step_count = start_states_batch['step_count'] + step
             
+            t_step_start = time.time()
             # 执行单步预测
-            logits, value, action_token, continuous_action, next_embeddings, reward_hat, termin_hat = \
+            logits, value, action_token, next_embeddings, reward_hat, termin_hat = \
                 self.model.imagine_single_step(
                     multimodal_emb, multimodal_att_mask, 
                     start_states_batch['labels'], step_count
                 )
+            single_step_times.append(time.time() - t_step_start)
             
             # 存储当前步的信息
             imagined_multimodal_embs.append(multimodal_emb.clone())
@@ -595,6 +621,12 @@ class ImaginationRolloutActor(InferenceActorCom):
                 start_states_batch['labels'], step_count + 1
             )
         
+        batch_duration = time.time() - t_batch_start
+        self.stats_actor.add_timing_metric.remote("Imagination/imagine_batch_time_ms", batch_duration * 1000)
+        if single_step_times:
+            avg_step_time = np.mean(single_step_times)
+            self.stats_actor.add_timing_metric.remote("Imagination/imagine_single_step_time_ms", avg_step_time * 1000)
+
         return (
             torch.stack(imagined_logits), 
             torch.stack(imagined_values), 
@@ -1079,8 +1111,16 @@ def main():
         print(f"错误: OpenVLA checkpoint 路径 '{PRETRAINED_CHECKPOINT}' 不存在。")
         return
 
-    ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
+    object_store_size_gb = 896 # 分配的GB数
+    object_store_memory_bytes = int(object_store_size_gb * 1024 * 1024 * 1024)
 
+    print(f"正在初始化 Ray，并为对象存储分配 {object_store_size_gb} GB 内存...")
+    
+    ray.init(
+        ignore_reinit_error=True, 
+        _temp_dir='/dev/shm',
+        object_store_memory=object_store_memory_bytes
+    )
     exp_name = f"{EXP_NAME}_{int(time.time())}"
     save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
     log_dir = f"runs/wm2/{exp_name}"
@@ -1101,7 +1141,8 @@ def main():
             actor_id=i, 
             cfg=cfg, 
             real_replay_buffer=replay_buffers[0], # 所有生成器从同一个真实池采样
-            imagination_buffers=imagination_buffers # 传递所有Buffer的句柄
+            imagination_buffers=imagination_buffers, # 传递所有Buffer的句柄
+            stats_actor=stats_actor
         ) for i in range(NUM_IMAGINATION_ACTORS)
     ]
     
@@ -1113,7 +1154,18 @@ def main():
             cfg=cfg
         ) for i in range(NUM_TRAINER_GPUS)
     ]
-    inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg, dtype=TORCH_DTYPE, infer_bs=INFERENCE_BATCH, infer_timeout=INFERENCE_TIMEOUT_MS, freeze_value=False, max_len=INP_MAX_LEN) for i in range(NUM_INFERENCE_ACTORS)]
+    
+    inference_pool = [InferenceActor.remote(
+        actor_id=i, 
+        cfg=cfg, 
+        dtype=TORCH_DTYPE, 
+        infer_bs=INFERENCE_BATCH, 
+        infer_timeout=INFERENCE_TIMEOUT_MS, 
+        freeze_value=False, 
+        max_len=INP_MAX_LEN,
+        stats_actor=stats_actor
+    ) for i in range(NUM_INFERENCE_ACTORS)]
+
     rollout_workers = [
         RolloutWorkerActor.remote(
             inference_pool[i % NUM_INFERENCE_ACTORS],
@@ -1233,6 +1285,7 @@ def main():
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:
             all_stats = ray.get(stats_actor.get_stats.remote())
             global_stats = all_stats.pop("_global_")
+            timing_stats = all_stats.pop("_timings_", {})
             avg_losses = {k: np.mean([d[k] for d in avg_losses_list]) for k in avg_losses_list[0]}
             
             # 汇总性能指标
@@ -1246,6 +1299,8 @@ def main():
                 writer.add_scalar(f'Loss/{k}', v, global_step)
             # 记录性能监控指标
             for k, v in avg_perf_timings.items():
+                writer.add_scalar(f'Performance/{k}', v, global_step)
+            for k, v in timing_stats.items():
                 writer.add_scalar(f'Performance/{k}', v, global_step)
 
             current_lrs = lrs_list[0]
