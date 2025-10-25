@@ -500,7 +500,7 @@ class WorldModel(ActorCritic):
     def compute_world_model_loss(self, wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward):
         with torch.autocast("cuda", dtype=self.model_dtype):
             post_patch_proj, rt_logits = self.forward(wm_inp)
-            post_patch_proj = post_patch_proj.float()
+            post_patch_proj = post_patch_proj.to(mini_next_teacher_proj_feat.dtype)
         
         non_terminal_mask = ~mini_done.squeeze()
         if torch.any(non_terminal_mask):

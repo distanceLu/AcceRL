@@ -35,7 +35,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete_ray_1TB"
+EXP_NAME = "ppo_wm_discrete_bf16_store"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
@@ -70,7 +70,7 @@ AE_LOSS_COEF = 1.0
 
 # 学习率调度参数
 WORLD_LR = 3e-5
-POLICY_LR = 1e-6
+POLICY_LR = 3e-6
 WORLD_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
 POLICY_TRAIN_START_STEP = 100
@@ -87,7 +87,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_pre_fetch2_1761305753/checkpoint_100"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_bf16_store_1761320480/checkpoint_3300"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -102,12 +102,12 @@ class Experience:
     old_logits: np.ndarray                  # (NUM_ACTIONS_CHUNK, VOCAB_SIZE)
     value_target: float
     done: bool                              # 结束标志
-    next_teacher_projector_features: Optional[np.ndarray] # 下一状态的教师视觉特征
+    next_teacher_projector_features: Optional[torch.Tensor] # 下一状态的教师视觉特征 (bf16 Tensor)
     reward: float
 
 @dataclass
 class ImaginedExperience:
-    multimodal_emb: np.ndarray
+    multimodal_emb: torch.Tensor            # (bf16 Tensor)
     attention_mask: np.ndarray
     labels: np.ndarray
     action: np.ndarray                      # 离散动作token
@@ -218,14 +218,21 @@ class ReplayBufferActor:
                 break
         if feasible_b is None:
             return None
+        
+        filled_features = []
         for b in batch:
             if b.next_teacher_projector_features is None:
-                b.next_teacher_projector_features = np.zeros_like(feasible_b.next_teacher_projector_features)
-            elif b.next_teacher_projector_features.shape != feasible_b.next_teacher_projector_features.shape:
-                print_str = f"[ERROR] ReplayBufferActor.sample(): next_teacher_projector_features 形状不匹配: {b.next_teacher_projector_features.shape} vs {batch[0].next_teacher_projector_features.shape}"
-                print(print_str, flush=True)
-                raise RuntimeError(print_str)
-        next_teacher_proj_feat = np.stack([b.next_teacher_projector_features for b in batch])
+                # feasible_b.next_teacher_projector_features is a torch.Tensor
+                filled_features.append(torch.zeros_like(feasible_b.next_teacher_projector_features))
+            else:
+                if b.next_teacher_projector_features.shape != feasible_b.next_teacher_projector_features.shape:
+                    print_str = f"[WARNING] ReplayBufferActor.sample(): next_teacher_projector_features 形状不匹配: {b.next_teacher_projector_features.shape} vs {feasible_b.next_teacher_projector_features.shape}"
+                    print(print_str, flush=True)
+                    raise RuntimeError(print_str)
+                filled_features.append(b.next_teacher_projector_features)
+
+        next_teacher_proj_feat = torch.stack(filled_features)
+        
         reward = np.asarray([b.reward for b in batch], np.float32)
         return obs_list, act, adv, old_logits, v_targ, done, next_teacher_proj_feat, reward
 
@@ -246,13 +253,13 @@ class ImaginationBufferActor:
             return None
         
         batch = random.sample(self.buffer, batch_size)
-        first_sample = batch[0].multimodal_emb.shape
+        first_sample_shape = batch[0].multimodal_emb.shape
         for b in batch:
-            if b.multimodal_emb.shape != first_sample:
-                print(f"b.shape: {b.multimodal_emb.shape}, first_sample shape: {first_sample}")
+            if b.multimodal_emb.shape != first_sample_shape:
+                print(f"b.shape: {b.multimodal_emb.shape}, first_sample shape: {first_sample_shape}")
         
         return {
-            "inputs_embeds": np.stack([b.multimodal_emb for b in batch]),
+            "inputs_embeds": torch.stack([b.multimodal_emb for b in batch]),
             "attention_mask": np.stack([b.attention_mask for b in batch]),
             "labels": np.stack([b.labels for b in batch]),
             "action": np.stack([b.action for b in batch]),
@@ -396,7 +403,6 @@ class RolloutWorkerActor:
                 next_teacher_features = traj_segment[i+1][5] 
             else:
                 next_teacher_features = bootstrap_proj_features if not done else None
-            
             batch.append(
                 Experience(
                     obs=s,
@@ -405,7 +411,7 @@ class RolloutWorkerActor:
                     old_logits=logits_val.astype(np.float32),
                     value_target=float(rets[i]),
                     done=done,
-                    next_teacher_projector_features=next_teacher_features.astype(np.float32) if next_teacher_features is not None else None,
+                    next_teacher_projector_features=next_teacher_features if next_teacher_features is None else next_teacher_features.to(torch.bfloat16),
                     reward=rew,
                 )
             )
@@ -493,7 +499,10 @@ class InferenceActor(InferenceActorCom):
                 action_tokens = action_tokens.detach().cpu().numpy()
                 logits_np = logits.to(torch.float32).detach().cpu().numpy()
                 values_np = value.to(torch.float32).detach().cpu().numpy()
-                teacher_proj_features_np = teacher_proj_features.to(torch.float32).detach().cpu().numpy()
+                
+                # teacher_proj_features保持为bf16 Tensor，转到CPU
+                teacher_proj_features_cpu = teacher_proj_features.to(torch.bfloat16).cpu()
+                
                 # 将标准化动作转换为环境动作
                 actions_env = []
                 for i in range(normalized_actions.shape[0]):
@@ -505,9 +514,8 @@ class InferenceActor(InferenceActorCom):
                         actions_env[i],      # 连续动作（用于环境）
                         logits_np[i],              # logits (NUM_ACTIONS_CHUNK, VOCAB_SIZE)
                         values_np[i],              # 价值估计
-                        teacher_proj_features_np[i] # 教师视觉特征
+                        teacher_proj_features_cpu[i] # 教师视觉特征 (torch.Tensor)
                     ))
-                
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/loop_time_ms", loop_duration * 1000)
 
@@ -686,7 +694,7 @@ class ImaginationRolloutActor(InferenceActorCom):
                 for i in range(T * B):
                     if valid_mask_flat[i]:
                         exp = ImaginedExperience(
-                            multimodal_emb=imagined_multimodal_embs_flat[i].float().cpu().numpy(),
+                            multimodal_emb=imagined_multimodal_embs_flat[i].cpu(), # 保持 bfloat16, 移至 CPU
                             attention_mask=imagined_att_masks_flat[i].cpu().numpy(),
                             labels=labels_np[i % B],
                             action=imagined_actions_flat[i].cpu().numpy(),
@@ -852,7 +860,7 @@ class TrainerActor(TrainerActorCom):
                 if sampled_data is None:
                     continue
                 
-                obs_list, act_np, _, _, _, done_np, next_teacher_proj_feat_np, reward_np = sampled_data
+                obs_list, act_np, _, _, _, done_np, next_teacher_proj_feat_tensor, reward_np = sampled_data
                 sample_time = time.time() - t_sample_start
                 
                 t_prep_start = time.time()
@@ -864,7 +872,7 @@ class TrainerActor(TrainerActorCom):
                     'inputs_batch': inputs_batch,
                     'actions': torch.tensor(act_np, dtype=torch.long),
                     'dones': torch.tensor(done_np, dtype=torch.bool),
-                    'next_teacher_proj_feat': torch.tensor(next_teacher_proj_feat_np),
+                    'next_teacher_proj_feat': next_teacher_proj_feat_tensor, # Already a tensor
                     'rewards': torch.tensor(reward_np, dtype=torch.float32),
                     'sample_time': sample_time,
                     'prep_time': prep_time
@@ -903,7 +911,7 @@ class TrainerActor(TrainerActorCom):
                     if isinstance(v, np.ndarray):
                         macro_batch[k] = torch.tensor(v)
                     elif isinstance(v, torch.Tensor):
-                        macro_batch[k] = v.cpu()
+                        macro_batch[k] = v.cpu() # This handles multimodal_emb correctly
                     else:
                         raise ValueError(f"Unsupported data type for key '{k}': {type(v)}")
                 prep_time = time.time() - t_prep_start
