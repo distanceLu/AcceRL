@@ -41,9 +41,9 @@ BENCHMARK = "libero_spatial"
 NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
 NUM_IMAGINATION_ACTORS = 1 # 使用1个专用的GPU Actor来生成想象数据
-NUM_ROLLOUT_WORKERS = 9
+NUM_ROLLOUT_WORKERS = 12
 ROLLOUT_LOCAL_BUF = 64
-INFERENCE_BATCH = 4
+INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
 IMAGINATION_REPLAY_CAPACITY = 1000
@@ -69,7 +69,7 @@ AE_LOSS_COEF = 1.0
 
 # 学习率调度参数
 WORLD_LR = 3e-5
-POLICY_LR = 1e-6
+POLICY_LR = 3e-6
 WORLD_WARMUP_STEPS = 500
 POLICY_WARMUP_STEPS = 500
 POLICY_TRAIN_START_STEP = 100
@@ -83,7 +83,7 @@ SAVE_INTERVAL_STEPS = 100
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_param_server_1761135135/checkpoint_400"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_bf16_store_1761320480/checkpoint_3300"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -949,6 +949,13 @@ class TrainerActor:
         # 获取批次数据并立即设为None以触发后台拉取
         wm_batch = self.next_wm_batch
         policy_batch = self.next_policy_batch
+        
+        # 记录数据准备时间到 perf_timings
+        perf_timings['wm_sample_time'] = wm_batch['sample_time']
+        perf_timings['wm_prep_time'] = wm_batch['prep_time']
+        perf_timings['policy_sample_time'] = policy_batch['sample_time']
+        perf_timings['policy_prep_time'] = policy_batch['prep_time']
+        
         self.next_wm_batch = None
         self.next_policy_batch = None
 
@@ -1122,7 +1129,7 @@ class TrainerActor:
             return {k: self._slice_and_to_gpu(v, start_idx, end_idx, device) for k, v in data.items()}
         elif isinstance(data, torch.Tensor):
             # 如果是批次数据（第一维度等于总样本数），需要切片
-            if data.shape[0] == end_idx or data.shape[0] >= end_idx:
+            if data.shape[0] >= end_idx:
                 return data[start_idx:end_idx].to(device)
             else:
                 # 否则只转移到GPU（如全局配置等）
@@ -1135,7 +1142,7 @@ class TrainerActor:
             return [self._slice_and_to_gpu(item, start_idx, end_idx, device) for item in data]
         else:
             # 其他类型（如标量、字符串等）直接返回
-            return data
+            raise ValueError(f"Unsupported data type for slicing and GPU transfer: {type(data)}")
     
 
 def build_openvla_cfg() -> GenerateConfig:
@@ -1171,8 +1178,16 @@ def main():
         print(f"错误: OpenVLA checkpoint 路径 '{PRETRAINED_CHECKPOINT}' 不存在。")
         return
 
-    ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
+    object_store_size_gb = 896 # 分配的GB数
+    object_store_memory_bytes = int(object_store_size_gb * 1024 * 1024 * 1024)
 
+    print(f"正在初始化 Ray，并为对象存储分配 {object_store_size_gb} GB 内存...")
+    
+    ray.init(
+        ignore_reinit_error=True, 
+        _temp_dir='/dev/shm',
+        object_store_memory=object_store_memory_bytes
+    )
     exp_name = f"{EXP_NAME}_{int(time.time())}"
     save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
     log_dir = f"runs/wm2/{exp_name}"
@@ -1282,11 +1297,13 @@ def main():
     global_step = 0
     last_saved_step = -1
     while global_step < TRAIN_ITERS:
+        t_train_start = time.time()
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
         
         avg_losses_list, lrs_list, steps_list = zip(*results)
         global_step = steps_list[0]
+        train_time = time.time() - t_train_start
 
         # 每 SAVE_INTERVAL_STEPS 步保存一次模型
         if global_step > 0 and global_step % SAVE_INTERVAL_STEPS == 0 and global_step != last_saved_step:
@@ -1302,6 +1319,7 @@ def main():
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:
             all_stats = ray.get(stats_actor.get_stats.remote())
             perf_stats = ray.get(stats_actor.get_perf_stats.remote())
+            perf_stats['train_time'] = train_time
             global_stats = all_stats.pop("_global_")
             avg_losses = {k: np.mean([d[k] for d in avg_losses_list]) for k in avg_losses_list[0]}
             for k, v in avg_losses.items(): writer.add_scalar(f'Loss/{k}', v, global_step)
@@ -1338,6 +1356,7 @@ def main():
                 writer.add_scalar(f'{tag_prefix}/Average_Episode_Length', env_stats['avg_ep_len'], global_step)
                 writer.add_scalar(f'{tag_prefix}/Success_Rate', env_stats['avg_success_rate'], global_step)
                 writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
+            writer.add_scalar('Performance/train_time_total', time.time() - t_train_start, global_step)
             last_log_time = current_time
 
     print(f"\n成功完成 {TRAIN_ITERS} 次训练！")
