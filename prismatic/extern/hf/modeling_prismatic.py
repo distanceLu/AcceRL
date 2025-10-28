@@ -586,7 +586,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
             input_embeddings, projected_patch_embeddings, attention_mask
         )
-        return multimodal_embeddings, multimodal_attention_mask
+        return multimodal_embeddings, multimodal_attention_mask, projected_patch_embeddings
 
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(

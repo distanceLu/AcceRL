@@ -408,7 +408,7 @@ class WorldModel(ActorCritic):
 
         with torch.no_grad():
             # 1. 从真实状态获取初始隐状态 (embeddings)
-            multimodal_emb, multimodal_att_mask = self.forward_vision(start_states)
+            multimodal_emb, multimodal_att_mask, _ = self.forward_vision(start_states)
         
         active_mask = torch.ones(B, dtype=torch.bool, device=device)
 
@@ -1093,7 +1093,7 @@ if __name__ == "__main__":
         print("=" * 80)
         
         with torch.no_grad():
-            multimodal_emb, multimodal_att_mask = world_model.forward_vision(inputs_batch)
+            multimodal_emb, multimodal_att_mask, _ = world_model.forward_vision(inputs_batch)
         
         print(f"✓ forward_vision 成功")
         print(f"  - multimodal_emb shape: {multimodal_emb.shape}, abs: {multimodal_emb.abs().sum()}")

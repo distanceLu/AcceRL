@@ -293,10 +293,6 @@ class ActorCritic(nn.Module):
 
 
 if __name__ == "__main__":
-    import sys
-    import numpy as np
-
-    # Libero env wrapper and helpers
     from rl.libero_env import LiberoEnvWrapper
     from rl.utils import prepare_one_obs, check_unnorm_key
     from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
@@ -308,12 +304,12 @@ if __name__ == "__main__":
     # 在这里设置要并行处理的环境数量
     ENVS_ID = list(range(10))
     envs_num = len(ENVS_ID)
-    BENCHMARK = TaskSuite.LIBERO_OBJECT
+    BENCHMARK = TaskSuite.LIBERO_SPATIAL
     unnorm_key = f"{BENCHMARK}_no_noops"
 
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_object_no_noops+b8+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state--150000_chkpt",
+        pretrained_checkpoint="/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000",
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
@@ -324,6 +320,7 @@ if __name__ == "__main__":
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
+        device=torch.device("cuda:7")
     )
 
     # 创建策略
@@ -360,6 +357,7 @@ if __name__ == "__main__":
 
     # 初始化每个环境的动作队列
     env_queues = [deque() for _ in range(len(ENVS_ID))]  # ENVS_ID是环境ID列表
+    times = deque(maxlen=100)
 
     # 主循环
     while True:
@@ -428,7 +426,11 @@ if __name__ == "__main__":
                 action_env = actor.vla._unnormalize_actions(action_norm, cfg.unnorm_key)
                 
                 # 执行动作
+                time1 = time.time()
                 obs, reward, terminated, truncated, info = envs[i].step(action_env)
+                time2 = time.time()
+                step_duration = time2 - time1
+                times.append(step_duration)
                 
                 # 更新状态
                 observations[i] = obs
@@ -460,9 +462,10 @@ if __name__ == "__main__":
                     observations[i] = obs
                     env_queues[i].clear()  # 重置动作队列
 
-        # 每轮结束后打印统计信息
-        print("=" * 60)
-        print(f"第 {total_episodes_finished // envs_num} 轮完成!")
-        print(f"累计总回合数: {total_episodes_finished}, 成功次数: {total_successes}")
-        print(f"总体成功率: {total_successes/total_episodes_finished:.3f}")
-        print("=" * 60)
+            if random.random() < 0.01 and total_episodes_finished > 0:
+                print("=" * 60)
+                print(f"第 {total_episodes_finished // envs_num} 轮完成!")
+                print(f"累计总回合数: {total_episodes_finished}, 成功次数: {total_successes}")
+                print(f"总体成功率: {total_successes/total_episodes_finished:.3f}")
+                print(f"最近 100 步的平均时间: {np.mean(times)*1000:.2f} ms")
+                print("=" * 60)

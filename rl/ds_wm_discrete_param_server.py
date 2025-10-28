@@ -34,7 +34,7 @@ from rl.utils import prepare_one_obs
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_param_server_pre_fetch"
+EXP_NAME = "ppo_wm_param_server_ent0d003_roll40"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
@@ -57,7 +57,7 @@ GAMMA = 0.99
 LAMBDA = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 0.5
-ENT_COEF = 0.0
+ENT_COEF = 0.003
 KL_COEF = 0.02
 
 # 世界模型想象步数
@@ -83,7 +83,7 @@ SAVE_INTERVAL_STEPS = 100
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_bf16_store_1761320480/checkpoint_3300"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_param_server2_1761469739/checkpoint_1700"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -1190,7 +1190,7 @@ def main():
     )
     exp_name = f"{EXP_NAME}_{int(time.time())}"
     save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
-    log_dir = f"runs/wm2/{exp_name}"
+    log_dir = f"runs/wm3/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)

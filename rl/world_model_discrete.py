@@ -312,7 +312,7 @@ class WorldModel(ActorCritic):
     def forward_vision(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         with torch.autocast("cuda", dtype=self.model_dtype):
             self.vla: OpenVLAForActionPrediction
-            multimodal_emb, multimodal_att_mask = self.agent.vla.forward_vision(  # TODO 改成vision用world model的，而embedding用agent的
+            multimodal_emb, multimodal_att_mask, proj_patch_emb = self.agent.vla.forward_vision(  # TODO 改成vision用world model的，而embedding用agent的
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 pixel_values=batch["pixel_values"].to(self.model_dtype),
@@ -326,7 +326,7 @@ class WorldModel(ActorCritic):
                 use_film=self.cfg.use_film,
                 this_act_emb=None
             )
-        return multimodal_emb, multimodal_att_mask
+        return multimodal_emb, multimodal_att_mask, proj_patch_emb
 
     def forward(self, inputs_batch: Dict[str, Any]) -> Tuple[torch.Tensor, ...]:
         """
@@ -397,7 +397,7 @@ class WorldModel(ActorCritic):
 
         with torch.no_grad():
             # 1. 从真实状态获取初始隐状态 (embeddings)
-            multimodal_emb, multimodal_att_mask = self.forward_vision(start_states)
+            multimodal_emb, multimodal_att_mask, _ = self.forward_vision(start_states)
         
         active_mask = torch.ones(B, dtype=torch.bool, device=device)
 
@@ -452,7 +452,7 @@ class WorldModel(ActorCritic):
     def get_initial_embeddings(self, start_states: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """获取初始状态的嵌入表示"""
         with torch.inference_mode():
-            multimodal_emb, multimodal_att_mask = self.forward_vision(start_states)
+            multimodal_emb, multimodal_att_mask, _ = self.forward_vision(start_states)
         return multimodal_emb, multimodal_att_mask
     
     def imagine_single_step(
@@ -897,7 +897,7 @@ if __name__ == "__main__":
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
         lora_rank=32,
-        device=torch.device("cuda:3"),
+        device=torch.device("cuda:7"),
     )
 
     print("=" * 80)
@@ -1004,7 +1004,7 @@ if __name__ == "__main__":
         print("=" * 80)
         
         with torch.no_grad():
-            multimodal_emb, multimodal_att_mask = world_model.forward_vision(inputs_batch)
+            multimodal_emb, multimodal_att_mask, _ = world_model.forward_vision(inputs_batch)
         
         print(f"✓ forward_vision 成功")
         print(f"  - multimodal_emb shape: {multimodal_emb.shape}, abs: {multimodal_emb.abs().sum()}")

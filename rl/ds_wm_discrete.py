@@ -1,6 +1,6 @@
 import os
-os.environ["MUJOCO_GL"] = "osmesa"
-os.environ["PYOPENGL_PLATFORM"] = "osmesa"
+# os.environ["MUJOCO_GL"] = "osmesa"
+# os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,4,5,6"
 
@@ -35,14 +35,14 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete_bf16_store"
+EXP_NAME = "ppo_wm_discrete_recompute_teach_feat"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
 NUM_TRAINER_GPUS = 4
 NUM_INFERENCE_ACTORS = 1
 NUM_IMAGINATION_ACTORS = 1 # 使用1个专用的GPU Actor来生成想象数据
-NUM_ROLLOUT_WORKERS = 12
+NUM_ROLLOUT_WORKERS = 40
 ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
@@ -58,7 +58,7 @@ GAMMA = 0.99
 LAMBDA = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 0.5
-ENT_COEF = 0.0
+ENT_COEF = 0.003
 KL_COEF = 0.02
 
 # 世界模型想象步数
@@ -87,7 +87,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_bf16_store_1761320480/checkpoint_3300"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_param_server2_1761469739/checkpoint_1700"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -102,7 +102,7 @@ class Experience:
     old_logits: np.ndarray                  # (NUM_ACTIONS_CHUNK, VOCAB_SIZE)
     value_target: float
     done: bool                              # 结束标志
-    next_teacher_projector_features: Optional[torch.Tensor] # 下一状态的教师视觉特征 (bf16 Tensor)
+    next_obs: Optional[Dict[str, torch.Tensor]] # 下一状态的原始观测
     reward: float
 
 @dataclass
@@ -205,36 +205,19 @@ class ReplayBufferActor:
             return None
         batch = random.sample(self.buffer, batch_size)
         obs_list = [b.obs for b in batch]
+        
+        # 为None的next_obs（在done=True时）使用其对应的obs作为占位符
+        # 这简化了Trainer端的批处理，因为所有条目都将具有有效的字典结构
+        next_obs_list = [b.next_obs if b.next_obs is not None else b.obs for b in batch]
+        
         act = np.stack([b.action for b in batch])  # (N, NUM_ACTIONS_CHUNK)
         adv = np.asarray([b.advantage for b in batch], np.float32)
         old_logits = np.stack([b.old_logits for b in batch])  # (N, NUM_ACTIONS_CHUNK, VOCAB_SIZE)
         v_targ = np.asarray([b.value_target for b in batch], np.float32)
         done = np.asarray([b.done for b in batch], np.bool_)
-        # 如果 next_teacher_projector_features 为 None (在 done=True 时)，用零填充
-        feasible_b = None
-        for b in batch:
-            if b.next_teacher_projector_features is not None:
-                feasible_b = b
-                break
-        if feasible_b is None:
-            return None
-        
-        filled_features = []
-        for b in batch:
-            if b.next_teacher_projector_features is None:
-                # feasible_b.next_teacher_projector_features is a torch.Tensor
-                filled_features.append(torch.zeros_like(feasible_b.next_teacher_projector_features))
-            else:
-                if b.next_teacher_projector_features.shape != feasible_b.next_teacher_projector_features.shape:
-                    print_str = f"[WARNING] ReplayBufferActor.sample(): next_teacher_projector_features 形状不匹配: {b.next_teacher_projector_features.shape} vs {feasible_b.next_teacher_projector_features.shape}"
-                    print(print_str, flush=True)
-                    raise RuntimeError(print_str)
-                filled_features.append(b.next_teacher_projector_features)
-
-        next_teacher_proj_feat = torch.stack(filled_features)
-        
         reward = np.asarray([b.reward for b in batch], np.float32)
-        return obs_list, act, adv, old_logits, v_targ, done, next_teacher_proj_feat, reward
+
+        return obs_list, next_obs_list, act, adv, old_logits, v_targ, done, reward
 
 @ray.remote
 class ImaginationBufferActor:
@@ -269,7 +252,7 @@ class ImaginationBufferActor:
             "step_count": np.array([b.step_count for b in batch], dtype=np.int64)
         }
 
-@ray.remote
+@ray.remote(num_gpus=0.01)
 class RolloutWorkerActor:
     def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, dtype, local_buff_len, gamma, lamb):
         self.infer, self.replay = infer, replay
@@ -330,7 +313,7 @@ class RolloutWorkerActor:
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.dtype)
                 inputs_t['step_count'] = torch.tensor([step_count], dtype=torch.long)
-                (action_token, continuous_action, logits, value, teacher_proj_features) = ray.get(self.infer.request.remote(inputs_t))
+                (action_token, continuous_action, logits, value) = ray.get(self.infer.request.remote(inputs_t))
 
                 chunk_reward = 0.0
                 done = False
@@ -346,9 +329,9 @@ class RolloutWorkerActor:
                         done = True
                         break
                 
-                # 存储所有信息，包括教师信号和结束标志
+                # 存储所有信息，包括下一个原始观测和结束标志
                 self.local_buffer.append((
-                    inputs_t, action_token, chunk_reward, logits, value, teacher_proj_features, done
+                    inputs_t, action_token, chunk_reward, logits, value, done
                 ))
                 obs = nxt 
                 if done:
@@ -363,7 +346,7 @@ class RolloutWorkerActor:
                         self.current_env_name, reward_sum, step_time, step_count, success
                     )
                     if self.local_buffer:
-                        # 最后一个状态的价值为0，没有下一个状态的特征
+                        # 最后一个状态的价值为0，没有下一个状态
                         self._process_traj(self.local_buffer, 0.0, None)
                     self.local_buffer.clear()
                     
@@ -373,8 +356,10 @@ class RolloutWorkerActor:
                     step_count = 0
                     time_start = time.time()
                 elif len(self.local_buffer) == self.local_buff_len + 1:
-                    _, _, _, _, bootstrap_val, bootstrap_proj_feat, _ = self.local_buffer[-1]
-                    self._process_traj(self.local_buffer[:-1], bootstrap_val, bootstrap_proj_feat)
+                    bootstrap_val = self.local_buffer[-1][4]
+                    # `obs` 变量持有的是 local_buffer[-1] 步骤执行后的下一个状态
+                    bootstrap_next_obs = self.local_buffer[-1][0] 
+                    self._process_traj(self.local_buffer[:-1], bootstrap_val, bootstrap_next_obs)
                     self.local_buffer = [self.local_buffer[-1]]
         except Exception as e:
             import traceback
@@ -382,12 +367,12 @@ class RolloutWorkerActor:
             traceback.print_exc()
             raise
 
-    def _process_traj(self, traj_segment, bootstrap_val, bootstrap_proj_features):
+    def _process_traj(self, traj_segment, bootstrap_val, bootstrap_next_obs):
         rets, advs = [], []
         gae = 0.0
         # 从后向前计算 GAE
         for i in reversed(range(len(traj_segment))):
-            _, _, r, _, v, _, done_flag = traj_segment[i]
+            _, _, r, _, v, done_flag = traj_segment[i]
             nv = bootstrap_val if i == len(traj_segment) - 1 else traj_segment[i+1][4]
             next_val = nv * (1.0 - float(done_flag))
             delta = r + self.gamma * next_val - v
@@ -398,20 +383,24 @@ class RolloutWorkerActor:
         advs_np = np.array(advs, dtype=np.float32)
 
         batch: List[Experience] = []
-        for i, (s, action_token, rew, logits_val, _, _, done) in enumerate(traj_segment):
-            if i < len(traj_segment) - 1:
-                next_teacher_features = traj_segment[i+1][5] 
+        for i, (s, action_token, rew, logits_val, _, done) in enumerate(traj_segment):
+            if done:
+                next_obs_processed = s
+            elif i < len(traj_segment) - 1:
+                next_obs_processed = traj_segment[i+1][0]  # 使用traj中的下一个obs
             else:
-                next_teacher_features = bootstrap_proj_features if not done else None
+                # traj的最后一步，使用bootstrap_next_obs
+                next_obs_processed = bootstrap_next_obs
+                
             batch.append(
                 Experience(
                     obs=s,
-                    action=action_token.astype(np.int64),  # 离散动作token
+                    action=action_token.astype(np.int64),
                     advantage=float(advs_np[i]),
                     old_logits=logits_val.astype(np.float32),
                     value_target=float(rets[i]),
                     done=done,
-                    next_teacher_projector_features=next_teacher_features if next_teacher_features is None else next_teacher_features.to(torch.bfloat16),
+                    next_obs=next_obs_processed,
                     reward=rew,
                 )
             )
@@ -420,7 +409,7 @@ class RolloutWorkerActor:
 # ================================================================
 # 3. 推理器 (InferenceActor)
 # ================================================================
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=0.5)
 class InferenceActor(InferenceActorCom):
     def __init__(self, actor_id, cfg, dtype, infer_bs, infer_timeout, freeze_value, max_len, stats_actor):
         super().__init__()
@@ -490,7 +479,7 @@ class InferenceActor(InferenceActorCom):
             try:
                 inputs_batch = self.model.prepare_inputs_batch(requests_to_process, self.max_len)
                 with torch.inference_mode():
-                    logits, value, teacher_proj_features = self.model.agent_super_forward(inputs_batch, return_vit_out=True)
+                    logits, value = self.model.agent_super_forward(inputs_batch, return_vit_out=False)
                 
                 # 使用agent的post_process方法获取离散和连续动作
                 action_tokens = []
@@ -499,9 +488,6 @@ class InferenceActor(InferenceActorCom):
                 action_tokens = action_tokens.detach().cpu().numpy()
                 logits_np = logits.to(torch.float32).detach().cpu().numpy()
                 values_np = value.to(torch.float32).detach().cpu().numpy()
-                
-                # teacher_proj_features保持为bf16 Tensor，转到CPU
-                teacher_proj_features_cpu = teacher_proj_features.to(torch.bfloat16).cpu()
                 
                 # 将标准化动作转换为环境动作
                 actions_env = []
@@ -514,7 +500,6 @@ class InferenceActor(InferenceActorCom):
                         actions_env[i],      # 连续动作（用于环境）
                         logits_np[i],              # logits (NUM_ACTIONS_CHUNK, VOCAB_SIZE)
                         values_np[i],              # 价值估计
-                        teacher_proj_features_cpu[i] # 教师视觉特征 (torch.Tensor)
                     ))
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/loop_time_ms", loop_duration * 1000)
@@ -825,8 +810,8 @@ class TrainerActor(TrainerActorCom):
         """将CPU上的数据切片并转移到GPU"""
         result = {}
         for k, v in data_cpu.items():
-            if k == 'inputs_batch':
-                # 特殊处理inputs_batch字典
+            # 特殊处理字典类型的批次数据 (inputs_batch, next_inputs_batch)
+            if isinstance(v, dict):
                 result[k] = {}
                 for sub_k, sub_v in v.items():
                     if isinstance(sub_v, torch.Tensor):
@@ -860,19 +845,20 @@ class TrainerActor(TrainerActorCom):
                 if sampled_data is None:
                     continue
                 
-                obs_list, act_np, _, _, _, done_np, next_teacher_proj_feat_tensor, reward_np = sampled_data
+                obs_list, next_obs_list, act_np, _, _, _, done_np, reward_np = sampled_data
                 sample_time = time.time() - t_sample_start
                 
                 t_prep_start = time.time()
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list, INP_MAX_LEN)
+                next_inputs_batch = self.base_model.prepare_inputs_batch(next_obs_list, INP_MAX_LEN)
                 prep_time = time.time() - t_prep_start
                 
                 # 存储完整宏批次（保持在CPU）
                 self.next_wm_batch = {
                     'inputs_batch': inputs_batch,
+                    'next_inputs_batch': next_inputs_batch,
                     'actions': torch.tensor(act_np, dtype=torch.long),
                     'dones': torch.tensor(done_np, dtype=torch.bool),
-                    'next_teacher_proj_feat': next_teacher_proj_feat_tensor, # Already a tensor
                     'rewards': torch.tensor(reward_np, dtype=torch.float32),
                     'sample_time': sample_time,
                     'prep_time': prep_time
@@ -973,9 +959,9 @@ class TrainerActor(TrainerActorCom):
         
         wm_data_cpu = {
             'inputs_batch': wm_batch['inputs_batch'],
+            'next_inputs_batch': wm_batch['next_inputs_batch'],
             'actions': wm_batch['actions'],
             'dones': wm_batch['dones'],
-            'next_teacher_proj_feat': wm_batch['next_teacher_proj_feat'],
             'rewards': wm_batch['rewards']
         }
         
@@ -989,11 +975,19 @@ class TrainerActor(TrainerActorCom):
             
             wm_inp = {**wm_mini_batch['inputs_batch'], 'this_action': wm_mini_batch['actions']}
 
+            # 动态计算教师特征作为AE损失的目标
+            with torch.no_grad():
+                # 临时切换到评估模式以禁用dropout等
+                self.model.module.eval() 
+                _, _, mini_next_teacher_proj_feat = self.model.forward_vision(wm_mini_batch['next_inputs_batch'])
+                # 切换回训练模式
+                self.model.module.train()
+
             ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss = \
                 self.model.module.compute_world_model_loss(
                     wm_inp, 
                     wm_mini_batch['dones'], 
-                    wm_mini_batch['next_teacher_proj_feat'], 
+                    mini_next_teacher_proj_feat, 
                     wm_mini_batch['rewards']
                 )
             
@@ -1131,7 +1125,7 @@ def main():
     )
     exp_name = f"{EXP_NAME}_{int(time.time())}"
     save_dir = f"/cpfs01/lcx_workspace/models/{exp_name}"
-    log_dir = f"runs/wm2/{exp_name}"
+    log_dir = f"runs/wm3/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
@@ -1339,6 +1333,7 @@ def main():
                 writer.add_scalar(f'{tag_prefix}/Average_Episode_Length', env_stats['avg_ep_len'], global_step)
                 writer.add_scalar(f'{tag_prefix}/Success_Rate', env_stats['avg_success_rate'], global_step)
                 writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
+            writer.add_scalar('Performance/train_time_total', time.time() - t_train_start, global_step)
             last_log_time = current_time
 
     print(f"\n成功完成 {TRAIN_ITERS} 次训练！")
