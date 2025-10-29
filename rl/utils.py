@@ -558,6 +558,12 @@ def load_lora_inplace(peft_model: PeftModel, lora_dir: Path):
     peft_model.print_trainable_parameters()
 
 
+def unfreeze_models(models):
+    for model in models:
+        for para in model.parameters():
+            para.requires_grad = True
+
+
 def freeze_models(models):
     for model in models:
         for para in model.parameters():

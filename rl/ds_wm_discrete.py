@@ -35,7 +35,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete_recompute_teach_feat"
+EXP_NAME = "ppo_wm_discrete_fix_lang_model_ref"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
@@ -44,7 +44,7 @@ NUM_INFERENCE_ACTORS = 1
 NUM_IMAGINATION_ACTORS = 1 # 使用1个专用的GPU Actor来生成想象数据
 NUM_ROLLOUT_WORKERS = 40
 ROLLOUT_LOCAL_BUF = 64
-INFERENCE_BATCH = 8
+INFERENCE_BATCH = 16
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
 IMAGINATION_REPLAY_CAPACITY = 1000
@@ -87,7 +87,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_param_server2_1761469739/checkpoint_1700"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_ent0d003_roll40_1761553894/checkpoint_2200"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -983,7 +983,7 @@ class TrainerActor(TrainerActorCom):
                 # 切换回训练模式
                 self.model.module.train()
 
-            ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss = \
+            ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss, relative_error = \
                 self.model.module.compute_world_model_loss(
                     wm_inp, 
                     wm_mini_batch['dones'], 
@@ -1002,6 +1002,7 @@ class TrainerActor(TrainerActorCom):
             epoch_losses["termi_mean"].append(termi_mean.item())
             epoch_losses["rt_classification_acc"].append(rt_acc.item())
             epoch_losses["mae_loss"].append(mae_loss.item())
+            epoch_losses["relative_error"].append(relative_error.item())
 
         perf_timings["wm_train_time"] = time.time() - t_wm_start
         perf_timings["wm_to_gpu_time"] = np.mean(wm_to_gpu_times)
@@ -1083,7 +1084,7 @@ class TrainerActor(TrainerActorCom):
 def build_openvla_cfg() -> GenerateConfig:
     cfg = GenerateConfig(
         pretrained_checkpoint=PRETRAINED_CHECKPOINT,
-        use_l1_regression=True,
+        use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
         num_images_in_input=2,
@@ -1274,7 +1275,7 @@ def main():
         sync_time = time.time() - t_sync_start
 
         # 每 SAVE_INTERVAL_STEPS 步保存一次模型，且只保留最新的一个
-        if global_step > 0 and global_step % SAVE_INTERVAL_STEPS == 0 and global_step != last_saved_step:
+        if global_step == 10 or global_step > 0 and global_step % SAVE_INTERVAL_STEPS == 0 and global_step != last_saved_step:
             if ray.get(trainer_group[0].get_rank.remote()) == 0:
                 current_checkpoint_dir = os.path.join(save_dir, f"checkpoint_{global_step}")
                 ray.get(trainer_group[0].save_model.remote(current_checkpoint_dir))

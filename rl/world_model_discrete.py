@@ -19,9 +19,8 @@ from typing import Any
 import torch
 
 from rl.actor_critic_model_discrete import ActorCritic
-from rl.utils import load_lora_inplace, freeze_models
+from rl.utils import load_lora_inplace, freeze_models, unfreeze_models
 from rl.modules import AttentionPoolHead
-# import os
 from pathlib import Path
 from peft import PeftModel
 
@@ -39,7 +38,8 @@ class Agent(ActorCritic):
             target_modules="all-linear",
             init_lora_weights="gaussian",
         )
-        self.language_model = get_peft_model(self.vla.language_model, lora_config)
+        self.vla.language_model = get_peft_model(self.vla.language_model, lora_config)
+        self.language_model = self.vla.language_model
         self.language_model.print_trainable_parameters()
         self.language_model: LlamaForCausalLM
         freeze_models([self.proprio_projector])
@@ -83,15 +83,21 @@ class WorldModel(ActorCritic):
         cfg.use_lora = True  # 恢复 cfg 中的 use_lora 标志
         self.agent = Agent(cfg, torch_dtype)
         hidden_size = self.vla.llm_dim
-        lora_config = LoraConfig(
-            r=cfg.lora_rank,
-            lora_alpha=min(cfg.lora_rank, 16),
-            lora_dropout=0,
-            target_modules="all-linear",
-            init_lora_weights="gaussian",
-        )
-        self.language_model = get_peft_model(self.vla.language_model, lora_config)
-        self.language_model.print_trainable_parameters()
+
+        layers_to_keep = self.vla.language_model.model.layers[0:4]
+        layers_to_delete = self.vla.language_model.model.layers[4:]
+        for layer in layers_to_delete:
+            del layer
+        del layers_to_delete
+        del self.vla.language_model.lm_head
+        self.vla.language_model.lm_head = nn.Identity()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.vla.language_model.model.layers = layers_to_keep
+
+        unfreeze_models(self.vla.language_model.model.layers)
+        self.language_model = self.vla.language_model
         self.language_model: LlamaForCausalLM
         if hasattr(self, 'action_head'):
             del self.action_head
@@ -305,7 +311,7 @@ class WorldModel(ActorCritic):
         reward_hat, termin_hat = self._decode_reward_termination(rt_logits)
         
         # 4. 投影以获得下一个状态的嵌入
-        next_embeddings = self.patch_proj(post_patch_embeddings)
+        next_embeddings = self.patch_proj(output.hidden_states[3][:, 2:num_patches+2, :])
         
         return next_embeddings.float(), reward_hat.float(), termin_hat
     
@@ -359,7 +365,7 @@ class WorldModel(ActorCritic):
         # 预测合并的reward-termination分类
         rt_logits = self.reward_termination_decoder.forward(post_patch_embeddings, step_emb)  # (B, 3)
         
-        post_patch_proj = self.patch_proj(post_patch_embeddings)
+        post_patch_proj = self.patch_proj(output.hidden_states[3][:, 2:num_patches+2, :])
 
         return post_patch_proj, rt_logits.float()
     
@@ -497,24 +503,27 @@ class WorldModel(ActorCritic):
         multimodal_emb[:, 1:num_patches+1, :] = next_embeddings
         return multimodal_emb
     
-    def compute_world_model_loss(self, wm_inp, mini_done, mini_next_teacher_proj_feat, mini_reward):
+    def compute_world_model_loss(self, wm_inp, mini_done, target_proj_feat, mini_reward):
         with torch.autocast("cuda", dtype=self.model_dtype):
             post_patch_proj, rt_logits = self.forward(wm_inp)
-            post_patch_proj = post_patch_proj.to(mini_next_teacher_proj_feat.dtype)
+            post_patch_proj = post_patch_proj.to(target_proj_feat.dtype)
         
         non_terminal_mask = ~mini_done.squeeze()
         if torch.any(non_terminal_mask):
             ae_loss = F.mse_loss(
                 post_patch_proj[non_terminal_mask],
-                mini_next_teacher_proj_feat[non_terminal_mask]
+                target_proj_feat[non_terminal_mask]
             )  # 自编码器损失 (仅对非终止状态)
             mae_loss = F.l1_loss(
                 post_patch_proj[non_terminal_mask],
-                mini_next_teacher_proj_feat[non_terminal_mask]
+                target_proj_feat[non_terminal_mask]
             ).detach()
+            diff = (post_patch_proj[non_terminal_mask] - target_proj_feat[non_terminal_mask]).abs()
+            relative_error = (diff / (target_proj_feat[non_terminal_mask].abs() + 1e-8)).mean().detach()
         else:
             ae_loss = torch.tensor(0.0, device=post_patch_proj.device)
             mae_loss = torch.tensor(0.0, device=post_patch_proj.device)
+            relative_error = torch.tensor(0.0, device=post_patch_proj.device)
             print(f"non_terminal_mask全为0: {non_terminal_mask}", flush=True)
         
         # 编码真实标签
@@ -535,7 +544,7 @@ class WorldModel(ActorCritic):
         # 计算分类准确率
         rt_acc = (torch.argmax(rt_logits, dim=-1) == rt_labels).float().mean()
         
-        return ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss
+        return ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss, relative_error
     
     def save_checkpoint(self, save_dir: str, epoch: int = None):
         """
@@ -548,10 +557,10 @@ class WorldModel(ActorCritic):
         save_path = Path(save_dir)
         save_path.mkdir(parents=True, exist_ok=True)
         
-        # 1. 保存 WorldModel 的 LoRA 权重
-        world_lora_path = save_path / f"world_lora{'_epoch_' + str(epoch) if epoch else ''}"
-        self.language_model.save_pretrained(world_lora_path)
-        print(f"✓ WorldModel LoRA 权重已保存到: {world_lora_path}")
+        # 1. 保存 WorldModel 的 language_model 全量权重（使用 state_dict）
+        world_model_state_path = save_path / f"world_model_state{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        torch.save(self.language_model.state_dict(), world_model_state_path)
+        print(f"✓ WorldModel language_model state_dict 已保存到: {world_model_state_path}")
         
         # 2. 保存 WorldModel 的额外层
         world_extra_layers = {
@@ -589,14 +598,23 @@ class WorldModel(ActorCritic):
         """
         save_path = Path(save_dir)
         
-        # 1. 加载 WorldModel 的 LoRA 权重
-        world_lora_path = save_path / f"world_lora{'_epoch_' + str(epoch) if epoch else ''}"
-        if world_lora_path.exists():
-            assert isinstance(self.language_model, PeftModel)
-            load_lora_inplace(self.language_model, world_lora_path)
-            print(f"✓ WorldModel LoRA 权重已安全加载")
+        # 1. 加载 WorldModel 的 language_model state_dict
+        world_model_state_path = save_path / f"world_model_state{'_epoch_' + str(epoch) if epoch else ''}.pt"
+        
+        if world_model_state_path.exists():
+            print(f"🔍 加载 WorldModel state_dict: {world_model_state_path}")
+            
+            state_dict = torch.load(world_model_state_path, map_location=self.device)
+            self.language_model.load_state_dict(state_dict, strict=True)
+            print("✓ WorldModel language_model state_dict 已加载")
+            
+            # 清理
+            del state_dict
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         else:
-            print(f"⚠️  警告: 未找到 WorldModel LoRA 权重: {world_lora_path}")
+            print(f"⚠️  警告: 未找到 WorldModel state_dict: {world_model_state_path}")
         
         # 2. 加载 WorldModel 的额外层
         world_extra_path = save_path / f"world_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
@@ -611,13 +629,13 @@ class WorldModel(ActorCritic):
             print(f"⚠️  警告: 未找到 WorldModel 额外层: {world_extra_path}")
         
         # 3. 加载 Agent 的 LoRA 权重
-        # agent_lora_path = save_path / f"agent_lora{'_epoch_' + str(epoch) if epoch else ''}"
-        # if agent_lora_path.exists():
-        #     assert isinstance(self.agent.language_model, PeftModel)
-        #     load_lora_inplace(self.agent.language_model, agent_lora_path)
-        #     print(f"✓ Agent LoRA 权重已安全加载")
-        # else:
-        #     print(f"⚠️  警告: 未找到 Agent LoRA 权重: {agent_lora_path}")
+        agent_lora_path = save_path / f"agent_lora{'_epoch_' + str(epoch) if epoch else ''}"
+        if agent_lora_path.exists():
+            assert isinstance(self.agent.language_model, PeftModel)
+            load_lora_inplace(self.agent.language_model, agent_lora_path)
+            print(f"✓ Agent LoRA 权重已安全加载")
+        else:
+            print(f"⚠️  警告: 未找到 Agent LoRA 权重: {agent_lora_path}")
         
         # 4. 加载 Agent 的额外层
         agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
@@ -625,8 +643,8 @@ class WorldModel(ActorCritic):
             agent_extra_layers = torch.load(agent_extra_path, map_location=self.device)
             self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
             self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
-            # self.agent.language_model.lm_head.load_state_dict(agent_extra_layers['lm_head'])
-            # print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
+            self.agent.language_model.lm_head.load_state_dict(agent_extra_layers['lm_head'])
+            print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
         else:
             print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
 
@@ -886,7 +904,7 @@ if __name__ == "__main__":
     # Instantiate config
     cfg = GenerateConfig(
         pretrained_checkpoint=pretrained_checkpoint,
-        use_l1_regression=True,
+        use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
         num_images_in_input=2,
@@ -897,13 +915,13 @@ if __name__ == "__main__":
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
         lora_rank=32,
-        device=torch.device("cuda:7"),
+        device=torch.device("cuda:6"),
     )
 
     print("=" * 80)
     print("初始化 WorldModel...")
     print("=" * 80)
-    checkpoint2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_bf16_store_1761320480/checkpoint_3300"
+    checkpoint2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_first4layers_1761739115/checkpoint_2300"
     # checkpoint2 = None
     
     # Create WorldModel
@@ -1196,6 +1214,110 @@ if __name__ == "__main__":
             print("\n⚠️  警告: 检测到 Inf 值!")
         if not has_nan and not has_inf:
             print("\n✓ 所有数值正常 (无 NaN 或 Inf)")
+        
+        # ---------------------------------------------------------------------
+        # 🆕 测试 8: WorldModel.compute_world_model_loss
+        # ---------------------------------------------------------------------
+        print("\n" + "=" * 80)
+        print(f"[迭代 {iteration + 1}] 测试 8: WorldModel.compute_world_model_loss")
+        print("=" * 80)
+        
+        # 准备下一个状态的观测
+        print("准备下一个状态的观测...")
+        next_observations = []
+        actual_rewards = []
+        actual_dones = []
+        
+        for i in range(NUM_ENVS):
+            # 从当前动作中提取第一个动作（转换为numpy）
+            action_to_execute = inputs_batch['this_action'][i, 0].cpu().numpy()
+            
+            # 在环境中执行动作
+            next_obs, reward, terminated, truncated, info = envs[i].step(action_to_execute)
+            done = terminated or truncated
+            
+            # 如果环境终止，重置它
+            if done:
+                next_obs, info = envs[i].reset()
+                print(f"  环境 {i} 在执行动作后终止，已重置")
+            
+            next_observations.append(next_obs)
+            actual_rewards.append(reward)
+            actual_dones.append(done)
+        
+        # 为下一个状态准备输入
+        next_inputs_list = []
+        for i in range(NUM_ENVS):
+            next_inputs_t = prepare_one_obs(
+                cfg, world_model.processor, 
+                next_observations[i], task_descriptions[i], TORCH_DTYPE
+            )
+            next_inputs_list.append(next_inputs_t)
+        
+        next_inputs_batch = world_model.prepare_inputs_batch(next_inputs_list)
+        
+        # 获取下一个状态的target_proj_feat
+        print("计算下一个状态的 target_proj_feat...")
+        with torch.no_grad():
+            _, _, target_proj_feat = world_model.forward_vision(next_inputs_batch)
+        
+        print(f"  - target_proj_feat shape: {target_proj_feat.shape}")
+        print(f"  - target_proj_feat 范围: [{target_proj_feat.min():.4f}, {target_proj_feat.max():.4f}]")
+        
+        # 准备真实的奖励和终止标志
+        mini_reward = torch.tensor(actual_rewards, dtype=torch.float32).to(cfg.device)
+        mini_done = torch.tensor(actual_dones, dtype=torch.bool).to(cfg.device)
+        
+        print(f"  - 实际奖励: {actual_rewards}")
+        print(f"  - 实际终止: {actual_dones}")
+        
+        # 计算世界模型损失
+        print("\n计算世界模型损失...")
+        
+        ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss, relative_error = \
+            world_model.compute_world_model_loss(
+                inputs_batch, mini_done, target_proj_feat, mini_reward
+            )
+        
+        print(f"✓ compute_world_model_loss 成功")
+        print(f"\n  损失指标:")
+        print(f"    - AE Loss (自编码器损失): {ae_loss.item():.6f}")
+        print(f"    - RT Loss (奖励-终止分类损失): {rt_loss.item():.6f}")
+        print(f"    - MAE Loss (平均绝对误差): {mae_loss.item():.6f}")
+        print(f"    - Relative Error (相对误差): {relative_error.item():.6f}")
+        
+        print(f"\n  准确率指标:")
+        print(f"    - Reward Accuracy (奖励预测准确率): {reward_acc.item():.4f}")
+        print(f"    - Termination Accuracy (终止预测准确率): {termin_acc.item():.4f}")
+        print(f"    - RT Classification Accuracy (联合分类准确率): {rt_acc.item():.4f}")
+        
+        print(f"\n  统计指标:")
+        print(f"    - Reward Mean (奖励均值): {reward_mean.item():.4f}")
+        print(f"    - Termination Mean (终止比例): {termi_mean.item():.4f}")
+        
+        # 检查损失是否有异常值
+        loss_nan = any([
+            torch.isnan(ae_loss),
+            torch.isnan(rt_loss),
+            torch.isnan(mae_loss),
+            torch.isnan(relative_error),
+        ])
+        loss_inf = any([
+            torch.isinf(ae_loss),
+            torch.isinf(rt_loss),
+            torch.isinf(mae_loss),
+            torch.isinf(relative_error),
+        ])
+        
+        if loss_nan:
+            print("\n⚠️  警告: 损失中检测到 NaN 值!")
+        elif loss_inf:
+            print("\n⚠️  警告: 损失中检测到 Inf 值!")
+        else:
+            print("\n✓ 所有损失值正常")
+        
+        # 恢复观测状态（因为我们修改了环境状态）
+        observations = next_observations
     
     print("\n" + "█" * 80)
     print("█  所有测试迭代完成!")
