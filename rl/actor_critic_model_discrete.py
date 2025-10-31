@@ -1,6 +1,8 @@
 
 import time
 import random
+import os
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -291,6 +293,166 @@ class ActorCritic(nn.Module):
     def _compute_num_patches(self):
         return compute_num_patches(self.vla, self.cfg)
 
+    def save_model(self, save_path, cfg, epoch: int | None = None):
+        from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+        from peft import PeftModel
+        import torch.distributed as dist
+        import copy
+
+        save_path = Path(save_path)
+        # save_path.mkdir(parents=True, exist_ok=True)
+        suffix = f"_epoch_{epoch}" if epoch is not None else ""
+
+        save_path = save_path/ f"agent_checkpoint{suffix}"
+        save_path.mkdir(parents=True, exist_ok=True)
+
+        agent_lora_path = save_path / f"agent_lora"
+        self.vla.save_pretrained(agent_lora_path)
+        print(f"✓ Agent LoRA 权重已保存到: {agent_lora_path}")
+        
+        agent_extra_layers = {
+            "value_head": self.value_head.state_dict(),
+            "attn_pool": self.attn_pool.state_dict(),
+            "lm_head": self.vla.language_model.lm_head.state_dict(),
+        }
+        # 额外补齐：保存 proprio_projector（因为它在 policy 里会训练）
+        if hasattr(self, "proprio_projector") and self.proprio_projector is not None:
+            agent_extra_layers["proprio_projector"] = self.proprio_projector.state_dict()
+
+        agent_extra_path = save_path / f"agent_extra_layers.pt"
+        torch.save(agent_extra_layers, agent_extra_path)
+        print(f"✓ Agent 额外层已保存到: {agent_extra_path}")
+        # # 可选：保存合并后的模型
+        # self.vla 此时已经是 PeftModel，并且 lm_head=256
+        # merged_vla = copy.deepcopy(self.vla)
+        # if isinstance(merged_vla, PeftModel):
+        #     merged_vla = merged_vla.merge_and_unload()   # 把 LoRA 合并回基座
+        # merged_vla.save_pretrained(save_path)
+        # print(f"Saved merged model for Step {epoch} at: {save_path}")
+
+    @torch.inference_mode()
+    def load_lora_and_merge_for_eval(
+        self,
+        checkpoint_dir: str | Path,
+        *,
+        keep_dtype: torch.dtype | None = None,
+        strict: bool = True,
+        save_merged_dir: str | Path | None = None,
+    ):
+        """
+        从磁盘读取 LoRA（agent_lora/）+ 额外层（agent_extra_layers.pt），
+        在当前精简头(256)的 self.vla 上挂载、合并并卸载适配器；最终得到“纯合并后的 VLA”用于评测。
+
+        Args:
+            checkpoint_dir: 训练期 save_model() 生成的 agent_checkpoint* 目录
+                            ├─ agent_lora/              # peft 权重
+                            └─ agent_extra_layers.pt    # lm_head / value_head / attn_pool / proprio_projector
+            keep_dtype:      合并后强制 dtype（默认保持 self.model_dtype）
+            strict:          额外层加载严格模式
+            save_merged_dir: 需要把已合并 VLA 落盘时给个路径；不需要就 None
+        """
+        from peft import PeftModel
+
+        checkpoint_dir = Path(checkpoint_dir)
+        lora_dir = checkpoint_dir / "agent_lora"
+        extra_path = checkpoint_dir / "agent_extra_layers.pt"
+
+        assert lora_dir.exists(), f"未找到 LoRA 目录: {lora_dir}"
+        assert extra_path.exists(), f"未找到额外层文件: {extra_path}"
+
+        device = self.device
+        target_dtype = keep_dtype or self.model_dtype
+
+        # 1) 保证当前模型已是“精简后的 lm_head=256”
+        lm = self.vla.language_model.lm_head
+        assert lm.out_features == self.n_action_bins, (
+            f"当前 lm_head.out_features={lm.out_features}，但期望 {self.n_action_bins}。"
+            "请确保已按你的 __init__ 逻辑裁剪到动作 256 头。"
+        )
+
+        # 2) 将 LoRA 从磁盘挂载到当前 self.vla
+        print(f"📥 挂载 LoRA 适配器: {lora_dir}")
+        self.vla = PeftModel.from_pretrained(
+            self.vla, str(lora_dir), is_trainable=False
+        ).to(device).to(target_dtype)
+
+        # 3) 加载额外层（和训练时保存的形状完全一致）
+        print(f"📥 加载额外层: {extra_path}")
+        sd = torch.load(extra_path, map_location=device)
+
+        # 确保 dtype / 设备正确
+        self.vla.language_model.lm_head.to(device).to(target_dtype)
+        self.value_head.to(device).to(target_dtype)
+        self.attn_pool.to(device).to(target_dtype)
+        if hasattr(self, "proprio_projector") and self.proprio_projector is not None:
+            self.proprio_projector.to(device).to(target_dtype)
+
+        self.vla.language_model.lm_head.load_state_dict(sd["lm_head"], strict=strict)
+        self.value_head.load_state_dict(sd["value_head"], strict=strict)
+        self.attn_pool.load_state_dict(sd["attn_pool"], strict=strict)
+        if "proprio_projector" in sd and self.proprio_projector is not None:
+            self.proprio_projector.load_state_dict(sd["proprio_projector"], strict=strict)
+
+        # 4) 合并并卸载 LoRA
+        print("🧩 merge_and_unload() 合并 LoRA 到基座 ...")
+        merged = self.vla.merge_and_unload()  # 有的 peft 返回 None（in-place）
+        if merged is not None:
+            self.vla = merged
+        self.vla.to(device).to(target_dtype)
+
+        # 5) 评测期冻结 + eval
+        for p in self.vla.parameters():
+            p.requires_grad = False
+        self.vla.eval()
+        self.eval()
+
+        # 6) （可选）落盘合并后的 VLA
+        if save_merged_dir is not None:
+            save_merged_dir = Path(save_merged_dir)
+            save_merged_dir.mkdir(parents=True, exist_ok=True)
+            print(f"💾 保存已合并 VLA 到: {save_merged_dir}")
+            self.vla.save_pretrained(str(save_merged_dir))
+
+        # 7) 简易结构检查
+        def _has_lora_params(m):
+            return any("lora_" in n.lower() for n, _ in m.named_parameters())
+        assert not _has_lora_params(self.vla), "合并后仍检测到 LoRA 参数（未完全卸载？）"
+
+        print("✅ 评测用模型就绪：纯基座 + 256 动作头（权重已包含 LoRA 增量）。")
+
+
+
+    
+    
+    def load_model(self, checkpoint_dir: str | Path, strict: bool = True):
+        from peft import PeftModel
+        checkpoint_dir = Path(checkpoint_dir)
+
+        # 1) 挂载 LoRA 适配器（直接包成 PeftModel）
+        lora_dir = checkpoint_dir / "agent_lora"
+        self.vla = PeftModel.from_pretrained(
+            self.vla,
+            str(lora_dir),
+            is_trainable=True,  # 需要继续训练就 True，只推理可以 False 或后续 merge_and_unload()
+        ).to(self.device).to(self.model_dtype)
+
+        # 2) 加载额外层
+        extra_path = checkpoint_dir / "agent_extra_layers.pt"
+        sd = torch.load(extra_path, map_location=self.device)
+
+        self.vla.language_model.lm_head.to(self.device).to(self.model_dtype)
+        self.value_head.to(self.device).to(self.model_dtype)
+        self.attn_pool.to(self.device).to(self.model_dtype)
+        if hasattr(self, "proprio_projector") and self.proprio_projector is not None:
+            self.proprio_projector.to(self.device).to(self.model_dtype)
+
+        self.vla.language_model.lm_head.load_state_dict(sd["lm_head"], strict=strict)
+        self.value_head.load_state_dict(sd["value_head"], strict=strict)
+        self.attn_pool.load_state_dict(sd["attn_pool"], strict=strict)
+        if "proprio_projector" in sd and self.proprio_projector is not None:
+            self.proprio_projector.load_state_dict(sd["proprio_projector"], strict=strict)
+
+        print(f"✅ 已从 {checkpoint_dir} 加载 LoRA 与额外层")
 
 if __name__ == "__main__":
     from rl.libero_env import LiberoEnvWrapper
@@ -309,7 +471,7 @@ if __name__ == "__main__":
 
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint="/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000",
+        pretrained_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_object_no_noops+b40+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--80000_chkpt",
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
@@ -325,11 +487,32 @@ if __name__ == "__main__":
 
     # 创建策略
     actor = ActorCritic(cfg, TORCH_DTYPE)
-    parameter_groups = actor.get_parameter_groups()
 
+    # # 测试：保存与加载模型
+    print("\n 模型初始化完成。开始测试 save_model ...")
+    # === 调用保存函数 ===
+    actor.save_model("./runs/rl_models", cfg, epoch=0)
+    print("\n save_model 测试完成！")
+
+    # #=== 调用加载函数 ===
+    # print("\n 模型保存完毕，开始测试 load_model ...")
+    # actor.load_model("runs/rl_models/agent_checkpoint_epoch_2", strict=True)
+    # print("\n load model 测试完成！")
+
+    # # == 合并 LoRA 测试 ==
+    print("\n 开始测试 merge_and_unload_lora ...")
+    actor.load_lora_and_merge_for_eval(
+    checkpoint_dir="./runs/rl_models/agent_checkpoint_epoch_0",
+    keep_dtype=TORCH_DTYPE,
+    strict=True,
+    save_merged_dir="./runs/rl_models/agent_checkpoint_epoch_0",  
+)
+    print("\n merge_and_unload_lora 测试完成！")
+ 
+    parameter_groups = actor.get_parameter_groups()
     check_unnorm_key(cfg, actor.vla)
     actor.eval()
-    
+   
     # 检查参数类型
     for key, value in actor.named_parameters():
         if value.dtype != TORCH_DTYPE:

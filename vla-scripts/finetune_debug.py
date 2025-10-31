@@ -5,7 +5,8 @@ Fine-tunes OpenVLA via LoRA (No DDP version for easier debugging).
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "5" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "7" 
+os.environ["WANDB_MODE"] = "disabled"
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -70,8 +71,8 @@ class FinetuneConfig:
     vla_path: str = "openvla/openvla-7b"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
 
     # Dataset
-    data_root_dir: Path = Path("datasets/rlds")      # Directory containing RLDS datasets
-    dataset_name: str = "aloha_scoop_x_into_bowl"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    data_root_dir: Path = Path("/cpfs01/lcx_workspace/data/openvla/modified_libero_rlds")      # Directory containing RLDS datasets
+    dataset_name: str = "libero_object_no_noops"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
     run_root_dir: Path = Path("runs")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
@@ -81,10 +82,10 @@ class FinetuneConfig:
     num_diffusion_steps_train: int = 50              # (When `diffusion==True`) Number of diffusion steps used for training
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
     num_images_in_input: int = 1                     # Number of images in the VLA input (default: 1)
-    use_proprio: bool = False                        # If True, includes robot proprioceptive state in input
+    use_proprio: bool = True                        # If True, includes robot proprioceptive state in input
 
     # Training configuration
-    batch_size: int = 8                              # Batch size per device
+    batch_size: int = 2                              # Batch size per device
     learning_rate: float = 5e-4                      # Learning rate
     lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 10% to 100%)
     num_steps_before_decay: int = 100_000            # Number of steps before LR decays by 10x

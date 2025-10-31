@@ -1,10 +1,10 @@
 import os
-os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
-os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
+# os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
+# os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,7,6,5"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -57,6 +57,10 @@ REPLAY_CAPACITY = 1000
 TRAIN_BATCH_SIZE = 12
 ACCUMULATION_STEPS = 28
 TRAIN_ITERS = 30000
+
+# Checkpoint
+CKPT_DIR = f"runs/Libero/{BENCHMARK}/checkpoints"
+CKPT_EVERY_STEPS = 100   # 每 N 个训练步保存一次
 
 # PPO
 GAMMA = 0.99
@@ -266,7 +270,7 @@ class BaseWorkerActor:
         self.task_description = None
         self.current_env_name = None
 
-@ray.remote
+@ray.remote(num_gpus=0.01)
 class RolloutWorkerActor(BaseWorkerActor):
     def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
         super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
@@ -354,7 +358,7 @@ class RolloutWorkerActor(BaseWorkerActor):
             )
         self.replay.add_batch.remote(batch)
 
-@ray.remote
+@ray.remote(num_gpus=0.01)
 class EvaluationWorkerActor(BaseWorkerActor):
     def __init__(self, infer, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
         super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
@@ -401,7 +405,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
 # ================================================================
 # 3. 推理器 (InferenceActor)
 # ================================================================
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=0.5)
 class InferenceActor(InferenceActorCom):
     def __init__(self, actor_id, cfg, stats_actor):
         super().__init__()
@@ -525,7 +529,7 @@ class InferenceActor(InferenceActorCom):
 # ================================================================
 # 4. 训练器 (TrainerActor)
 # ================================================================
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=0.01)
 class TrainerActor(TrainerActorCom):
     def __init__(self, rank, world_size, replay_buffer, cfg):
         super().__init__()
@@ -599,6 +603,14 @@ class TrainerActor(TrainerActorCom):
         n_total = sum(p.numel() for p in model.parameters())
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
+
+    async def save_agent(self, ckpt_dir: str, step: int):
+        """
+        只在 rank-0 上调用。调用 ActorCritic 内部的 save_model
+        """
+        os.makedirs(ckpt_dir, exist_ok=True)
+        self.base_model.save_model(ckpt_dir, epoch=step)
+        print(f"[Trainer {self.rank}] 已保存 checkpoint -> {ckpt_dir}/agent_lora_epoch_{step}, agent_extra_layers_epoch_{step}.pt")
 
     def _get_current_lr(self, current_step: int, peak_lr: float, warmup_steps: int, total_steps: int, start_step: int = 0) -> float:
         if current_step < start_step: return 0.0
@@ -916,6 +928,9 @@ def main():
         receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
         ray.get([broadcast_task] + receive_tasks)
         sync_time = time.time() - t_sync_start
+
+        if global_step > 0 and global_step % CKPT_EVERY_STEPS == 0:
+            ray.get(trainer_group[0].save_agent.remote(CKPT_DIR, global_step))
 
         current_time = time.time()
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:
