@@ -1,8 +1,8 @@
 import os
-# os.environ["MUJOCO_GL"] = "osmesa"
-# os.environ["PYOPENGL_PLATFORM"] = "osmesa"
+os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,4,5,6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
 
 import time
 import random
@@ -35,23 +35,24 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete_fix_lang_model_ref"
+EXP_NAME = "ppo_wm_discrete_env_idx1_mae"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 4
+NUM_TRAINER_GPUS = 2
 NUM_INFERENCE_ACTORS = 1
-NUM_IMAGINATION_ACTORS = 1 # 使用1个专用的GPU Actor来生成想象数据
-NUM_ROLLOUT_WORKERS = 40
+NUM_IMAGINATION_ACTORS = 1
+NUM_ROLLOUT_WORKERS = 20
 ROLLOUT_LOCAL_BUF = 64
-INFERENCE_BATCH = 16
+INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
 IMAGINATION_REPLAY_CAPACITY = 1000
-TRAIN_BATCH_SIZE = 22
-WORLD_ACCUM = 12
-AGENT_ACCUM = 12
-TRAIN_ITERS = 100000
+IMAGINATION_INFER_BATCH = 64
+TRAIN_BATCH_SIZE = 25
+WORLD_ACCUM = 20
+AGENT_ACCUM = 20
+TRAIN_ITERS = 30000
 
 # PPO
 GAMMA = 0.99
@@ -86,8 +87,8 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 # OpenVLA 加载配置
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
-PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_ent0d003_roll40_1761553894/checkpoint_2200"
+PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_env_idx1_2_1762010486/checkpoint_5200"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
@@ -130,18 +131,32 @@ class StatsActor:
             "total_episodes_processed": 0
         })
         self.timings = defaultdict(lambda: deque(maxlen=window_size))
+        self.actor_last_active = {}  # {actor_id: timestamp}
+        self.active_window_seconds = 600  # 10分钟
 
-    def add_episode_return(self, env_name: str, ep_return: float, step_time: float, ep_length: int, success: float):
+    def add_episode_return(self, env_name: str, ep_return: float, step_time: float, ep_length: int, success: float, actor_id: int, step_num: int):
         env_stats = self.stats[env_name]
         env_stats["episode_returns"].append(ep_return)
         env_stats["step_times"].append(step_time)
         env_stats["episode_lengths"].append(ep_length)
         env_stats["successes"].append(success)
         env_stats["total_episodes_processed"] += 1
+        if "total_samples_produced" not in self.stats["_global_"]:
+            self.stats["_global_"]["total_samples_produced"] = 0
+        self.stats["_global_"]["total_samples_produced"] += step_num
+        self.actor_last_active[actor_id] = time.time()
 
     def add_timing_metric(self, metric_name: str, value: float):
         """记录一个通用的性能计时值 (例如，一个循环或函数的执行时间)"""
         self.timings[metric_name].append(value)
+
+    def get_active_actor_count(self) -> int:
+        """返回最近10分钟内活跃的actor数量"""
+        current_time = time.time()
+        cutoff_time = current_time - self.active_window_seconds
+        active_count = sum(1 for last_active in self.actor_last_active.values() 
+                          if last_active >= cutoff_time)
+        return active_count
 
     def get_stats(self) -> Dict[str, Dict[str, float]]:
         per_env_stats = {}
@@ -149,6 +164,8 @@ class StatsActor:
         total_episodes_processed = 0
 
         for env_name, env_data in self.stats.items():
+            if env_name == "_global_":
+                continue
             total_episodes_processed += env_data["total_episodes_processed"]
             all_returns.extend(env_data["episode_returns"])
             all_lengths.extend(env_data["episode_lengths"])
@@ -174,6 +191,8 @@ class StatsActor:
             "avg_step_time": np.mean(all_step_times) if all_step_times else 0.0,
             "avg_success_rate": np.mean(all_successes) if all_successes else 0.0,
             "total_episodes_processed": total_episodes_processed,
+            "total_samples_produced": self.stats["_global_"].get("total_samples_produced", 0),
+            "active_actor_count": self.get_active_actor_count()
         }
         
         timing_stats = {}
@@ -252,7 +271,7 @@ class ImaginationBufferActor:
             "step_count": np.array([b.step_count for b in batch], dtype=np.int64)
         }
 
-@ray.remote(num_gpus=0.01)
+@ray.remote
 class RolloutWorkerActor:
     def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, dtype, local_buff_len, gamma, lamb):
         self.infer, self.replay = infer, replay
@@ -308,13 +327,14 @@ class RolloutWorkerActor:
 
             reward_sum = 0.0
             step_count = 0
+            infer_step = 0
             time_start = time.time()
 
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.dtype)
                 inputs_t['step_count'] = torch.tensor([step_count], dtype=torch.long)
                 (action_token, continuous_action, logits, value) = ray.get(self.infer.request.remote(inputs_t))
-
+                infer_step += 1
                 chunk_reward = 0.0
                 done = False
                 for i in range(len(continuous_action)):
@@ -343,7 +363,7 @@ class RolloutWorkerActor:
                         self.env_weights[self.current_env_idx] += 1
 
                     self.stats_actor.add_episode_return.remote(
-                        self.current_env_name, reward_sum, step_time, step_count, success
+                        self.current_env_name, reward_sum, step_time, step_count, success, self.wid, infer_step
                     )
                     if self.local_buffer:
                         # 最后一个状态的价值为0，没有下一个状态
@@ -354,6 +374,7 @@ class RolloutWorkerActor:
                     obs, info = self._reset_and_select_env(seed=current_seed)
                     reward_sum = 0.0
                     step_count = 0
+                    infer_step = 0
                     time_start = time.time()
                 elif len(self.local_buffer) == self.local_buff_len + 1:
                     bootstrap_val = self.local_buffer[-1][4]
@@ -409,7 +430,7 @@ class RolloutWorkerActor:
 # ================================================================
 # 3. 推理器 (InferenceActor)
 # ================================================================
-@ray.remote(num_gpus=0.5)
+@ray.remote(num_gpus=1)
 class InferenceActor(InferenceActorCom):
     def __init__(self, actor_id, cfg, dtype, infer_bs, infer_timeout, freeze_value, max_len, stats_actor):
         super().__init__()
@@ -542,7 +563,7 @@ class ImaginationRolloutActor(InferenceActorCom):
         self.model.cuda()
         self.model.eval()
         
-        self.generation_batch_size = 32 * self.num_buffers # 一次生成足够分发给所有buffer的轨迹
+        self.generation_batch_size = IMAGINATION_INFER_BATCH
         print(f"ImaginationRolloutActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()}, 将分发数据到 {self.num_buffers} 个Buffer。")
 
     def get_model_keys(self):
@@ -657,10 +678,14 @@ class ImaginationRolloutActor(InferenceActorCom):
                     imagined_rewards, imagined_values, imagined_dones, 
                     last_value, GAMMA, LAMBDA
                 )
-                valid_mask, _ = create_validity_mask(imagined_dones)
+                valid_mask, num_valid_steps = create_validity_mask(imagined_dones)
+                T, B = imagined_dones.shape
+                # print(f"imagined_rewards shape: {imagined_rewards.shape}, valid_mask shape: {valid_mask.shape}, num_valid_steps: {num_valid_steps}")
+                imag_rew_valid = imagined_rewards.view(T * B) * valid_mask.float()
+                mean_imag_rew = imag_rew_valid.sum() / num_valid_steps
+                self.stats_actor.add_timing_metric.remote("Imagination/mean_imagined_reward", mean_imag_rew.item())
 
                 # 4. 展平并处理数据
-                T, B = imagined_dones.shape
                 imagined_multimodal_embs_flat = imagined_multimodal_embs.view(T * B, *imagined_multimodal_embs.shape[2:])
                 imagined_att_masks_flat = imagined_att_masks.view(T * B, *imagined_att_masks.shape[2:])
                 imagined_actions_flat = imagined_actions.view(T * B, *imagined_actions.shape[2:])
@@ -991,7 +1016,7 @@ class TrainerActor(TrainerActorCom):
                     wm_mini_batch['rewards']
                 )
             
-            world_model_loss = AE_LOSS_COEF * ae_loss + RT_LOSS_COEF * rt_loss
+            world_model_loss = AE_LOSS_COEF * mae_loss + RT_LOSS_COEF * rt_loss
             self.model.backward(world_model_loss / WORLD_ACCUM)
             
             epoch_losses["ae_loss"].append(ae_loss.item())
@@ -1328,6 +1353,9 @@ def main():
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', global_stats['avg_ep_len'], global_step)
             writer.add_scalar('System/Total_Episodes_Processed', global_stats["total_episodes_processed"], global_step)
             writer.add_scalar('System/Avg_Step_Time', global_stats["avg_step_time"] , global_step)
+            writer.add_scalar('System/Total_Samples_Produced', global_stats["total_samples_produced"], global_step)
+            writer.add_scalar('System/Active_Rollout_Actors', global_stats["active_actor_count"], global_step)
+            
             for env_name, env_stats in all_stats.items():
                 tag_prefix = f"Rollout/{env_name}"
                 writer.add_scalar(f'{tag_prefix}/Average_Return', env_stats['avg_return'], global_step)

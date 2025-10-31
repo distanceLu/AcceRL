@@ -138,7 +138,7 @@ class WorldModel(ActorCritic):
         此版本增强了检查功能，可以打印出任何未被分组的可训练参数的具体名称，以便于调试。
         """
         # 世界模型/语言模型部分：可训练的语言模型层和新的投影层
-        lan_params = list(filter(lambda p: p.requires_grad, self.language_model.parameters()))
+        lan_params = list(self.language_model.model.layers.parameters())
         world_model_params = lan_params + \
                              list(self.patch_proj.parameters()) + \
                              list(self.act_proj.parameters()) + \
@@ -517,7 +517,7 @@ class WorldModel(ActorCritic):
             mae_loss = F.l1_loss(
                 post_patch_proj[non_terminal_mask],
                 target_proj_feat[non_terminal_mask]
-            ).detach()
+            )
             diff = (post_patch_proj[non_terminal_mask] - target_proj_feat[non_terminal_mask]).abs()
             relative_error = (diff / (target_proj_feat[non_terminal_mask].abs() + 1e-8)).mean().detach()
         else:
@@ -896,7 +896,7 @@ if __name__ == "__main__":
     BENCHMARK = TaskSuite.LIBERO_SPATIAL
     TEST_ENV_IDS = [5, 6, 7, 8]  # 使用多个环境
     NUM_ENVS = len(TEST_ENV_IDS)
-    NUM_TEST_ITERATIONS = 30  # 测试迭代次数
+    NUM_TEST_ITERATIONS = 3  # 测试迭代次数
 
     unnorm_key = f"{BENCHMARK}_no_noops"
     pretrained_checkpoint = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
