@@ -1,10 +1,10 @@
 import os
-# os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
-# os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
+os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
+os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,7,6,5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -43,10 +43,10 @@ from rl.com_utils import find_free_port
 # 0. 超参数与配置
 # ================================================================
 # Libero benchmark
-BENCHMARK = TaskSuite.LIBERO_SPATIAL
+BENCHMARK = TaskSuite.LIBERO_OBJECT
 
 # 分布式系统参数
-NUM_TRAINER_GPUS = 3
+NUM_TRAINER_GPUS = 2
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 40
 NUM_EVAL_WORKERS = 1
@@ -59,8 +59,8 @@ ACCUMULATION_STEPS = 28
 TRAIN_ITERS = 30000
 
 # Checkpoint
-CKPT_DIR = f"runs/Libero/{BENCHMARK}/checkpoints"
-CKPT_EVERY_STEPS = 100   # 每 N 个训练步保存一次
+CKPT_DIR = f"/cpfs01/liuwei_workspace/models/finetune_rl"
+CKPT_EVERY_STEPS = 2000   # 每 N 个训练步保存一次
 
 # PPO
 GAMMA = 0.99
@@ -270,7 +270,7 @@ class BaseWorkerActor:
         self.task_description = None
         self.current_env_name = None
 
-@ray.remote(num_gpus=0.01)
+@ray.remote
 class RolloutWorkerActor(BaseWorkerActor):
     def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
         super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
@@ -358,7 +358,7 @@ class RolloutWorkerActor(BaseWorkerActor):
             )
         self.replay.add_batch.remote(batch)
 
-@ray.remote(num_gpus=0.01)
+@ray.remote
 class EvaluationWorkerActor(BaseWorkerActor):
     def __init__(self, infer, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
         super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
@@ -405,7 +405,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
 # ================================================================
 # 3. 推理器 (InferenceActor)
 # ================================================================
-@ray.remote(num_gpus=0.5)
+@ray.remote(num_gpus=1)
 class InferenceActor(InferenceActorCom):
     def __init__(self, actor_id, cfg, stats_actor):
         super().__init__()
@@ -516,6 +516,7 @@ class InferenceActor(InferenceActorCom):
                 raise
     
     def forward_test(self):
+        return
         import pickle
         with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
             observation = pickle.load(file)
@@ -529,7 +530,7 @@ class InferenceActor(InferenceActorCom):
 # ================================================================
 # 4. 训练器 (TrainerActor)
 # ================================================================
-@ray.remote(num_gpus=0.01)
+@ray.remote(num_gpus=1)
 class TrainerActor(TrainerActorCom):
     def __init__(self, rank, world_size, replay_buffer, cfg):
         super().__init__()
@@ -805,7 +806,7 @@ def build_openvla_cfg() -> GenerateConfig:
         load_in_4bit=False,
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
-        unnorm_key="libero_spatial_no_noops",
+        unnorm_key=BENCHMARK+"_no_noops",
     )
     return cfg
 
