@@ -513,7 +513,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         noisy_action_projector=None,
         diffusion_timestep_embeddings=None,
         use_film: bool = False,
-        this_act_emb: torch.FloatTensor = None,
+        extra_emb: torch.FloatTensor = None,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -555,9 +555,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 (projected_patch_embeddings, diffusion_timestep_embeddings), dim=1
             )
 
-        if this_act_emb is not None:
+        if extra_emb is not None:
             # For simplicity, just append last action embedding to the end of projected vision patch tokens
-            projected_patch_embeddings = torch.cat((this_act_emb, projected_patch_embeddings), dim=1)
+            projected_patch_embeddings = torch.cat((extra_emb, projected_patch_embeddings), dim=1)
 
         # Process action embeddings
         if noisy_actions is not None:
@@ -608,7 +608,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         noisy_action_projector=None,
         diffusion_timestep_embeddings=None,
         use_film: bool = False,
-        this_act_emb: torch.FloatTensor = None,
+        extra_emb: torch.FloatTensor = None,
         use_llm_loss: bool = True,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
@@ -692,9 +692,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     (projected_patch_embeddings, diffusion_timestep_embeddings), dim=1
                 )
 
-            if this_act_emb is not None:
+            if extra_emb is not None:
                 # For simplicity, just append last action embedding to the end of projected vision patch tokens
-                projected_patch_embeddings = torch.cat((this_act_emb, projected_patch_embeddings), dim=1)
+                projected_patch_embeddings = torch.cat((extra_emb, projected_patch_embeddings), dim=1)
 
             # Process action embeddings
             if noisy_actions is not None:

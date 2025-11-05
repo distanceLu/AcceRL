@@ -35,7 +35,7 @@ from ds_com import TrainerActorCom, InferenceActorCom
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "ppo_wm_discrete_env_idx1_mae"
+EXP_NAME = "ppo_wm_discrete_env_idx1_rt_emb"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
@@ -88,7 +88,7 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_env_idx1_2_1762010486/checkpoint_5200"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_env_idx1_rt_token_1762259733/checkpoint_3000"
 
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度

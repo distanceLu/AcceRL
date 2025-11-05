@@ -332,7 +332,7 @@ class WorldModel(ActorCritic):
                 noisy_action_projector=None,
                 diffusion_timestep_embeddings=None,
                 use_film=self.cfg.use_film,
-                this_act_emb=None
+                extra_emb=None
             )
         return multimodal_emb, multimodal_att_mask
 
@@ -352,7 +352,7 @@ class WorldModel(ActorCritic):
         b_s = inputs_batch['this_action'].size(0)
         this_action = inputs_batch['this_action'].reshape(b_s, -1).to(self.model_dtype)  # (B, ACTION_DIM * NUM_ACTIONS_CHUNK)
         this_act_emb = self.act_proj(this_action)  # (B, 4096)
-        inputs_batch['this_act_emb'] = this_act_emb.unsqueeze(dim=1)  # (B, 1, 4096)
+        inputs_batch['extra_emb'] = this_act_emb.unsqueeze(dim=1)  # (B, 1, 4096)
 
         # 1) VLA 前向传播以获取隐藏状态
         output = self._forward_vla(inputs_batch)
@@ -1207,7 +1207,7 @@ if __name__ == "__main__":
         
         # 准备 inputs_batch 用于想象（需要确保有 step_count）
         imagine_inputs = inputs_batch.copy()
-        imagine_inputs.pop('this_act_emb')
+        imagine_inputs.pop('extra_emb')
         if 'step_count' not in imagine_inputs:
             imagine_inputs['step_count'] = torch.tensor([0] * NUM_ENVS, dtype=torch.long).to(cfg.device)
         

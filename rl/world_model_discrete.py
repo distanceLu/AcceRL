@@ -5,7 +5,7 @@ import numpy as np
 import gc
 from torch.distributions import Categorical
 import torch.nn.functional as F
-
+import random
 from peft import LoraConfig, get_peft_model
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
@@ -115,9 +115,10 @@ class WorldModel(ActorCritic):
             nn.Linear(ACTION_DIM * NUM_ACTIONS_CHUNK, hidden_size),
         ).to(self.device).to(dtype=self.model_dtype)
         
+        self.rt_token = nn.Embedding(1, hidden_size)
         # 合并的奖励-终止分类器：3个类别
         # Class 0: (r=0, done=0), Class 1: (r=0, done=1), Class 2: (r=1, done=1)
-        self.reward_termination_decoder = AttentionPoolHead(hidden_size, 3).to(self.device).to(dtype=self.model_dtype)
+        self.reward_termination_decoder = nn.Linear(hidden_size, 3)
         
         self.step_count_emb = nn.Embedding(500, hidden_size).to(self.device).to(dtype=self.model_dtype)
         
@@ -143,7 +144,8 @@ class WorldModel(ActorCritic):
                              list(self.patch_proj.parameters()) + \
                              list(self.act_proj.parameters()) + \
                              list(self.reward_termination_decoder.parameters()) + \
-                             list(self.step_count_emb.parameters())
+                             list(self.step_count_emb.parameters()) + \
+                             list(self.rt_token.parameters())
         if self.freeze_value:
             value_params = []
             print('不训练value head')
@@ -273,16 +275,16 @@ class WorldModel(ActorCritic):
     def predict_next(self, multimodal_emb, multimodal_att_mask, this_action, step_count) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """根据当前状态和动作，预测下一个隐状态、奖励和终止符。"""
         b_s = multimodal_emb.size(0)
-        this_action = this_action.reshape(b_s, 1, -1).to(self.model_dtype)  # (B, 1, ACTION_DIM * NUM_ACTIONS_CHUNK)
-        this_act_emb = self.act_proj(this_action)  # (B, 1, 4096)
-        act_att_mask = torch.full(
-                (b_s, 1),
+        extra_emb = self.get_extra_emb(b_s, this_action, step_count)  # (B, 3, 4096)
+        extra_size = extra_emb.size(1)  # 3
+        extra_att_mask = torch.full(
+                (b_s, extra_size),
                 fill_value=True,
                 dtype=multimodal_att_mask.dtype,
                 device=multimodal_att_mask.device,
             )
-        multimodal_emb = torch.cat([multimodal_emb[:, :1, :], this_act_emb, multimodal_emb[:, 1:, :]], dim=1)
-        multimodal_att_mask = torch.cat([multimodal_att_mask[:, :1], act_att_mask, multimodal_att_mask[:, 1:]], dim=1)
+        multimodal_emb = torch.cat([multimodal_emb[:, :1, :], extra_emb, multimodal_emb[:, 1:, :]], dim=1)
+        multimodal_att_mask = torch.cat([multimodal_att_mask[:, :1], extra_att_mask, multimodal_att_mask[:, 1:]], dim=1)
         output = self.language_model(
             input_ids=None,
             attention_mask=multimodal_att_mask,
@@ -295,23 +297,11 @@ class WorldModel(ActorCritic):
             output_hidden_states=True,
             return_dict=True,
         )
-        recon_hidden_states = output.hidden_states[-1]
+        hid_state = output.hidden_states[-1]
         num_patches = self._compute_num_patches()
-        
-        # 3. 提取和解码
-        # 当 'this_act_emb' 存在时，图像嵌入在第2个位置之后
-        post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
-        
-        step_emb = self.step_count_emb(step_count)
-        
-        # 预测合并的reward-termination分类
-        rt_logits = self.reward_termination_decoder.forward(post_patch_embeddings, step_emb)  # (B, 3)
-        
-        # 解码为reward和done
+        rt_logits = self.reward_termination_decoder.forward(hid_state[:, 1])  # (B, 3)
         reward_hat, termin_hat = self._decode_reward_termination(rt_logits)
-        
-        # 4. 投影以获得下一个状态的嵌入
-        next_embeddings = self.patch_proj(output.hidden_states[3][:, 2:num_patches+2, :])
+        next_embeddings = self.patch_proj(hid_state[:, extra_size+1:num_patches+extra_size+1, :])
         
         return next_embeddings.float(), reward_hat.float(), termin_hat
     
@@ -330,7 +320,7 @@ class WorldModel(ActorCritic):
                 noisy_action_projector=None,
                 diffusion_timestep_embeddings=None,
                 use_film=self.cfg.use_film,
-                this_act_emb=None
+                extra_emb=None
             )
         return multimodal_emb, multimodal_att_mask, proj_patch_emb
 
@@ -348,26 +338,29 @@ class WorldModel(ActorCritic):
                 raise KeyError(f"inputs_batch missing key: {k}")
         
         b_s = inputs_batch['this_action'].size(0)
-        this_action = inputs_batch['this_action'].reshape(b_s, -1).to(self.model_dtype)  # (B, ACTION_DIM * NUM_ACTIONS_CHUNK)
-        this_act_emb = self.act_proj(this_action)  # (B, 4096)
-        inputs_batch['this_act_emb'] = this_act_emb.unsqueeze(dim=1)  # (B, 1, 4096)
-
-        # 1) VLA 前向传播以获取隐藏状态
-        output = self._forward_vla(inputs_batch)
-        recon_hidden_states = output.hidden_states[-1]  # len(output.hidden_states): 33
-        num_patches = self._compute_num_patches()
+        this_action = inputs_batch['this_action']
         step_count = inputs_batch['step_count']
-        step_emb = self.step_count_emb(step_count)  # (B, 16)
-        
-        # 2) 准备用于 AE 损失的张量
-        post_patch_embeddings = recon_hidden_states[:, 2:num_patches+2]
-        
+        extra_emb = self.get_extra_emb(b_s, this_action, step_count)  # (B, 3, 4096)
+        inputs_batch['extra_emb'] = extra_emb
+
+        output = self._forward_vla(inputs_batch)
+        hid_state = output.hidden_states[-1]  # len(output.hidden_states): 33
+        num_patches = self._compute_num_patches()
         # 预测合并的reward-termination分类
-        rt_logits = self.reward_termination_decoder.forward(post_patch_embeddings, step_emb)  # (B, 3)
-        
-        post_patch_proj = self.patch_proj(output.hidden_states[3][:, 2:num_patches+2, :])
+        rt_logits = self.reward_termination_decoder.forward(hid_state[:, 1])  # (B, 3)
+        extra_size = extra_emb.size(1)  # 3
+        post_patch_proj = self.patch_proj(hid_state[:, extra_size+1:num_patches+extra_size+1, :])
 
         return post_patch_proj, rt_logits.float()
+    
+    def get_extra_emb(self, b_s, this_action: torch.Tensor, step_count: torch.Tensor) -> torch.Tensor:
+        this_action = this_action.reshape(b_s, 1, -1).to(self.model_dtype)  # (B, 1, ACTION_DIM * NUM_ACTIONS_CHUNK)
+        this_act_emb = self.act_proj(this_action)  # (B, 1, 4096)
+        rt_id = torch.zeros(b_s, dtype=torch.long, device=this_action.device)
+        rt_emb = self.rt_token(rt_id).unsqueeze(1)  # (B, 1, 4096)
+        step_emb = self.step_count_emb(step_count).unsqueeze(dim=1)
+        extra_emb = torch.cat([rt_emb, this_act_emb, step_emb], dim=1)  # (B, 3, 4096)
+        return extra_emb
     
     def agent_super_forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """仅使用 Agent 的前向传播来获取策略和价值。"""
@@ -566,6 +559,7 @@ class WorldModel(ActorCritic):
         world_extra_layers = {
             'patch_proj': self.patch_proj.state_dict(),
             'act_proj': self.act_proj.state_dict(),
+            'rt_token': self.rt_token.state_dict(),
             'reward_termination_decoder': self.reward_termination_decoder.state_dict(),
             'step_count_emb': self.step_count_emb.state_dict(),
         }
@@ -622,6 +616,7 @@ class WorldModel(ActorCritic):
             world_extra_layers = torch.load(world_extra_path, map_location=self.device)
             self.patch_proj.load_state_dict(world_extra_layers['patch_proj'])
             self.act_proj.load_state_dict(world_extra_layers['act_proj'])
+            # self.rt_token.load_state_dict(world_extra_layers['rt_token'])
             self.reward_termination_decoder.load_state_dict(world_extra_layers['reward_termination_decoder'])
             self.step_count_emb.load_state_dict(world_extra_layers['step_count_emb'])
             print(f"✓ WorldModel 额外层已从 {world_extra_path} 加载")
@@ -899,7 +894,7 @@ if __name__ == "__main__":
     NUM_TEST_ITERATIONS = 3  # 测试迭代次数
 
     unnorm_key = f"{BENCHMARK}_no_noops"
-    pretrained_checkpoint = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
+    pretrained_checkpoint = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
     # pretrained_checkpoint="/cpfs01/lcx_workspace/models/openvla-7b-oft-finetuned-libero-spatial-object-goal-10/"
     # Instantiate config
     cfg = GenerateConfig(
@@ -921,7 +916,7 @@ if __name__ == "__main__":
     print("=" * 80)
     print("初始化 WorldModel...")
     print("=" * 80)
-    checkpoint2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_first4layers_1761739115/checkpoint_2300"
+    checkpoint2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_env_idx1_rt_token_1762259733/checkpoint_3000"
     # checkpoint2 = None
     
     # Create WorldModel
@@ -1130,7 +1125,7 @@ if __name__ == "__main__":
         
         # 准备 inputs_batch 用于想象（需要确保有 step_count）
         imagine_inputs = inputs_batch.copy()
-        imagine_inputs.pop('this_act_emb')
+        imagine_inputs.pop('extra_emb')
         if 'step_count' not in imagine_inputs:
             imagine_inputs['step_count'] = torch.tensor([0] * NUM_ENVS, dtype=torch.long).to(cfg.device)
         
