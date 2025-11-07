@@ -84,8 +84,9 @@ class WorldModel(ActorCritic):
         self.agent = Agent(cfg, torch_dtype)
         hidden_size = self.vla.llm_dim
 
-        layers_to_keep = self.vla.language_model.model.layers[0:4]
-        layers_to_delete = self.vla.language_model.model.layers[4:]
+        keep_num = 8
+        layers_to_keep = self.vla.language_model.model.layers[0:keep_num]
+        layers_to_delete = self.vla.language_model.model.layers[keep_num:]
         for layer in layers_to_delete:
             del layer
         del layers_to_delete
@@ -503,18 +504,16 @@ class WorldModel(ActorCritic):
         
         non_terminal_mask = ~mini_done.squeeze()
         if torch.any(non_terminal_mask):
-            ae_loss = F.mse_loss(
-                post_patch_proj[non_terminal_mask],
-                target_proj_feat[non_terminal_mask]
-            )  # 自编码器损失 (仅对非终止状态)
-            mae_loss = F.l1_loss(
-                post_patch_proj[non_terminal_mask],
-                target_proj_feat[non_terminal_mask]
-            )
-            diff = (post_patch_proj[non_terminal_mask] - target_proj_feat[non_terminal_mask]).abs()
-            relative_error = (diff / (target_proj_feat[non_terminal_mask].abs() + 1e-8)).mean().detach()
+            pred = post_patch_proj[non_terminal_mask]
+            target = target_proj_feat[non_terminal_mask]
+            mse_loss = F.mse_loss(pred, target)  # 仅对非终止状态
+            mae_loss = F.l1_loss(pred, target)
+            # 这个指标现在对目标值很小的情况更加鲁棒
+            with torch.no_grad(): # 相对误差通常只用于监控，不参与梯度计算
+                denominator = torch.abs(target).clamp(min=1e-5)
+                relative_error = torch.mean(torch.abs(pred - target) / denominator)
         else:
-            ae_loss = torch.tensor(0.0, device=post_patch_proj.device)
+            mse_loss = torch.tensor(0.0, device=post_patch_proj.device)
             mae_loss = torch.tensor(0.0, device=post_patch_proj.device)
             relative_error = torch.tensor(0.0, device=post_patch_proj.device)
             print(f"non_terminal_mask全为0: {non_terminal_mask}", flush=True)
@@ -537,7 +536,7 @@ class WorldModel(ActorCritic):
         # 计算分类准确率
         rt_acc = (torch.argmax(rt_logits, dim=-1) == rt_labels).float().mean()
         
-        return ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss, relative_error
+        return mse_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss, relative_error
     
     def save_checkpoint(self, save_dir: str, epoch: int = None):
         """
@@ -916,7 +915,7 @@ if __name__ == "__main__":
     print("=" * 80)
     print("初始化 WorldModel...")
     print("=" * 80)
-    checkpoint2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_env_idx1_rt_token_1762259733/checkpoint_3000"
+    checkpoint2 = "/cpfs01/lcx_workspace/models/only_wm_env_idx1_8layer_1762517531/checkpoint_4000"
     # checkpoint2 = None
     
     # Create WorldModel
