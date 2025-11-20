@@ -11,7 +11,8 @@ import numpy as np
 from peft import LoraConfig, get_peft_model
 
 # Core OpenVLA components
-from experiments.robot.openvla_utils import (
+# zzq1120 单独从openvla_utils取出这两个方法
+from experiments.robot.sole_utils import (
     get_processor,
     get_proprio_projector,
 )
@@ -120,7 +121,7 @@ class ActorCritic(nn.Module):
         # Keep processor for external preparation
         self.processor = get_processor(cfg)
         self.proprio_projector = get_proprio_projector(
-            cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
+            cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM, device=self.device,
         )
         # 注意力池化层
         self.attn_pool = nn.Sequential(
@@ -557,12 +558,15 @@ if __name__ == "__main__":
     # 在这里设置要并行处理的环境数量
     ENVS_ID = list(range(10))
     envs_num = len(ENVS_ID)
-    BENCHMARK = TaskSuite.LIBERO_SPATIAL
+    BENCHMARK = TaskSuite.LIBERO_10
     unnorm_key = f"{BENCHMARK}_no_noops"
-
+    goal_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/goal_no_noops_resume+libero_goal_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state"
+    object_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_object_no_noops+b40+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
+    four_suites_checkpoint = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_4_task_suites_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--4tasks--70000_chkpt"
+    libero10_checkpoint = '/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_10_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state'
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_object_no_noops+b40+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt",
+        pretrained_checkpoint=libero10_checkpoint,
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
@@ -593,19 +597,19 @@ if __name__ == "__main__":
     # # == 合并 LoRA 测试 ==
     # print("\n 开始测试 merge_and_unload_lora ...")
     # actor.load_lora_and_merge_for_eval(
-    #     checkpoint_dir="./runs/rl_models/agent_checkpoint_epoch_0",
+    #     checkpoint_dir="./runs/rl_models/agent_lora_epoch_30000",
     #     keep_dtype=TORCH_DTYPE,
     #     strict=True,)
     # print("\n merge_and_unload_lora 测试完成！")
 
     # == 加载合并模型测试 ==
-    print("\n 开始测试 load_merged_model_for_eval ...")
-    actor.load_merged_model_for_eval(
-        path="./runs/rl_models/agent_checkpoint_epoch_0",
-        keep_dtype=TORCH_DTYPE,
-        strict=True,
-        device=actor.device,)
-    print("\n load_merged_model_for_eval 测试完成！")
+    # print("\n 开始测试 load_merged_model_for_eval ...")
+    # actor.load_merged_model_for_eval(
+    #     path="./runs/rl_models/agent_checkpoint_epoch_0",
+    #     keep_dtype=TORCH_DTYPE,
+    #     strict=True,
+    #     device=actor.device,)
+    # print("\n load_merged_model_for_eval 测试完成！")
  
     parameter_groups = actor.get_parameter_groups()
     check_unnorm_key(cfg, actor.vla)

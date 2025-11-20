@@ -29,7 +29,8 @@ from torch.utils.tensorboard import SummaryWriter
 # Libero env 与工具
 
 # OpenVLA 组件与常量
-from experiments.robot.openvla_utils import (
+# zzq1120 单独从openvla_utils取出这两个方法
+from experiments.robot.sole_utils import (
     get_processor,
 )
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK

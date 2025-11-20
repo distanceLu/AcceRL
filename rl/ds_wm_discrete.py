@@ -24,7 +24,10 @@ import deepspeed
 from torch.utils.tensorboard import SummaryWriter
 
 # OpenVLA 和 Libero 工具
-from experiments.robot.openvla_utils import get_processor
+# zzq1120 单独从openvla_utils取出这两个方法
+from experiments.robot.sole_utils import (
+    get_processor,
+)
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 from experiments.robot.libero.libero_utils import GenerateConfig
 

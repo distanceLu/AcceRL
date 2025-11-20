@@ -27,7 +27,8 @@ import torch.distributed as distributed
 from torch.utils.tensorboard import SummaryWriter
 
 # OpenVLA 组件与常量
-from experiments.robot.openvla_utils import (
+# zzq1120 单独从openvla_utils取出这两个方法
+from experiments.robot.sole_utils import (
     get_processor,
 )
 
@@ -516,7 +517,7 @@ class InferenceActor(InferenceActorCom):
                 raise
     
     def forward_test(self):
-        return
+        return  # TODO 测试用，后续删除 
         import pickle
         with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
             observation = pickle.load(file)

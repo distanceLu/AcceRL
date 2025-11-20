@@ -6,25 +6,6 @@ from contextlib import nullcontext
 import numpy as np
 from collections import deque
 
-from torch.distributions import Normal, TransformedDistribution
-from torch.distributions.transforms import TanhTransform
-
-from peft import LoraConfig, get_peft_model
-from experiments.robot.openvla_utils import L1RegressionActionHead
-
-# Core OpenVLA components
-from experiments.robot.openvla_utils import (
-    get_action_head,
-    get_processor,
-    get_proprio_projector,
-)
-
-# Masks used to extract action-related hidden states
-from prismatic.training.train_utils import (
-    get_current_action_mask,
-    get_next_actions_mask,
-)
-
 # Constants
 from prismatic.vla.constants import (
     NUM_ACTIONS_CHUNK,

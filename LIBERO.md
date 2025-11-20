@@ -74,6 +74,11 @@ CUDA_VISIBLE_DEVICES=7 python experiments/robot/libero/run_libero_eval.py \
   --task_suite_name libero_spatial
 ```
 python experiments/robot/libero/run_libero_eval.py \
+  --pretrained_checkpoint /cpfs01/liuwei_workspace/models/finetune_im/copy_spatial_10000ckpt \
+  --task_suite_name libero_spatial
+```
+
+python experiments/robot/libero/run_libero_eval.py \
   --pretrained_checkpoint moojink/openvla-7b-oft-finetuned-libero-10 \
   --task_suite_name libero_10
 ```

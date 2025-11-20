@@ -6,7 +6,8 @@ import numpy as np
 from peft import LoraConfig, get_peft_model
 
 # Core OpenVLA components
-from experiments.robot.openvla_utils import (
+# zzq1120 单独从openvla_utils取出这两个方法
+from experiments.robot.sole_utils import (
     get_action_head,
     get_processor,
     get_proprio_projector,
@@ -62,11 +63,11 @@ class ActorCritic(nn.Module):
         self.processor = get_processor(cfg)
 
         # Heads
-        self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim)
+        self.action_head = get_action_head(cfg, llm_dim=self.vla.llm_dim, device=self.device)
         self.action_head = self.action_head
 
         self.proprio_projector = get_proprio_projector(
-            cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM
+            cfg, llm_dim=self.vla.llm_dim, proprio_dim=PROPRIO_DIM, device=self.device
         )
 
         # Condition-independent log_std parameter (float32 for stability)
