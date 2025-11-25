@@ -31,7 +31,8 @@ from experiments.robot.libero.libero_utils import GenerateConfig
 from rl.world_model_discrete import WorldModel, compute_imagined_gae, create_validity_mask, compute_ppo_loss
 from rl.utils import prepare_one_obs
 from ds_com import TrainerActorCom, InferenceActorCom
-
+#zzq 1125 统一使用rl.com_utils
+from rl.com_utils import find_free_port
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
@@ -1122,17 +1123,6 @@ def build_openvla_cfg() -> GenerateConfig:
     )
     cfg.checkpoint2 = CHECKPOINT2
     return cfg
-
-
-def find_free_port() -> int:
-    """
-    利用 socket 绑定到端口 0 的技巧，由操作系统找到一个当前未被使用的临时端口。
-    """
-    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(("", 0))
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return s.getsockname()[1]
-
 
 def main():
     if not os.path.exists(PRETRAINED_CHECKPOINT):

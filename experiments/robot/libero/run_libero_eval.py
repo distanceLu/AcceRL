@@ -38,14 +38,17 @@ from experiments.robot.openvla_utils import (
     get_proprio_projector,
     resize_image_for_policy,
 )
+# zzq 1124 加上get_action
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_image_resize_size,
+    get_action,
     get_model,
     invert_gripper_action,
     normalize_gripper_action,
     set_seed_everywhere,
 )
+
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 
 
@@ -266,7 +269,18 @@ def run_episode(
             if len(action_queue) == 0:
                 # Query model to get action
                 observation['task_description'] = task_description
-                actions = my_get_action(model, cfg, processor, [observation], action_head, proprio_projector, model.dtype)
+                # zzq 1124 注释掉my_get_action，使用get_action
+                # actions = my_get_action(model, cfg, processor, [observation], action_head, proprio_projector, model.dtype)
+                actions = get_action(
+                    cfg, 
+                    model, 
+                    observation, 
+                    task_description, 
+                    processor, 
+                    action_head, 
+                    proprio_projector, 
+                    noisy_action_projector,
+                    )
                 action_queue.extend(actions)
 
             # Get action from queue
@@ -284,7 +298,8 @@ def run_episode(
 
     except Exception as e:
         log_message(f"Episode error: {e}", log_file)
-
+        import traceback
+        traceback.print_exc()
     return success, replay_images
 
 

@@ -37,6 +37,7 @@ from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs
 # 训练/推理通信（保持接口不变）
 from ds_com import TrainerActorCom, InferenceActorCom
+from rl.com_utils import find_free_port
 
 # ================================================================
 # 0. 超参数与配置
@@ -82,14 +83,12 @@ MOVING_AVG_WINDOW = 1000
 LOG_INTERVAL_SECONDS = 10
 
 # 通信组
-TRAIN_GROUP_PORT = 29531
 BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
-BROADCAST_GROUP_PORT = 29532
 
 # OpenVLA 加载配置
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
-PRETRAINED_CHECKPOINT = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/openvla-7b-oft-finetuned-2_gpus_batch_size_16_100_000"
+PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
 
 # ================================================================
 # 数据结构 更新经验数据结
@@ -116,8 +115,21 @@ class StatsActor:
             "total_episodes_processed": 0,
             "total_env_steps": 0
         })
+        self.timings = defaultdict(lambda: deque(maxlen=window_size))
+        self.actor_last_active = {}
+        self.active_window_seconds = 600
+        self.total_samples_produced = 0
 
-    def add_episode_return(self, env_name: str, ep_return: float, step_time: float, ep_length: int, success: float):
+    def add_episode_return(
+        self,
+        env_name: str,
+        ep_return: float,
+        step_time: float,
+        ep_length: int,
+        success: float,
+        actor_id: Optional[int] = None,
+        step_num: int = 0,
+    ):
         env_stats = self.stats[env_name]
         env_stats["episode_returns"].append(ep_return)
         env_stats["step_times"].append(step_time)
@@ -125,6 +137,19 @@ class StatsActor:
         env_stats["successes"].append(success)
         env_stats["total_episodes_processed"] += 1
         env_stats["total_env_steps"] += ep_length
+        if not env_name.startswith("eval_"):
+            self.total_samples_produced += step_num
+            if actor_id is not None:
+                self.actor_last_active[actor_id] = time.time()
+
+    def add_timing_metric(self, metric_name: str, value: float):
+        """记录系统性能相关的计时指标"""
+        self.timings[metric_name].append(value)
+
+    def get_active_actor_count(self) -> int:
+        current_time = time.time()
+        cutoff = current_time - self.active_window_seconds
+        return sum(1 for last_active in self.actor_last_active.values() if last_active >= cutoff)
 
     def get_stats(self) -> Dict[str, Dict[str, float]]:
         per_env_stats = {}
@@ -171,7 +196,9 @@ class StatsActor:
             "avg_ep_len": np.mean(all_lengths) if all_lengths else 0.0,
             "avg_step_time": np.mean(all_step_times) if all_step_times else 0.0,
             "total_episodes_processed": total_episodes_processed,
-            "total_env_steps": total_env_steps
+            "total_env_steps": total_env_steps,
+            "total_samples_produced": self.total_samples_produced,
+            "active_actor_count": self.get_active_actor_count()
         }
         per_env_stats["_global_eval_"] = {
             "avg_return": np.mean(eval_returns) if eval_returns else 0.0,
@@ -180,6 +207,10 @@ class StatsActor:
             "total_episodes_processed": eval_total_episodes_processed,
             "total_env_steps": eval_total_env_steps
         }
+        timing_stats = {}
+        for name, deq in self.timings.items():
+            timing_stats[name] = np.mean(deq) if deq else 0.0
+        per_env_stats["_timings_"] = timing_stats
         return per_env_stats
 
 # ================================================================
@@ -276,7 +307,15 @@ class RolloutWorkerActor(BaseWorkerActor):
                     step_time = (time.time() - time_start) / max(step_count_total, 1)
                     success = float(info.get('is_success', 0.0))
                     self.env_outcome[self.current_env_idx].append(1.0 - success)
-                    self.stats_actor.add_episode_return.remote(self.current_env_name, reward_sum, step_time, step_count_total, success)
+                    self.stats_actor.add_episode_return.remote(
+                        self.current_env_name,
+                        reward_sum,
+                        step_time,
+                        step_count_total,
+                        success,
+                        actor_id=self.wid,
+                        step_num=step_count_total,
+                    )
                     reward_sum = 0.0
                     if self.local_buffer: self._process_traj(self.local_buffer, 0.0)
                     self.local_buffer.clear()
@@ -345,7 +384,15 @@ class EvaluationWorkerActor(BaseWorkerActor):
                         if term or trunc: done = True; break
                 step_time = (time.time() - time_start) / max(step_count_total, 1)
                 success = float(info.get('is_success', 0.0))
-                self.stats_actor.add_episode_return.remote(f"eval_{self.current_env_name}", reward_sum, step_time, step_count_total, success)
+                self.stats_actor.add_episode_return.remote(
+                    f"eval_{self.current_env_name}",
+                    reward_sum,
+                    step_time,
+                    step_count_total,
+                    success,
+                    actor_id=None,
+                    step_num=step_count_total,
+                )
                 current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
                 obs, info = self._reset_and_select_env(seed=current_seed)
         except Exception as e: import traceback; print(f"[ERROR] EvaluationWorker {self.wid} run() 崩溃: {e}", flush=True); traceback.print_exc(); raise
@@ -356,7 +403,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
 # ================================================================
 @ray.remote(num_gpus=1)
 class InferenceActor(InferenceActorCom):
-    def __init__(self, actor_id, cfg):
+    def __init__(self, actor_id, cfg, stats_actor):
         super().__init__()
         self.actor_id = actor_id
         print(f"InferenceActor {actor_id}: 正在加载 OpenVLA ActorCritic...")
@@ -365,6 +412,7 @@ class InferenceActor(InferenceActorCom):
         self.model.eval()
         self.processor = self.model.processor
         self.cfg = cfg
+        self.stats_actor = stats_actor
 
         self.batch_size = INFERENCE_BATCH
         self.timeout_sec = INFERENCE_TIMEOUT_MS / 1000.0
@@ -416,8 +464,9 @@ class InferenceActor(InferenceActorCom):
             
             inputs_list = [r[0] for r in requests_to_process]
             deterministic_flags = [r[1] for r in requests_to_process]
-            
+            t_loop_start = time.time()
             try:
+                
                 inputs_batch = self.model.prepare_inputs_batch(inputs_list)
                 with torch.inference_mode():
                     # 1. 前向传播获取 logits 和 value
@@ -451,6 +500,8 @@ class InferenceActor(InferenceActorCom):
                         logits[i], # 对应的 logits
                         values[i]                 # 价值估计
                     ))
+                loop_duration = time.time() - t_loop_start
+                self.stats_actor.add_timing_metric.remote("Inference/loop_time_s", loop_duration)
             except Exception as e:
                 import traceback
                 print(f"[ERROR] InferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
@@ -570,9 +621,12 @@ class TrainerActor(TrainerActorCom):
                     print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size}...")
                     await asyncio.sleep(3)
 
+                t_sample_start = time.time()
                 obs_list, action_token_np, adv_np, logits_old_np, v_targ_np = \
                     await self.replay_buffer.sample.remote(self.super_batch_size)
+                sample_time = time.time() - t_sample_start
 
+                t_prep_start = time.time()
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
 
                 device = next(self.model.parameters()).device
@@ -580,8 +634,17 @@ class TrainerActor(TrainerActorCom):
                 adv_t = torch.tensor(adv_np, dtype=torch.float32, device=device)
                 logits_old_t = torch.tensor(logits_old_np, dtype=torch.float32, device=device)
                 v_targ_t = torch.tensor(v_targ_np, dtype=torch.float32, device=device)
+                prep_time = time.time() - t_prep_start
 
-                self.next_ready_batch = (inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t)
+                self.next_ready_batch = {
+                    'inputs_batch': inputs_batch,
+                    'act_token': act_token_t,
+                    'advantage': adv_t,
+                    'logits_old': logits_old_t,
+                    'value_target': v_targ_t,
+                    'sample_time': sample_time,
+                    'prep_time': prep_time
+                }
 
             except Exception as e:
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
@@ -605,7 +668,13 @@ class TrainerActor(TrainerActorCom):
         current_batch = self.next_ready_batch
         self.next_ready_batch = None
         
-        inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t = current_batch
+        inputs_batch = current_batch['inputs_batch']
+        act_token_t = current_batch['act_token']
+        adv_t = current_batch['advantage']
+        logits_old_t = current_batch['logits_old']
+        v_targ_t = current_batch['value_target']
+        policy_sample_time = current_batch['sample_time']
+        policy_prep_time = current_batch['prep_time']
 
         # 修正std 归一化（消融1）
         # 计算本地统计量
@@ -626,6 +695,7 @@ class TrainerActor(TrainerActorCom):
         epoch_ent, epoch_kl_divs = [], []   
         
         num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE
+        t_policy_train_start = time.time()
         
         for i in range(num_updates_in_epoch):
             start = i * TRAIN_BATCH_SIZE; end = start + TRAIN_BATCH_SIZE
@@ -699,7 +769,13 @@ class TrainerActor(TrainerActorCom):
         avg_ent = np.mean(epoch_ent)
         avg_kl_div = np.mean(epoch_kl_divs)
 
-        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, avg_kl_loss, current_lrs, self.global_step, avg_ent, avg_kl_div
+        perf_metrics = {
+            "policy_sample_time": policy_sample_time,
+            "policy_prep_time": policy_prep_time,
+            "policy_train_time": time.time() - t_policy_train_start
+        }
+
+        return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, avg_kl_loss, current_lrs, self.global_step, avg_ent, avg_kl_div, perf_metrics
 
 # ================================================================
 # 5. 主逻辑
@@ -711,7 +787,8 @@ def build_openvla_cfg() -> GenerateConfig:
         use_diffusion=False,
         use_film=False,
         num_images_in_input=2,
-        use_proprio=False, # Note: ActorCritic in discrete model can handle this
+        # zzq 1124 开启 proprio 
+        use_proprio=True, # Note: ActorCritic in discrete model can handle this
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=True,
@@ -741,7 +818,7 @@ def main():
         TrainerActor.remote(rank=i, world_size=NUM_TRAINER_GPUS, replay_buffer=replay_buffers[i], cfg=cfg)
         for i in range(NUM_TRAINER_GPUS)
     ]
-    inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg) for i in range(NUM_INFERENCE_ACTORS)]
+    inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg, stats_actor=stats_actor) for i in range(NUM_INFERENCE_ACTORS)]
     rollout_workers = [
         RolloutWorkerActor.remote(
             inference_pool[i % NUM_INFERENCE_ACTORS],
@@ -756,8 +833,14 @@ def main():
     print(f"已创建 {NUM_ROLLOUT_WORKERS} 个 Rollout workers 和 {NUM_EVAL_WORKERS} 个 Evaluation workers。")
 
     print("\n--- 步骤 2: 建立独立的 DeepSpeed 训练组 ---")
+    # zzq 1125 通信组，使用find_free_port
+    train_group_port = find_free_port()
+
+    broadcast_group_port = find_free_port()
+    while broadcast_group_port == train_group_port:
+        broadcast_group_port = find_free_port()
     trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
-    train_setup_tasks = [actor.setup_deepspeed_group.remote(trainer_master_addr, TRAIN_GROUP_PORT) for actor in trainer_group]
+    train_setup_tasks = [actor.setup_deepspeed_group.remote(trainer_master_addr, train_group_port) for actor in trainer_group]
     ray.get(train_setup_tasks)
     print("DeepSpeed 训练组建立完成。")
 
@@ -767,7 +850,7 @@ def main():
     broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
     broadcast_setup_tasks = [
         actor.setup_broadcast_group.remote(
-            master_addr=broadcast_master_addr, master_port=BROADCAST_GROUP_PORT,
+            master_addr=broadcast_master_addr, master_port=broadcast_group_port,
             group_name=BROADCAST_GROUP_NAME, group_world_size=broadcast_group_world_size,
             my_rank_in_group=rank) for rank, actor in enumerate(broadcast_participants)
     ]
@@ -822,13 +905,17 @@ def main():
     last_log_global_step = 0
     global_step = 0
     while global_step < TRAIN_ITERS:
+        t_train_start = time.time()
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
-        _, _, _, _, _, _, global_step, _, _ = results[0]
+        _, _, _, _, _, _, global_step, _, _, _ = results[0]
+        train_time = time.time() - t_train_start
 
+        t_sync_start = time.time()
         broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
         receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
         ray.get([broadcast_task] + receive_tasks)
+        sync_time = time.time() - t_sync_start
 
         current_time = time.time()
         if current_time - last_log_time > LOG_INTERVAL_SECONDS:
@@ -838,6 +925,7 @@ def main():
             steps_since_last_log = global_step - last_log_global_step
             training_speed_steps_per_sec = steps_since_last_log / elapsed_log_time if elapsed_log_time > 0 else 0.0
 
+            timing_stats = all_stats.pop("_timings_", {})
             global_stats = all_stats.pop("_global_rollout_")
             eval_stats = all_stats.pop("_global_eval_")
             avg_return = global_stats["avg_return"]
@@ -853,7 +941,7 @@ def main():
             eval_avg_step_time = eval_stats["avg_step_time"]
 
 
-            total_losses, p_losses, v_losses, e_losses, kl_losses, lrs_list, _, ents, avg_kl_divs = zip(*results)
+            total_losses, p_losses, v_losses, e_losses, kl_losses, lrs_list, _, ents, avg_kl_divs, perf_metrics_list = zip(*results)
             current_lrs = lrs_list[0]
 
             elapsed_time = current_time - start_time
@@ -875,6 +963,17 @@ def main():
             writer.add_scalar('Metrics/Entropy', np.mean(ents), global_step)
             writer.add_scalar('Metrics/KL_Divergence', np.mean(avg_kl_divs), global_step)
             writer.add_scalar('Metrics/Training_Speed_Steps_per_Sec', training_speed_steps_per_sec, global_step)
+            for metric_name, metric_value in timing_stats.items():
+                writer.add_scalar(f'Performance/{metric_name}', metric_value, global_step)
+            avg_policy_sample_time = np.mean([pm["policy_sample_time"] for pm in perf_metrics_list])
+            avg_policy_prep_time = np.mean([pm["policy_prep_time"] for pm in perf_metrics_list])
+            avg_policy_train_time = np.mean([pm["policy_train_time"] for pm in perf_metrics_list])
+            writer.add_scalar('Performance/policy_sample_time', avg_policy_sample_time, global_step)
+            writer.add_scalar('Performance/policy_prep_time', avg_policy_prep_time, global_step)
+            writer.add_scalar('Performance/policy_train_time', avg_policy_train_time, global_step)
+            writer.add_scalar('Performance/train_time', train_time, global_step)
+            writer.add_scalar('Performance/sync_time', sync_time, global_step)
+            writer.add_scalar('Performance/train_time_total', time.time() - t_train_start, global_step)
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
@@ -888,6 +987,8 @@ def main():
             writer.add_scalar('System/Eval_Total_Episodes_Processed', eval_total_episodes, global_step)
             writer.add_scalar('System/Eval_Total_Env_Steps', eval_env_steps, global_step)
             writer.add_scalar('System/Eval_Avg_Step_Time', eval_avg_step_time, global_step)
+            writer.add_scalar('System/Active_Rollout_Actors', global_stats.get("active_actor_count", 0), global_step)
+            writer.add_scalar('System/Total_Samples_Produced', global_stats.get("total_samples_produced", 0), global_step)
 
             for env_name, env_stats in all_stats.items():
                 if env_name.startswith("eval_"):
