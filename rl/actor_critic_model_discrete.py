@@ -577,7 +577,7 @@ if __name__ == "__main__":
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
-        device=torch.device("cuda:7")
+        device=torch.device("cuda:0")
     )
 
     # 创建策略

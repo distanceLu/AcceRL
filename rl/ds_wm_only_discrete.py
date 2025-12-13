@@ -2,7 +2,7 @@ import os
 os.environ["MUJOCO_GL"] = "osmesa"
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["TMPDIR"] = "/dev/shm"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "5,6,7"
 
 import time
 import random
@@ -19,7 +19,6 @@ import numpy as np
 
 import ray
 import torch
-import torch.distributed as distributed
 import deepspeed
 from torch.utils.tensorboard import SummaryWriter
 
@@ -35,7 +34,7 @@ from rl.com_utils import find_free_port
 # ================================================================
 # 0. 超参数与配置
 # ================================================================
-EXP_NAME = "only_wm_env_idx1_8layer"
+EXP_NAME = "only_wm_env_idx1_mae0p08"
 BENCHMARK = "libero_spatial"
 
 # 分布式系统参数
@@ -46,8 +45,8 @@ ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
-TRAIN_BATCH_SIZE = 8
-WORLD_ACCUM = 32
+TRAIN_BATCH_SIZE = 64
+WORLD_ACCUM = 4
 TRAIN_ITERS = 30000
 
 # RT 和 AE 损失的系数
@@ -60,14 +59,14 @@ WORLD_WARMUP_STEPS = 500
 
 # 日志
 MOVING_AVG_WINDOW = 1000
-LOG_INTERVAL_SECONDS = 10
+LOG_INTERVAL_SECONDS = 20
 SAVE_INTERVAL_STEPS = 200
 
 # OpenVLA 加载配置
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
-CHECKPOINT2 = "/cpfs01/lcx_workspace/models/ppo_wm_discrete_env_idx1_rt_token_1762259733/checkpoint_3000"
+CHECKPOINT2 = "/cpfs01/lcx_workspace/models/only_wm_env_idx1_mse_mae_1762700769/checkpoint_28800"
 
 INP_MAX_LEN = 100  # 输入input_id的最大长度
 
@@ -645,7 +644,7 @@ class TrainerActor:
                 _, _, mini_next_teacher_proj_feat = self.model.forward_vision(wm_mini_batch['next_inputs_batch'])
                 self.model.module.train()
 
-            ae_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss, relative_error = \
+            mse_loss, rt_loss, reward_acc, reward_mean, termin_acc, termi_mean, rt_acc, mae_loss, relative_error = \
                 self.model.module.compute_world_model_loss(
                     wm_inp, 
                     wm_mini_batch['dones'], 
@@ -656,7 +655,7 @@ class TrainerActor:
             world_model_loss = AE_LOSS_COEF * mae_loss + RT_LOSS_COEF * rt_loss
             self.model.backward(world_model_loss / WORLD_ACCUM)
             
-            epoch_losses["ae_loss"].append(ae_loss.item())
+            epoch_losses["ae_loss"].append(mse_loss.item())
             epoch_losses["rt_loss"].append(rt_loss.item())
             epoch_losses["reward_acc"].append(reward_acc.item())
             epoch_losses["reward_mean"].append(reward_mean.item())
@@ -666,13 +665,11 @@ class TrainerActor:
             epoch_losses["mae_loss"].append(mae_loss.item())
             epoch_losses["relative_error"].append(relative_error.item())
 
-        perf_timings["wm_train_time"] = time.time() - t_wm_start
-        perf_timings["wm_to_gpu_time"] = np.mean(wm_to_gpu_times)
-
         # 优化器步骤
         self.model.step()
         self.global_step += 1
-
+        perf_timings["wm_train_time"] = time.time() - t_wm_start
+        perf_timings["wm_to_gpu_time"] = np.mean(wm_to_gpu_times)
         avg_losses = {k: np.mean(v) for k, v in epoch_losses.items()}
         return avg_losses, current_lrs, self.global_step, perf_timings
 
@@ -852,6 +849,7 @@ def main():
                 writer.add_scalar(f'{tag_prefix}/Success_Rate', env_stats['avg_success_rate'], global_step)
                 writer.add_scalar(f'{tag_prefix}/Total_Episodes', env_stats['total_episodes'], global_step)
             writer.add_scalar('Performance/train_time_total', time.time() - t_train_start, global_step)
+            writer.add_scalar('Performance/log_time', time.time() - current_time, global_step)
             last_log_time = current_time
 
     print(f"\n成功完成 {TRAIN_ITERS} 次训练！")

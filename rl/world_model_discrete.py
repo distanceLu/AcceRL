@@ -622,14 +622,14 @@ class WorldModel(ActorCritic):
         else:
             print(f"⚠️  警告: 未找到 WorldModel 额外层: {world_extra_path}")
         
-        # 3. 加载 Agent 的 LoRA 权重
-        agent_lora_path = save_path / f"agent_lora{'_epoch_' + str(epoch) if epoch else ''}"
-        if agent_lora_path.exists():
-            assert isinstance(self.agent.language_model, PeftModel)
-            load_lora_inplace(self.agent.language_model, agent_lora_path)
-            print(f"✓ Agent LoRA 权重已安全加载")
-        else:
-            print(f"⚠️  警告: 未找到 Agent LoRA 权重: {agent_lora_path}")
+        # # 3. 加载 Agent 的 LoRA 权重
+        # agent_lora_path = save_path / f"agent_lora{'_epoch_' + str(epoch) if epoch else ''}"
+        # if agent_lora_path.exists():
+        #     assert isinstance(self.agent.language_model, PeftModel)
+        #     load_lora_inplace(self.agent.language_model, agent_lora_path)
+        #     print(f"✓ Agent LoRA 权重已安全加载")
+        # else:
+        #     print(f"⚠️  警告: 未找到 Agent LoRA 权重: {agent_lora_path}")
         
         # 4. 加载 Agent 的额外层
         agent_extra_path = save_path / f"agent_extra_layers{'_epoch_' + str(epoch) if epoch else ''}.pt"
@@ -637,7 +637,7 @@ class WorldModel(ActorCritic):
             agent_extra_layers = torch.load(agent_extra_path, map_location=self.device)
             self.agent.value_head.load_state_dict(agent_extra_layers['value_head'])
             self.agent.attn_pool.load_state_dict(agent_extra_layers['attn_pool'])
-            self.agent.language_model.lm_head.load_state_dict(agent_extra_layers['lm_head'])
+            # self.agent.language_model.lm_head.load_state_dict(agent_extra_layers['lm_head'])
             print(f"✓ Agent 额外层已从 {agent_extra_path} 加载")
         else:
             print(f"⚠️  警告: 未找到 Agent 额外层: {agent_extra_path}")
@@ -909,7 +909,7 @@ if __name__ == "__main__":
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
         lora_rank=32,
-        device=torch.device("cuda:6"),
+        device=torch.device("cuda:7"),
     )
 
     print("=" * 80)
