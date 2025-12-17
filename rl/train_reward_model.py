@@ -9,100 +9,16 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import numpy as np
 
 from experiments.robot.libero.libero_utils import GenerateConfig
 from experiments.robot.openvla_utils import get_processor
 from rl.models.reward_model import RewardModel
-from rl.utils import prepare_one_obs
-import numpy as np
-
-
-class RewardFrameDataset(Dataset):
-    """
-    Treat each frame in a saved sample as an independent training example.
-    Sample file format follows generate_actor_critic_discrete_data.py output.
-    """
-
-    def __init__(self, data_dirs: List[str], cfg: Any, processor: Any, torch_dtype: torch.dtype):
-        self.cfg = cfg
-        self.processor = processor
-        self.torch_dtype = torch_dtype
-
-        self.items: List[Tuple[str, int, int]] = []  # (file_path, frame_idx, reward_bool)
-        for data_dir in data_dirs:
-            if not os.path.isdir(data_dir):
-                continue
-            for fname in os.listdir(data_dir):
-                if not fname.endswith(".pt"):
-                    continue
-                fpath = os.path.join(data_dir, fname)
-                sample = torch.load(fpath)
-                # video = sample["video"]  # (T, H, W, 3)
-                mask = sample["mask"]    # (T,)
-                last_rew = sample["reward"]
-                assert np.all(mask == 1) 
-                # frag_rew = np.zeros_like(mask)
-                # frag_rew[-1] = last_rew
-                # reward_bool = 1 if float(sample["reward"]) > 0 else 0
-                # for idx, valid in enumerate(mask):
-                #     if bool(valid):
-                #         self.items.append((fpath, idx, frag_rew[idx]))
-                self.items.append((fpath, len(mask)-1, last_rew))
-
-        if len(self.items) == 0:
-            raise ValueError(f"No frames found in {data_dirs}")
-
-    def __len__(self) -> int:
-        return len(self.items)
-
-    def __getitem__(self, index: int):
-        fpath, frame_idx, rew = self.items[index]
-        sample = torch.load(fpath)
-        frame = sample["video"][frame_idx]  # HWC uint8
-        instruction = sample["instruction"]
-
-        obs = {"full_image": frame}
-        inputs = prepare_one_obs(self.cfg, self.processor, obs, instruction, self.torch_dtype)
-        # Remove proprio if unused (avoid None in collate)
-        if not self.cfg.use_proprio and ("proprio" in inputs) and (inputs["proprio"] is None):
-            inputs.pop("proprio", None)
-        return inputs, torch.tensor(rew, dtype=torch.long)
-
-
-def _simple_pad_batch(pad_token_id, inputs_list):
-    # inputs_list elements have: input_ids, attention_mask, labels, pixel_values
-    max_len = max(it["input_ids"].size(1) for it in inputs_list)
-    padded = []
-    for it in inputs_list:
-        # skip None entries (e.g., proprio when unused)
-        it = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in it.items() if v is not None}
-        cur_len = it["input_ids"].size(1)
-        if cur_len < max_len:
-            pad_amt = max_len - cur_len
-            bsz = it["input_ids"].size(0)
-            pad_ids = it["input_ids"].new_full((bsz, pad_amt), pad_token_id)
-            pad_mask = it["attention_mask"].new_zeros((bsz, pad_amt))
-            pad_labels = it["labels"].new_full((bsz, pad_amt), -100)
-            it["input_ids"] = torch.cat([it["input_ids"], pad_ids], dim=1)
-            it["attention_mask"] = torch.cat([it["attention_mask"], pad_mask], dim=1)
-            it["labels"] = torch.cat([it["labels"], pad_labels], dim=1)
-        padded.append(it)
-
-    batch = {}
-    keys = padded[0].keys()
-    for k in keys:
-        tensors = [it[k] for it in padded]
-        batch[k] = torch.cat(tensors, dim=0)
-    return batch
-
-
-def make_collate_fn(pad_token_id):
-    def _fn(batch):
-        inputs_list, labels = zip(*batch)
-        batch_inputs = _simple_pad_batch(pad_token_id, list(inputs_list))
-        batch_labels = torch.stack(labels)
-        return batch_inputs, batch_labels
-    return _fn
+from rl.models.utils import (
+    RewardFrameDataset,
+    compute_pr_auc,
+    make_collate_fn,
+)
 
 
 def build_cfg(device: str, pretrained_checkpoint: str) -> Any:
@@ -134,6 +50,10 @@ def train_one_epoch(model, dataloader, optimizer, device, grad_accum, writer, gl
     accum_tp = accum_tn = accum_fp = accum_fn = 0
     accum_count = 0
 
+    # Collect all logits and labels for PR-AUC
+    all_logits = []
+    all_labels = []
+
     for step, (batch_inputs, labels) in enumerate(tqdm(dataloader, desc="train", leave=False)):
         # Move tensors
         for k, v in batch_inputs.items():
@@ -141,9 +61,14 @@ def train_one_epoch(model, dataloader, optimizer, device, grad_accum, writer, gl
                 batch_inputs[k] = v.to(device)
         labels = labels.to(device)
 
+        logits = model.forward(batch_inputs)
         loss, metrics = model.compute_loss_and_metrics(batch_inputs, labels)
         loss = loss / grad_accum
         loss.backward()
+
+        # Collect for PR-AUC
+        all_logits.append(logits.detach().cpu())
+        all_labels.append(labels.detach().cpu())
 
         total_loss += metrics["loss"].item()
         tp += metrics["tp"].item()
@@ -181,12 +106,21 @@ def train_one_epoch(model, dataloader, optimizer, device, grad_accum, writer, gl
             accum_loss = accum_tp = accum_tn = accum_fp = accum_fn = 0
             accum_count = 0
 
+    # Compute PR-AUC for entire epoch
+    all_logits_tensor = torch.cat(all_logits, dim=0)
+    all_labels_tensor = torch.cat(all_labels, dim=0)
+    # Get positive class probabilities
+    probs = torch.softmax(all_logits_tensor.float(), dim=-1)[:, 1].numpy()
+    labels_np = all_labels_tensor.float().numpy()
+    pr_auc = compute_pr_auc(labels_np, probs)
+
     stats = {
         "loss": total_loss / len(dataloader),
         "tp": tp,
         "tn": tn,
         "fp": fp,
         "fn": fn,
+        "pr_auc": pr_auc,
     }
     # epoch-level positive / negative accuracy
     pos_den = tp + fn
@@ -202,17 +136,35 @@ def evaluate(model, dataloader, device):
     total_loss = 0.0
     tp = tn = fp = fn = 0
 
+    # Collect all logits and labels for PR-AUC
+    all_logits = []
+    all_labels = []
+
     for batch_inputs, labels in tqdm(dataloader, desc="eval", leave=False):
         for k, v in batch_inputs.items():
             if isinstance(v, torch.Tensor):
                 batch_inputs[k] = v.to(device)
         labels = labels.to(device)
+        logits = model.forward(batch_inputs)
         loss, metrics = model.compute_loss_and_metrics(batch_inputs, labels)
+        
+        # Collect for PR-AUC
+        all_logits.append(logits.cpu())
+        all_labels.append(labels.cpu())
+
         total_loss += metrics["loss"].item()
         tp += metrics["tp"].item()
         tn += metrics["tn"].item()
         fp += metrics["fp"].item()
         fn += metrics["fn"].item()
+
+    # Compute PR-AUC
+    all_logits_tensor = torch.cat(all_logits, dim=0)
+    all_labels_tensor = torch.cat(all_labels, dim=0)
+    # Get positive class probabilities
+    probs = torch.softmax(all_logits_tensor.float(), dim=-1)[:, 1].numpy()
+    labels_np = all_labels_tensor.float().numpy()
+    pr_auc = compute_pr_auc(labels_np, probs)
 
     stats = {
         "loss": total_loss / len(dataloader),
@@ -220,6 +172,7 @@ def evaluate(model, dataloader, device):
         "tn": tn,
         "fp": fp,
         "fn": fn,
+        "pr_auc": pr_auc,
     }
     pos_den = tp + fn
     neg_den = tn + fp
@@ -280,8 +233,9 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    writer = SummaryWriter(log_dir=Path(args.output_dir) / f"{timestamp}_{args.exp_name}")
-    best_val = float("inf")
+    tb_log_dir = Path(args.output_dir) / f"{timestamp}_{args.exp_name}"
+    writer = SummaryWriter(log_dir=tb_log_dir)
+    best_pr_auc = -1.0  # Track best PR-AUC instead of loss
     global_step = 0
 
     def _log_stats(prefix: str, stats: Dict[str, float], step: int):
@@ -305,23 +259,13 @@ def main():
         )
 
         # epoch-level stats (logged at current global_step)
+        _log_stats("train_epoch", train_stats, global_step)
         _log_stats("eval", val_stats, global_step)
 
-        # Save checkpoint
-        ckpt_path = Path(args.output_dir) / f"epoch_{epoch}.pt"
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "cfg": cfg.__dict__,
-                "epoch": epoch,
-                "val_loss": val_stats["loss"],
-            },
-            ckpt_path,
-        )
-
-        if val_stats["loss"] < best_val:
-            best_val = val_stats["loss"]
+        # Save best model based on PR-AUC (save to tensorboard directory)
+        if val_stats["pr_auc"] > best_pr_auc:
+            best_pr_auc = val_stats["pr_auc"]
+            ckpt_path = tb_log_dir / "best_model.pt"
             torch.save(
                 {
                     "model": model.state_dict(),
@@ -329,9 +273,11 @@ def main():
                     "cfg": cfg.__dict__,
                     "epoch": epoch,
                     "val_loss": val_stats["loss"],
+                    "val_pr_auc": val_stats["pr_auc"],
                 },
-                Path(args.output_dir) / "best.pt",
+                ckpt_path,
             )
+            print(f"Saved best model (PR-AUC: {best_pr_auc:.4f}) to {ckpt_path}")
 
     writer.close()
 
