@@ -2,6 +2,7 @@
 import time
 import random
 import os
+import warnings
 from pathlib import Path
 
 import torch
@@ -137,6 +138,9 @@ class ActorCritic(nn.Module):
         )
         self.to(self.device).to(dtype=self.model_dtype)
 
+        if cfg.checkpoint2:
+            self.load_checkpoint2(cfg.checkpoint2)
+
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
         """
         将可训练参数分为 'policy' 和 'value' 两组。
@@ -240,7 +244,7 @@ class ActorCritic(nn.Module):
         # Sanity checks
         for k in ("input_ids", "attention_mask", "pixel_values", "labels", "proprio"):
             if k not in inputs_batch:
-                raise KeyError(f"inputs_batch missing key: {k}")
+                warnings.warn(f"inputs_batch missing key: {k}", UserWarning)
 
         # 1. VLA前向传播获取隐藏状态和logits
         output = self._forward_vla(inputs_batch)
@@ -326,6 +330,14 @@ class ActorCritic(nn.Module):
         agent_extra_path = save_path / f"agent_extra_layers.pt"
         torch.save(agent_extra_layers, agent_extra_path)
         print(f"✓ Agent 额外层已保存到: {agent_extra_path}")
+    
+    def load_checkpoint2(self, checkpoint_dir: str | Path):
+        """
+        加载 checkpoint2
+        """
+        state = torch.load(checkpoint_dir, map_location=self.device)['student_state_dict']
+        self.load_state_dict(state, strict=True)
+        print(f"✓ Agent checkpoint2 已加载")
 
     def safe_load_model(self, checkpoint_dir: str | Path, strict: bool = True):
         """
@@ -556,28 +568,30 @@ if __name__ == "__main__":
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = list(range(10))
+    ENVS_ID = [0]
     envs_num = len(ENVS_ID)
-    BENCHMARK = TaskSuite.LIBERO_10
+    BENCHMARK = TaskSuite.LIBERO_SPATIAL
     unnorm_key = f"{BENCHMARK}_no_noops"
+    spatial_checkpoint = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
     goal_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/goal_no_noops_resume+libero_goal_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state"
     object_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_object_no_noops+b40+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
     four_suites_checkpoint = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_4_task_suites_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--4tasks--70000_chkpt"
     libero10_checkpoint = '/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_10_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state'
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint=libero10_checkpoint,
+        pretrained_checkpoint=four_suites_checkpoint,
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=2,
-        use_proprio=True,
+        num_images_in_input=1,
+        use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
-        device=torch.device("cuda:0")
+        device=torch.device("cuda:7"),
+        checkpoint2='runs/distill/20251219_094153_distill/checkpoints/checkpoint_latest.pt',
     )
 
     # 创建策略

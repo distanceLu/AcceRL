@@ -499,6 +499,9 @@ def prepare_inputs_batch(model, inputs_list: List[Dict[str, Any]], max_len=None)
     # Normalize proprio for each sample and run per-sample checks
     norm_stats = model.get_norm_stats()
     for it in inputs_list:
+        if it.get("proprio", None) is None:
+            it.pop("proprio", None)
+            continue
         # Normalize proprio using internal norm stats
         proprio_norm = normalize_proprio(norm_stats, it["proprio"])
         it["proprio"] = torch.tensor(proprio_norm, dtype=torch.float32).unsqueeze(dim=0)

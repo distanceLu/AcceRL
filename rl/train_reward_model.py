@@ -39,7 +39,7 @@ def build_cfg(device: str, pretrained_checkpoint: str) -> Any:
     )
 
 
-def train_one_epoch(model, dataloader, optimizer, device, grad_accum, writer, global_step):
+def train_one_epoch(model, dataloader, optimizer, device, grad_accum, writer, global_step, clip_grad_norm):
     model.train()
     total_loss = 0.0
     tp = tn = fp = fn = 0
@@ -85,11 +85,15 @@ def train_one_epoch(model, dataloader, optimizer, device, grad_accum, writer, gl
         accum_count += 1
 
         if (step + 1) % grad_accum == 0:
+            if clip_grad_norm is not None and clip_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             optimizer.step()
             optimizer.zero_grad()
             # log averages for this accumulation window at optimizer step
             avg_loss = accum_loss / max(accum_count, 1)
             writer.add_scalar("train/loss", avg_loss, global_step)
+            current_lr = optimizer.param_groups[0]["lr"]
+            writer.add_scalar("train/lr", current_lr, global_step)
             # log absolute counts (no averaging)
             writer.add_scalar("train/tp", accum_tp, global_step)
             writer.add_scalar("train/tn", accum_tn, global_step)
@@ -190,6 +194,8 @@ def main():
     parser.add_argument("--grad_accum", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--min_lr", type=float, default=1e-6)
+    parser.add_argument("--clip_grad_norm", type=float, default=1.0)
     parser.add_argument("--output_dir", type=str, default="runs/reward_model")
     parser.add_argument("--exp_name", type=str, default="reward_model")
     parser.add_argument("--focal_alpha", type=float, default=0.9)
@@ -230,6 +236,7 @@ def main():
     )
 
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
 
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -243,8 +250,18 @@ def main():
             writer.add_scalar(f"{prefix}/{k}", v, step)
 
     for epoch in range(1, args.epochs + 1):
-        train_stats, global_step = train_one_epoch(model, train_loader, optimizer, model.device, args.grad_accum, writer, global_step)
+        train_stats, global_step = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            model.device,
+            args.grad_accum,
+            writer,
+            global_step,
+            args.clip_grad_norm,
+        )
         val_stats = evaluate(model, val_loader, model.device)
+        scheduler.step()
 
         print(
             json.dumps(

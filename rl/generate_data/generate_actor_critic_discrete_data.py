@@ -31,10 +31,14 @@ def generate_data(
     image_size: int = 256,
     require_full_window: bool = True,
     pretrained_checkpoint: Optional[str] = None,
+    checkpoint2: Optional[str] = None,
     device: str = "cuda:0",
     use_bf16: bool = True,
     greedy: bool = False,
-    seed: int = 7,
+    seed: int = None,
+    print_success_interval: int = 100,
+    num_images_in_input: int = 2,
+    use_proprio: bool = True,
 ):
     """Generate windowed (video, action) samples using ActorCritic discrete policy.
 
@@ -49,9 +53,13 @@ def generate_data(
     os.makedirs(output_dir, exist_ok=True)
 
     # Reproducibility (best-effort)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        print(f"Set seed to {seed}")
+    else:
+        print("No seed provided, using random seed")
 
     unnorm_key = f"{benchmark_name}_no_noops"
 
@@ -61,8 +69,8 @@ def generate_data(
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=2,
-        use_proprio=True,
+        num_images_in_input=num_images_in_input,
+        use_proprio=use_proprio,
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=True,
@@ -74,6 +82,9 @@ def generate_data(
 
     # Policy
     actor = ActorCritic(cfg, torch_dtype)
+    state = torch.load(checkpoint2, map_location=actor.device)['student_state_dict']
+    actor.load_state_dict(state, strict=True)
+    print(f"Actor Critic Model loaded from {checkpoint2}")
     check_unnorm_key(cfg, actor.vla)
     actor.eval()
 
@@ -104,9 +115,16 @@ def generate_data(
 
     metadata: List[Dict[str, Any]] = []
     sample_idx = 0
+    
+    # Success rate tracking
+    total_success = 0
+    total_episodes = 0
 
     def _reset_env(i: int):
-        obs, info = envs[i].reset(seed=seed + int(time.time()) + i)
+        if seed is not None:
+            obs, info = envs[i].reset(seed=seed + i)
+        else:
+            obs, info = envs[i].reset(seed=int(time.time()) + i)
         observations[i] = obs
         task_descriptions[i] = info.get("task_description", envs[i].task_description)
         # start buffers with initial image (same as random script)
@@ -193,6 +211,7 @@ def generate_data(
                     sample_name = f"task{task_id}_ep{ep}_step{step}_{sample_idx:06d}.pt"
                     save_path = os.path.join(output_dir, sample_name)
 
+                    is_success = bool(info.get("is_success", False))
                     torch.save(
                         {
                             "video": video_tensor_seq,
@@ -200,11 +219,10 @@ def generate_data(
                             "mask": mask_seq,
                             "instruction": task_descriptions[i],
                             "reward": float(reward),
-                            "success": bool(info.get("is_success", False)),
+                            "success": is_success,
                         },
                         save_path,
                     )
-
                     metadata.append(
                         {
                             "path": save_path,
@@ -216,12 +234,21 @@ def generate_data(
                             "reward": float(reward),
                             "terminated": bool(terminated),
                             "truncated": bool(truncated),
-                            "is_success": bool(info.get("is_success", False)),
+                            "is_success": is_success,
                         }
                     )
                     sample_idx += 1
-
+                    
+                    # Update success rate tracking
+                    if is_success:
+                        total_success += 1
+                    
                 if terminated or truncated:
+                    total_episodes += 1
+                     # Print success rate periodically
+                    if total_episodes % print_success_interval == 0:
+                        success_rate = total_success / total_episodes if total_episodes > 0 else 0.0
+                        print(f"\n[Success Rate] Episodes: {total_episodes}, Success: {total_success}, Rate: {success_rate:.4f} ({success_rate*100:.2f}%)")
                     episodes_done[i] += 1
                     progress.update(1)
 
@@ -238,6 +265,11 @@ def generate_data(
                 env.close()
             except Exception:
                 pass
+        
+        # Print final success rate
+        if total_episodes > 0:
+            final_success_rate = total_success / total_episodes
+            print(f"\n[Final Success Rate] Total Episodes: {total_episodes}, Total Success: {total_success}, Rate: {final_success_rate:.4f} ({final_success_rate*100:.2f}%)")
 
         # Save metadata
         with open(os.path.join(output_dir, "metadata.json"), "w") as f:
@@ -277,12 +309,17 @@ if __name__ == "__main__":
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--require_full_window", action="store_true")
     parser.add_argument("--pretrained_checkpoint", type=str, default=None)
+    parser.add_argument("--checkpoint2", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--use_bf16", action="store_true")
     parser.add_argument("--greedy", action="store_true")
-    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--print_success_interval", type=int, default=10, help="Print success rate every N samples")
+    parser.add_argument("--num_images_in_input", type=int, default=2)
+    parser.add_argument("--use_proprio", action="store_true")
 
     args = parser.parse_args()
+    print(f"args: {args}")
 
     generate_data(
         output_dir=args.output_dir,
@@ -293,8 +330,12 @@ if __name__ == "__main__":
         image_size=args.image_size,
         require_full_window=args.require_full_window,
         pretrained_checkpoint=args.pretrained_checkpoint,
+        checkpoint2=args.checkpoint2,
         device=args.device,
         use_bf16=args.use_bf16,
         greedy=args.greedy,
         seed=args.seed,
+        print_success_interval=args.print_success_interval,
+        num_images_in_input=args.num_images_in_input,
+        use_proprio=args.use_proprio,
     )

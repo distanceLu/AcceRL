@@ -5,11 +5,12 @@ Fine-tunes OpenVLA via LoRA (No DDP version for easier debugging).
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "7" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 os.environ["WANDB_MODE"] = "disabled"
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Type
 from contextlib import nullcontext
@@ -23,6 +24,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -68,34 +70,34 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 @dataclass
 class FinetuneConfig:
     # fmt: off
-    vla_path: str = "openvla/openvla-7b"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
+    vla_path: str = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
 
     # Dataset
     data_root_dir: Path = Path("/cpfs01/lcx_workspace/data/openvla/modified_libero_rlds")      # Directory containing RLDS datasets
-    dataset_name: str = "libero_object_no_noops"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
-    run_root_dir: Path = Path("runs")                # Path to directory to store logs & checkpoints
+    dataset_name: str = "libero_spatial_no_noops"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    run_root_dir: Path = Path("runs/imitation")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
     # Algorithm and architecture
-    use_l1_regression: bool = True                   # If True, trains continuous action head with L1 regression objective
+    use_l1_regression: bool = False                   # If True, trains continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, trains continuous action head with diffusion modeling objective (DDIM)
     num_diffusion_steps_train: int = 50              # (When `diffusion==True`) Number of diffusion steps used for training
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
     num_images_in_input: int = 1                     # Number of images in the VLA input (default: 1)
-    use_proprio: bool = True                        # If True, includes robot proprioceptive state in input
+    use_proprio: bool = False                        # If True, includes robot proprioceptive state in input
 
     # Training configuration
     batch_size: int = 2                              # Batch size per device
     learning_rate: float = 5e-4                      # Learning rate
     lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 10% to 100%)
     num_steps_before_decay: int = 100_000            # Number of steps before LR decays by 10x
-    grad_accumulation_steps: int = 1                 # Number of gradient accumulation steps
+    grad_accumulation_steps: int = 8                 # Number of gradient accumulation steps
     max_steps: int = 200_000                         # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
     val_freq: int = 10_000                           # (When `use_val_set==True`) Validation set logging frequency in steps
     val_time_limit: int = 180                        # (When `use_val_set==True`) Time limit for computing validation metrics
-    save_freq: int = 10_000                          # Checkpoint saving frequency in steps
-    save_latest_checkpoint_only: bool = False        # If True, saves only 1 checkpoint, overwriting latest checkpoint
+    save_freq: int = 10                          # Checkpoint saving frequency in steps
+    save_latest_checkpoint_only: bool = True        # If True, saves only 1 checkpoint, overwriting latest checkpoint
                                                      #   (If False, saves all checkpoints)
     resume: bool = False                             # If True, resumes from checkpoint
     resume_step: Optional[int] = None                # (When `resume==True`) Step number that we are resuming from
@@ -469,8 +471,10 @@ def save_training_checkpoint(
         )
         merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
         merged_vla = merged_vla.merge_and_unload()
-        merged_vla.save_pretrained(checkpoint_dir)
-        print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
+        merged_path = checkpoint_dir / "merged_model"
+        os.makedirs(merged_path, exist_ok=True, mode=0o755)
+        merged_vla.save_pretrained(merged_path)
+        print(f"Saved merged model for Step {log_step} at: {merged_path}")
 
 
 def run_validation(
@@ -486,6 +490,7 @@ def run_validation(
     log_step,
     is_main_process: bool,
     val_time_limit: int,
+    writer: Optional[SummaryWriter] = None,
 ) -> None:
     """
     Compute validation set metrics for logging.
@@ -532,6 +537,10 @@ def run_validation(
 
     if is_main_process:
         log_metrics_to_wandb(avg_val_metrics, "VLA Val", log_step, wandb)
+        # Log to TensorBoard
+        if writer is not None:
+            for metric_name, value in avg_val_metrics.items():
+                writer.add_scalar(f"val/{metric_name}", value, log_step)
 
 
 @draccus.wrap()
@@ -550,7 +559,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Run ID and dirs
     run_id = get_run_id(cfg)
-    run_dir = cfg.run_root_dir / run_id
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = cfg.run_root_dir / f"{timestamp}_{run_id}"
     os.makedirs(run_dir, exist_ok=True)
 
     # Device setup
@@ -566,6 +576,8 @@ def finetune(cfg: FinetuneConfig) -> None:
     if is_main_process:
         wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{run_id}")
 
+    writer = SummaryWriter(log_dir=run_dir) if is_main_process else None
+    print(f"TensorBoard logs will be saved to: {run_dir}")
     # Constants
     print(
         "Detected constants:\n"
@@ -586,9 +598,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Update config.json and sync model files (single process)
-    if is_main_process:
-        update_auto_map(cfg.vla_path)
-        check_model_logic_mismatch(cfg.vla_path)
+    # if is_main_process:
+        # update_auto_map(cfg.vla_path)
+        # check_model_logic_mismatch(cfg.vla_path)
 
     # Load processor & model
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
@@ -805,6 +817,10 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             if is_main_process and log_step % cfg.wandb_log_freq == 0:
                 log_metrics_to_wandb(smoothened_metrics, "VLA Train", log_step, wandb)
+                # Log to TensorBoard
+                if writer is not None:
+                    for metric_name, value in smoothened_metrics.items():
+                        writer.add_scalar(f"train/{metric_name}", value, log_step)
 
             # LR warmup (optional)
             if cfg.lr_warmup_steps > 0:
@@ -815,6 +831,9 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             if is_main_process and log_step % cfg.wandb_log_freq == 0:
                 wandb.log({"VLA Train/Learning Rate": scheduler.get_last_lr()[0]}, step=log_step)
+                # Log learning rate to TensorBoard
+                if writer is not None:
+                    writer.add_scalar("train/learning_rate", scheduler.get_last_lr()[0], log_step)
 
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
@@ -852,12 +871,18 @@ def finetune(cfg: FinetuneConfig) -> None:
                     log_step=log_step,
                     is_main_process=is_main_process,
                     val_time_limit=cfg.val_time_limit,
+                    writer=writer,
                 )
                 vla.train()
 
             if log_step == cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
+    
+    # Close TensorBoard writer
+    if writer is not None:
+        writer.close()
+        print(f"TensorBoard logs saved to: {run_dir}")
 
 
 if __name__ == "__main__":
