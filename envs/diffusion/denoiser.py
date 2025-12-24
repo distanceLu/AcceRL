@@ -10,20 +10,87 @@ from typing import Any, Dict, List
 
 from .inner_model import InnerModel, InnerModelConfig
 from utils import LossAndLogs
+import sys
+from pathlib import Path
 
 
 
 def add_dims(input: Tensor, n: int) -> Tensor:
     return input.reshape(input.shape + (1,) * (n - input.ndim))
 
-class Batch:
-    obs: torch.ByteTensor
-    act: torch.LongTensor
-    rew: torch.FloatTensor
-    end: torch.LongTensor
-    trunc: torch.LongTensor
-    mask_padding: torch.BoolTensor
-    info: List[Dict[str, Any]]
+class SimpleBatch:
+    def __init__(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        mask_padding: torch.Tensor,
+        rew: torch.Tensor = None,
+        end: torch.Tensor = None,
+        trunc: torch.Tensor = None,
+        info: List[List[Dict]] = None
+    ):
+        self.obs = obs
+        self.act = act
+        self.mask_padding = mask_padding
+        self.rew = rew
+        self.end = end
+        self.trunc = trunc
+        self.info = info
+
+    def pin_memory(self) -> "SimpleBatch":
+        """Pin memory for all tensor attributes"""
+        for attr in ['obs', 'act', 'mask_padding', 'rew', 'end', 'trunc']:
+            val = getattr(self, attr)
+            if val is not None and isinstance(val, torch.Tensor):
+                setattr(self, attr, val.pin_memory())
+        return self
+
+    def to(self, device: torch.device, non_blocking: bool = False) -> 'SimpleBatch':
+        """Move all tensors to device"""
+        return SimpleBatch(
+            obs=self.obs.to(device, non_blocking=non_blocking) if isinstance(self.obs, torch.Tensor) else self.obs,
+            act=self.act.to(device, non_blocking=non_blocking) if isinstance(self.act, torch.Tensor) else self.act,
+            mask_padding=self.mask_padding.to(device, non_blocking=non_blocking) if isinstance(self.mask_padding, torch.Tensor) else self.mask_padding,
+            rew=self.rew.to(device, non_blocking=non_blocking) if self.rew is not None and isinstance(self.rew, torch.Tensor) else self.rew,
+            end=self.end.to(device, non_blocking=non_blocking) if self.end is not None and isinstance(self.end, torch.Tensor) else self.end,
+            trunc=self.trunc.to(device, non_blocking=non_blocking) if self.trunc is not None and isinstance(self.trunc, torch.Tensor) else self.trunc,
+            info=self.info
+        )
+
+    def save(self, filepath: str):
+        """Save batch to file"""
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self, filepath)
+
+    @classmethod
+    def load(cls, filepath: str) -> 'SimpleBatch':
+        """Load batch from file"""
+        batch = torch.load(filepath, map_location='cpu', weights_only=False)
+        
+        # Extract attributes and create new instance
+        obs = getattr(batch, 'obs', None)
+        act = getattr(batch, 'act', None)
+        mask_padding = getattr(batch, 'mask_padding', None)
+        rew = getattr(batch, 'rew', None)
+        end = getattr(batch, 'end', None)
+        trunc = getattr(batch, 'trunc', None)
+        info = getattr(batch, 'info', None)
+        
+        # Create default mask_padding if missing
+        if mask_padding is None and obs is not None:
+            batch_size, seq_len = obs.shape[:2]
+            mask_padding = torch.ones(batch_size, seq_len, dtype=torch.bool)
+
+        return cls(
+            obs=obs,
+            act=act,
+            mask_padding=mask_padding,
+            rew=rew,
+            end=end,
+            trunc=trunc,
+            info=info,
+        )
+
 
 @dataclass
 class Conditioners:
@@ -100,7 +167,7 @@ class Denoiser(nn.Module):
         denoised = self.wrap_model_output(noisy_next_obs, model_output, cs)
         return denoised
 
-    def forward(self, batch: Batch) -> LossAndLogs:
+    def forward(self, batch: SimpleBatch) -> LossAndLogs:
         n = self.cfg.inner_model.num_steps_conditioning
         seq_length = batch.act.size(1) - n
 
