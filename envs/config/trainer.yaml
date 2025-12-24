@@ -1,5 +1,5 @@
 world_model_env:
-  _target_: denoiser_world_model_env.WorldModelEnvConfig
+  _target_: world_model_env.WorldModelEnvConfig
   horizon: 15
   num_batches_to_preload: 256
   diffusion_sampler:

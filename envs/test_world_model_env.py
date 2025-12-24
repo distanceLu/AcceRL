@@ -2,6 +2,7 @@
 测试 WorldModelEnv 使用真实轨迹数据
 """
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -9,7 +10,7 @@ from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
 from diffusion import Denoiser, SimpleBatch
-from denoiser_world_model_env import WorldModelEnv, WorldModelEnvConfig
+from world_model_env import WorldModelEnv, WorldModelEnvConfig
 from utils import load_reward_model, tensor_to_image
 from experiments.robot.openvla_utils import get_processor
 from PIL import Image
@@ -123,37 +124,46 @@ def main():
     print(f"  reset_obs: {reset_obs.shape}")
     print(f"  reset_act: {reset_act.shape}")
 
-    print("\n" + "=" * 80)
-    print("执行 Reset...")
-    print("=" * 80)
-    current_obs, info = env.reset(reset_obs, reset_act)
-    print(f"Reset 完成，当前 obs shape: {current_obs.shape}")
+    for i in range(2):
+        print("\n" + "=" * 80)
+        print("执行 Reset...")
+        print("=" * 80)
+        current_obs, info = env.reset(reset_obs, reset_act)
+        print(f"Reset 完成，当前 obs shape: {current_obs.shape}")
 
-    print("\n" + "=" * 80)
-    print("执行 Step...")
-    print("=" * 80)
+        print("\n" + "=" * 80)
+        print("执行 Step...")
+        print("=" * 80)
 
-    remaining_act = window_act[num_steps_conditioning - 1:]  # 从第 num_steps_conditioning-1 个动作开始
+        remaining_act = window_act[num_steps_conditioning - 1:]  # 从第 num_steps_conditioning-1 个动作开始
 
-    print(f"剩余动作数量: {len(remaining_act)}")
-    print(f"剩余动作 shape: {remaining_act.shape}")
-    print(f"将执行 {len(remaining_act)} 次 step")
+        print(f"剩余动作数量: {len(remaining_act)}")
+        print(f"剩余动作 shape: {remaining_act.shape}")
+        print(f"将执行 {len(remaining_act)} 次 step")
 
-    for step_idx, action in enumerate(remaining_act):
-        next_obs, rew, end, trunc, info = env.step(action)
-        Image.fromarray(tensor_to_image(next_obs)).save(f"/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/{step_idx}.png")
-        print(
-            f"Step {step_idx}: "
-            f"obs shape={next_obs.shape}, "
-            f"rew={rew.item():.4f}, "
-            f"end={end.item()}, "
-            f"trunc={trunc.item()}, "
-            f"ep_len={info.get('ep_len', 'N/A')}"
-        )
+        for step_idx, action in enumerate(remaining_act):
+            step_start_time = time.time()
+            next_obs, rew, end, trunc, info = env.step(action)
+            step_end_time = time.time()
+            step_duration = step_end_time - step_start_time
+            
+            Image.fromarray(tensor_to_image(next_obs)).save(f"/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/{step_idx}.png")
+            predict_obs_time = info.get('predict_obs_time', 0)
+            predict_rew_time = info.get('predict_rew_time', 0)
+            print(
+                f"Step {step_idx}: "
+                f"time={step_duration:.4f}s "
+                f"(predict_obs={predict_obs_time:.4f}s, predict_rew={predict_rew_time:.4f}s), "
+                f"obs shape={next_obs.shape}, "
+                f"rew={rew.item():.4f}, "
+                f"end={end.item()}, "
+                f"trunc={trunc.item()}, "
+                f"ep_len={info.get('ep_len', 'N/A')}"
+            )
 
-        if info.get('dead', False):
-            print(f"  → Episode ended at step {step_idx}")
-            break
+            if info.get('dead', False):
+                print(f"  → Episode ended at step {step_idx}")
+                break
 
     print("\n" + "=" * 80)
     print("测试完成！")

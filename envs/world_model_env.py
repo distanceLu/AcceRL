@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
+import time
 
 import torch
 from torch import Tensor
@@ -81,9 +82,13 @@ class WorldModelEnv:
         # Append new action to act_buffer (becomes [T, act_dim])
         self.act_buffer = torch.cat([self.act_buffer, act.unsqueeze(0)], dim=0)  # [T-1, act_dim] -> [T, act_dim]
 
+        predict_obs_start = time.time()
         next_obs, denoising_trajectory = self.predict_next_obs()
+        predict_obs_time = time.time() - predict_obs_start
         
+        predict_rew_start = time.time()
         rew, end = self.predict_rew_end(next_obs)
+        predict_rew_time = time.time() - predict_rew_start
 
         self.ep_len += 1
         trunc = (self.ep_len >= self.horizon).long()
@@ -108,6 +113,8 @@ class WorldModelEnv:
         info["ep_len"] = self.ep_len.item()
         info["truncated"] = trunc.item()
         info["dead"] = dead.item()
+        info["predict_obs_time"] = predict_obs_time
+        info["predict_rew_time"] = predict_rew_time
 
         return self.obs_buffer[-1], rew, end, trunc, info
 
