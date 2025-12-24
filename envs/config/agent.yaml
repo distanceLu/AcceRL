@@ -1,0 +1,12 @@
+denoiser:
+  _target_: diffusion.DenoiserConfig
+  sigma_data: 0.5
+  sigma_offset_noise: 0.3
+  inner_model:
+    _target_: diffusion.InnerModelConfig
+    img_channels: 3
+    num_steps_conditioning: 4
+    cond_channels: 256
+    depths: [2,2,2,2]
+    channels: [64,64,64,64]
+    attn_depths: [0,0,0,0]
