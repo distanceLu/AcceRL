@@ -178,7 +178,6 @@ if __name__ == "__main__":
     def load_denoiser_from_checkpoint(
         agent_config_path: Path,
         trainer_config_path: Path,
-        checkpoint_path: str,
         device: torch.device,
     ):
         agent_cfg = OmegaConf.load(agent_config_path)
@@ -191,7 +190,7 @@ if __name__ == "__main__":
         sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
         denoiser.setup_training(sigma_distribution_cfg)
         
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        checkpoint = torch.load(agent_cfg.denoiser_path, map_location=device, weights_only=False)
         state_dict = checkpoint.get("denoiser_state_dict", checkpoint)
         
         act_emb_float_key = "inner_model.act_emb_float.0.weight"
@@ -209,23 +208,25 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     agent_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/agent.yaml")
     trainer_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/trainer.yaml")
-    checkpoint_path = "/cpfs01/jinshiji_workspace/diamond/checkpoints/checkpoint_step_543900.pt"
-    reward_model_path = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/reward_model/20251222_111317_reward_model/best_model.pt"
     
-    denoiser, trainer_cfg, agent_cfg = load_denoiser_from_checkpoint(agent_config_path, trainer_config_path, checkpoint_path, device)
+    denoiser, trainer_cfg, agent_cfg = load_denoiser_from_checkpoint(
+        agent_config_path=agent_config_path, 
+        trainer_config_path=trainer_config_path, 
+        device=device,
+    )
     sampler_cfg = instantiate(trainer_cfg.world_model_env.diffusion_sampler)
     
     reward_model, cfg = load_reward_model(
-        model_path=reward_model_path,
+        model_path=agent_cfg.reward_model_path,
         device=device,
-        pretrained_checkpoint=trainer_cfg.reward_model.pretrained_checkpoint,
-        focal_alpha=trainer_cfg.reward_model.focal_alpha,
+        pretrained_checkpoint=agent_cfg.openvla_path,
+        focal_alpha=agent_cfg.reward_model.focal_alpha,
     )
     processor = get_processor(cfg)
     
     env_cfg = WorldModelEnvConfig(
-        horizon=220,
-        num_batches_to_preload=1,
+        horizon=trainer_cfg.world_model_env.horizon,
+        num_batches_to_preload=trainer_cfg.world_model_env.num_batches_to_preload,
         diffusion_sampler=sampler_cfg,
     )
     

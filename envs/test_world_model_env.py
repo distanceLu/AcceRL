@@ -20,7 +20,6 @@ from PIL import Image
 def load_denoiser_from_checkpoint(
     agent_config_path: Path,
     trainer_config_path: Path,
-    checkpoint_path: str,
     device: torch.device,
 ):
     agent_cfg = OmegaConf.load(agent_config_path)
@@ -33,7 +32,7 @@ def load_denoiser_from_checkpoint(
     sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
     denoiser.setup_training(sigma_distribution_cfg)
     
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(agent_cfg.denoiser_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("denoiser_state_dict", checkpoint)
     
     act_emb_float_key = "inner_model.act_emb_float.0.weight"
@@ -51,15 +50,13 @@ def main():
     device = torch.device("cuda:7")
     agent_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/agent.yaml")
     trainer_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/trainer.yaml")
-    checkpoint_path = "/cpfs01/jinshiji_workspace/diamond/checkpoints/checkpoint_step_543900.pt"
-    reward_model_path = "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/reward_model/20251222_111317_reward_model/best_model.pt"
     trajectory_path = "/cpfs01/jinshiji_workspace/openvla_oft_rl/data/libero_batches_with_next_obs_test/batch_env0_traj2_len85.pt"
 
     print("=" * 80)
     print("加载 Denoiser 模型...")
     print("=" * 80)
     denoiser, trainer_cfg, agent_cfg = load_denoiser_from_checkpoint(
-        agent_config_path, trainer_config_path, checkpoint_path, device
+        agent_config_path, trainer_config_path, device
     )
     sampler_cfg = instantiate(trainer_cfg.world_model_env.diffusion_sampler)
 
@@ -67,10 +64,10 @@ def main():
     print("加载 Reward Model...")
     print("=" * 80)
     reward_model, cfg = load_reward_model(
-        model_path=reward_model_path,
+        model_path=agent_cfg.reward_model_path,
         device=str(device),
-        pretrained_checkpoint=trainer_cfg.reward_model.pretrained_checkpoint,
-        focal_alpha=trainer_cfg.reward_model.focal_alpha,
+        pretrained_checkpoint=agent_cfg.openvla_path,
+        focal_alpha=agent_cfg.reward_model.focal_alpha,
     )
     processor = get_processor(cfg)
 
@@ -78,8 +75,8 @@ def main():
     print("创建 WorldModelEnv...")
     print("=" * 80)
     env_cfg = WorldModelEnvConfig(
-        horizon=220,
-        num_batches_to_preload=1,
+        horizon=trainer_cfg.world_model_env.horizon,
+        num_batches_to_preload=trainer_cfg.world_model_env.num_batches_to_preload,
         diffusion_sampler=sampler_cfg,
     )
 

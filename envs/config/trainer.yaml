@@ -1,7 +1,7 @@
 world_model_env:
   _target_: world_model_env.WorldModelEnvConfig
-  horizon: 15
-  num_batches_to_preload: 256
+  horizon: 220
+  num_batches_to_preload: 1
   diffusion_sampler:
     _target_: diffusion.DiffusionSamplerConfig
     num_steps_denoising: 3
@@ -37,7 +37,3 @@ denoiser:
     scale: 1.2
     sigma_min: 2e-3
     sigma_max: 20
-
-reward_model:
-  focal_alpha: 0.99  # Focal loss alpha parameter for reward model
-  pretrained_checkpoint: "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"

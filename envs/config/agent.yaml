@@ -10,3 +10,10 @@ denoiser:
     depths: [2,2,2,2]
     channels: [64,64,64,64]
     attn_depths: [0,0,0,0]
+
+reward_model:
+  focal_alpha: 0.99  # Focal loss alpha parameter for reward model
+  
+denoiser_path: "/cpfs01/jinshiji_workspace/diamond/checkpoints/checkpoint_step_543900.pt"
+reward_model_path: "/cpfs01/jinshiji_workspace/openvla_oft_rl/runs/reward_model/20251222_111317_reward_model/best_model.pt"
+openvla_path: "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
