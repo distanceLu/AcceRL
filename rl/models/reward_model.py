@@ -76,7 +76,7 @@ class RewardModel(nn.Module):
         # Following world_model_discrete pattern: use token at position 1
         pooled = hid_state[:, 1]
         logits = self.reward_head(pooled)
-        return logits
+        return logits.float()
 
     def compute_loss_and_metrics(self, batch: Dict[str, torch.Tensor], labels: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         logits = self.forward(batch)
@@ -104,6 +104,9 @@ class RewardModel(nn.Module):
         """Load model state dict from file."""
         state_dict = torch.load(load_path, map_location=self.device)
         self.load_state_dict(state_dict['model'], strict=True)  # TODO
+
+    def get_norm_stats(self):
+        return self.vla.norm_stats[self.cfg.unnorm_key]["proprio"]
 
 
 if __name__ == "__main__":

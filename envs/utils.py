@@ -34,6 +34,28 @@ def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
     
     return img_np
 
+
+def tensor_to_image_batch(tensor: torch.Tensor) -> List[np.ndarray]:
+    """
+    Batch version of tensor_to_image.
+
+    Args:
+        tensor: [B, C, H, W] - batch of tensors in [-1, 1] range
+
+    Returns:
+        List[np.ndarray]: List of [H, W, C] uint8 images
+    """
+    B = tensor.shape[0]
+    # Process all images in batch at once using vectorized operations
+    img = tensor.cpu().clone()  # [B, C, H, W]
+    img = (img + 1) / 2  # Normalize to [0, 1]
+    img = img.clamp(0, 1)
+    img = img.permute(0, 2, 3, 1)  # [B, H, W, C]
+    img_np = (img.numpy() * 255).astype(np.uint8)
+
+    # Return as list of individual images
+    return [img_np[i] for i in range(B)]
+
 @torch.no_grad()
 def load_reward_model(
     model_path: str,

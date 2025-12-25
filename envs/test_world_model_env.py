@@ -144,7 +144,7 @@ def main():
             step_end_time = time.time()
             step_duration = step_end_time - step_start_time
             
-            Image.fromarray(tensor_to_image(next_obs)).save(f"/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/{step_idx}.png")
+            Image.fromarray(tensor_to_image(next_obs)).save(f"rollouts/tmp/{step_idx}.png")
             predict_obs_time = info.get('predict_obs_time', 0)
             predict_rew_time = info.get('predict_rew_time', 0)
             print(

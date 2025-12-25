@@ -1,4 +1,4 @@
-from experiments.robot.openvla_utils import prepare_images_for_vla, normalize_proprio
+from experiments.robot.openvla_utils import prepare_images_for_vla, prepare_images_for_vla_batch, normalize_proprio
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, IGNORE_INDEX, ACTION_DIM
 import torch
 import numpy as np
@@ -199,6 +199,170 @@ def prepare_labels_for_action_prediction(labels, input_ids):
         * ARBITRARY_ACTION_TOKEN_IDX
     )
     labels = torch.cat([labels, labels_extension], dim=-1)
+
+    # Replace last label token with stop token
+    labels[:, -1] = STOP_INDEX
+
+    return labels
+
+
+def prepare_one_obs_batch(
+    cfg: Any,
+    processor: Any,
+    obs_batch: List[Dict[str, Any]],
+    task_labels: List[str],
+    torch_dtype: torch.dtype,
+) -> List[Dict]:
+    """
+    Batch version of prepare_one_obs. Process multiple observations at once.
+
+    Args:
+        cfg: Configuration object with parameters
+        processor: Model processor for inputs
+        obs_batch: List of observation dictionaries
+        task_labels: List of text descriptions of tasks
+        torch_dtype: Torch dtype for processing
+
+    Returns:
+        List[Dict]: List of processed inputs ready for model
+    """
+    B = len(obs_batch)
+
+    # Collect all input images for batch processing
+    all_images_batch = []
+    for obs in obs_batch:
+        all_images = [obs["full_image"]]
+        if cfg.num_images_in_input > 1:
+            all_images.extend([obs[k] for k in obs.keys() if "wrist" in k])
+        all_images_batch.append(all_images)
+
+    # Batch process all images
+    processed_images_batch = prepare_images_for_vla_batch(all_images_batch, cfg)
+
+    # Process each sample
+    inputs_list = []
+    for i in range(B):
+        obs = obs_batch[i]
+        task_label = task_labels[i]
+        processed_images = processed_images_batch[i]
+
+        # Build VLA prompt
+        prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+
+        # Process primary image
+        primary_image = processed_images[0]
+        inputs = processor(prompt, primary_image).to(dtype=torch_dtype)
+
+        # Process additional wrist images if any
+        if len(processed_images) > 1:
+            all_wrist_inputs = [
+                processor(prompt, image_wrist).to(dtype=torch_dtype) for image_wrist in processed_images[1:]
+            ]
+            # Concatenate all images
+            primary_pixel_values = inputs["pixel_values"]
+            all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
+            inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
+
+        # Process proprioception data if used
+        proprio = None
+        if cfg.use_proprio and "state" in obs:
+            proprio = obs["state"]
+
+        # Process the inputs using the original single-sample logic
+        input_ids, attention_mask, labels = process_one_obs(
+            inputs["input_ids"], inputs["attention_mask"]
+        )
+        inputs["input_ids"] = input_ids
+        inputs["attention_mask"] = attention_mask
+        inputs["labels"] = labels
+        inputs["proprio"] = proprio
+
+        inputs_list.append(inputs)
+
+    return inputs_list
+
+
+def process_one_obs_batch(input_ids_batch, attention_mask_batch):
+    """
+    Batch version of process_one_obs. Supports batch_size > 1.
+    Note: This function expects input_ids_batch and attention_mask_batch to already be properly padded to the same length.
+
+    Args:
+        input_ids_batch: [B, seq_len] - batch of input_ids (already padded)
+        attention_mask_batch: [B, seq_len] - batch of attention_masks (already padded)
+
+    Returns:
+        Tuple of (input_ids_batch, attention_mask_batch, labels_batch)
+    """
+    B = input_ids_batch.shape[0]
+
+    # If the special empty token ('') does not already appear after the colon (':') token in the prompt
+    # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
+    # Since we're dealing with padded sequences, we need to find the actual end of each sequence
+    for i in range(B):
+        # Find the actual length of this sequence (where attention_mask is 1)
+        seq_len = attention_mask_batch[i].sum().item()
+        if seq_len > 0 and not torch.all(input_ids_batch[i, seq_len-1:seq_len] == 29871):
+            # Insert empty token before padding
+            empty_token = torch.tensor([29871], dtype=input_ids_batch.dtype, device=input_ids_batch.device)
+            attention_ones = torch.tensor([1], dtype=attention_mask_batch.dtype, device=attention_mask_batch.device)
+
+            # Shift everything after seq_len-1 to the right
+            input_ids_batch[i, seq_len:] = torch.cat([empty_token, input_ids_batch[i, seq_len:-1]], dim=0)
+            attention_mask_batch[i, seq_len:] = torch.cat([attention_ones, attention_mask_batch[i, seq_len:-1]], dim=0)
+
+    # Create fake labels tensor (needed for action mask)
+    labels_batch = input_ids_batch.clone()
+    labels_batch[:] = IGNORE_INDEX
+
+    # Prepare inputs by adding necessary tokens
+    input_ids_batch, attention_mask_batch = prepare_input_for_action_prediction_batch(input_ids_batch, attention_mask_batch)
+
+    # Update labels tensor for action mask computation later
+    labels_batch = prepare_labels_for_action_prediction_batch(labels_batch, input_ids_batch)
+
+    return input_ids_batch, attention_mask_batch, labels_batch
+
+
+def prepare_input_for_action_prediction_batch(input_ids, attention_mask):
+    """
+    Batch version of prepare_input_for_action_prediction. Supports batch_size > 1.
+    """
+    B = input_ids.shape[0]
+
+    # Add (ACTION_DIM * NUM_ACTIONS_CHUNK) placeholder tokens to input_ids to simulate action tokens
+    placeholder_action_token_ids = (
+        torch.ones((B, ACTION_DIM * NUM_ACTIONS_CHUNK), dtype=input_ids.dtype, device=input_ids.device)
+    )
+    input_ids = torch.cat([input_ids, placeholder_action_token_ids], dim=-1)
+
+    # Add stop token to sequence (needed in non-causal bi-directional self-attention, as it appears at train time)
+    stop_token_id = torch.ones((B, 1), dtype=input_ids.dtype, device=input_ids.device) * STOP_INDEX
+    input_ids = torch.cat([input_ids, stop_token_id], dim=-1)
+
+    # Extend the attention mask to fit the new shape of input
+    seq_len_diff = input_ids.shape[-1] - attention_mask.shape[-1]
+    if seq_len_diff > 0:
+        mask_extension = torch.ones((B, seq_len_diff), dtype=attention_mask.dtype, device=attention_mask.device)
+        attention_mask = torch.cat([attention_mask, mask_extension], dim=-1)
+
+    return input_ids, attention_mask
+
+
+def prepare_labels_for_action_prediction_batch(labels, input_ids):
+    """
+    Batch version of prepare_labels_for_action_prediction. Supports batch_size > 1.
+    """
+    B = labels.shape[0]
+
+    # Extend labels tensor with fake action labels
+    ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+    seq_len_diff = input_ids.shape[-1] - labels.shape[-1]
+    if seq_len_diff > 0:
+        labels_extension = (
+            torch.ones((B, seq_len_diff), dtype=labels.dtype, device=labels.device) * ARBITRARY_ACTION_TOKEN_IDX
+        )
+        labels = torch.cat([labels, labels_extension], dim=-1)
 
     # Replace last label token with stop token
     labels[:, -1] = STOP_INDEX

@@ -714,6 +714,27 @@ def prepare_images_for_vla(images: List[np.ndarray], cfg: Any) -> List[Image.Ima
     return processed_images
 
 
+def prepare_images_for_vla_batch(images_batch: List[List[np.ndarray]], cfg: Any) -> List[List[Image.Image]]:
+    """
+    Batch version of prepare_images_for_vla. Process multiple sets of images at once.
+
+    Args:
+        images_batch: List of lists, where each inner list contains images for one sample
+                      Each image is a numpy array
+        cfg: Configuration object with parameters
+
+    Returns:
+        List[List[Image.Image]]: List of lists of processed images ready for the model
+    """
+    processed_images_batch = []
+
+    for images in images_batch:
+        processed_images = prepare_images_for_vla(images, cfg)
+        processed_images_batch.append(processed_images)
+
+    return processed_images_batch
+
+
 def get_vla_action(
     cfg: Any,
     vla: torch.nn.Module,

@@ -45,6 +45,7 @@ class WorldModelEnv:
         self.instruction = instruction
         self.horizon = cfg.horizon
         self.return_denoising_trajectory = return_denoising_trajectory
+        self.last_success_prob = 0.0
 
     @property
     def device(self) -> torch.device:
@@ -64,6 +65,7 @@ class WorldModelEnv:
         self.obs_buffer = obs  # [T, C, H, W]
         self.act_buffer = act  # [T-1, act_dim]
         self.ep_len = torch.tensor(0, dtype=torch.long, device=obs.device)
+        self.last_success_prob = self.predict_rew_end(obs[-1])[0]
         
         return self.obs_buffer[-1], {}  # [C, H, W]
 
@@ -87,7 +89,9 @@ class WorldModelEnv:
         predict_obs_time = time.time() - predict_obs_start
         
         predict_rew_start = time.time()
-        rew, end = self.predict_rew_end(next_obs)
+        succeess_prob, end = self.predict_rew_end(next_obs)
+        rew = succeess_prob - self.last_success_prob
+        self.last_success_prob = succeess_prob
         predict_rew_time = time.time() - predict_rew_start
 
         self.ep_len += 1
@@ -115,6 +119,7 @@ class WorldModelEnv:
         info["dead"] = dead.item()
         info["predict_obs_time"] = predict_obs_time
         info["predict_rew_time"] = predict_rew_time
+        info["success_prob"] = succeess_prob.item()
 
         return self.obs_buffer[-1], rew, end, trunc, info
 
