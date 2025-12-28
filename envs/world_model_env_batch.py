@@ -5,10 +5,10 @@ import time
 
 import torch
 from torch import Tensor
-from diffusion import Denoiser, DiffusionSampler, DiffusionSamplerConfig
+from envs.diffusion import Denoiser, DiffusionSampler, DiffusionSamplerConfig
 
 from rl.utils import prepare_one_obs_batch, prepare_inputs_batch
-from utils import tensor_to_image_batch, load_reward_model
+from envs.utils import tensor_to_image_batch, load_reward_model
 from experiments.robot.openvla_utils import get_processor
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
@@ -59,12 +59,13 @@ class WorldModelEnvBatch:
         return self.sampler.denoiser.device
 
     @torch.no_grad()
-    def reset(self, obs: Tensor, act: Tensor, instructions: Optional[List[str]] = None) -> ResetOutput:
+    def reset(self, obs: Tensor, act: Tensor, instructions: Optional[List[str]] = None, initial_step_counts: Optional[Tensor] = None) -> ResetOutput:
         """
         Args:
             obs: [B, T, C, H, W] - observation sequence for each env
             act: [B, T-1, act_dim] - action sequence (one less than obs)
             instructions: Optional list of instructions for each env (if not provided in __init__)
+            initial_step_counts: Optional [B] tensor of initial step counts for each env
         
         Returns:
             (next_obs, info) where next_obs: [B, C, H, W]
@@ -75,7 +76,10 @@ class WorldModelEnvBatch:
         # Store with batch dimension
         self.obs_buffer = obs  # [B, T, C, H, W]
         self.act_buffer = act  # [B, T-1, act_dim]
-        self.ep_len = torch.zeros(B, dtype=torch.long, device=obs.device)  # [B]
+        if initial_step_counts is not None:
+            self.ep_len = initial_step_counts.to(obs.device).long()  # [B]
+        else:
+            self.ep_len = torch.zeros(B, dtype=torch.long, device=obs.device)  # [B]
         
         # Update instructions if provided
         if instructions is not None:
@@ -381,8 +385,12 @@ if __name__ == "__main__":
     
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/agent.yaml")
-    trainer_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/trainer.yaml")
+    current_dir = Path.cwd()
+    print(f"current_dir: {current_dir}")
+    agent_config_path = current_dir / "envs/config/agent.yaml"
+    trainer_config_path = current_dir / "envs/config/trainer.yaml"
+    print(f"agent_config_path: {agent_config_path}")
+    print(f"trainer_config_path: {trainer_config_path}")
     
     denoiser, trainer_cfg, agent_cfg = load_denoiser_from_checkpoint(
         agent_config_path=agent_config_path, 

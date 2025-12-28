@@ -11,10 +11,10 @@ import torch
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
-from diffusion import Denoiser, SimpleBatch
-from world_model_env import WorldModelEnv, WorldModelEnvConfig
-from world_model_env_batch import WorldModelEnvBatch
-from utils import load_reward_model, tensor_to_image
+from envs.diffusion import Denoiser, SimpleBatch
+from envs.world_model_env import WorldModelEnv, WorldModelEnvConfig
+from envs.world_model_env_batch import WorldModelEnvBatch
+from envs.utils import load_reward_model, tensor_to_image
 from experiments.robot.openvla_utils import get_processor
 
 
@@ -80,8 +80,8 @@ def compare_tensors(tensor1: torch.Tensor, tensor2: torch.Tensor, name: str, rto
 def test_single_env_vs_batch():
     """测试单个环境版本和 batch 版本（batch_size=1）的结果是否一致"""
     device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
-    agent_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/agent.yaml")
-    trainer_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/trainer.yaml")
+    agent_config_path = Path("envs/config/agent.yaml")
+    trainer_config_path = Path("envs/config/trainer.yaml")
     trajectory_path = "/cpfs01/jinshiji_workspace/openvla_oft_rl/data/libero_batches_with_next_obs_test/batch_env0_traj2_len85.pt"
     
     seed = 42
@@ -270,8 +270,8 @@ def test_single_env_vs_batch():
 def test_batch_multiple_envs():
     """测试 batch 版本处理多个环境的情况"""
     device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
-    agent_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/agent.yaml")
-    trainer_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/trainer.yaml")
+    agent_config_path = Path("envs/config/agent.yaml")
+    trainer_config_path = Path("envs/config/trainer.yaml")
     
     seed = 42
     batch_size = 3

@@ -94,6 +94,10 @@ BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
 USE_BF16: bool = True
 TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
+CHECKPOINT2 = 'runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt'
+
+EXP_NAME = "OpenVLA_DS_GIPO_DISCRETE_task0_10k_buffer"
+CLIP_MODE = "gipo"
 
 # ================================================================
 # 数据结构 更新经验数据结
@@ -756,8 +760,41 @@ class TrainerActor(TrainerActorCom):
                 ratio = torch.exp(logp - logp_old)
                 adv_unsqueezed = normalized_adv.unsqueeze(dim=-1).unsqueeze(dim=-1)
                 surr1 = ratio * adv_unsqueezed
-                surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
-                policy_loss = -torch.mean(torch.min(surr1, surr2))
+                if CLIP_MODE == "gipo":
+                    eps = 1e-9
+                    sigma = 1.0
+                    r_detach = ratio.clamp_min(eps).detach()
+                    coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
+                    surr_soft = surr1 * coeff
+                    policy_loss = -torch.mean(surr_soft)
+                elif CLIP_MODE == "ppo":
+                    surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
+                    policy_loss = -torch.mean(torch.min(surr1, surr2))
+                elif CLIP_MODE == "sapo":
+                    # τ 的非对称设置：通常 τ_neg > τ_pos（负优势更“硬”一点）
+                    tau_pos = 1.0
+                    tau_neg = 2.0
+                    if tau_pos <= 0 or tau_neg <= 0:
+                        raise ValueError(f"tau_pos/tau_neg must be > 0, got {tau_pos}, {tau_neg}")
+
+                    # 数值稳定：避免 ratio 极端导致 inf（可按需调大/关掉）
+                    ratio_min = 1e-6
+                    ratio_max = 1e6
+                    r = ratio.clamp(ratio_min, ratio_max)
+
+                    tau_pos_t = torch.full_like(adv_unsqueezed, tau_pos)
+                    tau_neg_t = torch.full_like(adv_unsqueezed, tau_neg)
+                    tau = torch.where(adv_unsqueezed > 0, tau_pos_t, tau_neg_t)
+
+                    # gate(r) = (4/τ) * sigmoid( τ*(r-1) )
+                    x = tau * (r - 1.0)
+                    gate = torch.sigmoid(x) * (4.0 / tau)
+
+                    # surrogate = gate * A   （注意：这里不再是 r*A）
+                    surr_sapo = gate * adv_unsqueezed
+                    policy_loss = -torch.mean(surr_sapo)
+                else:
+                    raise ValueError(f"Invalid CLIP_MODE: {CLIP_MODE}")
                 ent = torch.mean(dist.entropy())
                 ent_loss = -ENT_COEF * ent
                 
@@ -808,6 +845,7 @@ def build_openvla_cfg() -> GenerateConfig:
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=BENCHMARK+"_no_noops",
+        checkpoint2=CHECKPOINT2,
     )
     return cfg
 
@@ -817,9 +855,16 @@ def main():
         return
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
-    ray.init(ignore_reinit_error=True, _temp_dir='/dev/shm')
+    object_store_size_gb = 256  # 分配的GB数，根据系统内存调整（建议256-896GB）
+    object_store_memory_bytes = int(object_store_size_gb * 1024 * 1024 * 1024)
+    print(f"正在初始化 Ray，并为对象存储分配 {object_store_size_gb} GB 内存...")
+    ray.init(
+        ignore_reinit_error=True, 
+        _temp_dir='/dev/shm',
+        object_store_memory=object_store_memory_bytes
+    )
 
-    log_dir = f"runs/Libero/{BENCHMARK}/OpenVLA_DS_PPO_DISCRETE_cut_lm_head_{int(time.time())}"
+    log_dir = f"runs/Libero/{BENCHMARK}/{int(time.time())}_{EXP_NAME}"
     writer = SummaryWriter(log_dir)
     stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
     print(f"TensorBoard 日志将保存在: {log_dir}")

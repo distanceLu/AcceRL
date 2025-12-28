@@ -5,10 +5,10 @@ import time
 
 import torch
 from torch import Tensor
-from diffusion import Denoiser, DiffusionSampler, DiffusionSamplerConfig
+from envs.diffusion import Denoiser, DiffusionSampler, DiffusionSamplerConfig
 
 from rl.utils import prepare_one_obs
-from utils import tensor_to_image, load_reward_model
+from envs.utils import tensor_to_image, load_reward_model
 from experiments.robot.openvla_utils import get_processor
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
@@ -211,8 +211,8 @@ if __name__ == "__main__":
     
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/agent.yaml")
-    trainer_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/trainer.yaml")
+    agent_config_path = Path("envs/config/agent.yaml")
+    trainer_config_path = Path("envs/config/trainer.yaml")
     
     denoiser, trainer_cfg, agent_cfg = load_denoiser_from_checkpoint(
         agent_config_path=agent_config_path, 

@@ -9,7 +9,7 @@ import torch
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
-from diffusion import Denoiser, SimpleBatch
+from envs.diffusion import Denoiser, SimpleBatch
 from world_model_env import WorldModelEnv, WorldModelEnvConfig
 from utils import load_reward_model, tensor_to_image
 from experiments.robot.openvla_utils import get_processor
@@ -48,8 +48,8 @@ def load_denoiser_from_checkpoint(
 def main():
     # 配置路径
     device = torch.device("cuda:7")
-    agent_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/agent.yaml")
-    trainer_config_path = Path("/cpfs01/jinshiji_workspace/openvla_oft_rl/envs/config/trainer.yaml")
+    agent_config_path = Path("envs/config/agent.yaml")
+    trainer_config_path = Path("envs/config/trainer.yaml")
     trajectory_path = "/cpfs01/jinshiji_workspace/openvla_oft_rl/data/libero_batches_with_next_obs_test/batch_env0_traj2_len85.pt"
 
     print("=" * 80)

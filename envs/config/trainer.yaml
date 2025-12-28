@@ -1,9 +1,9 @@
 world_model_env:
-  _target_: world_model_env.WorldModelEnvConfig
+  _target_: envs.world_model_env.WorldModelEnvConfig
   horizon: 220
   num_batches_to_preload: 1
   diffusion_sampler:
-    _target_: diffusion.DiffusionSamplerConfig
+    _target_: envs.diffusion.diffusion_sampler.DiffusionSamplerConfig
     num_steps_denoising: 3
     sigma_min: 2e-3
     sigma_max: 5.0
@@ -32,7 +32,7 @@ denoiser:
     eps: 1e-8
   
   sigma_distribution: # log normal distribution for sigma during training
-    _target_: diffusion.SigmaDistributionConfig
+    _target_: envs.diffusion.SigmaDistributionConfig
     loc: -0.4
     scale: 1.2
     sigma_min: 2e-3

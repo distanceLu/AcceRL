@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from .inner_model import InnerModel, InnerModelConfig
-from utils import LossAndLogs
+from ..utils import LossAndLogs
 import sys
 from pathlib import Path
 
