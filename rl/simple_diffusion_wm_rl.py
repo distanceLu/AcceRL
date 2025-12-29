@@ -16,8 +16,8 @@ from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
 from envs.world_model_env_batch import WorldModelEnvBatch, WorldModelEnvConfig
-from envs.utils import load_reward_model
-from envs.diffusion.denoiser import Denoiser
+from envs.utils import load_reward_model, image_to_tensor
+from envs.diffusion.denoiser import load_denoiser_from_checkpoint
 from experiments.robot.openvla_utils import get_processor
 from rl.libero_env import LiberoEnvWrapper
 from rl.actor_critic_model_discrete import ActorCritic
@@ -26,24 +26,24 @@ from experiments.robot.libero.libero_utils import GenerateConfig
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 
 
-def image_to_tensor(image: np.ndarray, device: torch.device) -> torch.Tensor:
-    """
-    将 numpy array 图像转换为 tensor 格式
+# def image_to_tensor(image: np.ndarray, device: torch.device) -> torch.Tensor:
+#     """
+#     将 numpy array 图像转换为 tensor 格式
     
-    Args:
-        image: [H, W, C] uint8 numpy array
-        device: torch device
+#     Args:
+#         image: [H, W, C] uint8 numpy array
+#         device: torch device
     
-    Returns:
-        tensor: [C, H, W] float tensor in [-1, 1] range
-    """
-    # Convert to float and normalize to [0, 1]
-    img = image.astype(np.float32) / 255.0
-    # Convert to [C, H, W]
-    img = np.transpose(img, (2, 0, 1))
-    # Normalize to [-1, 1]
-    img = img * 2.0 - 1.0
-    return torch.from_numpy(img).to(device).float()
+#     Returns:
+#         tensor: [C, H, W] float tensor in [-1, 1] range
+#     """
+#     # Convert to float and normalize to [0, 1]
+#     img = image.astype(np.float32) / 255.0
+#     # Convert to [C, H, W]
+#     img = np.transpose(img, (2, 0, 1))
+#     # Normalize to [-1, 1]
+#     img = img * 2.0 - 1.0
+#     return torch.from_numpy(img).to(device).float()
 
 
 def collect_initial_obs_act_from_libero(
@@ -136,6 +136,8 @@ def collect_initial_obs_act_from_libero(
             # Step environment
             obs_dict, reward, terminated, truncated, info = env.step(action_env)
             step_count += 1
+            # if step_count >= 9:
+            #     truncated = True
             
             # Store observation
             img = obs_dict["full_image"]
@@ -143,7 +145,7 @@ def collect_initial_obs_act_from_libero(
             traj_obs_list.append(obs_tensor)
             
             # Store action (convert to tensor)
-            action_tensor = torch.from_numpy(action_env).to(device).float()
+            action_tensor = torch.from_numpy(action_norm).to(device).float()  # 由于训练denoiser的时候用的是action_norm，需要统一一下，TODO
             traj_act_list.append(action_tensor)
             
             # Check if we have enough observations for conditioning
@@ -209,61 +211,6 @@ def collect_initial_obs_act_from_libero(
     return obs_list, act_list, step_counts, instructions
 
 
-def load_denoiser_from_checkpoint(
-    agent_config_path: Path,
-    trainer_config_path: Path,
-    device: torch.device,
-):
-    """加载 Denoiser 模型"""
-    agent_cfg = OmegaConf.load(agent_config_path)
-    trainer_cfg = OmegaConf.load(trainer_config_path)
-    print(f"agent_cfg: {agent_cfg}")
-    print(f"trainer_cfg: {trainer_cfg}")
-    
-    # # 修复路径
-    # if hasattr(agent_cfg.denoiser, '_target_'):
-    #     target = agent_cfg.denoiser._target_
-    #     if target.startswith('diffusion.') and not target.startswith('envs.diffusion.'):
-    #         agent_cfg.denoiser._target_ = target.replace('diffusion.', 'envs.diffusion.')
-    
-    # if hasattr(agent_cfg.denoiser.inner_model, '_target_'):
-    #     target = agent_cfg.denoiser.inner_model._target_
-    #     if target.startswith('diffusion.') and not target.startswith('envs.diffusion.'):
-    #         agent_cfg.denoiser.inner_model._target_ = target.replace('diffusion.', 'envs.diffusion.')
-    
-    # if hasattr(trainer_cfg.world_model_env.diffusion_sampler, '_target_'):
-    #     target = trainer_cfg.world_model_env.diffusion_sampler._target_
-    #     if target.startswith('diffusion.') and not target.startswith('envs.diffusion.'):
-    #         trainer_cfg.world_model_env.diffusion_sampler._target_ = target.replace('diffusion.', 'envs.diffusion.')
-    
-    # if hasattr(trainer_cfg.denoiser.sigma_distribution, '_target_'):
-    #     target = trainer_cfg.denoiser.sigma_distribution._target_
-    #     if target.startswith('diffusion.') and not target.startswith('envs.diffusion.'):
-    #         trainer_cfg.denoiser.sigma_distribution._target_ = target.replace('diffusion.', 'envs.diffusion.')
-    
-    denoiser_cfg = instantiate(agent_cfg.denoiser)
-    if denoiser_cfg.inner_model.num_actions is None:
-        denoiser_cfg.inner_model.num_actions = 6
-
-    denoiser = Denoiser(denoiser_cfg).to(device)
-    sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
-    denoiser.setup_training(sigma_distribution_cfg)
-    
-    checkpoint = torch.load(agent_cfg.denoiser_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("denoiser_state_dict", checkpoint)
-    
-    act_emb_float_key = "inner_model.act_emb_float.0.weight"
-    if act_emb_float_key in state_dict:
-        act_emb_float_weight = state_dict[act_emb_float_key]
-        act_dim = act_emb_float_weight.shape[1]
-        _ = denoiser.inner_model._get_act_emb_float(act_dim)
-    
-    denoiser.load_state_dict(state_dict, strict=False)
-    denoiser.eval()
-    
-    return denoiser, trainer_cfg, agent_cfg
-
-
 def rollout_with_world_model_batched(
     env_batch: WorldModelEnvBatch,
     actor: ActorCritic,
@@ -319,8 +266,10 @@ def rollout_with_world_model_batched(
     all_val_list = []
     all_end_list = []
     all_trunc_list = []
+    all_mask_list = []
     all_advantages_list = []
     all_returns_list = []
+    all_instructions_list = []
     
     for batch_idx in range(num_batches):
         start_idx = batch_idx * batch_size
@@ -345,18 +294,39 @@ def rollout_with_world_model_batched(
             max_steps=max_steps,
             deterministic=deterministic,
         )
-        print(f"batch_idx: {batch_idx}, reward sum: {batch_result['rew'].sum(dim=1)}")
-        # 收集结果
-        all_obs_list.append(batch_result["obs"])
-        all_act_list.append(batch_result["act"])
-        all_act_tokens_list.append(batch_result["act_tokens"])
-        all_rew_list.append(batch_result["rew"])
-        all_val_list.append(batch_result["val"])
-        all_end_list.append(batch_result["end"])
-        all_trunc_list.append(batch_result["trunc"])
-        all_advantages_list.append(batch_result["advantages"])
-        all_returns_list.append(batch_result["returns"])
+        
+        if batch_result["obs"].shape[0] > 0:
+            print(f"batch_idx: {batch_idx}, reward sum: {batch_result['rew'].sum(dim=1)}")
+            # 收集结果
+            all_obs_list.append(batch_result["obs"])
+            all_act_list.append(batch_result["act_logits"])
+            all_act_tokens_list.append(batch_result["act_tokens"])
+            all_rew_list.append(batch_result["rew"])
+            all_val_list.append(batch_result["val"])
+            all_end_list.append(batch_result["end"])
+            all_trunc_list.append(batch_result["trunc"])
+            all_mask_list.append(batch_result["mask"])
+            all_advantages_list.append(batch_result["advantages"])
+            all_returns_list.append(batch_result["returns"])
+            
+            if "instructions" in batch_result:
+                all_instructions_list.extend(batch_result["instructions"])
     
+    if len(all_obs_list) == 0:
+        return {
+            "obs": torch.zeros(0, 0, *initial_obs.shape[2:], device=device),
+            "act_logits": torch.zeros(0, 0, 8, 1, device=device),
+            "act_tokens": torch.zeros(0, 0, 8, dtype=torch.long, device=device),
+            "rew": torch.zeros(0, 0, device=device),
+            "val": torch.zeros(0, 0, device=device),
+            "end": torch.zeros(0, 0, dtype=torch.long, device=device),
+            "trunc": torch.zeros(0, 0, dtype=torch.long, device=device),
+            "mask": torch.zeros(0, 0, dtype=torch.bool, device=device),
+            "advantages": torch.zeros(0, 0, device=device),
+            "returns": torch.zeros(0, 0, device=device),
+            "instructions": [],
+        }
+
     # 合并所有批次的结果
     # 注意：不同批次的 rollout 长度可能不同，需要处理
     # 找到最大长度
@@ -364,12 +334,13 @@ def rollout_with_world_model_batched(
     max_act_len = max(act.shape[1] for act in all_act_list)
     max_act_tokens_len = max(act_tokens.shape[1] for act_tokens in all_act_tokens_list)
     max_val_len = max(val.shape[1] for val in all_val_list)
+    max_mask_len = max(mask.shape[1] for mask in all_mask_list)
     max_adv_len = max(adv.shape[1] for adv in all_advantages_list)
     max_ret_len = max(ret.shape[1] for ret in all_returns_list)
     
     # 获取形状信息
     _, T_obs, C, H, W = all_obs_list[0].shape
-    _, T_act, num_actions, act_dim = all_act_list[0].shape
+    _, T_act, num_actions, vocab_size = all_act_list[0].shape
     
     # 填充到相同长度并合并
     padded_obs_list = []
@@ -379,10 +350,11 @@ def rollout_with_world_model_batched(
     padded_val_list = []
     padded_end_list = []
     padded_trunc_list = []
+    padded_mask_list = []
     padded_advantages_list = []
     padded_returns_list = []
     
-    for i in range(num_batches):
+    for i in range(len(all_obs_list)):
         obs = all_obs_list[i]  # [B_i, T_i, C, H, W]
         act = all_act_list[i]  # [B_i, T_i, num_actions, act_dim]
         act_tokens = all_act_tokens_list[i]  # [B_i, T_i, num_actions]
@@ -408,17 +380,21 @@ def rollout_with_world_model_batched(
         
         # 填充动作、奖励、结束信号（使用零填充）
         if T_i_act < max_act_len:
-            padding_act = torch.zeros(B_i, max_act_len - T_i_act, num_actions, act_dim, device=device, dtype=act.dtype)
+            padding_act = torch.zeros(B_i, max_act_len - T_i_act, num_actions, vocab_size, device=device, dtype=act.dtype)
+            padding_act_tokens = torch.zeros(B_i, max_act_len - T_i_act, num_actions, device=device, dtype=torch.long)
             padding_rew = torch.zeros(B_i, max_act_len - T_i_act, device=device, dtype=rew.dtype)
+            padding_val = torch.zeros(B_i, max_act_len - T_i_act, device=device, dtype=val.dtype)
             padding_end = torch.zeros(B_i, max_act_len - T_i_act, device=device, dtype=end.dtype)
             padding_trunc = torch.zeros(B_i, max_act_len - T_i_act, device=device, dtype=trunc.dtype)
+            padding_mask = torch.zeros(B_i, max_act_len - T_i_act, device=device, dtype=torch.bool)
 
             act = torch.cat([act, padding_act], dim=1)
             rew = torch.cat([rew, padding_rew], dim=1)
+            val = torch.cat([val, padding_val], dim=1)
             end = torch.cat([end, padding_end], dim=1)
             trunc = torch.cat([trunc, padding_trunc], dim=1)
 
-        # 填充act_tokens、val、advantages、returns（使用零填充）
+        # 填充act_tokens、val、advantages、returns、mask（使用零填充）
         if T_i_act_tokens < max_act_tokens_len:
             padding_act_tokens = torch.zeros(B_i, max_act_tokens_len - T_i_act_tokens, num_actions, device=device, dtype=act_tokens.dtype)
             act_tokens = torch.cat([act_tokens, padding_act_tokens], dim=1)
@@ -435,6 +411,13 @@ def rollout_with_world_model_batched(
             padding_ret = torch.zeros(B_i, max_ret_len - T_i_ret, device=device, dtype=returns.dtype)
             returns = torch.cat([returns, padding_ret], dim=1)
 
+        # Get mask and pad it
+        mask = all_mask_list[i]
+        T_i_mask = mask.shape[1]
+        if T_i_mask < max_mask_len:
+            padding_mask = torch.zeros(B_i, max_mask_len - T_i_mask, device=device, dtype=torch.bool)
+            mask = torch.cat([mask, padding_mask], dim=1)
+
         padded_obs_list.append(obs)
         padded_act_list.append(act)
         padded_act_tokens_list.append(act_tokens)
@@ -442,30 +425,34 @@ def rollout_with_world_model_batched(
         padded_val_list.append(val)
         padded_end_list.append(end)
         padded_trunc_list.append(trunc)
+        padded_mask_list.append(mask)
         padded_advantages_list.append(advantages)
         padded_returns_list.append(returns)
     
     # 合并所有批次
     final_obs = torch.cat(padded_obs_list, dim=0)  # [B, max_obs_len, C, H, W]
-    final_act = torch.cat(padded_act_list, dim=0)  # [B, max_act_len, num_actions, act_dim]
+    final_act = torch.cat(padded_act_list, dim=0)  # [B, max_act_len, num_actions, vocab_size]
     final_act_tokens = torch.cat(padded_act_tokens_list, dim=0)  # [B, max_act_tokens_len, num_actions]
     final_rew = torch.cat(padded_rew_list, dim=0)  # [B, max_act_len]
     final_val = torch.cat(padded_val_list, dim=0)  # [B, max_val_len]
     final_end = torch.cat(padded_end_list, dim=0)  # [B, max_act_len]
     final_trunc = torch.cat(padded_trunc_list, dim=0)  # [B, max_act_len]
+    final_mask = torch.cat(padded_mask_list, dim=0)  # [B, max_mask_len]
     final_advantages = torch.cat(padded_advantages_list, dim=0)  # [B, max_adv_len]
     final_returns = torch.cat(padded_returns_list, dim=0)  # [B, max_ret_len]
 
     return {
         "obs": final_obs,
-        "act": final_act,
+        "act_logits": final_act,
         "act_tokens": final_act_tokens,
         "rew": final_rew,
         "val": final_val,
         "end": final_end,
         "trunc": final_trunc,
+        "mask": final_mask,
         "advantages": final_advantages,
         "returns": final_returns,
+        "instructions": all_instructions_list,
     }
 
 
@@ -507,44 +494,55 @@ def rollout_with_world_model(
     # Filter out trajectories that have already reached horizon
     if initial_step_counts is not None:
         valid_mask = initial_step_counts < horizon
-        if not valid_mask.any():
-            # All trajectories have reached horizon
-            print("Warning: All trajectories have already reached horizon, skipping rollout")
-            empty_data = {
-                "obs": initial_obs,
-                "act": torch.zeros(B, 0, initial_act.shape[-1], device=device),
-                "rew": torch.zeros(B, 0, device=device),
-                "val": torch.zeros(B, 0, device=device),
-                "end": torch.zeros(B, 0, dtype=torch.long, device=device),
-                "advantages": torch.zeros(B, 0, device=device),
-                "returns": torch.zeros(B, 0, device=device),
-            }
-            return empty_data
-
+        
         # Filter valid trajectories
         valid_indices = torch.where(valid_mask)[0]
+        
+        # Keep track of original count for logging
+        original_B = initial_obs.shape[0]
+        
         initial_obs = initial_obs[valid_indices]
         initial_act = initial_act[valid_indices]
         instructions = [instructions[i] for i in valid_indices.cpu().tolist()]
         initial_step_counts = initial_step_counts[valid_indices]
         B = initial_obs.shape[0]
-        print(f"Filtered {len(valid_indices)} valid trajectories out of {len(valid_mask)} (removed {len(valid_mask) - len(valid_indices)} that reached horizon)")
+        
+        if B < original_B:
+            print(f"Filtered {B} valid trajectories out of {original_B} (removed {original_B - B} that reached horizon)")
+
+    if B == 0:
+        return {
+            "obs": torch.zeros(0, 0, *initial_obs.shape[2:], device=device),
+            "act_logits": torch.zeros(0, 0, 8, 1, device=device),
+            "act_tokens": torch.zeros(0, 0, 8, dtype=torch.long, device=device),
+            "rew": torch.zeros(0, 0, device=device),
+            "val": torch.zeros(0, 0, device=device),
+            "end": torch.zeros(0, 0, dtype=torch.long, device=device),
+            "trunc": torch.zeros(0, 0, dtype=torch.long, device=device),
+            "mask": torch.zeros(0, 0, dtype=torch.bool, device=device),
+            "advantages": torch.zeros(0, 0, device=device),
+            "returns": torch.zeros(0, 0, device=device),
+            "instructions": [],
+        }
 
     # Reset environment with initial step counts
     current_obs, _ = env_batch.reset(initial_obs, initial_act, instructions, initial_step_counts)
 
     # Storage for ActorCritic-level steps (every NUM_ACTIONS_CHUNK env steps)
-    obs_list = []  # Observations at the start of each ActorCritic step
-    act_list = []  # Actions (logits) from ActorCritic
-    act_tokens_list = []  # Action tokens actually executed
-    rew_list = []  # Accumulated rewards over NUM_ACTIONS_CHUNK steps
-    val_list = []  # Values from ActorCritic
-    end_list = []  # Whether episode ended in this chunk
-    trunc_list = []  # Whether episode was truncated in this chunk
+    # Fixed shape [B, T_ac, ...] - don't use need_actions slicing to keep B constant
+    obs_list = []  # Observations at the start of each ActorCritic step [B, C, H, W]
+    act_logits_list = []  # Action logits from ActorCritic [B, 8, vocab_size]
+    act_tokens_list = []  # Action tokens actually executed [B, 8]
+    rew_list = []  # Accumulated rewards over NUM_ACTIONS_CHUNK steps [B]
+    val_list = []  # Values from ActorCritic [B]
+    end_list = []  # Whether episode ended in this chunk [B]
+    trunc_list = []  # Whether episode was truncated in this chunk [B]
+    mask_list = []  # Mask indicating which environments are active [B]
 
     # Action queue for each environment (ActorCritic generates 8 actions at once)
     action_queues = [deque() for _ in range(B)]
     active_envs = list(range(B))  # Currently active environments
+    alive_mask = torch.ones(B, dtype=torch.bool, device=device)  # Track alive environments
 
     env_step = 0
     while env_step < max_steps and active_envs:
@@ -578,11 +576,15 @@ def rollout_with_world_model(
             # ActorCritic forward
             inputs_batch = actor.prepare_inputs_batch(inputs_list)
             with torch.no_grad():
-                action_logits, values = actor.forward(inputs_batch)  # [b_s, 8, 7], [b_s]
+                action_logits, values = actor.forward(inputs_batch)  # [b_s, 8, vocab_size], [b_s]
 
-            # Store observation and value at this ActorCritic step
-            obs_list.append(current_obs[need_actions])  # [B_active, C, H, W]
-            val_list.append(values)  # [B_active]
+            # Store observation and value at this ActorCritic step - FIXED SHAPE [B, ...]
+            obs_list.append(current_obs.clone())  # [B, C, H, W] - store for all envs
+            val_list.append(torch.zeros(B, device=device))  # [B] - will fill only active ones
+            val_list[-1][need_actions] = values  # Fill values only for active envs
+
+            act_logits_list.append(torch.zeros(B, *action_logits.shape[1:], device=device))  # [B, 8, vocab_size]
+            act_tokens_list.append(torch.zeros(B, action_logits.shape[1], dtype=torch.long, device=device))  # [B, 8]
 
             # Process actions
             deterministic_flags = [deterministic] * len(inputs_list)
@@ -590,9 +592,9 @@ def rollout_with_world_model(
             # action_token_ids: [B_active, 8] - 实际采样的动作tokens
             # normalized_actions: [B_active, 8, 7]
 
-            # Store action logits and action tokens for PPO
-            act_list.append(action_logits.cpu())  # [B_active, 8, 7]
-            act_tokens_list.append(action_token_ids.cpu())  # [B_active, 8]
+            # Store action logits and tokens for active environments only
+            act_logits_list[-1][need_actions] = action_logits  # [B, 8, vocab_size]
+            act_tokens_list[-1][need_actions] = action_token_ids  # [B, 8]
 
             # Add actions to queues
             for idx, env_idx in enumerate(env_indices):
@@ -618,7 +620,8 @@ def rollout_with_world_model(
                         action_norm = np.array(action_norm)
                     action_env_np = actor.vla._unnormalize_actions(action_norm, actor.cfg.unnorm_key)
                     action_env = torch.from_numpy(action_env_np).to(device).float()
-                    actions_step.append(action_env)
+                    act_norm_torch = torch.from_numpy(action_norm).to(device).float()
+                    actions_step.append(act_norm_torch)  # 由于训练denoiser的时候用的是action_norm，需要统一一下，TODO
                 else:
                     # Use zero action for inactive environments
                     actions_step.append(torch.zeros(ACTION_DIM, device=device))
@@ -641,10 +644,11 @@ def rollout_with_world_model(
                     chunk_truncated[i] = trunc[i]
                     terminated_envs.append(i)
 
-            # Remove terminated environments from active list
+            # Remove terminated environments from active list and update alive_mask
             for env_idx in terminated_envs:
                 if env_idx in active_envs:
                     active_envs.remove(env_idx)
+                    alive_mask[env_idx] = False
 
             current_obs = next_obs
             env_step += 1
@@ -654,9 +658,10 @@ def rollout_with_world_model(
 
         # Store chunk results (only for environments that were active at the start of this chunk)
         if need_actions:  # Only store if we actually took an ActorCritic step
-            rew_list.append(chunk_rewards[need_actions])
-            end_list.append(chunk_ended[need_actions])
-            trunc_list.append(chunk_truncated[need_actions])
+            rew_list.append(chunk_rewards.clone())  # [B] - store for all envs, inactive are 0
+            end_list.append(chunk_ended.clone())    # [B] - store for all envs
+            trunc_list.append(chunk_truncated.clone())  # [B] - store for all envs
+            mask_list.append(alive_mask.clone())  # [B] - mask of active envs
 
         # Check if all environments are done
         if isinstance(info.get('alive', None), (list, np.ndarray)):
@@ -672,12 +677,13 @@ def rollout_with_world_model(
     # Convert lists to tensors
     if obs_list:
         obs_tensor = torch.stack(obs_list, dim=1)  # [B, T_ac, C, H, W] where T_ac is ActorCritic steps
-        act_tensor = torch.stack(act_list, dim=1)  # [B, T_ac, 8, 7] - action logits
+        act_logits_tensor = torch.stack(act_logits_list, dim=1)  # [B, T_ac, 8, vocab_size] - action logits
         act_tokens_tensor = torch.stack(act_tokens_list, dim=1)  # [B, T_ac, 8] - action tokens
         rew_tensor = torch.stack(rew_list, dim=1)  # [B, T_ac]
         val_tensor = torch.stack(val_list, dim=1)  # [B, T_ac]
         end_tensor = torch.stack(end_list, dim=1)  # [B, T_ac]
         trunc_tensor = torch.stack(trunc_list, dim=1)  # [B, T_ac]
+        mask_tensor = torch.stack(mask_list, dim=1)  # [B, T_ac] - valid mask
 
         # Compute GAE
         T_ac = obs_tensor.shape[1]
@@ -699,14 +705,16 @@ def rollout_with_world_model(
 
         return {
             "obs": obs_tensor,  # [B, T_ac, C, H, W]
-            "act": act_tensor,  # [B, T_ac, 8, 7] - action logits
+            "act_logits": act_logits_tensor,  # [B, T_ac, 8, vocab_size] - action logits
             "act_tokens": act_tokens_tensor,  # [B, T_ac, 8] - action tokens executed
             "rew": rew_tensor,  # [B, T_ac]
             "val": val_tensor,  # [B, T_ac]
             "end": end_tensor,  # [B, T_ac]
             "trunc": trunc_tensor,  # [B, T_ac]
+            "mask": mask_tensor,  # [B, T_ac] - valid mask for training
             "advantages": advantages,  # [B, T_ac]
             "returns": returns,  # [B, T_ac]
+            "instructions": instructions,
         }
     else:
         raise ValueError(f"No observations were collected at step {env_step}")
@@ -762,6 +770,7 @@ def ppo_update(
     max_grad_norm: float = 0.5,
     num_epochs: int = 4,
     batch_size: int = 64,
+    gradient_accumulation_steps: int = 1,
 ) -> Dict[str, float]:
     """
     执行PPO更新
@@ -775,21 +784,34 @@ def ppo_update(
         entropy_coef: 熵损失系数
         max_grad_norm: 最大梯度范数
         num_epochs: PPO更新轮数
-        batch_size: 批大小
+        batch_size: mini batch大小
+        gradient_accumulation_steps: 梯度累计步数
 
     Returns:
         训练指标字典
     """
     obs = rollout_data["obs"]  # [B, T_ac, C, H, W]
-    old_action_logits = rollout_data["act"]  # [B, T_ac, 8, 7] - old action logits
+    old_action_logits = rollout_data["act_logits"]  # [B, T_ac, 8, vocab_size] - old action logits
     old_action_tokens = rollout_data["act_tokens"]  # [B, T_ac, 8] - action tokens actually executed
     advantages = rollout_data["advantages"]  # [B, T_ac]
     returns = rollout_data["returns"]  # [B, T_ac]
     old_values = rollout_data["val"]  # [B, T_ac] - old values
+    mask = rollout_data["mask"]  # [B, T_ac] - valid mask
     instructions = rollout_data.get("instructions", [""] * obs.shape[0])
 
     B, T_ac, C, H, W = obs.shape
-    print(obs.shape)
+    print(f"PPO update batch shape: {obs.shape}")
+    
+    if B == 0 or T_ac == 0:
+        print("Skipping PPO update due to empty batch")
+        return {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+            "total_loss": 0.0,
+            "mean_reward": 0.0,
+            "mean_episode_length": 0.0,
+        }
 
     # 确保所有张量在同一个设备上
     device = actor_critic.device
@@ -800,12 +822,16 @@ def ppo_update(
     returns = returns.to(device)
     old_values = old_values.to(device)
 
-    # 展平批次和时间维度
-    obs_flat = obs.reshape(B * T_ac, C, H, W)  # [B*T_ac, C, H, W]
-    advantages_flat = advantages.reshape(B * T_ac)  # [B*T_ac]
-    returns_flat = returns.reshape(B * T_ac)  # [B*T_ac]
-    old_values_flat = old_values.reshape(B * T_ac)  # [B*T_ac]
-    old_action_tokens_flat = old_action_tokens.reshape(B * T_ac, -1)  # [B*T_ac, 8]
+    # 展平批次和时间维度，只保留有效的样本
+    mask_flat = mask.reshape(-1)  # [B*T_ac]
+    valid_indices = torch.where(mask_flat)[0].to(device)  # Only train on valid steps
+
+    obs_flat = obs.reshape(B * T_ac, C, H, W)[valid_indices]  # [N_valid, C, H, W]
+    advantages_flat = advantages.reshape(B * T_ac)[valid_indices]  # [N_valid]
+    returns_flat = returns.reshape(B * T_ac)[valid_indices]  # [N_valid]
+    old_values_flat = old_values.reshape(B * T_ac)[valid_indices]  # [N_valid]
+    old_action_tokens_flat = old_action_tokens.reshape(B * T_ac, -1)[valid_indices]  # [N_valid, 8]
+    old_action_logits_flat = old_action_logits.reshape(B * T_ac, *old_action_logits.shape[2:])[valid_indices]  # [N_valid, 8, vocab_size]
 
     # 标准化优势函数
     advantages_flat = (advantages_flat - advantages_flat.mean()) / (advantages_flat.std() + 1e-8)
@@ -820,22 +846,28 @@ def ppo_update(
     total_value_loss = 0
     total_entropy_loss = 0
     total_loss = 0
-    num_updates = 0
+    num_forward = 0
 
     # PPO更新循环
     for epoch in range(num_epochs):
-        # 随机打乱数据
-        indices = torch.randperm(B * T_ac, device=device)
+        # 清零梯度
+        optimizer.zero_grad()
+
+        # 只对有效样本进行打乱
+        N_valid = len(obs_flat)
+        indices = torch.randperm(N_valid, device=device)
+
         obs_shuffled = obs_flat[indices]
         advantages_shuffled = advantages_flat[indices]
         returns_shuffled = returns_flat[indices]
         old_values_shuffled = old_values_flat[indices]
         old_action_tokens_shuffled = old_action_tokens_flat[indices]
-        old_logits_shuffled = old_action_logits.reshape(B * T_ac, *old_action_logits.shape[2:])[indices]
+        old_logits_shuffled = old_action_logits_flat[indices]
 
-        # 分批处理
-        for start_idx in range(0, B * T_ac, batch_size):
-            end_idx = min(start_idx + batch_size, B * T_ac)
+        # 分批处理（支持梯度累计）
+        accumulation_step = 0
+        for start_idx in range(0, N_valid, batch_size):
+            end_idx = min(start_idx + batch_size, N_valid)
             batch_indices = indices[start_idx:end_idx]
 
             batch_obs = obs_shuffled[start_idx:end_idx]
@@ -844,7 +876,10 @@ def ppo_update(
             batch_old_values = old_values_shuffled[start_idx:end_idx]
             batch_old_action_tokens = old_action_tokens_shuffled[start_idx:end_idx]
             batch_old_logits = old_logits_shuffled[start_idx:end_idx]
-            batch_instructions = [instructions_flat[i] for i in batch_indices.cpu().tolist()]
+
+            # 修正instructions索引：用batch_indices对应的原始位置
+            batch_original_indices = valid_indices[batch_indices]  # 从valid_indices中取原始位置
+            batch_instructions = [instructions_flat[i] for i in batch_original_indices.cpu().tolist()]
 
             # 准备输入
             inputs_list = []
@@ -868,7 +903,7 @@ def ppo_update(
 
             # 前向传播
             action_logits, values = actor_critic.forward(inputs_batch)
-            # action_logits: [batch_size, 8, 7] (NUM_ACTIONS_CHUNK, ACTION_DIM)
+            # action_logits: [batch_size, 8*7, 256] (NUM_ACTIONS_CHUNK * ACTION_DIM)
             # values: [batch_size]
 
             # 计算新旧策略的log概率
@@ -881,49 +916,68 @@ def ppo_update(
             old_log_probs = old_dist.log_prob(batch_old_action_tokens)  # [batch_size, 8]
             new_log_probs = new_dist.log_prob(batch_old_action_tokens)  # [batch_size, 8]
 
-            # PPO策略损失 (sum over action dimensions)
+            # PPO策略损失 
             ratio = torch.exp(new_log_probs - old_log_probs)
             surr1 = ratio * batch_advantages.unsqueeze(-1)  # 广播到action_dim维度
             surr2 = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * batch_advantages.unsqueeze(-1)
-            policy_loss = -torch.min(surr1, surr2).sum(dim=-1).mean()  # 求和后平均
+            policy_loss = -torch.min(surr1, surr2).mean()  # 求和后平均
 
-            # 价值损失 (使用旧价值函数进行监督)
-            value_loss = torch.nn.functional.mse_loss(values, batch_old_values)
+            # 价值损失 (拟合returns，而不是旧value)
+            value_loss = torch.nn.functional.mse_loss(values, batch_returns)
 
-            # 熵损失 (sum over action dimensions)
-            entropy_loss = -new_dist.entropy().sum(dim=-1).mean()  # 求和后平均
+            # 熵损失 
+            entropy_loss = -new_dist.entropy().mean()  # 求和后平均
 
             # 总损失
             loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
 
-            # 梯度更新
-            optimizer.zero_grad()
+            # 梯度累计
+            loss = loss / gradient_accumulation_steps  # 缩放损失
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(actor_critic.parameters(), max_grad_norm)
-            optimizer.step()
+            num_forward += 1
+            accumulation_step += 1
+
+            # 达到累计步数时更新参数，或者这是最后一个batch时也要更新
+            is_last_batch = (start_idx + batch_size >= N_valid)  # Check if this is the last batch in valid samples
+            if accumulation_step % gradient_accumulation_steps == 0 or is_last_batch:
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(actor_critic.parameters(), max_grad_norm)
+                # 参数更新
+                optimizer.step()
+                optimizer.zero_grad()
+                accumulation_step = 0  # 重置计数器
 
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_entropy_loss += entropy_loss.item()
-            total_loss += loss.item()
-            num_updates += 1
+            total_loss += loss.item() * gradient_accumulation_steps  # 恢复原始损失值
 
     # 计算平均指标
-    metrics = {
-        "policy_loss": total_policy_loss / num_updates,
-        "value_loss": total_value_loss / num_updates,
-        "entropy_loss": total_entropy_loss / num_updates,
-        "total_loss": total_loss / num_updates,
-        "mean_reward": rollout_data["rew"].sum(dim=1).mean().item(),
-        "mean_episode_length": T_ac,
-    }
+    if num_forward > 0:
+        metrics = {
+            "policy_loss": total_policy_loss / num_forward,
+            "value_loss": total_value_loss / num_forward,
+            "entropy_loss": total_entropy_loss / num_forward,
+            "total_loss": total_loss / num_forward,
+            "mean_reward": rollout_data["rew"].sum(dim=1).mean().item(),
+            "mean_episode_length": T_ac,
+        }
+    else:
+        metrics = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+            "total_loss": 0.0,
+            "mean_reward": 0.0,
+            "mean_episode_length": 0.0,
+        }
 
     return metrics
 
 
 def main():
     """主函数：执行PPO强化学习训练"""
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
     # 配置路径
     current_dir = Path.cwd()
@@ -936,7 +990,7 @@ def main():
 
     # 训练配置
     num_iterations = 100  # 训练迭代次数
-    num_trajectories_per_iter = 4  # 每次迭代收集的轨迹数
+    num_trajectories_per_iter = 2  # 每次迭代收集的轨迹数
     rollout_max_steps = 8  # 每次rollout的最大步数
     rollout_batch_size = 8  # rollout批大小
 
@@ -944,10 +998,11 @@ def main():
     learning_rate = 3e-4
     clip_ratio = 0.2
     value_coef = 0.5
-    entropy_coef = 0.01
+    entropy_coef = 0.0
     max_grad_norm = 0.5
-    ppo_epochs = 4
+    ppo_epochs = 1
     ppo_batch_size = 8
+    gradient_accumulation_steps = 8
 
     # 设置TensorBoard
     log_dir = current_dir / "runs/simple_diffusion_wm_rl" / f"{int(time.time())}_ppo_training"
@@ -1015,16 +1070,17 @@ def main():
 
     # 训练循环
     print(f"\n开始训练，共 {num_iterations} 次迭代...")
-
+    obs_list = []
     for iteration in range(num_iterations):
         print(f"\n=== 迭代 {iteration + 1}/{num_iterations} ===")
         start_time = time.time()
 
         # 1. 收集初始数据
         print(f"收集 {num_trajectories_per_iter} 条轨迹的初始数据...")
-        obs_list, act_list, step_counts, instructions = collect_initial_obs_act_from_libero(
-            libero_env, actor, num_steps_conditioning, num_trajectories_per_iter, device, deterministic=False
-        )
+        if len(obs_list) == 0:
+            obs_list, act_list, step_counts, instructions = collect_initial_obs_act_from_libero(
+                libero_env, actor, num_steps_conditioning, num_trajectories_per_iter, device, deterministic=False
+            )
 
         if len(obs_list) == 0:
             print("警告：未收集到有效轨迹，跳过此次迭代")
@@ -1064,7 +1120,11 @@ def main():
         # 3. 执行PPO更新 (GAE已经在rollout_data中)
         print("执行PPO更新...")
         rollout_data_for_ppo = rollout_data.copy()
-        rollout_data_for_ppo["instructions"] = instructions
+        # Use instructions returned from rollout (which are filtered and aligned)
+        if "instructions" in rollout_data:
+            rollout_data_for_ppo["instructions"] = rollout_data["instructions"]
+        else:
+            rollout_data_for_ppo["instructions"] = instructions
 
         metrics = ppo_update(
             actor_critic=actor,
@@ -1076,6 +1136,7 @@ def main():
             max_grad_norm=max_grad_norm,
             num_epochs=ppo_epochs,
             batch_size=ppo_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
         )
 
         # 5. 记录指标到TensorBoard

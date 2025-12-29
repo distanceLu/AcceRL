@@ -20,8 +20,19 @@ from torch.optim import AdamW
 import wandb
 from rl.models.reward_model import RewardModel
 from experiments.robot.libero.libero_utils import GenerateConfig
-
+from PIL import Image
 LossAndLogs = Tuple[Tensor, Dict[str, Any]]
+
+
+def image_to_tensor(img, device, image_size=224):
+    img_pil = Image.fromarray(img)
+    img_resized = img_pil.resize((image_size, image_size), Image.BILINEAR)
+    img_array = np.array(img_resized)  # shape: (image_size, image_size, 3), dtype: uint8
+    img_tensor = torch.from_numpy(img_array).to(device).permute(2, 0, 1)  # (3, image_size, image_size)
+    img_float = img_tensor.float() / 255.0  # [0, 1]
+    img_normalized = img_float * 2.0 - 1.0  # [-1, 1]
+    return img_normalized
+
 
 def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
     if tensor.ndim == 4:    #[B, C, H, W]

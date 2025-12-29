@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rl.utils import get_vla, forward_vla
+from rl.utils import get_vla, forward_vla, prepare_inputs_batch
 from experiments.robot.openvla_utils import get_processor
 
 
@@ -108,6 +108,8 @@ class RewardModel(nn.Module):
     def get_norm_stats(self):
         return self.vla.norm_stats[self.cfg.unnorm_key]["proprio"]
 
+    def prepare_inputs_batch(self, inp, max_len=None):
+        return prepare_inputs_batch(self, inp, max_len)
 
 if __name__ == "__main__":
     import json

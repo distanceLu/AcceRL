@@ -12,7 +12,8 @@ from .inner_model import InnerModel, InnerModelConfig
 from ..utils import LossAndLogs
 import sys
 from pathlib import Path
-
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 
 def add_dims(input: Tensor, n: int) -> Tensor:
@@ -196,3 +197,37 @@ class Denoiser(nn.Module):
 
         loss /= (seq_length + 1)
         return loss, {"loss_denoising": loss.detach()}
+
+
+def load_denoiser_from_checkpoint(
+    agent_config_path: Path,
+    trainer_config_path: Path,
+    device: torch.device,
+):
+    """加载 Denoiser 模型"""
+    agent_cfg = OmegaConf.load(agent_config_path)
+    trainer_cfg = OmegaConf.load(trainer_config_path)
+    print(f"agent_cfg: {agent_cfg}")
+    print(f"trainer_cfg: {trainer_cfg}")
+    
+    denoiser_cfg = instantiate(agent_cfg.denoiser)
+    if denoiser_cfg.inner_model.num_actions is None:
+        denoiser_cfg.inner_model.num_actions = 6
+
+    denoiser = Denoiser(denoiser_cfg).to(device)
+    sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
+    denoiser.setup_training(sigma_distribution_cfg)
+    
+    checkpoint = torch.load(agent_cfg.denoiser_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("denoiser_state_dict", checkpoint)
+    
+    act_emb_float_key = "inner_model.act_emb_float.0.weight"
+    if act_emb_float_key in state_dict:
+        act_emb_float_weight = state_dict[act_emb_float_key]
+        act_dim = act_emb_float_weight.shape[1]
+        _ = denoiser.inner_model._get_act_emb_float(act_dim)
+    
+    denoiser.load_state_dict(state_dict, strict=False)
+    denoiser.eval()
+    
+    return denoiser, trainer_cfg, agent_cfg
