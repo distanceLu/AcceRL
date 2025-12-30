@@ -31,7 +31,6 @@ def generate_data(
     image_size: int = 256,
     require_full_window: bool = True,
     pretrained_checkpoint: Optional[str] = None,
-    checkpoint2: Optional[str] = None,
     device: str = "cuda:0",
     use_bf16: bool = True,
     greedy: bool = False,
@@ -82,9 +81,6 @@ def generate_data(
 
     # Policy
     actor = ActorCritic(cfg, torch_dtype)
-    state = torch.load(checkpoint2, map_location=actor.device)['student_state_dict']
-    actor.load_state_dict(state, strict=True)
-    print(f"Actor Critic Model loaded from {checkpoint2}")
     check_unnorm_key(cfg, actor.vla)
     actor.eval()
 
@@ -330,7 +326,6 @@ if __name__ == "__main__":
         image_size=args.image_size,
         require_full_window=args.require_full_window,
         pretrained_checkpoint=args.pretrained_checkpoint,
-        checkpoint2=args.checkpoint2,
         device=args.device,
         use_bf16=args.use_bf16,
         greedy=args.greedy,
