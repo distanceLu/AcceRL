@@ -19,7 +19,6 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 import numpy as np
 from envs.world_model_env_batch import WorldModelEnvConfig
-
 import ray
 import torch
 import torch.distributions
@@ -56,13 +55,13 @@ BENCHMARK = TaskSuite.LIBERO_SPATIAL
 NUM_TRAINER_GPUS = 1
 NUM_INFERENCE_ACTORS = 1
 NUM_ROLLOUT_WORKERS = 20
-NUM_EVAL_WORKERS = 1
+NUM_EVAL_WORKERS = 10
 ROLLOUT_LOCAL_BUF = 64
 INFERENCE_BATCH = 8
 INFERENCE_TIMEOUT_MS = 300
 REPLAY_CAPACITY = 10000
-TRAIN_BATCH_SIZE = 12
-ACCUMULATION_STEPS = 21
+TRAIN_BATCH_SIZE = 32
+ACCUMULATION_STEPS = 8
 TRAIN_ITERS = 30000
 
 # Checkpoint
@@ -90,7 +89,7 @@ POLICY_WARMUP_STEPS = 500
 POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
 
 # 世界模型想象步数
-IMAGINE_HORIZON = 10 
+IMAGINE_HORIZON = 8 
 # 世界模型推理配置
 # 在超参数部分添加
 NUM_STEP_COND = 4  # 或者其他合适的值，用于条件观测步数
@@ -113,7 +112,7 @@ PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+
 CHECKPOINT2 = 'runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt'
 
 CLIP_MODE = "sapo"
-EXP_NAME = f"OpenVLA_DS_{CLIP_MODE}_DISCRETE_task0_10k_buffer"
+EXP_NAME = f"OpenVLA_DS_{CLIP_MODE}_DISCRETE_task0_wm"
 
 # ================================================================
 # 数据结构 更新经验数据结
@@ -141,6 +140,7 @@ class StatsActor:
             "total_env_steps": 0
         })
         self.timings = defaultdict(lambda: deque(maxlen=window_size))
+        self.imagine_rewards = deque(maxlen=window_size)  # 用于记录 imagination rollout 的 imagine_reward
         self.actor_last_active = {}
         self.active_window_seconds = 600
         self.total_samples_produced = 0
@@ -170,6 +170,11 @@ class StatsActor:
     def add_timing_metric(self, metric_name: str, value: float):
         """记录系统性能相关的计时指标"""
         self.timings[metric_name].append(value)
+
+    def add_imagine_reward(self, avg_imagine_reward: float, actor_id: int):
+        """记录 imagination rollout 中的平均 imagine_reward"""
+        self.imagine_rewards.append(avg_imagine_reward)
+        self.actor_last_active[actor_id] = time.time()
 
     def get_active_actor_count(self) -> int:
         current_time = time.time()
@@ -223,7 +228,8 @@ class StatsActor:
             "total_episodes_processed": total_episodes_processed,
             "total_env_steps": total_env_steps,
             "total_samples_produced": self.total_samples_produced,
-            "active_actor_count": self.get_active_actor_count()
+            "active_actor_count": self.get_active_actor_count(),
+            "avg_imagine_reward": np.mean(self.imagine_rewards) if self.imagine_rewards else 0.0
         }
         per_env_stats["_global_eval_"] = {
             "avg_return": np.mean(eval_returns) if eval_returns else 0.0,
@@ -297,9 +303,11 @@ class RolloutWorkerActor(BaseWorkerActor):
         super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
         self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
         self.local_buffer = []
-        self.episodes = []
+        self.episodes = deque(maxlen=100)
         self.num_step_cond = num_step_cond
         self.imagine_horizon = imagine_horizon
+        if self.imagine_horizon % NUM_ACTIONS_CHUNK != 0:
+            Warning(f"imagine_horizon {self.imagine_horizon} is not divisible by NUM_ACTIONS_CHUNK {NUM_ACTIONS_CHUNK}，这会导致不足NUM_ACTIONS_CHUNK的轨迹被丢弃！")
         self.torch_dtype = torch_dtype
         self.reward_infer = reward_infer
         self.denoiser_infer = denoiser_infer
@@ -317,8 +325,11 @@ class RolloutWorkerActor(BaseWorkerActor):
 
     def run(self):
         try:
-            self.get_one_episode()
+            imagine_step = 0
             while True:
+                if imagine_step % 10 == 0:
+                    self.get_one_episode()
+                imagine_step += 1
                 experience = random.choice(self.episodes)
                 obs_list, reward_list, done_list, act_norm_list, task_description = experience
                 obs_list2 = [obs['full_image'] for obs in obs_list]
@@ -330,17 +341,22 @@ class RolloutWorkerActor(BaseWorkerActor):
                     act_list_sub = act_norm_list[i:i+self.num_step_cond-1]
                     obs_tensor = torch.stack(obs_list_sub, dim=0) # [num_step_cond, C, H, W]
                     # Bug fix: 将 numpy 数组列表转换为 tensor 列表后再 stack
-                    act_tensor = torch.stack([torch.from_numpy(a) for a in act_list_sub], dim=0) # [num_step_cond-1, act_dim]
+                    if isinstance(act_list_sub[0], np.ndarray):
+                        act_list_sub = [torch.from_numpy(a.copy()) for a in act_list_sub]
+                    act_tensor = torch.stack(act_list_sub, dim=0) # [num_step_cond-1, act_dim]
                     last_succ_prob = self.predict_rew_end(obs_tensor[-1], task_description)[0]
                     # end = False  # Bug fix: 初始化 end 变量，避免未定义错误
                     for j in range(self.imagine_horizon):
                         inputs_t = self.obs2inp(obs_tensor[-1], task_description)
                         act_norm, action_env, action_token, logits, value = ray.get(self.infer.request.remote(inputs_t, deterministic=False))
+                        if isinstance(act_norm, np.ndarray):
+                            act_norm = torch.from_numpy(act_norm.copy())
+                        act_norm = act_norm.float().to(act_tensor.device)
                         chunk_reward = 0.0
                         for k in range(len(action_env)):
                             # TODO denoiser暂时支持action norm作为输入动作
                             # Bug fix: 使用正确的循环变量 k 而不是 i
-                            single_action = torch.from_numpy(act_norm[k]).to(act_tensor.device)
+                            single_action = act_norm[k]
                             act_tensor = torch.cat([act_tensor, single_action.unsqueeze(0)], dim=0)
                             nxt = self.predict_next_obs(obs_tensor, act_tensor)
                             obs_tensor = torch.roll(obs_tensor, -1, dims=0)
@@ -361,6 +377,10 @@ class RolloutWorkerActor(BaseWorkerActor):
                             inputs_t = self.obs2inp(obs_tensor[-1], task_description)
                             _, _, _, _, bootstrap_val = ray.get(self.infer.request.remote(inputs_t, deterministic=False))
                             self._process_traj(self.local_buffer, bootstrap_val)
+                        # 记录 imagine_reward 平均值
+                        imagine_rewards = [exp[2] for exp in self.local_buffer]
+                        avg_imagine_reward = sum(imagine_rewards) / len(imagine_rewards)
+                        self.stats_actor.add_imagine_reward.remote(avg_imagine_reward, self.wid)
                     self.local_buffer.clear()
         except Exception as e:
             import traceback
@@ -434,7 +454,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.replay.add_batch.remote(batch)
 
     def predict_next_obs(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
-        return ray.get(self.denoiser_infer.request.remote(obs, act))
+        return ray.get(self.denoiser_infer.request.remote(obs.float(), act.float()))
     
     def predict_rew_end(self, next_obs: torch.Tensor, task_description: str) -> Tuple[float, int]:
         """
@@ -654,7 +674,7 @@ class RewardInferenceActor:
             model_path=agent_cfg.reward_model_path,
             device="cuda",
             pretrained_checkpoint=agent_cfg.openvla_path,
-            focal_alpha=agent_cfg.focal_alpha,
+            focal_alpha=agent_cfg.reward_model.focal_alpha,
         )
         self.batch_size = INFERENCE_BATCH
         self.timeout_sec = INFERENCE_TIMEOUT_MS / 1000.0
@@ -733,6 +753,7 @@ class DenoiserInferenceActor:
             diffusion_sampler=sampler_cfg,
         )
         self.sampler = DiffusionSampler(denoiser, env_cfg.diffusion_sampler)
+        self.device = self.sampler.sigmas.device
         self.batch_size = INFERENCE_BATCH
         self.timeout_sec = INFERENCE_TIMEOUT_MS / 1000.0
         self.requests, self.promises = [], []
@@ -778,8 +799,8 @@ class DenoiserInferenceActor:
             for req in requests_to_process:
                 obs_list.append(req[0])
                 act_list.append(req[1])
-            obs_batch = torch.stack(obs_list, dim=0)
-            act_batch = torch.stack(act_list, dim=0)
+            obs_batch = torch.stack(obs_list, dim=0).to(self.device)
+            act_batch = torch.stack(act_list, dim=0).to(self.device)
             t_loop_start = time.time()
             try:
                 with torch.inference_mode():
@@ -1121,7 +1142,7 @@ def main():
         return
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
-    object_store_size_gb = 128  # 分配的GB数，根据系统内存调整（建议256-896GB）
+    object_store_size_gb = 256  # 分配的GB数，根据系统内存调整（建议256-896GB）
     object_store_memory_bytes = int(object_store_size_gb * 1024 * 1024 * 1024)
     print(f"正在初始化 Ray，并为对象存储分配 {object_store_size_gb} GB 内存...")
     ray.init(
@@ -1329,6 +1350,7 @@ def main():
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
+            writer.add_scalar('Rollout/_Global/Average_Imagine_Reward', global_stats.get("avg_imagine_reward", 0.0), global_step)
             writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
             writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
 
