@@ -1,10 +1,12 @@
 import os
+import argparse
 os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
 # 设置临时文件目录，避免磁盘I/O瓶颈
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+# 注意: CUDA_VISIBLE_DEVICES 现在通过命令行参数设置
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -46,73 +48,133 @@ from envs.utils import tensor_to_image, image_to_tensor, load_reward_model
 from pathlib import Path
 
 # ================================================================
-# 0. 超参数与配置
+# 0. 超参数与配置 - 命令行参数解析
 # ================================================================
-# Libero benchmark
-BENCHMARK = TaskSuite.LIBERO_SPATIAL
-
-# 分布式系统参数
-NUM_TRAINER_GPUS = 1
-NUM_INFERENCE_ACTORS = 1
-NUM_ROLLOUT_WORKERS = 20
-NUM_EVAL_WORKERS = 10
-ROLLOUT_LOCAL_BUF = 64
-INFERENCE_BATCH = 8
-INFERENCE_TIMEOUT_MS = 300
-REPLAY_CAPACITY = 10000
-TRAIN_BATCH_SIZE = 32
-ACCUMULATION_STEPS = 8
-TRAIN_ITERS = 30000
-
-# Checkpoint
-CKPT_DIR = f"/cpfs01/liuwei_workspace/models/finetune_rl"
-CKPT_EVERY_STEPS = 2000000   # 每 N 个训练步保存一次
-
-# PPO
-GAMMA = 0.99
-LAMBDA = 0.95
-CLIP_EPS = 0.2
-VF_COEF = 0.5
-ENT_COEF = 0.00
-KL_COEF = 0.1
-
-# 奖励缩放
-REWARD_SCALE = 1.0
-
-# ================================================================
-# 学习率调度参数
-# ================================================================
-VALUE_LR = 1e-4
-POLICY_LR = 1e-5
-VALUE_WARMUP_STEPS = 500
-POLICY_WARMUP_STEPS = 500
-POLICY_TRAIN_START_STEP = 0 # 策略网络从第500个 *更新步* 开始训练
-
-# 世界模型想象步数
-IMAGINE_HORIZON = 8 
-# 世界模型推理配置
-# 在超参数部分添加
-NUM_STEP_COND = 4  # 或者其他合适的值，用于条件观测步数
-NUM_REWARD_INFERENCE_ACTORS = 1
-NUM_DENOISER_INFERENCE_ACTORS = 1
-AGENT_CONFIG_PATH = Path.cwd() / "envs/config/agent.yaml"
-TRAINER_CONFIG_PATH = Path.cwd() / "envs/config/trainer.yaml"
-
-# 日志
-MOVING_AVG_WINDOW = 1000
-LOG_INTERVAL_SECONDS = 10
-
-# 通信组
-BROADCAST_GROUP_NAME = "trainer_to_inference_broadcast"
-
-# OpenVLA 加载配置
-USE_BF16: bool = True
-TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
-PRETRAINED_CHECKPOINT = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
-CHECKPOINT2 = 'runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt'
-
-CLIP_MODE = "sapo"
-EXP_NAME = f"OpenVLA_DS_{CLIP_MODE}_DISCRETE_task0_wm"
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='OpenVLA RL Training with World Model')
+    
+    # 环境变量
+    parser.add_argument('--cuda-visible-devices', type=str, default='1,2',
+                        help='CUDA visible devices (default: 1,2)')
+    
+    # Libero benchmark
+    parser.add_argument('--benchmark', type=str, default='libero_spatial',
+                        choices=['libero_spatial', 'libero_object', 'libero_goal', 'libero_10', 'libero_90'],
+                        help='Libero benchmark suite (default: libero_spatial)')
+    
+    # 分布式系统参数
+    parser.add_argument('--num-trainer-gpus', type=int, default=1,
+                        help='Number of trainer GPUs (default: 1)')
+    parser.add_argument('--num-inference-actors', type=int, default=1,
+                        help='Number of inference actors (default: 1)')
+    parser.add_argument('--num-rollout-workers', type=int, default=20,
+                        help='Number of rollout workers (default: 20)')
+    parser.add_argument('--num-eval-workers', type=int, default=10,
+                        help='Number of evaluation workers (default: 10)')
+    parser.add_argument('--rollout-local-buf', type=int, default=64,
+                        help='Rollout local buffer size (default: 64)')
+    parser.add_argument('--inference-batch', type=int, default=8,
+                        help='Inference batch size (default: 8)')
+    parser.add_argument('--inference-timeout-ms', type=int, default=300,
+                        help='Inference timeout in milliseconds (default: 300)')
+    parser.add_argument('--replay-capacity', type=int, default=10000,
+                        help='Replay buffer capacity (default: 10000)')
+    parser.add_argument('--train-batch-size', type=int, default=32,
+                        help='Training batch size (default: 32)')
+    parser.add_argument('--accumulation-steps', type=int, default=8,
+                        help='Gradient accumulation steps (default: 8)')
+    parser.add_argument('--train-iters', type=int, default=30000,
+                        help='Total training iterations (default: 30000)')
+    
+    # Checkpoint
+    parser.add_argument('--ckpt-dir', type=str, default='/cpfs01/liuwei_workspace/models/finetune_rl',
+                        help='Checkpoint directory (default: /cpfs01/liuwei_workspace/models/finetune_rl)')
+    parser.add_argument('--ckpt-every-steps', type=int, default=2000000,
+                        help='Save checkpoint every N steps (default: 2000000)')
+    
+    # PPO 参数
+    parser.add_argument('--gamma', type=float, default=0.99,
+                        help='PPO discount factor (default: 0.99)')
+    parser.add_argument('--lambda', type=float, default=0.95, dest='lambda_',
+                        help='PPO GAE lambda (default: 0.95)')
+    parser.add_argument('--clip-eps', type=float, default=0.2,
+                        help='PPO clipping epsilon (default: 0.2)')
+    parser.add_argument('--vf-coef', type=float, default=0.5,
+                        help='Value function coefficient (default: 0.5)')
+    parser.add_argument('--ent-coef', type=float, default=0.00,
+                        help='Entropy coefficient (default: 0.00)')
+    parser.add_argument('--kl-coef', type=float, default=0.1,
+                        help='KL divergence coefficient (default: 0.1)')
+    
+    # 奖励缩放
+    parser.add_argument('--reward-scale', type=float, default=1.0,
+                        help='Reward scaling factor (default: 1.0)')
+    
+    # 学习率调度参数
+    parser.add_argument('--value-lr', type=float, default=1e-4,
+                        help='Value network learning rate (default: 1e-4)')
+    parser.add_argument('--policy-lr', type=float, default=1e-5,
+                        help='Policy network learning rate (default: 1e-5)')
+    parser.add_argument('--value-warmup-steps', type=int, default=500,
+                        help='Value network warmup steps (default: 500)')
+    parser.add_argument('--policy-warmup-steps', type=int, default=500,
+                        help='Policy network warmup steps (default: 500)')
+    parser.add_argument('--policy-train-start-step', type=int, default=0,
+                        help='Start training policy network at step N (default: 0)')
+    
+    # 世界模型配置
+    parser.add_argument('--imagine-horizon', type=int, default=8,
+                        help='World model imagination horizon (default: 8)')
+    parser.add_argument('--num-step-cond', type=int, default=4,
+                        help='Number of conditional observation steps (default: 4)')
+    parser.add_argument('--num-reward-inference-actors', type=int, default=1,
+                        help='Number of reward inference actors (default: 1)')
+    parser.add_argument('--num-denoiser-inference-actors', type=int, default=1,
+                        help='Number of denoiser inference actors (default: 1)')
+    parser.add_argument('--agent-config-path', type=str, default='envs/config/agent.yaml',
+                        help='Agent config path (default: envs/config/agent.yaml)')
+    parser.add_argument('--trainer-config-path', type=str, default='envs/config/trainer.yaml',
+                        help='Trainer config path (default: envs/config/trainer.yaml)')
+    
+    # 日志
+    parser.add_argument('--moving-avg-window', type=int, default=1000,
+                        help='Moving average window size (default: 1000)')
+    parser.add_argument('--log-interval-seconds', type=int, default=10,
+                        help='Log interval in seconds (default: 10)')
+    
+    # 通信组
+    parser.add_argument('--broadcast-group-name', type=str, default='trainer_to_inference_broadcast',
+                        help='Broadcast group name (default: trainer_to_inference_broadcast)')
+    
+    # OpenVLA 加载配置
+    parser.add_argument('--use-bf16', action='store_true', default=True,
+                        help='Use bfloat16 (default: True)')
+    parser.add_argument('--no-bf16', action='store_false', dest='use_bf16',
+                        help='Disable bfloat16')
+    parser.add_argument('--pretrained-checkpoint', type=str,
+                        default='/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt',
+                        help='Pretrained checkpoint path')
+    parser.add_argument('--checkpoint2', type=str,
+                        default='runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt',
+                        help='Second checkpoint path')
+    
+    parser.add_argument('--clip-mode', type=str, default='sapo',
+                        choices=['ppo', 'sapo', 'clippo'],
+                        help='Clipping mode for PPO (default: sapo)')
+    parser.add_argument('--exp-name', type=str, default=None,
+                        help='Experiment name (default: auto-generated based on clip-mode)')
+    
+    args = parser.parse_args()
+    
+    # 设置 CUDA_VISIBLE_DEVICES 环境变量
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+    
+    # 如果没有提供 exp_name，自动生成
+    if args.exp_name is None:
+        args.exp_name = f"OpenVLA_DS_{args.clip_mode}_DISCRETE_task0_wm"
+    
+    return args
 
 # ================================================================
 # 数据结构 更新经验数据结
@@ -130,7 +192,7 @@ class Experience:
 # ================================================================
 @ray.remote
 class StatsActor:
-    def __init__(self, window_size=MOVING_AVG_WINDOW):
+    def __init__(self, window_size):
         self.stats = defaultdict(lambda: {
             "episode_returns": deque(maxlen=window_size),
             "step_times": deque(maxlen=window_size),
@@ -249,7 +311,7 @@ class StatsActor:
 # ================================================================
 @ray.remote
 class ReplayBufferActor:
-    def __init__(self, capacity=REPLAY_CAPACITY):
+    def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
 
     def add_batch(self, batch: List[Experience]):
@@ -270,7 +332,7 @@ class ReplayBufferActor:
 
 class BaseWorkerActor:
     """rollout 和 eval worker 的共享逻辑。"""
-    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
+    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name):
         self.infer = infer
         self.replay = replay
         self.stats_actor = stats_actor
@@ -299,7 +361,7 @@ class BaseWorkerActor:
 
 @ray.remote
 class RolloutWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, num_step_cond, imagine_horizon, torch_dtype, reward_infer, denoiser_infer):
+    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, num_step_cond, imagine_horizon, torch_dtype, reward_infer, denoiser_infer, reward_scale, gamma, lambda_):
         super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
         self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
         self.local_buffer = []
@@ -311,6 +373,9 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.torch_dtype = torch_dtype
         self.reward_infer = reward_infer
         self.denoiser_infer = denoiser_infer
+        self.reward_scale = reward_scale
+        self.gamma = gamma
+        self.lambda_ = lambda_
 
     def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
         failure_counts = np.array([sum(history) for history in self.env_outcome])
@@ -365,7 +430,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                             succ_prob, end = self.predict_rew_end(nxt, task_description)
                             rew = succ_prob - last_succ_prob
                             last_succ_prob = succ_prob
-                            chunk_reward += rew * REWARD_SCALE
+                            chunk_reward += rew * self.reward_scale
                             if end: 
                                 break  # TODO 没有考虑truncated
                         self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
@@ -405,7 +470,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                 done_list.append(term or trunc)
                 action_norm_list.append(act_norm[i])
                 reward_sum += r
-                chunk_reward += r * REWARD_SCALE
+                chunk_reward += r * self.reward_scale
                 step_count_total += 1
                 if term or trunc: done = True; break
             # self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
@@ -433,8 +498,8 @@ class RolloutWorkerActor(BaseWorkerActor):
         for i in reversed(range(len(traj_segment))):
             _, _, r, _, v = traj_segment[i]
             nv = bootstrap_val if i == len(traj_segment) - 1 else traj_segment[i+1][4]
-            delta = r + GAMMA * nv - v
-            gae = delta + GAMMA * LAMBDA * gae
+            delta = r + self.gamma * nv - v
+            gae = delta + self.gamma * self.lambda_ * gae
             advs.append(gae)
             rets.append(gae + v)
         advs.reverse(); rets.reverse()
@@ -495,8 +560,9 @@ class RolloutWorkerActor(BaseWorkerActor):
 
 @ray.remote
 class EvaluationWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name=BENCHMARK):
+    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name, torch_dtype):
         super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
+        self.torch_dtype = torch_dtype
         print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
 
     def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
@@ -514,7 +580,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
             while True:
                 reward_sum, time_start, step_count_total, done = 0.0, time.time(), 0, False
                 while not done:
-                    inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, TORCH_DTYPE)
+                    inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
                     _, action_env, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
                     for i in range(len(action_env)):
                         single_action = action_env[i]
@@ -542,26 +608,26 @@ class EvaluationWorkerActor(BaseWorkerActor):
 # ================================================================
 @ray.remote(num_gpus=0.3)
 class InferenceActor(InferenceActorCom):
-    def __init__(self, actor_id, cfg, stats_actor):
+    def __init__(self, actor_id, cfg, stats_actor, torch_dtype, inference_batch, inference_timeout_ms):
         super().__init__()
         self.actor_id = actor_id
         print(f"InferenceActor {actor_id}: 正在加载 OpenVLA ActorCritic...")
-        self.model = ActorCritic(cfg, torch_dtype=TORCH_DTYPE)
+        self.model = ActorCritic(cfg, torch_dtype=torch_dtype)
         self.model.cuda()
         self.model.eval()
         self.processor = self.model.processor
         self.cfg = cfg
         self.stats_actor = stats_actor
 
-        self.batch_size = INFERENCE_BATCH
-        self.timeout_sec = INFERENCE_TIMEOUT_MS / 1000.0
+        self.batch_size = inference_batch
+        self.timeout_sec = inference_timeout_ms / 1000.0
         self.requests, self.promises = [], []
         self.last_process_time = time.time()
 
         loop = asyncio.get_event_loop()
         self._bg_task = loop.create_task(self._loop())
         self._bg_task.add_done_callback(self._on_bg_task_done)
-        print(f"InferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {INFERENCE_TIMEOUT_MS}ms)")
+        print(f"InferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {inference_timeout_ms}ms)")
 
     def get_model_keys(self):
         if self.model is None:
@@ -665,7 +731,7 @@ class InferenceActor(InferenceActorCom):
 
 @ray.remote(num_gpus=0.3)
 class RewardInferenceActor:
-    def __init__(self, actor_id, stats_actor, agent_config_path):
+    def __init__(self, actor_id, stats_actor, agent_config_path, inference_batch, inference_timeout_ms):
         super().__init__()
         self.actor_id = actor_id
         self.stats_actor = stats_actor
@@ -676,15 +742,15 @@ class RewardInferenceActor:
             pretrained_checkpoint=agent_cfg.openvla_path,
             focal_alpha=agent_cfg.reward_model.focal_alpha,
         )
-        self.batch_size = INFERENCE_BATCH
-        self.timeout_sec = INFERENCE_TIMEOUT_MS / 1000.0
+        self.batch_size = inference_batch
+        self.timeout_sec = inference_timeout_ms / 1000.0
         self.requests, self.promises = [], []
         self.last_process_time = time.time()
 
         loop = asyncio.get_event_loop()
         self._bg_task = loop.create_task(self._loop())
         self._bg_task.add_done_callback(self._on_bg_task_done)
-        print(f"RewardInferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {INFERENCE_TIMEOUT_MS}ms)")
+        print(f"RewardInferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {inference_timeout_ms}ms)")
 
     def _on_bg_task_done(self, task: asyncio.Task):
         try:
@@ -738,7 +804,7 @@ class RewardInferenceActor:
 
 @ray.remote(num_gpus=0.3)
 class DenoiserInferenceActor:
-    def __init__(self, actor_id, stats_actor, agent_config_path, trainer_config_path):
+    def __init__(self, actor_id, stats_actor, agent_config_path, trainer_config_path, inference_batch, inference_timeout_ms):
         super().__init__()
         self.actor_id = actor_id
         self.stats_actor = stats_actor
@@ -754,15 +820,15 @@ class DenoiserInferenceActor:
         )
         self.sampler = DiffusionSampler(denoiser, env_cfg.diffusion_sampler)
         self.device = self.sampler.sigmas.device
-        self.batch_size = INFERENCE_BATCH
-        self.timeout_sec = INFERENCE_TIMEOUT_MS / 1000.0
+        self.batch_size = inference_batch
+        self.timeout_sec = inference_timeout_ms / 1000.0
         self.requests, self.promises = [], []
         self.last_process_time = time.time()
 
         loop = asyncio.get_event_loop()
         self._bg_task = loop.create_task(self._loop())
         self._bg_task.add_done_callback(self._on_bg_task_done)
-        print(f"DenoiserInferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {INFERENCE_TIMEOUT_MS}ms)")
+        print(f"DenoiserInferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {inference_timeout_ms}ms)")
 
     def _on_bg_task_done(self, task: asyncio.Task):
         try:
@@ -825,7 +891,10 @@ class DenoiserInferenceActor:
 # ================================================================
 @ray.remote(num_gpus=1)
 class TrainerActor(TrainerActorCom):
-    def __init__(self, rank, world_size, replay_buffer, cfg):
+    def __init__(self, rank, world_size, replay_buffer, cfg, train_batch_size, accumulation_steps, 
+                 use_bf16, torch_dtype, policy_lr, value_lr, gamma, lambda_, clip_eps, vf_coef, 
+                 ent_coef, kl_coef, reward_scale, value_warmup_steps, policy_warmup_steps, 
+                 policy_train_start_step, train_iters, clip_mode):
         super().__init__()
         self.rank = rank
         self.world_size = world_size
@@ -837,7 +906,28 @@ class TrainerActor(TrainerActorCom):
         self.data_dtype = None
         self.next_ready_batch: Optional[Tuple] = None
         self.data_fetching_task = None
-        self.super_batch_size = TRAIN_BATCH_SIZE * ACCUMULATION_STEPS
+        
+        # 存储训练参数
+        self.train_batch_size = train_batch_size
+        self.accumulation_steps = accumulation_steps
+        self.super_batch_size = train_batch_size * accumulation_steps
+        self.use_bf16 = use_bf16
+        self.torch_dtype = torch_dtype
+        self.policy_lr = policy_lr
+        self.value_lr = value_lr
+        self.gamma = gamma
+        self.lambda_ = lambda_
+        self.clip_eps = clip_eps
+        self.vf_coef = vf_coef
+        self.ent_coef = ent_coef
+        self.kl_coef = kl_coef
+        self.reward_scale = reward_scale
+        self.value_warmup_steps = value_warmup_steps
+        self.policy_warmup_steps = policy_warmup_steps
+        self.policy_train_start_step = policy_train_start_step
+        self.train_iters = train_iters
+        self.clip_mode = clip_mode
+        
         self.global_step = 0
 
         print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()}")
@@ -863,21 +953,21 @@ class TrainerActor(TrainerActorCom):
         deepspeed.init_distributed(dist_backend="nccl")
 
         print(f"Trainer {self.rank}: 正在加载 OpenVLA ActorCritic...")
-        model = ActorCritic(self.cfg, torch_dtype=TORCH_DTYPE)
+        model = ActorCritic(self.cfg, torch_dtype=self.torch_dtype)
         self.base_model = model
 
         # 参数分组（与之前代码一致）
         param_groups = self.base_model.get_parameter_groups()
         optimizer_params = [
-            {"params": pg["params"], "name": pg["name"], "lr": POLICY_LR if pg["name"] == "policy" else VALUE_LR}
+            {"params": pg["params"], "name": pg["name"], "lr": self.policy_lr if pg["name"] == "policy" else self.value_lr}
             for pg in param_groups
         ]
         
         ds_config = {
-            "train_micro_batch_size_per_gpu": TRAIN_BATCH_SIZE,
-            "gradient_accumulation_steps": ACCUMULATION_STEPS,
+            "train_micro_batch_size_per_gpu": self.train_batch_size,
+            "gradient_accumulation_steps": self.accumulation_steps,
             "optimizer": {"type": "AdamW", "params": {}},
-            "bf16": {"enabled": USE_BF16},
+            "bf16": {"enabled": self.use_bf16},
             "zero_optimization": {
                 "stage": 2, "allgather_partitions": True, "allgather_bucket_size": 5e8,
                 "reduce_scatter": True, "reduce_bucket_size": 5e8, "overlap_comm": True,
@@ -964,8 +1054,8 @@ class TrainerActor(TrainerActorCom):
             print(f"Trainer {self.rank}: 初始数据已收到，开始第一个训练周期。")
 
         current_lrs = {}
-        value_lr = self._get_current_lr(self.global_step, VALUE_LR, VALUE_WARMUP_STEPS, TRAIN_ITERS)
-        policy_lr = self._get_current_lr(self.global_step, POLICY_LR, POLICY_WARMUP_STEPS, TRAIN_ITERS, start_step=POLICY_TRAIN_START_STEP)
+        value_lr = self._get_current_lr(self.global_step, self.value_lr, self.value_warmup_steps, self.train_iters)
+        policy_lr = self._get_current_lr(self.global_step, self.policy_lr, self.policy_warmup_steps, self.train_iters, start_step=self.policy_train_start_step)
         
         for param_group in self.optimizer.param_groups:
             if param_group['name'] == 'value': param_group['lr'] = value_lr; current_lrs['value'] = value_lr
@@ -1000,11 +1090,11 @@ class TrainerActor(TrainerActorCom):
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses, epoch_kl_losses = [], [], [], [], []
         epoch_ent, epoch_kl_divs = [], []   
         
-        num_updates_in_epoch = self.super_batch_size // TRAIN_BATCH_SIZE
+        num_updates_in_epoch = self.super_batch_size // self.train_batch_size
         t_policy_train_start = time.time()
         
         for i in range(num_updates_in_epoch):
-            start = i * TRAIN_BATCH_SIZE; end = start + TRAIN_BATCH_SIZE
+            start = i * self.train_batch_size; end = start + self.train_batch_size
             mini_inputs = {k: v[start:end] for k, v in inputs_batch.items()}
             
             mini_act_token = act_token_t[start:end]
@@ -1023,9 +1113,9 @@ class TrainerActor(TrainerActorCom):
             )
 
             # 价值损失 (不变)
-            value_loss = VF_COEF * torch.mean((value - mini_v_targ) ** 2)
+            value_loss = self.vf_coef * torch.mean((value - mini_v_targ) ** 2)
             
-            if self.global_step < POLICY_TRAIN_START_STEP:
+            if self.global_step < self.policy_train_start_step:
                 loss = value_loss
                 policy_loss = torch.tensor(0.0, device=loss.device)
                 ent_loss = torch.tensor(0.0, device=loss.device)
@@ -1043,21 +1133,21 @@ class TrainerActor(TrainerActorCom):
 
                 kl_div_tensor = kl.kl_divergence(dist_old, dist)
                 kl_div = torch.mean(kl_div_tensor).item() # 作为指标
-                kl_loss = KL_COEF * torch.mean(kl_div_tensor) # 作为损失
+                kl_loss = self.kl_coef * torch.mean(kl_div_tensor) # 作为损失
                 ratio = torch.exp(logp - logp_old)
                 adv_unsqueezed = normalized_adv.unsqueeze(dim=-1).unsqueeze(dim=-1)
                 surr1 = ratio * adv_unsqueezed
-                if CLIP_MODE == "gipo":
+                if self.clip_mode == "gipo":
                     eps = 1e-9
                     sigma = 1.0
                     r_detach = ratio.clamp_min(eps).detach()
                     coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
                     surr_soft = surr1 * coeff
                     policy_loss = -torch.mean(surr_soft)
-                elif CLIP_MODE == "ppo":
-                    surr2 = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * adv_unsqueezed
+                elif self.clip_mode == "ppo":
+                    surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * adv_unsqueezed
                     policy_loss = -torch.mean(torch.min(surr1, surr2))
-                elif CLIP_MODE == "sapo":
+                elif self.clip_mode == "sapo":
                     # τ 的非对称设置：通常 τ_neg > τ_pos（负优势更“硬”一点）
                     tau_pos = 1.0
                     tau_neg = 2.0
@@ -1081,9 +1171,9 @@ class TrainerActor(TrainerActorCom):
                     surr_sapo = gate * adv_unsqueezed
                     policy_loss = -torch.mean(surr_sapo)
                 else:
-                    raise ValueError(f"Invalid CLIP_MODE: {CLIP_MODE}")
+                    raise ValueError(f"Invalid CLIP_MODE: {self.clip_mode}")
                 ent = torch.mean(dist.entropy())
-                ent_loss = -ENT_COEF * ent
+                ent_loss = -self.ent_coef * ent
                 
                 loss = policy_loss + value_loss + ent_loss + kl_loss
 
@@ -1118,9 +1208,14 @@ class TrainerActor(TrainerActorCom):
 # ================================================================
 # 5. 主逻辑
 # ================================================================
-def build_openvla_cfg() -> GenerateConfig:
+def build_openvla_cfg(args) -> GenerateConfig:
+    """
+    构建 OpenVLA 配置
+    Args:
+        args: 解析后的命令行参数
+    """
     cfg = GenerateConfig(
-        pretrained_checkpoint=PRETRAINED_CHECKPOINT,
+        pretrained_checkpoint=args.pretrained_checkpoint,
         use_l1_regression=False, # Note: ActorCritic in discrete model doesn't use this
         use_diffusion=False,
         use_film=False,
@@ -1131,14 +1226,25 @@ def build_openvla_cfg() -> GenerateConfig:
         load_in_4bit=False,
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
-        unnorm_key=BENCHMARK+"_no_noops",
-        checkpoint2=CHECKPOINT2,
+        unnorm_key=args.benchmark+"_no_noops",
+        checkpoint2=args.checkpoint2,
     )
     return cfg
 
-def main():
-    if not os.path.exists(PRETRAINED_CHECKPOINT):
-        print(f"错误: OpenVLA checkpoint 路径 '{PRETRAINED_CHECKPOINT}' 不存在。请更新 PRETRAINED_CHECKPOINT。")
+def main(args):
+    """
+    主函数，接受命令行参数
+    Args:
+        args: 解析后的命令行参数
+    """
+    # 将 benchmark 字符串转换为 TaskSuite 枚举
+    benchmark = args.benchmark
+    torch_dtype = torch.bfloat16 if args.use_bf16 else torch.float32
+    agent_config_path = Path.cwd() / args.agent_config_path
+    trainer_config_path = Path.cwd() / args.trainer_config_path
+    
+    if not os.path.exists(args.pretrained_checkpoint):
+        print(f"错误: OpenVLA checkpoint 路径 '{args.pretrained_checkpoint}' 不存在。请更新 PRETRAINED_CHECKPOINT。")
         return
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
@@ -1151,56 +1257,72 @@ def main():
         object_store_memory=object_store_memory_bytes
     )
     print(f"Ray 初始化完成，对象存储分配 {object_store_size_gb} GB 内存。")
-    log_dir = f"runs/Libero/{BENCHMARK}/{int(time.time())}_{EXP_NAME}"
+    log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
     writer = SummaryWriter(log_dir)
-    stats_actor = StatsActor.remote(window_size=MOVING_AVG_WINDOW)
+    stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
-    cfg = build_openvla_cfg()
+    cfg = build_openvla_cfg(args)
 
     print("--- 步骤 1: 创建 Actors ---")
-    replay_buffers = [ReplayBufferActor.remote(capacity=REPLAY_CAPACITY) for _ in range(NUM_TRAINER_GPUS)]
+    replay_buffers = [ReplayBufferActor.remote(capacity=args.replay_capacity) for _ in range(args.num_trainer_gpus)]
     trainer_group = [
-        TrainerActor.remote(rank=i, world_size=NUM_TRAINER_GPUS, replay_buffer=replay_buffers[i], cfg=cfg)
-        for i in range(NUM_TRAINER_GPUS)
+        TrainerActor.remote(
+            rank=i, world_size=args.num_trainer_gpus, replay_buffer=replay_buffers[i], cfg=cfg,
+            train_batch_size=args.train_batch_size, accumulation_steps=args.accumulation_steps,
+            use_bf16=args.use_bf16, torch_dtype=torch_dtype, policy_lr=args.policy_lr, value_lr=args.value_lr,
+            gamma=args.gamma, lambda_=args.lambda_, clip_eps=args.clip_eps, vf_coef=args.vf_coef,
+            ent_coef=args.ent_coef, kl_coef=args.kl_coef, reward_scale=args.reward_scale,
+            value_warmup_steps=args.value_warmup_steps, policy_warmup_steps=args.policy_warmup_steps,
+            policy_train_start_step=args.policy_train_start_step, train_iters=args.train_iters,
+            clip_mode=args.clip_mode
+        )
+        for i in range(args.num_trainer_gpus)
     ]
-    inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg, stats_actor=stats_actor) for i in range(NUM_INFERENCE_ACTORS)]
+    inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg, stats_actor=stats_actor, torch_dtype=torch_dtype, inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms) for i in range(args.num_inference_actors)]
     reward_inference_pool = [
         RewardInferenceActor.remote(
             actor_id=i, 
             stats_actor=stats_actor, 
-            agent_config_path=AGENT_CONFIG_PATH
-        ) for i in range(NUM_REWARD_INFERENCE_ACTORS)
+            agent_config_path=agent_config_path,
+            inference_batch=args.inference_batch,
+            inference_timeout_ms=args.inference_timeout_ms
+        ) for i in range(args.num_reward_inference_actors)
     ]
     denoiser_inference_pool = [
         DenoiserInferenceActor.remote(
             actor_id=i,
             stats_actor=stats_actor,
-            agent_config_path=AGENT_CONFIG_PATH,
-            trainer_config_path=TRAINER_CONFIG_PATH
-        ) for i in range(NUM_DENOISER_INFERENCE_ACTORS)
+            agent_config_path=agent_config_path,
+            trainer_config_path=trainer_config_path,
+            inference_batch=args.inference_batch,
+            inference_timeout_ms=args.inference_timeout_ms
+        ) for i in range(args.num_denoiser_inference_actors)
     ]
     rollout_workers = [
         RolloutWorkerActor.remote(
-            inference_pool[i % NUM_INFERENCE_ACTORS],
-            replay_buffers[i % NUM_TRAINER_GPUS], 
+            inference_pool[i % args.num_inference_actors],
+            replay_buffers[i % args.num_trainer_gpus], 
             i, 
             stats_actor, 
             cfg,
-            BENCHMARK,                    # benchmark_name
-            NUM_STEP_COND,               # num_step_cond
-            IMAGINE_HORIZON,            # imagine_horizon
-            TORCH_DTYPE,                # torch_dtype
-            reward_inference_pool[i % NUM_REWARD_INFERENCE_ACTORS],    # reward_infer
-            denoiser_inference_pool[i % NUM_DENOISER_INFERENCE_ACTORS]  # denoiser_infer
-        ) for i in range(NUM_ROLLOUT_WORKERS)
+            benchmark,                    # benchmark_name
+            args.num_step_cond,               # num_step_cond
+            args.imagine_horizon,            # imagine_horizon
+            torch_dtype,                # torch_dtype
+            reward_inference_pool[i % args.num_reward_inference_actors],    # reward_infer
+            denoiser_inference_pool[i % args.num_denoiser_inference_actors],  # denoiser_infer
+            args.reward_scale,              # reward_scale
+            args.gamma,                     # gamma
+            args.lambda_                    # lambda_
+        ) for i in range(args.num_rollout_workers)
     ]
     eval_workers = [
         EvaluationWorkerActor.remote(
-            inference_pool[i % NUM_INFERENCE_ACTORS], f"eval_{i}", stats_actor, cfg
-        ) for i in range(NUM_EVAL_WORKERS)
+            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, benchmark, torch_dtype
+        ) for i in range(args.num_eval_workers)
     ]
-    print(f"已创建 {NUM_ROLLOUT_WORKERS} 个 Rollout workers 和 {NUM_EVAL_WORKERS} 个 Evaluation workers。")
+    print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")
 
     print("\n--- 步骤 2: 建立独立的 DeepSpeed 训练组 ---")
     # zzq 1125 通信组，使用find_free_port
@@ -1214,14 +1336,14 @@ def main():
     ray.get(train_setup_tasks)
     print("DeepSpeed 训练组建立完成。")
 
-    print(f"\n--- 步骤 3: 建立共享广播组 ({BROADCAST_GROUP_NAME}) ---")
+    print(f"\n--- 步骤 3: 建立共享广播组 ({args.broadcast_group_name}) ---")
     broadcast_participants = [trainer_group[0]] + inference_pool
     broadcast_group_world_size = len(broadcast_participants)
     broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
     broadcast_setup_tasks = [
         actor.setup_broadcast_group.remote(
             master_addr=broadcast_master_addr, master_port=broadcast_group_port,
-            group_name=BROADCAST_GROUP_NAME, group_world_size=broadcast_group_world_size,
+            group_name=args.broadcast_group_name, group_world_size=broadcast_group_world_size,
             my_rank_in_group=rank) for rank, actor in enumerate(broadcast_participants)
     ]
     ray.get(broadcast_setup_tasks)
@@ -1247,8 +1369,8 @@ def main():
     ray.get(forward_test_tasks)
     print("推理器前向测试完成 (广播前)。")
     
-    broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
-    receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
+    broadcast_task = trainer_group[0].broadcast_weights.remote(args.broadcast_group_name)
+    receive_tasks = [inf.receive_and_update_weights.remote(args.broadcast_group_name) for inf in inference_pool]
     ray.get([broadcast_task] + receive_tasks)
     print("初始权重已广播到所有推理器。")
 
@@ -1261,8 +1383,8 @@ def main():
     for w in eval_workers: w.run.remote()
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
-    min_buffer_size_for_start = TRAIN_BATCH_SIZE * ACCUMULATION_STEPS
-    assert min_buffer_size_for_start < REPLAY_CAPACITY, "初始填充量必须小于回放池总容量"
+    min_buffer_size_for_start = args.train_batch_size * args.accumulation_steps
+    assert min_buffer_size_for_start < args.replay_capacity, "初始填充量必须小于回放池总容量"
     while not all(size >= min_buffer_size_for_start for size in ray.get([rb.size.remote() for rb in replay_buffers])):
         sizes = ray.get([rb.size.remote() for rb in replay_buffers])
         print(f"等待所有经验池填充初始数据 (目标: {min_buffer_size_for_start})... (当前大小: {sizes})")
@@ -1274,7 +1396,7 @@ def main():
     last_log_time = time.time()
     last_log_global_step = 0
     global_step = 0
-    while global_step < TRAIN_ITERS:
+    while global_step < args.train_iters:
         t_train_start = time.time()
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
@@ -1282,16 +1404,16 @@ def main():
         train_time = time.time() - t_train_start
 
         t_sync_start = time.time()
-        broadcast_task = trainer_group[0].broadcast_weights.remote(BROADCAST_GROUP_NAME)
-        receive_tasks = [inf.receive_and_update_weights.remote(BROADCAST_GROUP_NAME) for inf in inference_pool]
+        broadcast_task = trainer_group[0].broadcast_weights.remote(args.broadcast_group_name)
+        receive_tasks = [inf.receive_and_update_weights.remote(args.broadcast_group_name) for inf in inference_pool]
         ray.get([broadcast_task] + receive_tasks)
         sync_time = time.time() - t_sync_start
 
-        if global_step > 0 and global_step % CKPT_EVERY_STEPS == 0:
-            ray.get(trainer_group[0].save_agent.remote(CKPT_DIR, global_step))
+        if global_step > 0 and global_step % args.ckpt_every_steps == 0:
+            ray.get(trainer_group[0].save_agent.remote(args.ckpt_dir, global_step))
 
         current_time = time.time()
-        if current_time - last_log_time > LOG_INTERVAL_SECONDS:
+        if current_time - last_log_time > args.log_interval_seconds:
             all_stats = ray.get(stats_actor.get_stats.remote())
 
             elapsed_log_time = current_time - last_log_time
@@ -1320,7 +1442,7 @@ def main():
             elapsed_time = current_time - start_time
             total_buffer_size = sum(ray.get([rb.size.remote() for rb in replay_buffers]))
 
-            print(f"更新步 {global_step}/{TRAIN_ITERS} | 时间: {elapsed_time:.1f}s | "
+            print(f"更新步 {global_step}/{args.train_iters} | 时间: {elapsed_time:.1f}s | "
                   f"全局平均奖励: {avg_return:.2f} | 全局平均幕长: {avg_ep_len:.1f} | Eval奖励: {eval_avg_return:.2f} | "
                   f"value loss: {np.mean(v_losses):.4f} | LR(V/P): {current_lrs['value']:.7f}/{current_lrs['policy']:.7f} | "
                   f"Episodes数量: {total_episodes:,} | Step平均时间: {avg_step_time:.3f}s")
@@ -1381,10 +1503,17 @@ def main():
             last_log_time = current_time
             last_log_global_step = global_step
 
-    print(f"\n成功完成 {TRAIN_ITERS} 次训练与同步循环！")
+    print(f"\n成功完成 {args.train_iters} 次训练与同步循环！")
     writer.close()
     ray.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    print("=" * 80)
+    print("命令行参数:")
+    print("-" * 80)
+    for arg, value in vars(args).items():
+        print(f"  {arg}: {value}")
+    print("=" * 80)
+    main(args)
