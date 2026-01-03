@@ -152,6 +152,10 @@ def parse_args():
                         help='Use bfloat16 (default: True)')
     parser.add_argument('--no-bf16', action='store_false', dest='use_bf16',
                         help='Disable bfloat16')
+    parser.add_argument('--use-proprio', action='store_true', default=False,
+                        help='Use proprioceptive state (default: False)')
+    parser.add_argument('--num-images-in-input', type=int, default=1,
+                        help='Number of images in input (default: 1)')
     parser.add_argument('--pretrained-checkpoint', type=str,
                         default='/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt',
                         help='Pretrained checkpoint path')
@@ -1219,9 +1223,9 @@ def build_openvla_cfg(args) -> GenerateConfig:
         use_l1_regression=False, # Note: ActorCritic in discrete model doesn't use this
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=1,
+        num_images_in_input=args.num_images_in_input,
         # zzq 1124 开启 proprio 
-        use_proprio=False, # Note: ActorCritic in discrete model can handle this
+        use_proprio=args.use_proprio, # Note: ActorCritic in discrete model can handle this
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=True,
