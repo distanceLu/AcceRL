@@ -154,6 +154,10 @@ def parse_args():
     parser.add_argument('--exp-name', type=str, default=None,
                         help='Experiment name (default: auto-generated based on clip-mode)')
     
+    # GAE 重计算选项
+    parser.add_argument('--recompute-value', action='store_true', default=False,
+                        help='Recompute value using current model before GAE calculation (default: False)')
+    
     args = parser.parse_args()
     
     # 设置 CUDA_VISIBLE_DEVICES 环境变量
@@ -166,14 +170,30 @@ def parse_args():
     return args
 
 # ================================================================
-# 数据结构 更新经验数据结
+# 数据结构
 # ================================================================
 @dataclass
+class Trajectory:
+    """完整轨迹，用于按轨迹存储和 GAE 重计算"""
+    obs_list: List[Dict[str, torch.Tensor]]  # 每个时间步的 obs (prepare_one_obs 的结果)
+    action_tokens: np.ndarray                 # shape: [T, NUM_ACTIONS_CHUNK, ACTION_DIM]
+    rewards: np.ndarray                       # shape: [T,]
+    behaviour_logits: np.ndarray              # shape: [T, NUM_ACTIONS_CHUNK, ACTION_DIM, VOCAB_SIZE]
+    old_values: np.ndarray                    # shape: [T,] - RolloutWorker 收集时的 value
+    bootstrap_value: float                    # 截断时的 bootstrap value
+    is_terminal: bool                         # True=完整 episode，False=截断
+    
+    @property
+    def num_steps(self) -> int:
+        return len(self.rewards)
+
+@dataclass
 class Experience:
+    """单个样本，用于训练时的 mini-batch"""
     obs: Dict[str, torch.Tensor]            # prepare_one_obs 的结果（CPU tensors）
-    action_token: np.ndarray                # 采样的离散动作 token (shape: [ACTION_DIM,])
+    action_token: np.ndarray                # 采样的离散动作 token (shape: [NUM_ACTIONS_CHUNK, ACTION_DIM])
     advantage: float
-    behaviour_logits: np.ndarray            # 行为策略的 logits (shape: [ACTION_DIM, VOCAB_SIZE])
+    behaviour_logits: np.ndarray            # 行为策略的 logits (shape: [NUM_ACTIONS_CHUNK, ACTION_DIM, VOCAB_SIZE])
     value_target: float
 
 # ================================================================
@@ -293,24 +313,48 @@ class StatsActor:
 # ================================================================
 @ray.remote
 class ReplayBufferActor:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+    """按轨迹存储的经验回放缓冲区"""
+    def __init__(self, capacity: int):
+        # capacity 表示最大轨迹数量
+        self.trajectories: deque = deque(maxlen=capacity)
 
-    def add_batch(self, batch: List[Experience]):
-        self.buffer.extend(batch)
+    def add_trajectory(self, traj: Trajectory):
+        """添加一条轨迹"""
+        self.trajectories.append(traj)
 
-    def size(self):
-        return len(self.buffer)
+    def size(self) -> int:
+        """返回轨迹数量"""
+        return len(self.trajectories)
     
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        # obs 是 prepare_one_obs 的字典，不能 stack，保持 list 返回
-        obs_list = [b.obs for b in batch]
-        action_token = np.stack([b.action_token for b in batch])
-        adv = np.asarray([b.advantage for b in batch], np.float32)
-        logits_old = np.stack([b.behaviour_logits for b in batch])
-        v_targ = np.asarray([b.value_target for b in batch], np.float32)
-        return obs_list, action_token, adv, logits_old, v_targ
+    def total_steps(self) -> int:
+        """返回所有轨迹的总步数"""
+        return sum(t.num_steps for t in self.trajectories)
+    
+    def sample_trajectories(self, min_steps: int) -> List[Trajectory]:
+        """采样足够步数的轨迹
+        
+        Args:
+            min_steps: 最小需要的步数
+            
+        Returns:
+            采样的轨迹列表，总步数 >= min_steps
+        """
+        if not self.trajectories:
+            return []
+        
+        sampled = []
+        total = 0
+        indices = list(range(len(self.trajectories)))
+        random.shuffle(indices)
+        
+        for idx in indices:
+            traj = self.trajectories[idx]
+            sampled.append(traj)
+            total += traj.num_steps
+            if total >= min_steps:
+                break
+        
+        return sampled
 
 class BaseWorkerActor:
     """rollout 和 eval worker 的共享逻辑。"""
@@ -343,12 +387,10 @@ class BaseWorkerActor:
 
 @ray.remote
 class RolloutWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, gamma, lambda_, reward_scale, torch_dtype, rollout_local_buf):
+    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, reward_scale, torch_dtype, rollout_local_buf):
         super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
         self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
         self.local_buffer = []
-        self.gamma = gamma
-        self.lambda_ = lambda_
         self.reward_scale = reward_scale
         self.torch_dtype = torch_dtype
         self.rollout_local_buf = rollout_local_buf
@@ -369,6 +411,7 @@ class RolloutWorkerActor(BaseWorkerActor):
             current_seed = int(time.time() * 1000) + self.wid + os.getpid()
             obs, info = self._reset_and_select_env(seed=current_seed)
             reward_sum, time_start, step_count_total = 0.0, time.time(), 0
+            step_count = 0
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
                 action_env, action_token, logits, value = ray.get(self.infer.request.remote(inputs_t, deterministic=False))
@@ -382,6 +425,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                     if term or trunc: done = True; break
                 self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
                 obs = nxt
+                step_count += 1
 
                 if done:
                     step_time = (time.time() - time_start) / max(step_count_total, 1)
@@ -394,45 +438,34 @@ class RolloutWorkerActor(BaseWorkerActor):
                         step_count_total,
                         success,
                         actor_id=self.wid,
-                        step_num=step_count_total,
+                        step_num=step_count,
                     )
+                    step_count = 0
                     reward_sum = 0.0
-                    if self.local_buffer: self._process_traj(self.local_buffer, 0.0)
+                    if self.local_buffer: 
+                        self._process_traj(self.local_buffer, bootstrap_val=0.0, is_terminal=True)
                     self.local_buffer.clear()
                     current_seed = int(time.time() * 1000) + self.wid + os.getpid()
                     obs, info = self._reset_and_select_env(seed=current_seed)
                     time_start, step_count_total = time.time(), 0
                 elif len(self.local_buffer) == self.rollout_local_buf + 1:
                     _, _, _, _, bootstrap_val = self.local_buffer[-1]
-                    self._process_traj(self.local_buffer[:-1], bootstrap_val)
+                    self._process_traj(self.local_buffer[:-1], bootstrap_val=bootstrap_val, is_terminal=False)
                     self.local_buffer = [self.local_buffer[-1]]
         except Exception as e: import traceback; print(f"[ERROR] RolloutWorker {self.wid} run() 崩溃: {e}", flush=True); traceback.print_exc(); raise
 
-    def _process_traj(self, traj_segment, bootstrap_val):
-        rets, advs = [], []
-        gae = 0.0
-        for i in reversed(range(len(traj_segment))):
-            _, _, r, _, v = traj_segment[i]
-            nv = bootstrap_val if i == len(traj_segment) - 1 else traj_segment[i+1][4]
-            delta = r + self.gamma * nv - v
-            gae = delta + self.gamma * self.lambda_ * gae
-            advs.append(gae)
-            rets.append(gae + v)
-        advs.reverse(); rets.reverse()
-        advs_np = np.array(advs, dtype=np.float32)
-
-        batch: List[Experience] = []
-        for i, (s, a_token, _, logits, _) in enumerate(traj_segment):
-            batch.append(
-                Experience(
-                    obs=s,
-                    action_token=a_token.astype(np.int64), # token 是整数
-                    advantage=float(advs_np[i]),
-                    behaviour_logits=logits.astype(np.float32),
-                    value_target=float(rets[i]),
-                )
-            )
-        self.replay.add_batch.remote(batch)
+    def _process_traj(self, traj_segment, bootstrap_val: float, is_terminal: bool):
+        """打包轨迹原始数据，不计算 GAE（由 Trainer 统一计算）"""
+        traj = Trajectory(
+            obs_list=[s for s, _, _, _, _ in traj_segment],
+            action_tokens=np.stack([a for _, a, _, _, _ in traj_segment]).astype(np.int64),
+            rewards=np.array([r for _, _, r, _, _ in traj_segment], dtype=np.float32),
+            behaviour_logits=np.stack([l for _, _, _, l, _ in traj_segment]).astype(np.float32),
+            old_values=np.array([v for _, _, _, _, v in traj_segment], dtype=np.float32),
+            bootstrap_value=float(bootstrap_val),
+            is_terminal=is_terminal,
+        )
+        self.replay.add_trajectory.remote(traj)
 
 @ray.remote
 class EvaluationWorkerActor(BaseWorkerActor):
@@ -612,7 +645,7 @@ class TrainerActor(TrainerActorCom):
     def __init__(self, rank, world_size, replay_buffer, cfg, train_batch_size, accumulation_steps, 
                  use_bf16, torch_dtype, policy_lr, value_lr, gamma, lambda_, clip_eps, vf_coef, 
                  ent_coef, kl_coef, reward_scale, value_warmup_steps, policy_warmup_steps, 
-                 policy_train_start_step, train_iters, clip_mode):
+                 policy_train_start_step, train_iters, clip_mode, recompute_value):
         super().__init__()
         self.rank = rank
         self.world_size = world_size
@@ -645,10 +678,11 @@ class TrainerActor(TrainerActorCom):
         self.policy_train_start_step = policy_train_start_step
         self.train_iters = train_iters
         self.clip_mode = clip_mode
+        self.recompute_value = recompute_value
         
         self.global_step = 0
 
-        print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()}")
+        print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()} (recompute_value={recompute_value})")
 
     def get_model_keys(self):
         if self.model is None:
@@ -723,31 +757,147 @@ class TrainerActor(TrainerActorCom):
         cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
         return peak_lr * cosine_decay
 
+    def _compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, 
+                      bootstrap_value: float, is_terminal: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+        """计算单条轨迹的 GAE 和 returns (GPU版本)
+        
+        Args:
+            rewards: [T,] 每步的奖励 (GPU tensor)
+            values: [T,] 每步的价值估计 (GPU tensor)
+            bootstrap_value: 最后一步的 bootstrap value（截断时使用）
+            is_terminal: 是否是完整 episode
+            
+        Returns:
+            advantages: [T,] (GPU tensor)
+            returns: [T,] (GPU tensor)
+        """
+        T = len(rewards)
+        device = rewards.device
+        advs = torch.zeros(T, dtype=torch.float32, device=device)
+        rets = torch.zeros(T, dtype=torch.float32, device=device)
+        
+        # 如果是完整 episode，最后的 bootstrap 应该是 0
+        last_value = 0.0 if is_terminal else bootstrap_value
+        gae = 0.0
+        
+        for i in reversed(range(T)):
+            next_v = last_value if i == T - 1 else values[i + 1].item()
+            delta = rewards[i].item() + self.gamma * next_v - values[i].item()
+            gae = delta + self.gamma * self.lambda_ * gae
+            advs[i] = gae
+            rets[i] = gae + values[i].item()
+        
+        return advs, rets
+
+    async def _process_trajectories(self, trajectories: List[Trajectory]) -> Tuple[List, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """处理轨迹，根据 recompute_value 决定是否重新计算 value (全GPU版本)
+        
+        Args:
+            trajectories: 采样的轨迹列表
+            
+        Returns:
+            obs_list: 所有观测列表
+            action_tokens: [N, NUM_ACTIONS_CHUNK, ACTION_DIM] GPU tensor
+            advantages: [N,] GPU tensor
+            behaviour_logits: [N, NUM_ACTIONS_CHUNK, ACTION_DIM, VOCAB_SIZE] GPU tensor
+            value_targets: [N,] GPU tensor
+        """
+        # 收集所有 obs
+        all_obs = []
+        for traj in trajectories:
+            all_obs.extend(traj.obs_list)
+        
+        device = next(self.model.parameters()).device
+        
+        if self.recompute_value:
+            # 重新前向计算 value - 分批次处理，保持在 GPU
+            num_obs = len(all_obs)
+            all_values = []
+            with torch.no_grad():
+                for start_idx in range(0, num_obs, self.train_batch_size):
+                    end_idx = min(start_idx + self.train_batch_size, num_obs)
+                    obs_batch = all_obs[start_idx:end_idx]
+                    inputs_batch = self.base_model.prepare_inputs_batch(obs_batch)
+                    _, batch_values = self.model.forward(inputs_batch)
+                    all_values.append(batch_values.float())
+            values = torch.cat(all_values, dim=0)
+        else:
+            # 使用老 value，转为 GPU tensor
+            values = torch.from_numpy(np.concatenate([traj.old_values for traj in trajectories])).to(device)
+        
+        # 按轨迹分割，计算 GAE
+        all_action_tokens = []
+        all_advantages = []
+        all_behaviour_logits = []
+        all_value_targets = []
+        
+        offset = 0
+        for traj in trajectories:
+            T = traj.num_steps
+            traj_values = values[offset:offset + T]
+            offset += T
+            
+            # 将 rewards 转为 GPU tensor
+            traj_rewards = torch.from_numpy(traj.rewards).to(device)
+            
+            advs, rets = self._compute_gae(
+                rewards=traj_rewards,
+                values=traj_values,
+                bootstrap_value=traj.bootstrap_value,
+                is_terminal=traj.is_terminal
+            )
+            
+            # 收集数据
+            all_action_tokens.append(torch.from_numpy(traj.action_tokens).to(device))
+            all_advantages.append(advs)
+            all_behaviour_logits.append(torch.from_numpy(traj.behaviour_logits).to(device))
+            all_value_targets.append(rets)
+        
+        # 拼接所有数据
+        action_tokens = torch.cat(all_action_tokens, dim=0)
+        advantages = torch.cat(all_advantages, dim=0)
+        behaviour_logits = torch.cat(all_behaviour_logits, dim=0)
+        value_targets = torch.cat(all_value_targets, dim=0)
+        
+        return all_obs, action_tokens, advantages, behaviour_logits, value_targets
+
     async def _data_fetching_loop(self):
-        print(f"Trainer {self.rank}: 后台数据准备循环已启动 (超级批次大小: {self.super_batch_size})。")
+        print(f"Trainer {self.rank}: 后台数据准备循环已启动 (超级批次大小: {self.super_batch_size}, recompute_value={self.recompute_value})。")
         while True:
             try:
                 if self.next_ready_batch is not None:
                     await asyncio.sleep(0.1)
                     continue
 
-                while await self.replay_buffer.size.remote() < self.super_batch_size:
-                    print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size}...")
+                # 等待足够的数据（按总步数计算）
+                while await self.replay_buffer.total_steps.remote() < self.super_batch_size:
+                    total_steps = await self.replay_buffer.total_steps.remote()
+                    print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size} 步... (当前: {total_steps})")
                     await asyncio.sleep(3)
 
                 t_sample_start = time.time()
-                obs_list, action_token_np, adv_np, logits_old_np, v_targ_np = \
-                    await self.replay_buffer.sample.remote(self.super_batch_size)
+                # 采样轨迹
+                trajectories = await self.replay_buffer.sample_trajectories.remote(self.super_batch_size)
                 sample_time = time.time() - t_sample_start
 
                 t_prep_start = time.time()
+                # 处理轨迹（计算 GAE，可能重新计算 value）- 全部在 GPU 上
+                obs_list, action_tokens, advantages, behaviour_logits, value_targets = await self._process_trajectories(trajectories)
+                
+                # 打乱样本顺序 - 在 GPU 上进行
+                num_samples = len(obs_list)
+                indices = torch.randperm(num_samples, device=action_tokens.device)
+                
+                # 根据打乱的索引重排数据
+                obs_list = [obs_list[i] for i in indices.cpu().tolist()]
+                act_token_t = action_tokens[indices].long()
+                adv_t = advantages[indices]
+                logits_old_t = behaviour_logits[indices]
+                v_targ_t = value_targets[indices]
+                
+                # 准备 batch
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
-
-                device = next(self.model.parameters()).device
-                act_token_t = torch.tensor(action_token_np, dtype=torch.long, device=device) # Tokens 是 long 类型
-                adv_t = torch.tensor(adv_np, dtype=torch.float32, device=device)
-                logits_old_t = torch.tensor(logits_old_np, dtype=torch.float32, device=device)
-                v_targ_t = torch.tensor(v_targ_np, dtype=torch.float32, device=device)
+                
                 prep_time = time.time() - t_prep_start
 
                 self.next_ready_batch = {
@@ -761,7 +911,9 @@ class TrainerActor(TrainerActorCom):
                 }
 
             except Exception as e:
+                import traceback
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
+                traceback.print_exc()
                 await asyncio.sleep(3)
 
     async def run_training_epoch(self) -> Tuple[float, float, float, float, Dict[str, float], int]:
@@ -843,7 +995,7 @@ class TrainerActor(TrainerActorCom):
             else:
                 # 策略与熵损失 (离散版本)
                 dist = torch.distributions.Categorical(logits=action_logits_reshape)
-                logp = dist.log_prob(mini_act_token) # 对动作维度求和
+                logp = dist.log_prob(mini_act_token)
 
                 with torch.no_grad():
                     dist_old = torch.distributions.Categorical(logits=mini_logits_old)
@@ -989,7 +1141,7 @@ def main(args):
             ent_coef=args.ent_coef, kl_coef=args.kl_coef, reward_scale=args.reward_scale,
             value_warmup_steps=args.value_warmup_steps, policy_warmup_steps=args.policy_warmup_steps,
             policy_train_start_step=args.policy_train_start_step, train_iters=args.train_iters,
-            clip_mode=args.clip_mode
+            clip_mode=args.clip_mode, recompute_value=args.recompute_value
         )
         for i in range(args.num_trainer_gpus)
     ]
@@ -998,7 +1150,7 @@ def main(args):
         RolloutWorkerActor.remote(
             inference_pool[i % args.num_inference_actors],
             replay_buffers[i % args.num_trainer_gpus], i, stats_actor, cfg, benchmark,
-            args.gamma, args.lambda_, args.reward_scale, torch_dtype, args.rollout_local_buf
+            args.reward_scale, torch_dtype, args.rollout_local_buf
         ) for i in range(args.num_rollout_workers)
     ]
     eval_workers = [
@@ -1067,11 +1219,11 @@ def main(args):
     for w in eval_workers: w.run.remote()
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
-    min_buffer_size_for_start = args.train_batch_size * args.accumulation_steps
-    assert min_buffer_size_for_start < args.replay_capacity, "初始填充量必须小于回放池总容量"
-    while not all(size >= min_buffer_size_for_start for size in ray.get([rb.size.remote() for rb in replay_buffers])):
-        sizes = ray.get([rb.size.remote() for rb in replay_buffers])
-        print(f"等待所有经验池填充初始数据 (目标: {min_buffer_size_for_start})... (当前大小: {sizes})")
+    min_buffer_steps_for_start = args.train_batch_size * args.accumulation_steps
+    while not all(steps >= min_buffer_steps_for_start for steps in ray.get([rb.total_steps.remote() for rb in replay_buffers])):
+        total_steps_list = ray.get([rb.total_steps.remote() for rb in replay_buffers])
+        traj_counts = ray.get([rb.size.remote() for rb in replay_buffers])
+        print(f"等待所有经验池填充初始数据 (目标步数: {min_buffer_steps_for_start})... (当前步数: {total_steps_list}, 轨迹数: {traj_counts})")
         time.sleep(5)
     print("远程经验池已准备好，训练器将按需获取数据。")
 
