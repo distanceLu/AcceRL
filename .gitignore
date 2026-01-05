@@ -160,3 +160,9 @@ logs/
 storm_runs/
 log/
 runtime_vis_results/
+
+ae_debug/
+data/
+datasets/
+saved_images/
+diamond_world_model/

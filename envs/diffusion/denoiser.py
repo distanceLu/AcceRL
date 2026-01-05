@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from .inner_model import InnerModel, InnerModelConfig
-from ..utils import LossAndLogs
+from ..utils import LossAndLogs, configure_opt, get_lr_sched
 import sys
 from pathlib import Path
 from hydra.utils import instantiate
@@ -168,18 +168,34 @@ class Denoiser(nn.Module):
         denoised = self.wrap_model_output(noisy_next_obs, model_output, cs)
         return denoised
 
-    def forward(self, batch: SimpleBatch) -> LossAndLogs:
+    def forward(self, *args, **kwargs) -> LossAndLogs:
+        """
+        Forward accepts either (obs, act, mask_padding) or a batch dict/object with attributes .obs, .act, .mask_padding
+        """
+        # Check if called as (obs, act, mask_padding)
+        if len(args) == 3:
+            obs, act, mask_padding = args
+        elif len(args) == 1:
+            batch = args[0]
+            obs = batch.obs
+            act = batch.act
+            mask_padding = batch.mask_padding
+        else:
+            raise ValueError(f"Invalid arguments: {args}")
+        
+        # obs:[bs, 5, 3, h, w] act:[bs, 4, act_dim] n=4
         n = self.cfg.inner_model.num_steps_conditioning
-        seq_length = batch.act.size(1) - n
+        seq_length = obs.size(1) - n
 
-        all_obs = batch.obs.clone()
+        all_obs = obs.clone()
+        all_act = act.clone()
         loss = 0
 
-        for i in range(seq_length + 1):
+        for i in range(seq_length):
             obs = all_obs[:, i : n + i]
             next_obs = all_obs[:, n + i]
-            act = batch.act[:, i : n + i]
-            mask = batch.mask_padding[:, n + i]
+            act = all_act[:, i : n + i]
+            mask = mask_padding[:, n + i]
 
             b, t, c, h, w = obs.shape
             obs = obs.reshape(b, t * c, h, w)
@@ -195,21 +211,33 @@ class Denoiser(nn.Module):
             denoised = self.wrap_model_output(noisy_next_obs, model_output, cs)
             all_obs[:, n + i] = denoised
 
-        loss /= (seq_length + 1)
+        loss /= seq_length
         return loss, {"loss_denoising": loss.detach()}
 
+# def load_checkpoint_denoiser(checkpoint_path: Path, denoiser, optimizer, lr_scheduler, device):       
+#     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+#     state_dict = checkpoint["denoiser_state_dict"]
+#     act_emb_float_key = "inner_model.act_emb_float.0.weight"
+    
+#     if act_emb_float_key in state_dict:
+#         act_emb_float_weight = state_dict[act_emb_float_key]
+#         act_dim = act_emb_float_weight.shape[1]
+#         _ = denoiser.inner_model._get_act_emb_float(act_dim)
+    
+#     denoiser.load_state_dict(state_dict, strict=False)
+#     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+#     start_step = checkpoint["effective_step"]
+#     lr_scheduler.last_epoch = -1
+
+#     return start_step
 
 def load_denoiser_from_checkpoint(
-    agent_config_path: Path,
-    trainer_config_path: Path,
+    agent_cfg: Any,
+    trainer_cfg: Any,
     device: torch.device,
 ):
     """加载 Denoiser 模型"""
-    agent_cfg = OmegaConf.load(agent_config_path)
-    trainer_cfg = OmegaConf.load(trainer_config_path)
-    print(f"agent_cfg: {agent_cfg}")
-    print(f"trainer_cfg: {trainer_cfg}")
-    
     denoiser_cfg = instantiate(agent_cfg.denoiser)
     if denoiser_cfg.inner_model.num_actions is None:
         denoiser_cfg.inner_model.num_actions = 6
@@ -217,10 +245,19 @@ def load_denoiser_from_checkpoint(
     denoiser = Denoiser(denoiser_cfg).to(device)
     sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
     denoiser.setup_training(sigma_distribution_cfg)
-    
+
+    denoiser_opt_cfg = trainer_cfg.denoiser.optimizer
+    optimizer = configure_opt(
+        denoiser,
+        lr=denoiser_opt_cfg.lr,
+        weight_decay=denoiser_opt_cfg.weight_decay,
+        eps=denoiser_opt_cfg.eps
+    )
+    lr_scheduler = get_lr_sched(optimizer, trainer_cfg.denoiser.training.lr_warmup_steps)
+
     checkpoint = torch.load(agent_cfg.denoiser_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("denoiser_state_dict", checkpoint)
-    
+
+    state_dict = checkpoint["denoiser_state_dict"]
     act_emb_float_key = "inner_model.act_emb_float.0.weight"
     if act_emb_float_key in state_dict:
         act_emb_float_weight = state_dict[act_emb_float_key]
@@ -228,6 +265,9 @@ def load_denoiser_from_checkpoint(
         _ = denoiser.inner_model._get_act_emb_float(act_dim)
     
     denoiser.load_state_dict(state_dict, strict=False)
-    denoiser.eval()
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    start_step = checkpoint["effective_step"]
+    lr_scheduler.last_epoch = -1
+    # start_step = load_checkpoint_denoiser(agent_cfg.denoiser_path, denoiser, optimizer, lr_scheduler, device)
     
-    return denoiser, trainer_cfg, agent_cfg
+    return denoiser, optimizer, lr_scheduler, start_step

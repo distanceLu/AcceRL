@@ -16,8 +16,8 @@ from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
 from envs.world_model_env_batch import WorldModelEnvBatch, WorldModelEnvConfig
-from envs.utils import load_reward_model, image_to_tensor
-from envs.diffusion.denoiser import load_denoiser_from_checkpoint
+from envs.utils import load_reward_model_from_checkpoint, image_to_tensor, save_checkpoint, manage_checkpoints
+from envs.diffusion.denoiser import Denoiser, load_denoiser_from_checkpoint
 from experiments.robot.openvla_utils import get_processor
 from rl.libero_env import LiberoEnvWrapper
 from rl.actor_critic_model_discrete import ActorCritic
@@ -25,25 +25,7 @@ from rl.utils import prepare_one_obs
 from experiments.robot.libero.libero_utils import GenerateConfig
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 
-
-# def image_to_tensor(image: np.ndarray, device: torch.device) -> torch.Tensor:
-#     """
-#     将 numpy array 图像转换为 tensor 格式
-    
-#     Args:
-#         image: [H, W, C] uint8 numpy array
-#         device: torch device
-    
-#     Returns:
-#         tensor: [C, H, W] float tensor in [-1, 1] range
-#     """
-#     # Convert to float and normalize to [0, 1]
-#     img = image.astype(np.float32) / 255.0
-#     # Convert to [C, H, W]
-#     img = np.transpose(img, (2, 0, 1))
-#     # Normalize to [-1, 1]
-#     img = img * 2.0 - 1.0
-#     return torch.from_numpy(img).to(device).float()
+# export PYTHONPATH=/cpfs01/jinshiji_workspace/openvla_oft_rl:$PYTHONPATH
 
 
 def collect_initial_obs_act_from_libero(
@@ -53,7 +35,7 @@ def collect_initial_obs_act_from_libero(
     num_trajectories: int,
     device: torch.device,
     deterministic: bool = False,
-) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[int], List[str]]:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[int], List[str]]:
     """
     从 LiberoEnvWrapper 收集多条完整轨迹的初始观测和动作序列
     
@@ -68,11 +50,13 @@ def collect_initial_obs_act_from_libero(
     Returns:
         obs_list: List of [T, C, H, W] tensors
         act_list: List of [T-1, act_dim] tensors
+        rew_list: List of [T-1] tensors (rewards for each action step)
         step_counts: List of step counts for each trajectory
         instructions: List of task descriptions
     """
     obs_list = []
     act_list = []
+    rew_list = []
     step_counts = []
     instructions = []
     
@@ -86,6 +70,7 @@ def collect_initial_obs_act_from_libero(
         # Collect observations and actions
         traj_obs_list = []
         traj_act_list = []
+        traj_rew_list = [] # rew for initial obs
         action_queue = deque()
         
         # First observation
@@ -148,8 +133,12 @@ def collect_initial_obs_act_from_libero(
             action_tensor = torch.from_numpy(action_norm).to(device).float()  # 由于训练denoiser的时候用的是action_norm，需要统一一下，TODO
             traj_act_list.append(action_tensor)
             
+            # Store reward (convert to tensor)
+            reward_tensor = torch.tensor(reward, dtype=torch.float32, device=device)
+            traj_rew_list.append(reward_tensor)
+            
             # Check if we have enough observations for conditioning
-            if len(traj_obs_list) >= num_steps_conditioning:
+            if len(traj_obs_list) >= num_steps_conditioning + 1:
                 # We have enough observations, can stop collecting
                 # But continue to collect full trajectory for step count
                 pass
@@ -163,13 +152,12 @@ def collect_initial_obs_act_from_libero(
         #                end before index (T-1) so that window doesn't include last obs
         T = len(traj_obs_list)
         
-        if T < num_steps_conditioning:
+        if T < num_steps_conditioning + 1:
             # Not enough observations, skip this trajectory
-            print(f"轨迹 {traj_idx + 1}/{num_trajectories}: 观测数量 {T} < {num_steps_conditioning}，跳过")
+            print(f"轨迹 {traj_idx + 1}/{num_trajectories}: 观测数量 {T} < {num_steps_conditioning + 1}，跳过")
             continue
         
         # Calculate number of valid windows
-        # Valid window indices: from (0, num_steps_conditioning-1) to (T-1-num_steps_conditioning, T-1)
         num_valid_windows = T - num_steps_conditioning
         
         if num_valid_windows <= 0:
@@ -181,25 +169,29 @@ def collect_initial_obs_act_from_libero(
             # Window start index for observations
             # Start from 0, increment by 1 for each window
             obs_start_idx = window_idx
-            obs_end_idx = obs_start_idx + num_steps_conditioning
+            obs_end_idx = obs_start_idx + num_steps_conditioning + 1
             
             # Corresponding action indices (one less than obs)
             act_start_idx = obs_start_idx
-            act_end_idx = obs_start_idx + num_steps_conditioning - 1
+            act_end_idx = act_start_idx + num_steps_conditioning
             
             # Extract window
             window_obs = traj_obs_list[obs_start_idx:obs_end_idx]
             window_act = traj_act_list[act_start_idx:act_end_idx]
+            window_rew = traj_rew_list[act_end_idx - 1]  # Rewards correspond to actions
             
-            # Stack observations: [T, C, H, W]
+            # Stack observations: [n_condition+1, C, H, W]
             obs = torch.stack(window_obs, dim=0)
-            # Stack actions: [T-1, act_dim]
+            # Stack actions: [n_condition, act_dim]
             act = torch.stack(window_act, dim=0)
-            assert obs.shape[0] == num_steps_conditioning
-            assert act.shape[0] == num_steps_conditioning - 1
+            # Stack rewards: [n_condition-1]
+            rew = window_rew
+            assert obs.shape[0] == num_steps_conditioning + 1
+            assert act.shape[0] == num_steps_conditioning
             
             obs_list.append(obs)
             act_list.append(act)
+            rew_list.append(rew)
             # For step count, use the step count at the start of this window
             # step_count is the total steps, so at window start it's (obs_start_idx)
             step_counts.append(obs_start_idx)
@@ -207,8 +199,8 @@ def collect_initial_obs_act_from_libero(
 
         print(f"轨迹 {traj_idx + 1}/{num_trajectories}: T={T}, step_count={step_count}, "
               f"有效窗口数={num_valid_windows}, terminated={terminated}, truncated={truncated}")
-    assert len(obs_list) == len(act_list) == len(step_counts) == len(instructions)
-    return obs_list, act_list, step_counts, instructions
+    assert len(obs_list) == len(act_list) == len(rew_list) == len(step_counts) == len(instructions)
+    return obs_list, act_list, rew_list, step_counts, instructions
 
 
 def rollout_with_world_model_batched(
@@ -720,6 +712,320 @@ def rollout_with_world_model(
         raise ValueError(f"No observations were collected at step {env_step}")
 
 
+def evaluate_world_model(
+    obs: torch.Tensor,
+    act: torch.Tensor,
+    rew: torch.Tensor,
+    denoiser: Denoiser,
+    reward_model: Any,
+    reward_cfg: Any,
+    processor: Any,
+    instructions: List[str],
+    device: torch.device,
+    batch_size: int,
+) -> Dict[str, float]:
+    """
+    评估 World Model（包括 Denoiser 和 Reward Model）
+    
+    Args:
+        obs: [B, num_steps_conditioning+1, C, H, W] 观测序列（[-1, 1] 范围）
+        act: [B, num_steps_conditioning, act_dim] 动作序列（归一化动作）
+        rew: [B] 标量奖励，对应最后一个观测
+        denoiser: Denoiser 模型
+        reward_model: Reward Model 模型
+        reward_cfg: Reward Model 配置
+        processor: 图像预处理器
+        instructions: 任务指令列表 [B]
+        device: 设备
+        batch_size: 分批大小
+    
+    Returns:
+        评估指标字典
+    """
+    denoiser.eval()
+    reward_model.eval()
+    
+    B, T = obs.shape[:2]
+    mask_padding = torch.ones(obs.shape[:2], dtype=torch.bool, device=device)
+    
+    with torch.no_grad():
+        # ========== 1. 评估 Denoiser（分批） ==========
+        num_denoiser_samples = B
+        num_denoiser_batches = (num_denoiser_samples + batch_size - 1) // batch_size
+        
+        total_denoiser_loss = 0.0
+        for batch_idx in range(num_denoiser_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, num_denoiser_samples)
+            
+            obs_batch = obs[start_idx:end_idx]
+            act_batch = act[start_idx:end_idx]
+            mask_batch = mask_padding[start_idx:end_idx]
+            
+            loss_denoiser, _ = denoiser(obs_batch, act_batch, mask_batch)
+            total_denoiser_loss += loss_denoiser.item() * (end_idx - start_idx)
+        
+        avg_denoiser_loss = total_denoiser_loss / num_denoiser_samples
+        
+        # ========== 2. 评估 Reward Model（分批） ==========
+        # 提取最后一个观测，对应 reward
+        last_obs = obs[:, -1]  # [B, C, H, W]
+        
+        # 预处理所有观测
+        inputs_list = []
+        for i in range(B):
+            obs_tensor = last_obs[i]  # [C, H, W] in [-1, 1]
+            obs_np = obs_tensor.cpu().numpy().transpose(1, 2, 0)  # [H, W, C]
+            obs_img = ((obs_np + 1) / 2 * 255).astype(np.uint8)
+            obs_dict = {"full_image": obs_img}
+            
+            inputs = prepare_one_obs(
+                reward_cfg,
+                processor,
+                obs_dict,
+                instructions[i],
+                reward_model.model_dtype,
+            )
+            inputs_list.append(inputs)
+        
+        # 一次性批处理所有输入
+        inputs_batch = reward_model.prepare_inputs_batch(inputs_list)
+        labels = (rew > 0).long()  # [B]
+        
+        # 分批评估 Reward Model
+        num_reward_samples = B
+        num_reward_batches = (num_reward_samples + batch_size - 1) // batch_size
+        
+        total_reward_loss = 0.0
+        total_tp = total_tn = total_fp = total_fn = 0
+        
+        for batch_idx in range(num_reward_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, num_reward_samples)
+            
+            # 切片批次数据
+            batch_inputs = {k: v[start_idx:end_idx] for k, v in inputs_batch.items()}
+            batch_labels = labels[start_idx:end_idx]
+            
+            # 前向传播
+            logits = reward_model.forward(batch_inputs)
+            loss_reward, metrics_reward = reward_model.compute_loss_and_metrics(batch_inputs, batch_labels)
+            
+            total_reward_loss += loss_reward.item() * (end_idx - start_idx)
+            total_tp += metrics_reward["tp"].item()
+            total_tn += metrics_reward["tn"].item()
+            total_fp += metrics_reward["fp"].item()
+            total_fn += metrics_reward["fn"].item()
+        
+        avg_reward_loss = total_reward_loss / num_reward_samples
+        
+        # 计算准确率
+        pos_den = total_tp + total_fn
+        neg_den = total_tn + total_fp
+        pos_acc = float(total_tp) / pos_den if pos_den > 0 else 0.0
+        neg_acc = float(total_tn) / neg_den if neg_den > 0 else 0.0
+    
+    return {
+        "denoiser_loss": avg_denoiser_loss,
+        "reward_loss": avg_reward_loss,
+        "reward_pos_acc": pos_acc,
+        "reward_neg_acc": neg_acc,
+        "reward_tp": total_tp,
+        "reward_tn": total_tn,
+        "reward_fp": total_fp,
+        "reward_fn": total_fn,
+    }
+
+
+def train_world_model(
+    obs: torch.Tensor, 
+    act: torch.Tensor,
+    rew: torch.Tensor, 
+    trainer_cfg: Dict[str, Any],
+    denoiser: Denoiser,
+    denoiser_optimizer: optim.Optimizer,
+    denoiser_lr_scheduler: optim.lr_scheduler.LambdaLR,
+    denoiser_start_step: int,
+    reward_model: Any,
+    reward_optimizer: optim.Optimizer,
+    reward_lr_scheduler: optim.lr_scheduler._LRScheduler,
+    reward_cfg: Any,
+    processor: Any,
+    instructions: List[str],
+    reward_start_step: int,
+    writer: SummaryWriter,
+):
+    """
+    训练 World Model（包括 Denoiser 和 Reward Model）
+    
+    Args:
+        obs: [B, num_steps_conditioning+1, C, H, W] 观测序列（[-1, 1] 范围）
+        act: [B, num_steps_conditioning, act_dim] 动作序列（归一化动作）
+        rew: [B] 标量奖励，对应最后一个观测
+        trainer_cfg: 训练配置（包含 denoiser 和 reward_model 的训练参数）
+        denoiser: Denoiser 模型
+        denoiser_optimizer: Denoiser 优化器
+        denoiser_lr_scheduler: Denoiser 学习率调度器
+        denoiser_start_step: Denoiser 当前训练步数
+        reward_model: Reward Model 模型
+        reward_optimizer: Reward Model 优化器
+        reward_lr_scheduler: Reward Model 学习率调度器
+        reward_cfg: Reward Model 配置（用于数据预处理）
+        processor: 图像预处理器（用于 reward model 输入处理）
+        instructions: 任务指令列表 [B]
+        reward_start_step: Reward Model 当前训练步数
+        writer: TensorBoard SummaryWriter（用于记录训练日志）
+    
+    Returns:
+        denoiser_step: 更新后的 Denoiser 训练步数
+        reward_step: 更新后的 Reward Model 训练步数
+    """
+    device = obs.device
+    B, T = obs.shape[:2]
+    mask_padding = torch.ones(obs.shape[:2], dtype=torch.bool, device=device)
+    
+    # 获取训练步数
+    steps_per_epoch = trainer_cfg.trainer.steps_per_epoch
+    
+    # 准备 Reward Model 的数据（只需准备一次）
+    # 取最后一个观测，对应 reward
+    last_obs = obs[:, -1]  # [B, C, H, W]
+    
+    # 将观测转换为 reward model 需要的格式（只需转换一次）
+    inputs_list = []
+    for i in range(B):
+        obs_tensor = last_obs[i]  # [C, H, W] in [-1, 1]
+        obs_np = obs_tensor.cpu().numpy().transpose(1, 2, 0)  # [H, W, C]
+        obs_img = ((obs_np + 1) / 2 * 255).astype(np.uint8)
+        obs_dict = {"full_image": obs_img}
+        
+        inputs = prepare_one_obs(
+            reward_cfg,
+            processor,
+            obs_dict,
+            instructions[i],
+            reward_model.model_dtype,
+        )
+        inputs_list.append(inputs)
+    
+    inputs_batch = reward_model.prepare_inputs_batch(inputs_list)
+    labels = (rew > 0).long()  # [B]
+    
+    # 获取批次配置
+    batch_size = trainer_cfg.trainer.batch_size
+    grad_accum = trainer_cfg.trainer.grad_accum
+    
+    # 多步训练循环
+    for step_idx in range(steps_per_epoch):
+        # ========== 1. 训练 Denoiser ==========
+        denoiser.train()
+        denoiser_optimizer.zero_grad()
+        
+        # 计算 Denoiser 的批次数量
+        num_denoiser_samples = obs.shape[0]
+        num_denoiser_batches = (num_denoiser_samples + batch_size - 1) // batch_size
+        
+        total_denoiser_loss = 0.0
+        denoiser_update_count = 0
+        for batch_idx in range(num_denoiser_batches):
+            # 获取当前批次
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, num_denoiser_samples)
+            
+            obs_batch = obs[start_idx:end_idx]
+            act_batch = act[start_idx:end_idx]
+            mask_batch = mask_padding[start_idx:end_idx]
+            
+            # 前向传播
+            loss_denoiser, logs = denoiser(obs_batch, act_batch, mask_batch)
+            loss_denoiser = loss_denoiser / grad_accum  # 梯度累积缩放
+            loss_denoiser.backward()
+            
+            total_denoiser_loss += loss_denoiser.item() * grad_accum
+            
+            # 每 grad_accum 个 batch 或最后一个 batch 更新梯度
+            if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == num_denoiser_batches:
+                torch.nn.utils.clip_grad_norm_(denoiser.parameters(), trainer_cfg.denoiser.training.max_grad_norm)
+                denoiser_optimizer.step()
+                denoiser_lr_scheduler.step()
+                denoiser_optimizer.zero_grad()
+                denoiser_update_count += 1
+        
+        avg_denoiser_loss = total_denoiser_loss / num_denoiser_batches
+        writer.add_scalar("train/denoiser_loss", avg_denoiser_loss, denoiser_start_step)
+        writer.add_scalar("train/denoiser_lr", denoiser_lr_scheduler.get_last_lr()[0], denoiser_start_step)
+        
+        # ========== 2. 训练 Reward Model ==========
+        reward_model.train()
+        reward_optimizer.zero_grad()
+        
+        # 计算 Reward Model 的批次数量
+        num_reward_samples = B
+        num_reward_batches = (num_reward_samples + batch_size - 1) // batch_size
+        
+        total_reward_loss = 0.0
+        total_tp = total_tn = total_fp = total_fn = 0
+        reward_update_count = 0
+        
+        for batch_idx in range(num_reward_batches):
+            # 获取当前批次
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, num_reward_samples)
+            
+            # 直接对 inputs_batch 中的 tensor 切片（避免重复调用 prepare_inputs_batch）
+            batch_inputs = {k: v[start_idx:end_idx] for k, v in inputs_batch.items()}
+            batch_labels = labels[start_idx:end_idx]
+            
+            # 前向传播
+            logits = reward_model.forward(batch_inputs)
+            loss_reward, metrics_reward = reward_model.compute_loss_and_metrics(batch_inputs, batch_labels)
+            loss_reward = loss_reward / grad_accum  # 梯度累积缩放
+            loss_reward.backward()
+            
+            total_reward_loss += loss_reward.item() * grad_accum
+            total_tp += metrics_reward["tp"].item()
+            total_tn += metrics_reward["tn"].item()
+            total_fp += metrics_reward["fp"].item()
+            total_fn += metrics_reward["fn"].item()
+            
+            # 每 grad_accum 个 batch 或最后一个 batch 更新梯度
+            if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == num_reward_batches:
+                torch.nn.utils.clip_grad_norm_(reward_model.parameters(), trainer_cfg.reward_model.training.clip_grad_norm)
+                reward_optimizer.step()
+                reward_lr_scheduler.step()
+                reward_optimizer.zero_grad()
+                reward_update_count += 1
+        
+        avg_reward_loss = total_reward_loss / num_reward_batches
+        
+        # 记录训练日志
+        writer.add_scalar("train/reward_model_loss", avg_reward_loss, reward_start_step)
+        writer.add_scalar("train/reward_model_lr", reward_optimizer.param_groups[0]["lr"], reward_start_step)
+        writer.add_scalar("train/reward_model_tp", total_tp, reward_start_step)
+        writer.add_scalar("train/reward_model_tn", total_tn, reward_start_step)
+        writer.add_scalar("train/reward_model_fp", total_fp, reward_start_step)
+        writer.add_scalar("train/reward_model_fn", total_fn, reward_start_step)
+        
+        # 计算准确率
+        pos_den = total_tp + total_fn
+        neg_den = total_tn + total_fp
+        pos_acc = float(total_tp) / pos_den if pos_den > 0 else 0.0
+        neg_acc = float(total_tn) / neg_den if neg_den > 0 else 0.0
+        writer.add_scalar("train/reward_model_pos_acc", pos_acc, reward_start_step)
+        writer.add_scalar("train/reward_model_neg_acc", neg_acc, reward_start_step)
+        
+        # 更新 step 计数器
+        denoiser_start_step += 1
+        reward_start_step += 1
+        
+        print(f"  训练步骤 {step_idx + 1}/{steps_per_epoch}: "
+              f"denoiser_loss={avg_denoiser_loss:.4f} (batches={num_denoiser_batches}, updates={denoiser_update_count}), "
+              f"reward_loss={avg_reward_loss:.4f} (batches={num_reward_batches}, updates={reward_update_count}), "
+              f"reward_pos_acc={pos_acc:.4f}, "
+              f"reward_neg_acc={neg_acc:.4f}")
+    
+    return denoiser_start_step, reward_start_step
+
 def compute_gae(
     rewards: torch.Tensor,
     values: torch.Tensor,
@@ -977,7 +1283,7 @@ def ppo_update(
 
 def main():
     """主函数：执行PPO强化学习训练"""
-    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
     # 配置路径
     current_dir = Path.cwd()
@@ -1013,19 +1319,16 @@ def main():
     print("\n加载模型...")
 
     # 加载 Denoiser
-    denoiser, trainer_cfg, agent_cfg = load_denoiser_from_checkpoint(
-        agent_config_path, trainer_config_path, device
+    agent_cfg = OmegaConf.load(agent_config_path)
+    trainer_cfg = OmegaConf.load(trainer_config_path)
+    denoiser, denoiser_optimizer, denoiser_lr_scheduler, denoiser_start_step = load_denoiser_from_checkpoint(
+        agent_cfg, trainer_cfg, device
     )
     sampler_cfg = instantiate(trainer_cfg.world_model_env.diffusion_sampler)
 
-    # 加载 Reward Model
-    reward_model, reward_cfg = load_reward_model(
-        model_path=agent_cfg.reward_model_path,
-        device=str(device),
-        pretrained_checkpoint=agent_cfg.openvla_path,
-        focal_alpha=agent_cfg.reward_model.focal_alpha,
+    reward_model, reward_optimizer, reward_lr_scheduler, processor, reward_cfg, reward_start_step = load_reward_model_from_checkpoint(
+        agent_cfg, trainer_cfg, device
     )
-    processor = get_processor(reward_cfg)
 
     # 创建 WorldModelEnvBatch配置
     env_cfg = WorldModelEnvConfig(
@@ -1048,7 +1351,7 @@ def main():
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key="libero_spatial_no_noops",
         device=device,
-        checkpoint2='runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt',
+        checkpoint2=agent_cfg.checkpoint2_path,
     )
     actor = ActorCritic(actor_cfg, torch.bfloat16)
     actor.train()  # 设置为训练模式
@@ -1067,6 +1370,11 @@ def main():
     )
 
     num_steps_conditioning = agent_cfg.denoiser.inner_model.num_steps_conditioning
+    eval_interval = trainer_cfg.trainer.eval_interval
+    num_to_keep = trainer_cfg.trainer.num_to_keep
+    checkpoint_dir = log_dir / "checkpoints"
+    best_denoiser_loss = float('inf')
+    best_reward_loss = float('inf')
 
     # 训练循环
     print(f"\n开始训练，共 {num_iterations} 次迭代...")
@@ -1078,7 +1386,7 @@ def main():
         # 1. 收集初始数据
         print(f"收集 {num_trajectories_per_iter} 条轨迹的初始数据...")
         if len(obs_list) == 0:
-            obs_list, act_list, step_counts, instructions = collect_initial_obs_act_from_libero(
+            obs_list, act_list, rew_list, step_counts, instructions = collect_initial_obs_act_from_libero(
                 libero_env, actor, num_steps_conditioning, num_trajectories_per_iter, device, deterministic=False
             )
 
@@ -1087,9 +1395,90 @@ def main():
             continue
 
         # 转换为批格式
-        initial_obs = torch.stack(obs_list, dim=0)  # [B, T, C, H, W]
-        initial_act = torch.stack(act_list, dim=0)  # [B, T-1, act_dim]
+        obs = torch.stack(obs_list, dim=0)
+        act = torch.stack(act_list, dim=0)
+        rew = torch.stack(rew_list, dim=0)
+        initial_obs = obs[:, :num_steps_conditioning]  # [B, T, C, H, W]
+        initial_act = act[:, :num_steps_conditioning-1]  # [B, T-1, act_dim]
         initial_step_counts = torch.tensor(step_counts, device=device, dtype=torch.long)  # [B]
+
+        print("训练 World Model...")
+        denoiser_start_step, reward_start_step = train_world_model(
+            obs=obs,
+            act=act,
+            rew=rew,
+            trainer_cfg=trainer_cfg,
+            denoiser=denoiser, 
+            denoiser_optimizer=denoiser_optimizer, 
+            denoiser_lr_scheduler=denoiser_lr_scheduler, 
+            denoiser_start_step=denoiser_start_step,
+            reward_model=reward_model,
+            reward_optimizer=reward_optimizer,
+            reward_lr_scheduler=reward_lr_scheduler,
+            reward_cfg=reward_cfg,
+            processor=processor,
+            instructions=instructions,
+            reward_start_step=reward_start_step,
+            writer=writer,
+        )
+
+        if (iteration + 1) % eval_interval == 0:
+            print(f"\n=== 测试 World Model (Iteration {iteration + 1}) ===")
+            # TODO 需重新收集测试数据 obs/act/rew 。此处省略，用训练集来测试。
+            eval_metrics = evaluate_world_model(
+                obs=obs,
+                act=act,
+                rew=rew,
+                denoiser=denoiser,
+                reward_model=reward_model,
+                reward_cfg=reward_cfg,
+                processor=processor,
+                instructions=instructions,
+                device=device,
+                batch_size=trainer_cfg.trainer.batch_size,
+            )
+            
+            print(f"Evaluation Results:")
+            print(f"  Denoiser Loss: {eval_metrics['denoiser_loss']:.4f}")
+            print(f"  Reward Model Loss: {eval_metrics['reward_loss']:.4f}")
+            print(f"  Reward Pos Acc: {eval_metrics['reward_pos_acc']:.4f}")
+            print(f"  Reward Neg Acc: {eval_metrics['reward_neg_acc']:.4f}")
+            
+            writer.add_scalar("eval/denoiser_loss", eval_metrics['denoiser_loss'], iteration)
+            writer.add_scalar("eval/reward_loss", eval_metrics['reward_loss'], iteration)
+            writer.add_scalar("eval/reward_pos_acc", eval_metrics['reward_pos_acc'], iteration)
+            writer.add_scalar("eval/reward_neg_acc", eval_metrics['reward_neg_acc'], iteration)
+            
+            is_best_denoiser = eval_metrics['denoiser_loss'] < best_denoiser_loss
+            is_best_reward = eval_metrics['reward_loss'] < best_reward_loss
+            
+            if is_best_denoiser:
+                best_denoiser_loss = eval_metrics['denoiser_loss']
+                print(f"  *** Best Denoiser! (loss={best_denoiser_loss:.4f}) ***")
+            
+            if is_best_reward:
+                best_reward_loss = eval_metrics['reward_loss']
+                print(f"  *** Best Reward Model! (loss={best_reward_loss:.4f}) ***")
+            
+            save_checkpoint(
+                save_dir=checkpoint_dir,
+                iteration=iteration + 1,
+                denoiser=denoiser,
+                denoiser_optimizer=denoiser_optimizer,
+                denoiser_lr_scheduler=denoiser_lr_scheduler,
+                denoiser_step=denoiser_start_step,
+                reward_model=reward_model,
+                reward_optimizer=reward_optimizer,
+                reward_lr_scheduler=reward_lr_scheduler,
+                reward_step=reward_start_step,
+                reward_cfg=reward_cfg,
+                eval_metrics=eval_metrics,
+                is_best_denoiser=is_best_denoiser,
+                is_best_reward=is_best_reward,
+            )
+            
+            manage_checkpoints(checkpoint_dir, num_to_keep)
+            print("=" * 80 + "\n")
 
         # 创建 WorldModelEnvBatch
         env_batch = WorldModelEnvBatch(

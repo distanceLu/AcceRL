@@ -111,6 +111,8 @@ class RewardModel(nn.Module):
     def prepare_inputs_batch(self, inp, max_len=None):
         return prepare_inputs_batch(self, inp, max_len)
 
+
+
 if __name__ == "__main__":
     import json
     from pathlib import Path

@@ -17,12 +17,7 @@ world_model_env:
 denoiser:
   training:
     num_autoregressive_steps: 1
-    start_after_epochs: 0
-    steps_first_epoch: 10
-    steps_per_epoch: 4
     sample_weights: [0.1, 0.1, 0.1, 0.7]
-    batch_size: 32
-    grad_acc_steps: 1
     lr_warmup_steps: 100
     max_grad_norm: 1.0
 
@@ -37,3 +32,20 @@ denoiser:
     scale: 1.2
     sigma_min: 2e-3
     sigma_max: 20
+
+reward_model:
+  training:
+    clip_grad_norm: 1.0
+    focal_alpha: 0.99
+
+  optimizer:
+    lr: 1e-4
+    min_lr: 1e-6
+    T_max: 300
+
+trainer:
+  steps_per_epoch: 4
+  batch_size: 8
+  grad_accum: 32
+  eval_interval: 10
+  num_to_keep: 1
