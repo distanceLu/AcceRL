@@ -581,6 +581,14 @@ def normalize_proprio(norm_stats, proprio: Any) -> np.ndarray:
     Normalize proprioception data using self.vla.norm_stats[self.cfg.unnorm_key]["proprio"].
     Accepts numpy array or torch tensor; returns numpy array in [-1, 1].
     """
+    # Check if norm_stats is None
+    if norm_stats is None:
+        raise ValueError(
+            "proprio normalization statistics are None. "
+            "This usually means the model checkpoint does not contain proprio normalization stats. "
+            "Please check if the dataset_statistics.json file contains 'proprio' statistics for the given unnorm_key."
+        )
+    
     # Convert to numpy
     if isinstance(proprio, torch.Tensor):
         proprio = proprio.detach().cpu().numpy()

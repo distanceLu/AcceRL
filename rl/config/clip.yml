@@ -1,0 +1,43 @@
+clip: {}
+
+soft_clip_alpha-0:
+  soft_clip_alpha: 0
+
+soft_clip_alpha-0-5:
+  soft_clip_alpha: 0.5
+
+soft_clip_alpha-1:
+  soft_clip_alpha: 1
+
+soft_clip_alpha-2:
+  soft_clip_alpha: 2
+
+log_gauss_clip:
+  # coeff = exp(-0.5 * (log(r+eps)/sigma)^2), eps=1e-9
+  sigma: 1
+  eps: 1e-9
+
+
+ce-gppo_clip:
+  beta1: 0.5
+  beta2: 1
+
+# CISPO / IS-weight clip (MiniMax-M1): clip importance-sampling weight, not PPO token mask
+cispo_clip:
+  # asymmetric IS clip range: [1 - eps_is_low, 1 + eps_is_high]
+  # set eps_is_low to null to disable lower bound (i.e., only clip upper)
+  eps_is_low: null
+  eps_is_high: 0.2
+
+  # optional: numerical stability
+  ratio_min: 1.0e-8
+  ratio_max: 1.0e8
+
+# SAPO-style soft clip (sigmoid gate)
+sapo_soft_clip:
+  tau_pos: 1.0
+  tau_neg: 2.0
+  # optional: numerical stability / diagnostics
+  ratio_min: 1.0e-6
+  ratio_max: 1.0e6
+  sapo_w_thresh: 0.05
