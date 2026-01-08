@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
@@ -11,6 +12,7 @@ os.environ["TMPDIR"] = "/dev/shm"
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import time
+from datetime import datetime
 import random
 import asyncio
 from collections import deque, defaultdict
@@ -208,7 +210,8 @@ class StatsActor:
             "episode_lengths": deque(maxlen=window_size),
             "successes": deque(maxlen=window_size),
             "total_episodes_processed": 0,
-            "total_env_steps": 0
+            "total_env_steps": 0,
+            "step_rewards": deque(maxlen=window_size),
         })
         self.timings = defaultdict(lambda: deque(maxlen=window_size))
         self.actor_last_active = {}
@@ -232,6 +235,8 @@ class StatsActor:
         env_stats["successes"].append(success)
         env_stats["total_episodes_processed"] += 1
         env_stats["total_env_steps"] += ep_length
+        step_reward = ep_return / ep_length
+        env_stats["step_rewards"].append(step_reward)
         if not env_name.startswith("eval_"):
             self.total_samples_produced += step_num
             if actor_id is not None:
@@ -251,11 +256,11 @@ class StatsActor:
         all_returns, all_lengths, all_step_times = [], [], []
         total_episodes_processed = 0
         total_env_steps = 0
-        
+        all_step_rewards = []
         eval_returns, eval_lengths, eval_step_times = [], [], []
         eval_total_episodes_processed = 0
         eval_total_env_steps = 0
-
+        eval_step_rewards = []
         for env_name, env_data in self.stats.items():
             if not env_data["episode_returns"]:
                 per_env_stats[env_name] = { 
@@ -271,7 +276,8 @@ class StatsActor:
                 "avg_ep_len": np.mean(env_data["episode_lengths"]),
                 "avg_success_rate": np.mean(env_data["successes"]),
                 "num_episodes_in_avg": len(env_data["episode_returns"]),
-                "total_episodes": env_data["total_episodes_processed"]
+                "total_episodes": env_data["total_episodes_processed"],
+                "avg_step_reward": np.mean(env_data["step_rewards"])
             }
             if env_name.startswith("eval_"):
                 eval_total_episodes_processed += env_data["total_episodes_processed"]
@@ -279,17 +285,19 @@ class StatsActor:
                 eval_returns.extend(env_data["episode_returns"])
                 eval_lengths.extend(env_data["episode_lengths"])
                 eval_step_times.extend(env_data["step_times"])
+                eval_step_rewards.extend(env_data["step_rewards"])
             else:
                 total_episodes_processed += env_data["total_episodes_processed"]
                 total_env_steps += env_data["total_env_steps"]
                 all_returns.extend(env_data["episode_returns"])
                 all_lengths.extend(env_data["episode_lengths"])
                 all_step_times.extend(env_data["step_times"])
-
+                all_step_rewards.extend(env_data["step_rewards"])
         per_env_stats["_global_rollout_"] = {
             "avg_return": np.mean(all_returns) if all_returns else 0.0,
             "avg_ep_len": np.mean(all_lengths) if all_lengths else 0.0,
             "avg_step_time": np.mean(all_step_times) if all_step_times else 0.0,
+            "avg_step_reward": np.mean(all_step_rewards) if all_step_rewards else 0.0,
             "total_episodes_processed": total_episodes_processed,
             "total_env_steps": total_env_steps,
             "total_samples_produced": self.total_samples_produced,
@@ -299,6 +307,7 @@ class StatsActor:
             "avg_return": np.mean(eval_returns) if eval_returns else 0.0,
             "avg_ep_len": np.mean(eval_lengths) if eval_lengths else 0.0,
             "avg_step_time": np.mean(eval_step_times) if eval_step_times else 0.0,
+            "avg_step_reward": np.mean(eval_step_rewards) if eval_step_rewards else 0.0,
             "total_episodes_processed": eval_total_episodes_processed,
             "total_env_steps": eval_total_env_steps
         }
@@ -488,9 +497,11 @@ class EvaluationWorkerActor(BaseWorkerActor):
             obs, info = self._reset_and_select_env(seed=current_seed)
             while True:
                 reward_sum, time_start, step_count_total, done = 0.0, time.time(), 0, False
+                step_count = 0
                 while not done:
                     inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
                     action_env, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
+                    step_count += 1
                     for i in range(len(action_env)):
                         single_action = action_env[i]
                         obs, r, term, trunc, info = self.env.step(single_action)
@@ -505,7 +516,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
                     step_count_total,
                     success,
                     actor_id=None,
-                    step_num=step_count_total,
+                    step_num=step_count,
                 )
                 current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
                 obs, info = self._reset_and_select_env(seed=current_seed)
@@ -1123,8 +1134,14 @@ def main(args):
         object_store_memory=object_store_memory_bytes
     )
 
-    log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
+    log_dir = f"runs/Libero/{args.benchmark}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}"
     writer = SummaryWriter(log_dir)
+
+    # 保存命令行参数到log_dir中的json文件
+    args_file = os.path.join(log_dir, "args.json")
+    with open(args_file, 'w', encoding='utf-8') as f:
+        json.dump(vars(args), f, indent=2, ensure_ascii=False)
+    print(f"命令行参数已保存到: {args_file}")
     stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
@@ -1264,13 +1281,13 @@ def main(args):
             total_episodes = global_stats["total_episodes_processed"]
             total_env_steps = global_stats["total_env_steps"]
             avg_step_time = global_stats["avg_step_time"]
-
+            avg_step_reward = global_stats["avg_step_reward"]
             eval_avg_return = eval_stats["avg_return"]
             eval_avg_ep_len = eval_stats["avg_ep_len"]
             eval_total_episodes = eval_stats["total_episodes_processed"]
             eval_env_steps = eval_stats["total_env_steps"]
             eval_avg_step_time = eval_stats["avg_step_time"]
-
+            eval_avg_step_reward = eval_stats["avg_step_reward"]
 
             total_losses, p_losses, v_losses, e_losses, kl_losses, lrs_list, _, ents, avg_kl_divs, perf_metrics_list = zip(*results)
             current_lrs = lrs_list[0]
@@ -1308,9 +1325,10 @@ def main(args):
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
+            writer.add_scalar('Rollout/_Global/Average_Step_Reward', avg_step_reward, global_step)
             writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
             writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
-
+            writer.add_scalar('Eval/_Global/Average_Step_Reward', eval_avg_step_reward, global_step)
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
             writer.add_scalar('System/Total_Env_Steps', total_env_steps, global_step)

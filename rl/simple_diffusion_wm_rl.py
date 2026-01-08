@@ -2,6 +2,10 @@
 简单的 WorldModelEnvBatch rollout 实现
 使用 LiberoEnvWrapper 生成初始数据，ActorCritic 生成动作
 """
+from datetime import datetime
+import os
+os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
+os.environ["PYOPENGL_PLATFORM"] = "osmesa" 
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
@@ -35,6 +39,11 @@ def collect_initial_obs_act_from_libero(
     num_trajectories: int,
     device: torch.device,
     deterministic: bool = False,
+    writer: Optional[SummaryWriter] = None,
+    global_step: int = 0,
+    success_window: Optional[deque] = None,
+    length_window: Optional[deque] = None,
+    window_size: int = 100,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[int], List[str]]:
     """
     从 LiberoEnvWrapper 收集多条完整轨迹的初始观测和动作序列
@@ -46,6 +55,11 @@ def collect_initial_obs_act_from_libero(
         num_trajectories: 收集的轨迹数量
         device: torch device
         deterministic: 是否使用确定性动作
+        writer: TensorBoard SummaryWriter (可选)
+        global_step: 全局步数，用于tensorboard记录
+        success_window: 成功率滑动窗口 (可选，如果None会创建新的)
+        length_window: 轨迹长度滑动窗口 (可选，如果None会创建新的)
+        window_size: 滑动窗口大小，默认为100
     
     Returns:
         obs_list: List of [T, C, H, W] tensors
@@ -60,7 +74,15 @@ def collect_initial_obs_act_from_libero(
     step_counts = []
     instructions = []
     
-    from collections import deque
+    # 初始化滑动窗口用于统计
+    if success_window is None:
+        success_window = deque(maxlen=window_size)
+    if length_window is None:
+        length_window = deque(maxlen=window_size)
+    
+    # 当前批次的统计
+    batch_successes = []
+    batch_lengths = []
     
     for traj_idx in range(num_trajectories):
         # Reset environment
@@ -143,6 +165,16 @@ def collect_initial_obs_act_from_libero(
                 # But continue to collect full trajectory for step count
                 pass
         
+        # 统计当前轨迹的成功与否和长度
+        is_success = float(terminated)  # terminated=True 表示成功完成任务
+        traj_length = step_count
+        batch_successes.append(is_success)
+        batch_lengths.append(traj_length)
+        
+        # 添加到滑动窗口
+        success_window.append(is_success)
+        length_window.append(traj_length)
+        
         # Extract valid conditioning windows using sliding window
         # Note: traj_obs_list has T observations (indices 0 to T-1)
         #       traj_act_list has T-1 actions (indices 0 to T-2)
@@ -199,6 +231,28 @@ def collect_initial_obs_act_from_libero(
 
         print(f"轨迹 {traj_idx + 1}/{num_trajectories}: T={T}, step_count={step_count}, "
               f"有效窗口数={num_valid_windows}, terminated={terminated}, truncated={truncated}")
+    
+    # 记录统计信息到 TensorBoard
+    if writer is not None and len(batch_successes) > 0:
+        # 当前批次的统计
+        batch_success_rate = np.mean(batch_successes)
+        batch_avg_length = np.mean(batch_lengths)
+        
+        # 滑动窗口的统计
+        window_success_rate = np.mean(list(success_window))
+        window_avg_length = np.mean(list(length_window))
+        
+        # 记录到 TensorBoard
+        writer.add_scalar("collect/batch_success_rate", batch_success_rate, global_step)
+        writer.add_scalar("collect/batch_avg_trajectory_length", batch_avg_length, global_step)
+        writer.add_scalar("collect/window_success_rate", window_success_rate, global_step)
+        writer.add_scalar("collect/window_avg_trajectory_length", window_avg_length, global_step)
+        writer.add_scalar("collect/num_trajectories", len(batch_successes), global_step)
+        
+        print(f"\n=== 轨迹收集统计 (Step {global_step}) ===")
+        print(f"当前批次: 成功率={batch_success_rate:.2%}, 平均长度={batch_avg_length:.1f}")
+        print(f"滑动窗口 (size={len(success_window)}): 成功率={window_success_rate:.2%}, 平均长度={window_avg_length:.1f}")
+    
     assert len(obs_list) == len(act_list) == len(rew_list) == len(step_counts) == len(instructions)
     return obs_list, act_list, rew_list, step_counts, instructions
 
@@ -288,7 +342,7 @@ def rollout_with_world_model_batched(
         )
         
         if batch_result["obs"].shape[0] > 0:
-            print(f"batch_idx: {batch_idx}, reward sum: {batch_result['rew'].sum(dim=1)}")
+            # print(f"batch_idx: {batch_idx}, reward sum: {batch_result['rew'].sum(dim=1)}")
             # 收集结果
             all_obs_list.append(batch_result["obs"])
             all_act_list.append(batch_result["act_logits"])
@@ -1296,22 +1350,22 @@ def main():
 
     # 训练配置
     num_iterations = 100  # 训练迭代次数
-    num_trajectories_per_iter = 2  # 每次迭代收集的轨迹数
+    num_trajectories_per_iter = 5  # 每次迭代收集的轨迹数
     rollout_max_steps = 8  # 每次rollout的最大步数
     rollout_batch_size = 8  # rollout批大小
 
     # PPO配置
-    learning_rate = 3e-4
+    learning_rate = 1e-5
     clip_ratio = 0.2
     value_coef = 0.5
     entropy_coef = 0.0
     max_grad_norm = 0.5
     ppo_epochs = 1
     ppo_batch_size = 8
-    gradient_accumulation_steps = 8
+    gradient_accumulation_steps = 32
 
     # 设置TensorBoard
-    log_dir = current_dir / "runs/simple_diffusion_wm_rl" / f"{int(time.time())}_ppo_training"
+    log_dir = current_dir / "runs/simple_diffusion_wm_rl" / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_wm_train_slide"
     writer = SummaryWriter(log_dir=str(log_dir))
     print(f"TensorBoard logs will be saved to: {log_dir}")
 
@@ -1375,54 +1429,103 @@ def main():
     checkpoint_dir = log_dir / "checkpoints"
     best_denoiser_loss = float('inf')
     best_reward_loss = float('inf')
+    
+    # 初始化统计滑动窗口
+    success_window = deque(maxlen=100)
+    length_window = deque(maxlen=100)
 
     # 训练循环
     print(f"\n开始训练，共 {num_iterations} 次迭代...")
-    obs_list = []
+    obs_list = deque(maxlen=50000)
+    act_list = deque(maxlen=50000)
+    rew_list = deque(maxlen=50000)
+    step_counts = deque(maxlen=50000)
+    instructions = deque(maxlen=50000)
+    
     for iteration in range(num_iterations):
         print(f"\n=== 迭代 {iteration + 1}/{num_iterations} ===")
         start_time = time.time()
 
         # 1. 收集初始数据
         print(f"收集 {num_trajectories_per_iter} 条轨迹的初始数据...")
-        if len(obs_list) == 0:
-            obs_list, act_list, rew_list, step_counts, instructions = collect_initial_obs_act_from_libero(
-                libero_env, actor, num_steps_conditioning, num_trajectories_per_iter, device, deterministic=False
+        if len(obs_list) == 0 or iteration % 5 == 0:
+            obs_list_t, act_list_t, rew_list_t, step_counts_t, instructions_t = collect_initial_obs_act_from_libero(
+                env=libero_env,
+                actor=actor,
+                num_steps_conditioning=num_steps_conditioning,
+                num_trajectories=num_trajectories_per_iter,
+                device=device,
+                deterministic=False,
+                writer=writer,
+                global_step=iteration,
+                success_window=success_window,
+                length_window=length_window,
+                window_size=100,
             )
+            obs_list.extend(obs_list_t)
+            act_list.extend(act_list_t)
+            rew_list.extend(rew_list_t)
+            step_counts.extend(step_counts_t)
+            instructions.extend(instructions_t)
 
         if len(obs_list) == 0:
             print("警告：未收集到有效轨迹，跳过此次迭代")
             continue
 
+        # 随机采样数据用于rollout
+        num_available_samples = len(obs_list)
+        num_samples_for_rollout = min(512, num_available_samples)
+        sample_indices = torch.randperm(num_available_samples)[:num_samples_for_rollout].tolist()
+        
+        # 从列表中选择样本
+        obs_sampled = [obs_list[i] for i in sample_indices]
+        act_sampled = [act_list[i] for i in sample_indices]
+        rew_sampled = [rew_list[i] for i in sample_indices]
+        step_counts_sampled = [step_counts[i] for i in sample_indices]
+        instructions_sampled = [instructions[i] for i in sample_indices]
+        
+        print(f"从 {num_available_samples} 个样本中随机选择了 {num_samples_for_rollout} 个样本用于rollout")
+
         # 转换为批格式
-        obs = torch.stack(obs_list, dim=0)
-        act = torch.stack(act_list, dim=0)
-        rew = torch.stack(rew_list, dim=0)
-        initial_obs = obs[:, :num_steps_conditioning]  # [B, T, C, H, W]
-        initial_act = act[:, :num_steps_conditioning-1]  # [B, T-1, act_dim]
-        initial_step_counts = torch.tensor(step_counts, device=device, dtype=torch.long)  # [B]
+        obs = torch.stack(list(obs_list), dim=0)
+        act = torch.stack(list(act_list), dim=0)
+        rew = torch.stack(list(rew_list), dim=0)
+        initial_obs = torch.stack(obs_sampled, dim=0)[:, :num_steps_conditioning]  # [B, T, C, H, W]
+        initial_act = torch.stack(act_sampled, dim=0)[:, :num_steps_conditioning-1]  # [B, T-1, act_dim]
+        initial_step_counts = torch.tensor(step_counts_sampled, device=device, dtype=torch.long)  # [B]
 
         print("训练 World Model...")
-        denoiser_start_step, reward_start_step = train_world_model(
-            obs=obs,
-            act=act,
-            rew=rew,
-            trainer_cfg=trainer_cfg,
-            denoiser=denoiser, 
-            denoiser_optimizer=denoiser_optimizer, 
-            denoiser_lr_scheduler=denoiser_lr_scheduler, 
-            denoiser_start_step=denoiser_start_step,
-            reward_model=reward_model,
-            reward_optimizer=reward_optimizer,
-            reward_lr_scheduler=reward_lr_scheduler,
-            reward_cfg=reward_cfg,
-            processor=processor,
-            instructions=instructions,
-            reward_start_step=reward_start_step,
-            writer=writer,
-        )
+        wm_bs = 1024
+        start_buffer_size = 4096
+        if num_available_samples < start_buffer_size:
+            print(f"样本数量不足512（当前={num_available_samples}），跳过本次 World Model 训练")
+        else:
+            sample_indices_wm = torch.randperm(num_available_samples)[:wm_bs].tolist()
+            obs_wm = torch.stack([obs_list[i] for i in sample_indices_wm], dim=0)
+            act_wm = torch.stack([act_list[i] for i in sample_indices_wm], dim=0)
+            rew_wm = torch.stack([rew_list[i] for i in sample_indices_wm], dim=0)
+            instructions_wm = [instructions[i] for i in sample_indices_wm]
 
-        if (iteration + 1) % eval_interval == 0:
+            denoiser_start_step, reward_start_step = train_world_model(
+                obs=obs_wm,
+                act=act_wm,
+                rew=rew_wm,
+                trainer_cfg=trainer_cfg,
+                denoiser=denoiser,
+                denoiser_optimizer=denoiser_optimizer,
+                denoiser_lr_scheduler=denoiser_lr_scheduler,
+                denoiser_start_step=denoiser_start_step,
+                reward_model=reward_model,
+                reward_optimizer=reward_optimizer,
+                reward_lr_scheduler=reward_lr_scheduler,
+                reward_cfg=reward_cfg,
+                processor=processor,
+                instructions=instructions_wm,
+                reward_start_step=reward_start_step,
+                writer=writer,
+            )
+
+        if (iteration + 1) % eval_interval == 0 and False:
             print(f"\n=== 测试 World Model (Iteration {iteration + 1}) ===")
             # TODO 需重新收集测试数据 obs/act/rew 。此处省略，用训练集来测试。
             eval_metrics = evaluate_world_model(
@@ -1460,24 +1563,24 @@ def main():
                 best_reward_loss = eval_metrics['reward_loss']
                 print(f"  *** Best Reward Model! (loss={best_reward_loss:.4f}) ***")
             
-            save_checkpoint(
-                save_dir=checkpoint_dir,
-                iteration=iteration + 1,
-                denoiser=denoiser,
-                denoiser_optimizer=denoiser_optimizer,
-                denoiser_lr_scheduler=denoiser_lr_scheduler,
-                denoiser_step=denoiser_start_step,
-                reward_model=reward_model,
-                reward_optimizer=reward_optimizer,
-                reward_lr_scheduler=reward_lr_scheduler,
-                reward_step=reward_start_step,
-                reward_cfg=reward_cfg,
-                eval_metrics=eval_metrics,
-                is_best_denoiser=is_best_denoiser,
-                is_best_reward=is_best_reward,
-            )
+            # save_checkpoint(
+            #     save_dir=checkpoint_dir,
+            #     iteration=iteration + 1,
+            #     denoiser=denoiser,
+            #     denoiser_optimizer=denoiser_optimizer,
+            #     denoiser_lr_scheduler=denoiser_lr_scheduler,
+            #     denoiser_step=denoiser_start_step,
+            #     reward_model=reward_model,
+            #     reward_optimizer=reward_optimizer,
+            #     reward_lr_scheduler=reward_lr_scheduler,
+            #     reward_step=reward_start_step,
+            #     reward_cfg=reward_cfg,
+            #     eval_metrics=eval_metrics,
+            #     is_best_denoiser=is_best_denoiser,
+            #     is_best_reward=is_best_reward,
+            # )
             
-            manage_checkpoints(checkpoint_dir, num_to_keep)
+            # manage_checkpoints(checkpoint_dir, num_to_keep)
             print("=" * 80 + "\n")
 
         # 创建 WorldModelEnvBatch
@@ -1488,7 +1591,7 @@ def main():
             reward_cfg=reward_cfg,
             processor=processor,
             torch_dtype=torch.bfloat16,
-            instructions=instructions,
+            instructions=instructions_sampled,
             return_denoising_trajectory=False,
         )
 
@@ -1499,7 +1602,7 @@ def main():
             actor=actor,
             initial_obs=initial_obs,
             initial_act=initial_act,
-            instructions=instructions,
+            instructions=instructions_sampled,
             initial_step_counts=initial_step_counts,
             max_steps=rollout_max_steps,
             deterministic=False,
@@ -1513,7 +1616,7 @@ def main():
         if "instructions" in rollout_data:
             rollout_data_for_ppo["instructions"] = rollout_data["instructions"]
         else:
-            rollout_data_for_ppo["instructions"] = instructions
+            rollout_data_for_ppo["instructions"] = instructions_sampled
 
         metrics = ppo_update(
             actor_critic=actor,
