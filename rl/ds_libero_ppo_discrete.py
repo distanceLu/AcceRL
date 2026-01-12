@@ -152,7 +152,7 @@ def parse_args():
     
     parser.add_argument('--clip-mode', type=str, default='sapo',
                         choices=['ppo', 'sapo', 'gipo'],
-                        help='Clipping mode for PPO (default: sapo)')
+                        help='Clipping mode (default: ppo)')
     parser.add_argument('--exp-name', type=str, default=None,
                         help='Experiment name (default: auto-generated based on clip-mode)')
     
