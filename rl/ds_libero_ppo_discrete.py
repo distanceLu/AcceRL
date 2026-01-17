@@ -75,8 +75,8 @@ def parse_args():
                         help='Inference batch size (default: 8)')
     parser.add_argument('--inference-timeout-ms', type=int, default=300,
                         help='Inference timeout in milliseconds (default: 300)')
-    parser.add_argument('--replay-capacity', type=int, default=10000,
-                        help='Replay buffer capacity (default: 10000)')
+    parser.add_argument('--replay-capacity', type=int, default=1000,
+                        help='Replay buffer capacity (default: 1000)')
     parser.add_argument('--train-batch-size', type=int, default=12,
                         help='Training batch size (default: 12)')
     parser.add_argument('--accumulation-steps', type=int, default=21,
@@ -184,6 +184,8 @@ class Trajectory:
     old_values: np.ndarray                    # shape: [T,] - RolloutWorker 收集时的 value
     bootstrap_value: float                    # 截断时的 bootstrap value
     is_terminal: bool                         # True=完整 episode，False=截断
+    policy_versions: np.ndarray               # shape: [T,] - 每个样本的策略版本
+    insert_steps: np.ndarray                  # shape: [T,] - 每个样本的插入时间戳
     
     @property
     def num_steps(self) -> int:
@@ -326,10 +328,12 @@ class ReplayBufferActor:
     def __init__(self, capacity: int):
         # capacity 表示最大轨迹数量
         self.trajectories: deque = deque(maxlen=capacity)
+        self.insert_counter = 0  # 全局插入计数器
 
     def add_trajectory(self, traj: Trajectory):
         """添加一条轨迹"""
         self.trajectories.append(traj)
+        self.insert_counter += 1
 
     def size(self) -> int:
         """返回轨迹数量"""
@@ -423,7 +427,7 @@ class RolloutWorkerActor(BaseWorkerActor):
             step_count = 0
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
-                action_env, action_token, logits, value = ray.get(self.infer.request.remote(inputs_t, deterministic=False))
+                action_env, action_token, logits, value, policy_version = ray.get(self.infer.request.remote(inputs_t, deterministic=False))
                 chunk_reward, done = 0.0, False
                 for i in range(len(action_env)):
                     single_action = action_env[i]
@@ -432,7 +436,9 @@ class RolloutWorkerActor(BaseWorkerActor):
                     chunk_reward += r * self.reward_scale
                     step_count_total += 1
                     if term or trunc: done = True; break
-                self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
+                # 记录当前时间戳作为 insert_step
+                insert_step = int(time.time() * 1000)
+                self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value, policy_version, insert_step))
                 obs = nxt
                 step_count += 1
 
@@ -458,7 +464,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                     obs, info = self._reset_and_select_env(seed=current_seed)
                     time_start, step_count_total = time.time(), 0
                 elif len(self.local_buffer) == self.rollout_local_buf + 1:
-                    _, _, _, _, bootstrap_val = self.local_buffer[-1]
+                    _, _, _, _, bootstrap_val, _, _ = self.local_buffer[-1]
                     self._process_traj(self.local_buffer[:-1], bootstrap_val=bootstrap_val, is_terminal=False)
                     self.local_buffer = [self.local_buffer[-1]]
         except Exception as e: import traceback; print(f"[ERROR] RolloutWorker {self.wid} run() 崩溃: {e}", flush=True); traceback.print_exc(); raise
@@ -466,13 +472,15 @@ class RolloutWorkerActor(BaseWorkerActor):
     def _process_traj(self, traj_segment, bootstrap_val: float, is_terminal: bool):
         """打包轨迹原始数据，不计算 GAE（由 Trainer 统一计算）"""
         traj = Trajectory(
-            obs_list=[s for s, _, _, _, _ in traj_segment],
-            action_tokens=np.stack([a for _, a, _, _, _ in traj_segment]).astype(np.int64),
-            rewards=np.array([r for _, _, r, _, _ in traj_segment], dtype=np.float32),
-            behaviour_logits=np.stack([l for _, _, _, l, _ in traj_segment]).astype(np.float32),
-            old_values=np.array([v for _, _, _, _, v in traj_segment], dtype=np.float32),
+            obs_list=[s for s, _, _, _, _, _, _ in traj_segment],
+            action_tokens=np.stack([a for _, a, _, _, _, _, _ in traj_segment]).astype(np.int64),
+            rewards=np.array([r for _, _, r, _, _, _, _ in traj_segment], dtype=np.float32),
+            behaviour_logits=np.stack([l for _, _, _, l, _, _, _ in traj_segment]).astype(np.float32),
+            old_values=np.array([v for _, _, _, _, v, _, _ in traj_segment], dtype=np.float32),
             bootstrap_value=float(bootstrap_val),
             is_terminal=is_terminal,
+            policy_versions=np.array([pv for _, _, _, _, _, pv, _ in traj_segment], dtype=np.int64),
+            insert_steps=np.array([ins for _, _, _, _, _, _, ins in traj_segment], dtype=np.int64),
         )
         self.replay.add_trajectory.remote(traj)
 
@@ -500,7 +508,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
                 step_count = 0
                 while not done:
                     inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
-                    action_env, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
+                    action_env, _, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
                     step_count += 1
                     for i in range(len(action_env)):
                         single_action = action_env[i]
@@ -538,6 +546,7 @@ class InferenceActor(InferenceActorCom):
         self.processor = self.model.processor
         self.cfg = cfg
         self.stats_actor = stats_actor
+        self.policy_version = 0  # 策略版本号，每次更新权重时递增
 
         self.batch_size = inference_batch
         self.timeout_sec = inference_timeout_ms / 1000.0
@@ -556,6 +565,13 @@ class InferenceActor(InferenceActorCom):
         sd = self.model.state_dict()
         res = {k: float(v.abs().sum().item()) for k, v in sd.items()}
         return res
+    
+    def receive_and_update_weights(self, group_name):
+        """覆盖基类方法，接收权重后自增策略版本"""
+        super().receive_and_update_weights(group_name)
+        self.policy_version += 1
+        if self.actor_id == 0:
+            print(f"InferenceActor {self.actor_id}: 已更新到 policy_version={self.policy_version}")
 
     def _on_bg_task_done(self, task: asyncio.Task):
         try:
@@ -622,8 +638,9 @@ class InferenceActor(InferenceActorCom):
                     promises_to_process[i].set_result((
                         actions_env[i],           # 反归一化的环境动作
                         action_tokens[i],         # 离散动作 token
-                        logits[i], # 对应的 logits
-                        values[i]                 # 价值估计
+                        logits[i],                # 对应的 logits
+                        values[i],                # 价值估计
+                        self.policy_version       # 当前策略版本
                     ))
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/loop_time_s", loop_duration)
@@ -692,6 +709,7 @@ class TrainerActor(TrainerActorCom):
         self.recompute_value = recompute_value
         
         self.global_step = 0
+        self.policy_version = 0  # 策略版本号，每次更新后递增
 
         print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()} (recompute_value={recompute_value})")
 
@@ -800,7 +818,321 @@ class TrainerActor(TrainerActorCom):
         
         return advs, rets
 
-    async def _process_trajectories(self, trajectories: List[Trajectory]) -> Tuple[List, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _compute_diagnostic_metrics(
+        self,
+        ratio: torch.Tensor,  # [B, NUM_ACTIONS_CHUNK, ACTION_DIM] or [B]
+        advantage: torch.Tensor,  # [B]
+        policy_version: torch.Tensor,  # [B]
+        insert_step: torch.Tensor,  # [B]
+        current_policy_version: int,
+        current_step: int,
+        clip_eps: float = 0.2,
+    ) -> Dict[str, float]:
+        """
+        计算诊断指标：staleness、ratio 分布、ESS、PG Active/Dead、有效贡献等
+        
+        根据 docs/clip_metrics.md 文档实现的完整指标集合。
+        """
+        with torch.no_grad():
+            metrics = {}
+            
+            # ==================== 预处理 ====================
+            # ratio 可能是 [B, NUM_ACTIONS_CHUNK, ACTION_DIM]，需要展平
+            ratio_flat = ratio.reshape(-1)
+            
+            # advantage 需要扩展到与 ratio_flat 相同的维度
+            if ratio.dim() == 3:  # [B, NUM_ACTIONS_CHUNK, ACTION_DIM]
+                adv_expanded = advantage.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
+            else:  # [B]
+                adv_expanded = advantage
+            
+            # ==================== 1. Staleness（数据陈旧度）====================
+            staleness_ver = current_policy_version - policy_version.float()  # Δv
+            metrics['staleness_ver_mean'] = staleness_ver.mean().item()
+            metrics['staleness_ver_p95'] = torch.quantile(staleness_ver, 0.95).item()
+            
+            # Age（步数差）- 使用 batch 内相对 age
+            age_steps = insert_step.float().max() - insert_step.float()
+            metrics['age_steps_mean'] = age_steps.mean().item()
+            metrics['age_steps_p95'] = torch.quantile(age_steps, 0.95).item() if age_steps.numel() > 0 else 0.0
+            metrics['age_steps_max'] = age_steps.max().item()
+            
+            # 分桶阈值（绝对）
+            NEW_THRESHOLD = 2
+            OLD_THRESHOLD = 10
+            
+            new_mask_batch = staleness_ver <= NEW_THRESHOLD  # [B]
+            old_mask_batch = staleness_ver >= OLD_THRESHOLD  # [B]
+            
+            # 扩展到与 ratio_flat 相同的维度
+            if ratio.dim() == 3:
+                new_mask = new_mask_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
+                old_mask = old_mask_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
+            else:
+                new_mask = new_mask_batch
+                old_mask = old_mask_batch
+            
+            # A. 分桶组成（绝对阈值）
+            metrics['staleness_old_frac_abs'] = old_mask_batch.float().mean().item()
+            metrics['staleness_new_frac_abs'] = new_mask_batch.float().mean().item()
+            
+            # A2) 旧桶内的陈旧度分布
+            if old_mask_batch.any():
+                old_gaps = staleness_ver[old_mask_batch]
+                metrics['staleness_old_gap_mean_abs'] = old_gaps.mean().item()
+                metrics['staleness_old_gap_p95_abs'] = torch.quantile(old_gaps, 0.95).item()
+            else:
+                metrics['staleness_old_gap_mean_abs'] = 0.0
+                metrics['staleness_old_gap_p95_abs'] = 0.0
+            
+            # B. 相对陈旧度（Relative Staleness）
+            staleness_ratio = staleness_ver / max(current_policy_version, 1)
+            metrics['staleness_ratio_mean'] = staleness_ratio.mean().item()
+            metrics['staleness_ratio_p95'] = torch.quantile(staleness_ratio, 0.95).item()
+            
+            # B2) 相对阈值分桶
+            NEW_RATIO_THRESHOLD = 0.05   # 落后 <= 5%
+            OLD_RATIO_THRESHOLD = 0.5    # 落后 >= 50%
+            
+            new_mask_ratio_batch = staleness_ratio <= NEW_RATIO_THRESHOLD
+            old_mask_ratio_batch = staleness_ratio >= OLD_RATIO_THRESHOLD
+            
+            # 扩展到与 ratio_flat 相同的维度
+            if ratio.dim() == 3:
+                new_mask_ratio = new_mask_ratio_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
+                old_mask_ratio = old_mask_ratio_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
+            else:
+                new_mask_ratio = new_mask_ratio_batch
+                old_mask_ratio = old_mask_ratio_batch
+            
+            metrics['staleness_old_frac_ratio'] = old_mask_ratio_batch.float().mean().item()
+            metrics['staleness_new_frac_ratio'] = new_mask_ratio_batch.float().mean().item()
+            
+            # ==================== 2. Ratio / log-ratio 分布 ====================
+            metrics['rho_mean'] = ratio_flat.mean().item()
+            metrics['rho_p50'] = torch.median(ratio_flat).item()
+            metrics['rho_p90'] = torch.quantile(ratio_flat, 0.90).item()
+            metrics['rho_p99'] = torch.quantile(ratio_flat, 0.99).item()
+            metrics['rho_max'] = ratio_flat.max().item()
+            
+            # log-ratio
+            logrho = torch.log(ratio_flat.clamp(min=1e-8))
+            metrics['logrho_mean'] = logrho.mean().item()
+            metrics['abs_logrho_p95'] = torch.quantile(torch.abs(logrho), 0.95).item()
+            
+            # ==================== 3. Hard Clip 指标（PPO）====================
+            if self.clip_mode == "ppo":
+                # Dead gradient: (A > 0 and ρ > 1+ε) or (A < 0 and ρ < 1-ε)
+                dead_mask = ((adv_expanded > 0) & (ratio_flat > (1 + clip_eps))) | \
+                           ((adv_expanded < 0) & (ratio_flat < (1 - clip_eps)))
+                
+                metrics['pg_dead_frac'] = dead_mask.float().mean().item()
+                metrics['pg_active_frac'] = 1.0 - metrics['pg_dead_frac']
+                
+                # 分桶统计（绝对阈值）
+                if new_mask.any():
+                    metrics['pg_dead_frac_new'] = dead_mask[new_mask].float().mean().item()
+                    metrics['pg_active_frac_new'] = 1.0 - metrics['pg_dead_frac_new']
+                if old_mask.any():
+                    metrics['pg_dead_frac_old'] = dead_mask[old_mask].float().mean().item()
+                    metrics['pg_active_frac_old'] = 1.0 - metrics['pg_dead_frac_old']
+                
+                # 分桶统计（相对阈值）
+                if new_mask_ratio.any():
+                    metrics['pg_dead_frac_new_ratio'] = dead_mask[new_mask_ratio].float().mean().item()
+                    metrics['pg_active_frac_new_ratio'] = 1.0 - metrics['pg_dead_frac_new_ratio']
+                if old_mask_ratio.any():
+                    metrics['pg_dead_frac_old_ratio'] = dead_mask[old_mask_ratio].float().mean().item()
+                    metrics['pg_active_frac_old_ratio'] = 1.0 - metrics['pg_dead_frac_old_ratio']
+                
+                # U（贡献权重）for Hard Clip
+                u = ratio_flat * (~dead_mask).float()
+            else:
+                # ==================== 4. Soft Clip 指标 ====================
+                # Outside clip (按 ratio 定义)
+                outside_clip = (ratio_flat < (1 - clip_eps)) | (ratio_flat > (1 + clip_eps))
+                metrics['outside_clip_frac'] = outside_clip.float().mean().item()
+                
+                # 分桶统计
+                if new_mask.any():
+                    metrics['outside_clip_frac_new'] = outside_clip[new_mask].float().mean().item()
+                if old_mask.any():
+                    metrics['outside_clip_frac_old'] = outside_clip[old_mask].float().mean().item()
+                
+                # U（贡献权重）for Soft Clip - 需要根据 clip_mode 计算
+                if self.clip_mode == "sapo":
+                    # SAPO: gate(r) = (4/τ) * sigmoid(τ*(r-1))
+                    tau_pos = 1.0
+                    tau_neg = 2.0
+                    ratio_min = 1e-6
+                    ratio_max = 1e6
+                    r = ratio_flat.clamp(ratio_min, ratio_max)
+                    
+                    tau = torch.where(adv_expanded > 0, 
+                                     torch.full_like(ratio_flat, tau_pos),
+                                     torch.full_like(ratio_flat, tau_neg))
+                    x = tau * (r - 1.0)
+                    p = torch.sigmoid(x)
+                    w_sapo = 4.0 * p * (1.0 - p)
+                    u = w_sapo * r
+                    
+                    # suppressed：权重被显著抑制（< 阈值）
+                    w_threshold = 1e-3
+                    suppressed_mask = w_sapo < w_threshold
+                    metrics['suppressed_frac'] = suppressed_mask.float().mean().item()
+                    
+                    if new_mask.any():
+                        metrics['suppressed_frac_new'] = suppressed_mask[new_mask].float().mean().item()
+                    if old_mask.any():
+                        metrics['suppressed_frac_old'] = suppressed_mask[old_mask].float().mean().item()
+                        
+                elif self.clip_mode == "gipo":
+                    # GIPO: Log-Gauss soft clip
+                    eps = 1e-9
+                    sigma = 1.0
+                    r = ratio_flat.clamp_min(eps).detach()
+                    w_gauss = torch.exp(-0.5 * (torch.log(r) / sigma) ** 2)
+                    u = w_gauss * r
+                    
+                    # suppressed
+                    w_threshold = 1e-3
+                    suppressed_mask = w_gauss < w_threshold
+                    metrics['suppressed_frac'] = suppressed_mask.float().mean().item()
+                    
+                    if new_mask.any():
+                        metrics['suppressed_frac_new'] = suppressed_mask[new_mask].float().mean().item()
+                    if old_mask.any():
+                        metrics['suppressed_frac_old'] = suppressed_mask[old_mask].float().mean().item()
+                else:
+                    # 其他模式：直接使用 ratio
+                    u = ratio_flat
+            
+            # ==================== 5. 贡献权重 U 统计 ====================
+            metrics['u_mean'] = u.mean().item()
+            metrics['u_p50'] = torch.median(u).item()
+            metrics['u_p90'] = torch.quantile(u, 0.90).item()
+            metrics['u_p99'] = torch.quantile(u, 0.99).item()
+            metrics['u_max'] = u.max().item()
+            
+            # 分桶统计
+            if new_mask.any():
+                u_new = u[new_mask]
+                metrics['u_mean_new'] = u_new.mean().item()
+                metrics['u_p90_new'] = torch.quantile(u_new, 0.90).item()
+            if old_mask.any():
+                u_old = u[old_mask]
+                metrics['u_mean_old'] = u_old.mean().item()
+                metrics['u_p90_old'] = torch.quantile(u_old, 0.90).item()
+            
+            # ==================== 6. NearZero_U_Frac ====================
+            near_zero_threshold = 1e-3
+            near_zero_mask = u < near_zero_threshold
+            metrics['nearzero_u_frac'] = near_zero_mask.float().mean().item()
+            
+            # 分桶统计（绝对阈值）
+            if new_mask.any():
+                metrics['nearzero_u_frac_new'] = near_zero_mask[new_mask].float().mean().item()
+            if old_mask.any():
+                metrics['nearzero_u_frac_old'] = near_zero_mask[old_mask].float().mean().item()
+            
+            # 分桶统计（相对阈值）
+            if new_mask_ratio.any():
+                metrics['nearzero_u_frac_new_ratio'] = near_zero_mask[new_mask_ratio].float().mean().item()
+            if old_mask_ratio.any():
+                metrics['nearzero_u_frac_old_ratio'] = near_zero_mask[old_mask_ratio].float().mean().item()
+            
+            # ==================== 7. 数据贡献占比（Contribution Share）====================
+            u_sum_all = u.sum()
+            
+            # C1) 基于绝对阈值的贡献占比
+            if old_mask.any() and u_sum_all > 0:
+                metrics['contribution_old_u_share'] = (u[old_mask].sum() / u_sum_all).item()
+            else:
+                metrics['contribution_old_u_share'] = 0.0
+            
+            if new_mask.any() and u_sum_all > 0:
+                metrics['contribution_new_u_share'] = (u[new_mask].sum() / u_sum_all).item()
+            else:
+                metrics['contribution_new_u_share'] = 0.0
+            
+            # C2) 基于相对阈值的贡献占比
+            if old_mask_ratio.any() and u_sum_all > 0:
+                metrics['contribution_old_u_share_ratio'] = (u[old_mask_ratio].sum() / u_sum_all).item()
+            else:
+                metrics['contribution_old_u_share_ratio'] = 0.0
+            
+            if new_mask_ratio.any() and u_sum_all > 0:
+                metrics['contribution_new_u_share_ratio'] = (u[new_mask_ratio].sum() / u_sum_all).item()
+            else:
+                metrics['contribution_new_u_share_ratio'] = 0.0
+            
+            # C3) 基于 |u*A| 的梯度贡献占比
+            u_grad_proxy = torch.abs(u * adv_expanded)
+            u_grad_sum_all = u_grad_proxy.sum()
+            
+            # 绝对阈值版本
+            if old_mask.any() and u_grad_sum_all > 0:
+                metrics['contribution_old_u_share_abs_grad_proxy'] = (u_grad_proxy[old_mask].sum() / u_grad_sum_all).item()
+            else:
+                metrics['contribution_old_u_share_abs_grad_proxy'] = 0.0
+            
+            if new_mask.any() and u_grad_sum_all > 0:
+                metrics['contribution_new_u_share_abs_grad_proxy'] = (u_grad_proxy[new_mask].sum() / u_grad_sum_all).item()
+            else:
+                metrics['contribution_new_u_share_abs_grad_proxy'] = 0.0
+            
+            # 相对阈值版本
+            if old_mask_ratio.any() and u_grad_sum_all > 0:
+                metrics['contribution_old_u_share_abs_grad_proxy_ratio'] = (u_grad_proxy[old_mask_ratio].sum() / u_grad_sum_all).item()
+            else:
+                metrics['contribution_old_u_share_abs_grad_proxy_ratio'] = 0.0
+            
+            if new_mask_ratio.any() and u_grad_sum_all > 0:
+                metrics['contribution_new_u_share_abs_grad_proxy_ratio'] = (u_grad_proxy[new_mask_ratio].sum() / u_grad_sum_all).item()
+            else:
+                metrics['contribution_new_u_share_abs_grad_proxy_ratio'] = 0.0
+            
+            # ==================== 8. ESS（有效样本量）====================
+            u_sum = u.sum()
+            u_sq_sum = (u * u).sum()
+            ess_eff = (u_sum * u_sum) / (u_sq_sum + 1e-12)
+            metrics['ess_eff'] = ess_eff.item()
+            metrics['ess_eff_norm'] = (ess_eff / u.numel()).item()
+            
+            # 分桶统计（绝对阈值）
+            if new_mask.any():
+                u_new = u[new_mask]
+                u_new_sum = u_new.sum()
+                u_new_sq_sum = (u_new * u_new).sum()
+                ess_eff_new = (u_new_sum * u_new_sum) / (u_new_sq_sum + 1e-12)
+                metrics['ess_eff_norm_new'] = (ess_eff_new / u_new.numel()).item()
+                metrics['ess_eff_norm_new_abs'] = (ess_eff_new / u_new.numel()).item()
+            if old_mask.any():
+                u_old = u[old_mask]
+                u_old_sum = u_old.sum()
+                u_old_sq_sum = (u_old * u_old).sum()
+                ess_eff_old = (u_old_sum * u_old_sum) / (u_old_sq_sum + 1e-12)
+                metrics['ess_eff_norm_old'] = (ess_eff_old / u_old.numel()).item()
+                metrics['ess_eff_norm_old_abs'] = (ess_eff_old / u_old.numel()).item()
+            
+            # 分桶统计（相对阈值）
+            if new_mask_ratio.any():
+                u_new_ratio = u[new_mask_ratio]
+                u_new_ratio_sum = u_new_ratio.sum()
+                u_new_ratio_sq_sum = (u_new_ratio * u_new_ratio).sum()
+                ess_eff_new_ratio = (u_new_ratio_sum * u_new_ratio_sum) / (u_new_ratio_sq_sum + 1e-12)
+                metrics['ess_eff_norm_new_ratio'] = (ess_eff_new_ratio / u_new_ratio.numel()).item()
+            
+            if old_mask_ratio.any():
+                u_old_ratio = u[old_mask_ratio]
+                u_old_ratio_sum = u_old_ratio.sum()
+                u_old_ratio_sq_sum = (u_old_ratio * u_old_ratio).sum()
+                ess_eff_old_ratio = (u_old_ratio_sum * u_old_ratio_sum) / (u_old_ratio_sq_sum + 1e-12)
+                metrics['ess_eff_norm_old_ratio'] = (ess_eff_old_ratio / u_old_ratio.numel()).item()
+            
+            return metrics
+
+    async def _process_trajectories(self, trajectories: List[Trajectory]) -> Tuple[List, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """处理轨迹，根据 recompute_value 决定是否重新计算 value (全GPU版本)
         
         Args:
@@ -812,6 +1144,8 @@ class TrainerActor(TrainerActorCom):
             advantages: [N,] GPU tensor
             behaviour_logits: [N, NUM_ACTIONS_CHUNK, ACTION_DIM, VOCAB_SIZE] GPU tensor
             value_targets: [N,] GPU tensor
+            policy_versions: [N,] GPU tensor
+            insert_steps: [N,] GPU tensor
         """
         # 收集所有 obs
         all_obs = []
@@ -841,6 +1175,8 @@ class TrainerActor(TrainerActorCom):
         all_advantages = []
         all_behaviour_logits = []
         all_value_targets = []
+        all_policy_versions = []
+        all_insert_steps = []
         
         offset = 0
         for traj in trajectories:
@@ -863,14 +1199,19 @@ class TrainerActor(TrainerActorCom):
             all_advantages.append(advs)
             all_behaviour_logits.append(torch.from_numpy(traj.behaviour_logits).to(device))
             all_value_targets.append(rets)
+            # 每个 step 都有自己的 policy_version 和 insert_step
+            all_policy_versions.append(torch.from_numpy(traj.policy_versions).to(device))
+            all_insert_steps.append(torch.from_numpy(traj.insert_steps).to(device))
         
         # 拼接所有数据
         action_tokens = torch.cat(all_action_tokens, dim=0)
         advantages = torch.cat(all_advantages, dim=0)
         behaviour_logits = torch.cat(all_behaviour_logits, dim=0)
         value_targets = torch.cat(all_value_targets, dim=0)
+        policy_versions = torch.cat(all_policy_versions, dim=0)
+        insert_steps = torch.cat(all_insert_steps, dim=0)
         
-        return all_obs, action_tokens, advantages, behaviour_logits, value_targets
+        return all_obs, action_tokens, advantages, behaviour_logits, value_targets, policy_versions, insert_steps
 
     async def _data_fetching_loop(self):
         print(f"Trainer {self.rank}: 后台数据准备循环已启动 (超级批次大小: {self.super_batch_size}, recompute_value={self.recompute_value})。")
@@ -893,7 +1234,7 @@ class TrainerActor(TrainerActorCom):
 
                 t_prep_start = time.time()
                 # 处理轨迹（计算 GAE，可能重新计算 value）- 全部在 GPU 上
-                obs_list, action_tokens, advantages, behaviour_logits, value_targets = await self._process_trajectories(trajectories)
+                obs_list, action_tokens, advantages, behaviour_logits, value_targets, policy_versions, insert_steps = await self._process_trajectories(trajectories)
                 
                 # 打乱样本顺序 - 在 GPU 上进行
                 num_samples = len(obs_list)
@@ -905,6 +1246,8 @@ class TrainerActor(TrainerActorCom):
                 adv_t = advantages[indices]
                 logits_old_t = behaviour_logits[indices]
                 v_targ_t = value_targets[indices]
+                policy_ver_t = policy_versions[indices]
+                insert_step_t = insert_steps[indices]
                 
                 # 准备 batch
                 inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
@@ -917,6 +1260,8 @@ class TrainerActor(TrainerActorCom):
                     'advantage': adv_t,
                     'logits_old': logits_old_t,
                     'value_target': v_targ_t,
+                    'policy_version': policy_ver_t,
+                    'insert_step': insert_step_t,
                     'sample_time': sample_time,
                     'prep_time': prep_time
                 }
@@ -950,6 +1295,8 @@ class TrainerActor(TrainerActorCom):
         adv_t = current_batch['advantage']
         logits_old_t = current_batch['logits_old']
         v_targ_t = current_batch['value_target']
+        policy_ver_t = current_batch['policy_version']
+        insert_step_t = current_batch['insert_step']
         policy_sample_time = current_batch['sample_time']
         policy_prep_time = current_batch['prep_time']
 
@@ -969,7 +1316,10 @@ class TrainerActor(TrainerActorCom):
         global_std = torch.sqrt(global_var)
 
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses, epoch_kl_losses = [], [], [], [], []
-        epoch_ent, epoch_kl_divs = [], []   
+        epoch_ent, epoch_kl_divs = [], []
+        epoch_explained_variance = []
+        epoch_grad_norms = []
+        diagnostic_metrics = {}  # 只在第一个 mini-batch 计算一次
         
         num_updates_in_epoch = self.super_batch_size // self.train_batch_size
         t_policy_train_start = time.time()
@@ -982,6 +1332,8 @@ class TrainerActor(TrainerActorCom):
             mini_adv = adv_t[start:end]
             mini_logits_old = logits_old_t[start:end]
             mini_v_targ = v_targ_t[start:end]
+            mini_policy_ver = policy_ver_t[start:end]
+            mini_insert_step = insert_step_t[start:end]
             
             # 使用全局统计量进行归一化
             normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
@@ -995,6 +1347,18 @@ class TrainerActor(TrainerActorCom):
 
             # 价值损失 (不变)
             value_loss = self.vf_coef * torch.mean((value - mini_v_targ) ** 2)
+            
+            # Explained Variance (在第一个 mini-batch 计算)
+            if i == 0:
+                with torch.no_grad():
+                    value_pred = value.squeeze(-1) if value.dim() > 1 else value
+                    target = mini_v_targ
+                    var_target = torch.var(target, unbiased=False)
+                    if var_target < 1e-12:
+                        ev = 0.0
+                    else:
+                        ev = 1.0 - torch.var(target - value_pred, unbiased=False) / (var_target + 1e-12)
+                    epoch_explained_variance.append(float(ev))
             
             if self.global_step < self.policy_train_start_step:
                 loss = value_loss
@@ -1016,6 +1380,19 @@ class TrainerActor(TrainerActorCom):
                 kl_div = torch.mean(kl_div_tensor).item() # 作为指标
                 kl_loss = self.kl_coef * torch.mean(kl_div_tensor) # 作为损失
                 ratio = torch.exp(logp - logp_old)
+                
+                # ========== 计算诊断指标（只在第一个 mini-batch 时计算）==========
+                if i == 0 and self.global_step >= self.policy_train_start_step:
+                    diagnostic_metrics = self._compute_diagnostic_metrics(
+                        ratio=ratio,
+                        advantage=normalized_adv,
+                        policy_version=mini_policy_ver,
+                        insert_step=mini_insert_step,
+                        current_policy_version=self.policy_version,
+                        current_step=self.global_step,
+                        clip_eps=self.clip_eps,
+                    )
+                
                 adv_unsqueezed = normalized_adv.unsqueeze(dim=-1).unsqueeze(dim=-1)
                 surr1 = ratio * adv_unsqueezed
                 if self.clip_mode == "gipo":
@@ -1059,6 +1436,15 @@ class TrainerActor(TrainerActorCom):
                 loss = policy_loss + value_loss + ent_loss + kl_loss
 
             self.model.backward(loss)
+            
+            # Gradient Norm (在第一个 mini-batch 计算)
+            if i == 0 and self.global_step >= self.policy_train_start_step:
+                try:
+                    grad_norm = self.model.get_global_grad_norm()
+                    epoch_grad_norms.append(float(grad_norm))
+                except Exception:
+                    pass
+            
             self.model.step()
             epoch_losses.append(loss.item())
             epoch_p_losses.append(policy_loss.item())
@@ -1078,11 +1464,22 @@ class TrainerActor(TrainerActorCom):
         avg_ent = np.mean(epoch_ent)
         avg_kl_div = np.mean(epoch_kl_divs)
 
+        # 计算 Explained Variance 和 Grad Norm 的平均值
+        avg_explained_variance = np.mean(epoch_explained_variance) if epoch_explained_variance else 0.0
+        avg_grad_norm = np.mean(epoch_grad_norms) if epoch_grad_norms else 0.0
+        
         perf_metrics = {
             "policy_sample_time": policy_sample_time,
             "policy_prep_time": policy_prep_time,
-            "policy_train_time": time.time() - t_policy_train_start
+            "policy_train_time": time.time() - t_policy_train_start,
+            "explained_variance": avg_explained_variance,
+            "grad_norm": avg_grad_norm,
         }
+        # 合并诊断指标到 perf_metrics
+        perf_metrics.update(diagnostic_metrics)
+        
+        # 递增策略版本
+        self.policy_version += 1
 
         return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, avg_kl_loss, current_lrs, self.global_step, avg_ent, avg_kl_div, perf_metrics
 
@@ -1311,6 +1708,148 @@ def main(args):
             writer.add_scalar('Metrics/Entropy', np.mean(ents), global_step)
             writer.add_scalar('Metrics/KL_Divergence', np.mean(avg_kl_divs), global_step)
             writer.add_scalar('Metrics/Training_Speed_Steps_per_Sec', training_speed_steps_per_sec, global_step)
+            
+            # ========== 新增核心指标：Explained Variance 和 Gradient Norm ==========
+            if 'explained_variance' in perf_metrics_list[0]:
+                writer.add_scalar('Metrics/ExplainedVariance', perf_metrics_list[0]['explained_variance'], global_step)
+            if 'grad_norm' in perf_metrics_list[0]:
+                writer.add_scalar('Metrics/Grad_Norm', perf_metrics_list[0]['grad_norm'], global_step)
+            
+            # ========== 新增诊断指标（Staleness、Ratio、ESS 等）==========
+            # 1. Staleness
+            if 'staleness_ver_mean' in perf_metrics_list[0]:
+                writer.add_scalar('Staleness/Version_Mean', perf_metrics_list[0]['staleness_ver_mean'], global_step)
+                writer.add_scalar('Staleness/Version_P95', perf_metrics_list[0]['staleness_ver_p95'], global_step)
+                writer.add_scalar('Staleness/Age_Steps_Mean', perf_metrics_list[0]['age_steps_mean'], global_step)
+                writer.add_scalar('Staleness/Age_Steps_P95', perf_metrics_list[0]['age_steps_p95'], global_step)
+                if 'age_steps_max' in perf_metrics_list[0]:
+                    writer.add_scalar('Staleness/Age_Steps_Max', perf_metrics_list[0]['age_steps_max'], global_step)
+                
+                # A. 分桶组成（绝对阈值）
+                if 'staleness_old_frac_abs' in perf_metrics_list[0]:
+                    writer.add_scalar('Staleness/OldFrac_Abs', perf_metrics_list[0]['staleness_old_frac_abs'], global_step)
+                    writer.add_scalar('Staleness/NewFrac_Abs', perf_metrics_list[0]['staleness_new_frac_abs'], global_step)
+                if 'staleness_old_gap_mean_abs' in perf_metrics_list[0]:
+                    writer.add_scalar('Staleness/OldGapMean_Abs', perf_metrics_list[0]['staleness_old_gap_mean_abs'], global_step)
+                    writer.add_scalar('Staleness/OldGapP95_Abs', perf_metrics_list[0]['staleness_old_gap_p95_abs'], global_step)
+                
+                # B. 相对陈旧度
+                if 'staleness_ratio_mean' in perf_metrics_list[0]:
+                    writer.add_scalar('Staleness/RatioMean', perf_metrics_list[0]['staleness_ratio_mean'], global_step)
+                    writer.add_scalar('Staleness/RatioP95', perf_metrics_list[0]['staleness_ratio_p95'], global_step)
+                if 'staleness_old_frac_ratio' in perf_metrics_list[0]:
+                    writer.add_scalar('Staleness/OldFrac_Ratio', perf_metrics_list[0]['staleness_old_frac_ratio'], global_step)
+                    writer.add_scalar('Staleness/NewFrac_Ratio', perf_metrics_list[0]['staleness_new_frac_ratio'], global_step)
+            
+            # 2. Ratio / log-ratio 分布
+            if 'rho_mean' in perf_metrics_list[0]:
+                writer.add_scalar('Ratio/Rho_Mean', perf_metrics_list[0]['rho_mean'], global_step)
+                writer.add_scalar('Ratio/Rho_P50', perf_metrics_list[0]['rho_p50'], global_step)
+                writer.add_scalar('Ratio/Rho_P90', perf_metrics_list[0]['rho_p90'], global_step)
+                writer.add_scalar('Ratio/Rho_P99', perf_metrics_list[0]['rho_p99'], global_step)
+                writer.add_scalar('Ratio/Rho_Max', perf_metrics_list[0]['rho_max'], global_step)
+                writer.add_scalar('Ratio/LogRho_Mean', perf_metrics_list[0]['logrho_mean'], global_step)
+                writer.add_scalar('Ratio/AbsLogRho_P95', perf_metrics_list[0]['abs_logrho_p95'], global_step)
+            
+            # 3. Hard Clip 指标（PPO）
+            if 'pg_active_frac' in perf_metrics_list[0]:
+                writer.add_scalar('Hard/PG_Active_Frac', perf_metrics_list[0]['pg_active_frac'], global_step)
+                writer.add_scalar('Hard/PG_Dead_Frac', perf_metrics_list[0]['pg_dead_frac'], global_step)
+                if 'pg_active_frac_new' in perf_metrics_list[0]:
+                    writer.add_scalar('Hard/PG_Active_Frac_New', perf_metrics_list[0]['pg_active_frac_new'], global_step)
+                    writer.add_scalar('Hard/PG_Dead_Frac_New', perf_metrics_list[0]['pg_dead_frac_new'], global_step)
+                if 'pg_active_frac_old' in perf_metrics_list[0]:
+                    writer.add_scalar('Hard/PG_Active_Frac_Old', perf_metrics_list[0]['pg_active_frac_old'], global_step)
+                    writer.add_scalar('Hard/PG_Dead_Frac_Old', perf_metrics_list[0]['pg_dead_frac_old'], global_step)
+                # 相对阈值分桶
+                if 'pg_active_frac_new_ratio' in perf_metrics_list[0]:
+                    writer.add_scalar('Hard/PG_Active_Frac_New_Ratio', perf_metrics_list[0]['pg_active_frac_new_ratio'], global_step)
+                    writer.add_scalar('Hard/PG_Dead_Frac_New_Ratio', perf_metrics_list[0]['pg_dead_frac_new_ratio'], global_step)
+                if 'pg_active_frac_old_ratio' in perf_metrics_list[0]:
+                    writer.add_scalar('Hard/PG_Active_Frac_Old_Ratio', perf_metrics_list[0]['pg_active_frac_old_ratio'], global_step)
+                    writer.add_scalar('Hard/PG_Dead_Frac_Old_Ratio', perf_metrics_list[0]['pg_dead_frac_old_ratio'], global_step)
+            
+            # 4. Soft Clip 指标
+            if 'outside_clip_frac' in perf_metrics_list[0]:
+                writer.add_scalar('Soft/Outside_Clip_Frac', perf_metrics_list[0]['outside_clip_frac'], global_step)
+                if 'outside_clip_frac_new' in perf_metrics_list[0]:
+                    writer.add_scalar('Soft/Outside_Clip_Frac_New', perf_metrics_list[0]['outside_clip_frac_new'], global_step)
+                if 'outside_clip_frac_old' in perf_metrics_list[0]:
+                    writer.add_scalar('Soft/Outside_Clip_Frac_Old', perf_metrics_list[0]['outside_clip_frac_old'], global_step)
+            
+            if 'suppressed_frac' in perf_metrics_list[0]:
+                writer.add_scalar('Soft/Suppressed_Frac', perf_metrics_list[0]['suppressed_frac'], global_step)
+                if 'suppressed_frac_new' in perf_metrics_list[0]:
+                    writer.add_scalar('Soft/Suppressed_Frac_New', perf_metrics_list[0]['suppressed_frac_new'], global_step)
+                if 'suppressed_frac_old' in perf_metrics_list[0]:
+                    writer.add_scalar('Soft/Suppressed_Frac_Old', perf_metrics_list[0]['suppressed_frac_old'], global_step)
+            
+            # 5. 贡献权重 U
+            if 'u_mean' in perf_metrics_list[0]:
+                writer.add_scalar('Contribution/U_Mean', perf_metrics_list[0]['u_mean'], global_step)
+                writer.add_scalar('Contribution/U_P50', perf_metrics_list[0]['u_p50'], global_step)
+                writer.add_scalar('Contribution/U_P90', perf_metrics_list[0]['u_p90'], global_step)
+                writer.add_scalar('Contribution/U_P99', perf_metrics_list[0]['u_p99'], global_step)
+                writer.add_scalar('Contribution/U_Max', perf_metrics_list[0]['u_max'], global_step)
+                
+                # 分桶统计（绝对阈值）
+                if 'u_mean_new' in perf_metrics_list[0]:
+                    writer.add_scalar('Contribution/U_Mean_New', perf_metrics_list[0]['u_mean_new'], global_step)
+                    writer.add_scalar('Contribution/U_P90_New', perf_metrics_list[0]['u_p90_new'], global_step)
+                if 'u_mean_old' in perf_metrics_list[0]:
+                    writer.add_scalar('Contribution/U_Mean_Old', perf_metrics_list[0]['u_mean_old'], global_step)
+                    writer.add_scalar('Contribution/U_P90_Old', perf_metrics_list[0]['u_p90_old'], global_step)
+            
+            # 6. 数据贡献占比
+            if 'contribution_old_u_share' in perf_metrics_list[0]:
+                writer.add_scalar('Contribution/OldUShare', perf_metrics_list[0]['contribution_old_u_share'], global_step)
+                writer.add_scalar('Contribution/NewUShare', perf_metrics_list[0]['contribution_new_u_share'], global_step)
+            if 'contribution_old_u_share_ratio' in perf_metrics_list[0]:
+                writer.add_scalar('Contribution/OldUShare_Ratio', perf_metrics_list[0]['contribution_old_u_share_ratio'], global_step)
+                writer.add_scalar('Contribution/NewUShare_Ratio', perf_metrics_list[0]['contribution_new_u_share_ratio'], global_step)
+            
+            # 基于 |u*A| 的梯度贡献占比
+            if 'contribution_old_u_share_abs_grad_proxy' in perf_metrics_list[0]:
+                writer.add_scalar('Contribution/OldUShare_AbsGradProxy', perf_metrics_list[0]['contribution_old_u_share_abs_grad_proxy'], global_step)
+                writer.add_scalar('Contribution/NewUShare_AbsGradProxy', perf_metrics_list[0]['contribution_new_u_share_abs_grad_proxy'], global_step)
+            if 'contribution_old_u_share_abs_grad_proxy_ratio' in perf_metrics_list[0]:
+                writer.add_scalar('Contribution/OldUShare_AbsGradProxy_Ratio', perf_metrics_list[0]['contribution_old_u_share_abs_grad_proxy_ratio'], global_step)
+                writer.add_scalar('Contribution/NewUShare_AbsGradProxy_Ratio', perf_metrics_list[0]['contribution_new_u_share_abs_grad_proxy_ratio'], global_step)
+            
+            # 7. NearZero_U_Frac
+            if 'nearzero_u_frac' in perf_metrics_list[0]:
+                writer.add_scalar('Contribution/NearZero_U_Frac', perf_metrics_list[0]['nearzero_u_frac'], global_step)
+                # 分桶统计（绝对阈值）
+                if 'nearzero_u_frac_new' in perf_metrics_list[0]:
+                    writer.add_scalar('Contribution/NearZero_U_Frac_New', perf_metrics_list[0]['nearzero_u_frac_new'], global_step)
+                if 'nearzero_u_frac_old' in perf_metrics_list[0]:
+                    writer.add_scalar('Contribution/NearZero_U_Frac_Old', perf_metrics_list[0]['nearzero_u_frac_old'], global_step)
+                # 分桶统计（相对阈值）
+                if 'nearzero_u_frac_new_ratio' in perf_metrics_list[0]:
+                    writer.add_scalar('Contribution/NearZero_U_Frac_New_Ratio', perf_metrics_list[0]['nearzero_u_frac_new_ratio'], global_step)
+                if 'nearzero_u_frac_old_ratio' in perf_metrics_list[0]:
+                    writer.add_scalar('Contribution/NearZero_U_Frac_Old_Ratio', perf_metrics_list[0]['nearzero_u_frac_old_ratio'], global_step)
+            
+            # 8. ESS（有效样本量）
+            if 'ess_eff' in perf_metrics_list[0]:
+                writer.add_scalar('ESS/ESS_Eff', perf_metrics_list[0]['ess_eff'], global_step)
+                writer.add_scalar('ESS/ESS_Eff_Norm', perf_metrics_list[0]['ess_eff_norm'], global_step)
+                
+                # 分桶统计（绝对阈值）
+                if 'ess_eff_norm_new' in perf_metrics_list[0]:
+                    writer.add_scalar('ESS/ESS_Eff_Norm_New', perf_metrics_list[0]['ess_eff_norm_new'], global_step)
+                if 'ess_eff_norm_old' in perf_metrics_list[0]:
+                    writer.add_scalar('ESS/ESS_Eff_Norm_Old', perf_metrics_list[0]['ess_eff_norm_old'], global_step)
+                if 'ess_eff_norm_new_abs' in perf_metrics_list[0]:
+                    writer.add_scalar('ESS/ESS_Eff_Norm_New_Abs', perf_metrics_list[0]['ess_eff_norm_new_abs'], global_step)
+                if 'ess_eff_norm_old_abs' in perf_metrics_list[0]:
+                    writer.add_scalar('ESS/ESS_Eff_Norm_Old_Abs', perf_metrics_list[0]['ess_eff_norm_old_abs'], global_step)
+                
+                # 分桶统计（相对阈值）
+                if 'ess_eff_norm_new_ratio' in perf_metrics_list[0]:
+                    writer.add_scalar('ESS/ESS_Eff_Norm_New_Ratio', perf_metrics_list[0]['ess_eff_norm_new_ratio'], global_step)
+                if 'ess_eff_norm_old_ratio' in perf_metrics_list[0]:
+                    writer.add_scalar('ESS/ESS_Eff_Norm_Old_Ratio', perf_metrics_list[0]['ess_eff_norm_old_ratio'], global_step)
             for metric_name, metric_value in timing_stats.items():
                 writer.add_scalar(f'Performance/{metric_name}', metric_value, global_step)
             avg_policy_sample_time = np.mean([pm["policy_sample_time"] for pm in perf_metrics_list])

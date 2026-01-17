@@ -568,9 +568,9 @@ if __name__ == "__main__":
     TORCH_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
     # 在这里设置要并行处理的环境数量
-    ENVS_ID = [0]
+    ENVS_ID = list(range(10))
     envs_num = len(ENVS_ID)
-    BENCHMARK = TaskSuite.LIBERO_SPATIAL
+    BENCHMARK = TaskSuite.LIBERO_OBJECT
     unnorm_key = f"{BENCHMARK}_no_noops"
     spatial_checkpoint = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
     goal_checkpoint="/cpfs01/liuwei_workspace/models/finetune_im/goal_no_noops_resume+libero_goal_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state"
@@ -579,19 +579,19 @@ if __name__ == "__main__":
     libero10_checkpoint = '/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_10_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state'
     # Instantiate config
     cfg = GenerateConfig(
-        pretrained_checkpoint=four_suites_checkpoint,
+        pretrained_checkpoint=object_checkpoint,
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=1,
-        use_proprio=False,
+        num_images_in_input=2,
+        use_proprio=True,
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
-        device=torch.device("cuda:7"),
-        checkpoint2='runs/distill/20251219_094153_distill/checkpoints/checkpoint_latest.pt',
+        device=torch.device("cuda:2"),
+        # checkpoint2='runs/distill/20251219_094153_distill/checkpoints/checkpoint_latest.pt',
     )
 
     # 创建策略
