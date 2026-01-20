@@ -60,6 +60,10 @@ def parse_args():
                         choices=['libero_spatial', 'libero_object', 'libero_goal', 'libero_10', 'libero_90'],
                         help='Libero benchmark suite (default: libero_spatial)')
     
+    # Task IDs
+    parser.add_argument('--task-ids', type=str, default='0,1,2,3,4,5,6,7,8,9',
+                        help='Comma-separated list of task IDs (default: 0,1,2,3,4,5,6,7,8,9)')
+    
     # 分布式系统参数
     parser.add_argument('--num-trainer-gpus', type=int, default=1,
                         help='Number of trainer GPUs (default: 1)')
@@ -160,7 +164,55 @@ def parse_args():
     parser.add_argument('--recompute-value', action='store_true', default=False,
                         help='Recompute value using current model before GAE calculation (default: False)')
     
+    # Resume 功能
+    parser.add_argument('--resume-from', type=str, default=None,
+                        help='Resume training from checkpoint directory (will load all parameters from saved args.json)')
+    
     args = parser.parse_args()
+    
+    # 如果是 resume 模式，加载保存的参数
+    if args.resume_from:
+        print(f"\n{'='*80}")
+        print(f"Resume 模式：从 {args.resume_from} 加载训练配置")
+        print(f"{'='*80}\n")
+        
+        saved_args_path = os.path.join(args.resume_from, "args.json")
+        if not os.path.exists(saved_args_path):
+            raise FileNotFoundError(f"无法找到保存的参数文件: {saved_args_path}")
+        
+        with open(saved_args_path, 'r', encoding='utf-8') as f:
+            saved_args = json.load(f)
+        
+        # 检查 checkpoint 状态文件
+        checkpoint_files = [f for f in os.listdir(args.resume_from) if f.startswith('trainer_state_step_')]
+        if not checkpoint_files:
+            raise FileNotFoundError(f"无法找到训练状态文件（trainer_state_step_*.pt）在 {args.resume_from}")
+        
+        # 获取最新的 checkpoint step
+        resume_steps = [int(f.split('_')[-1].replace('.pt', '')) for f in checkpoint_files]
+        resume_step = max(resume_steps)
+        
+        print(f"找到 checkpoint，resume_step = {resume_step}")
+        print(f"\n加载保存的训练参数（忽略命令行参数，除了 --resume-from）：")
+        print("-" * 80)
+        
+        # 保存 resume_from 路径
+        resume_from_path = args.resume_from
+        
+        # 用保存的参数覆盖所有参数
+        for key, value in saved_args.items():
+            if hasattr(args, key):
+                old_val = getattr(args, key)
+                if old_val != value:
+                    print(f"  {key}: {old_val} -> {value}")
+                setattr(args, key, value)
+        
+        # 恢复 resume_from 和添加 resume_step
+        args.resume_from = resume_from_path
+        args.resume_step = resume_step
+        
+        print("-" * 80)
+        print(f"✓ 参数加载完成，将从步数 {resume_step} 继续训练\n")
     
     # 设置 CUDA_VISIBLE_DEVICES 环境变量
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
@@ -219,6 +271,7 @@ class StatsActor:
         self.actor_last_active = {}
         self.active_window_seconds = 600
         self.total_samples_produced = 0
+        self.window_size = window_size
 
     def add_episode_return(
         self,
@@ -318,6 +371,69 @@ class StatsActor:
             timing_stats[name] = np.mean(deq) if deq else 0.0
         per_env_stats["_timings_"] = timing_stats
         return per_env_stats
+    
+    def save_stats(self, save_path: str):
+        """保存统计信息"""
+        import pickle
+        # 将 defaultdict 转换为普通 dict 以便序列化
+        stats_dict = {}
+        for env_name, env_data in self.stats.items():
+            stats_dict[env_name] = {
+                "episode_returns": list(env_data["episode_returns"]),
+                "step_times": list(env_data["step_times"]),
+                "episode_lengths": list(env_data["episode_lengths"]),
+                "successes": list(env_data["successes"]),
+                "total_episodes_processed": env_data["total_episodes_processed"],
+                "total_env_steps": env_data["total_env_steps"],
+                "step_rewards": list(env_data["step_rewards"]),
+            }
+        
+        timings_dict = {name: list(deq) for name, deq in self.timings.items()}
+        
+        state = {
+            'stats': stats_dict,
+            'timings': timings_dict,
+            'actor_last_active': self.actor_last_active,
+            'total_samples_produced': self.total_samples_produced,
+            'window_size': self.window_size
+        }
+        
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, 'wb') as f:
+            pickle.dump(state, f)
+        print(f"StatsActor 已保存到 {save_path}")
+    
+    def load_stats(self, load_path: str):
+        """加载统计信息"""
+        import pickle
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"无法找到 StatsActor 文件: {load_path}")
+        
+        with open(load_path, 'rb') as f:
+            state = pickle.load(f)
+        
+        # 恢复 stats
+        self.stats.clear()
+        for env_name, env_data in state['stats'].items():
+            self.stats[env_name] = {
+                "episode_returns": deque(env_data["episode_returns"], maxlen=self.window_size),
+                "step_times": deque(env_data["step_times"], maxlen=self.window_size),
+                "episode_lengths": deque(env_data["episode_lengths"], maxlen=self.window_size),
+                "successes": deque(env_data["successes"], maxlen=self.window_size),
+                "total_episodes_processed": env_data["total_episodes_processed"],
+                "total_env_steps": env_data["total_env_steps"],
+                "step_rewards": deque(env_data["step_rewards"], maxlen=self.window_size),
+            }
+        
+        # 恢复 timings
+        self.timings.clear()
+        for name, timing_list in state['timings'].items():
+            self.timings[name] = deque(timing_list, maxlen=self.window_size)
+        
+        self.actor_last_active = state['actor_last_active']
+        self.total_samples_produced = state['total_samples_produced']
+        
+        print(f"StatsActor 已从 {load_path} 加载")
 
 # ================================================================
 # 2. 经验回放与 Rollout
@@ -368,10 +484,36 @@ class ReplayBufferActor:
                 break
         
         return sampled
+    
+    def save_buffer(self, save_path: str):
+        """保存经验回放缓冲区"""
+        import pickle
+        state = {
+            'trajectories': list(self.trajectories),
+            'insert_counter': self.insert_counter,
+            'capacity': self.trajectories.maxlen
+        }
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, 'wb') as f:
+            pickle.dump(state, f)
+        print(f"ReplayBuffer 已保存到 {save_path} (轨迹数: {len(self.trajectories)}, 步数: {self.total_steps()})")
+    
+    def load_buffer(self, load_path: str):
+        """加载经验回放缓冲区"""
+        import pickle
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"无法找到 ReplayBuffer 文件: {load_path}")
+        
+        with open(load_path, 'rb') as f:
+            state = pickle.load(f)
+        
+        self.trajectories = deque(state['trajectories'], maxlen=self.trajectories.maxlen)
+        self.insert_counter = state['insert_counter']
+        print(f"ReplayBuffer 已从 {load_path} 加载 (轨迹数: {len(self.trajectories)}, 步数: {self.total_steps()})")
 
 class BaseWorkerActor:
     """rollout 和 eval worker 的共享逻辑。"""
-    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name):
+    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, task_ids):
         self.infer = infer
         self.replay = replay
         self.stats_actor = stats_actor
@@ -381,15 +523,17 @@ class BaseWorkerActor:
         self.benchmark_name = benchmark_name
         from rl.libero_env import LiberoEnvWrapper
 
-        self.num_tasks = 10
-        print(f"BaseWorker {wid}: 正在初始化 {self.num_tasks} 个 Libero 环境...")
+        # 对外暴露 task_ids 列表
+        self.task_ids = task_ids
+        self.num_tasks = len(task_ids)
+        print(f"BaseWorker {wid}: 正在初始化 {self.num_tasks} 个 Libero 环境，task_ids = {task_ids}...")
         self.envs = [
             LiberoEnvWrapper(
                 benchmark_name=self.benchmark_name,
-                task_id=i,
+                task_id=task_id,
                 image_size=224,
                 render_mode="rgb_array"
-            ) for i in range(self.num_tasks)]
+            ) for task_id in task_ids]
         print(f"BaseWorker {wid}: 环境初始化完成。")
         
         self.env = None
@@ -400,8 +544,8 @@ class BaseWorkerActor:
 
 @ray.remote
 class RolloutWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, reward_scale, torch_dtype, rollout_local_buf):
-        super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
+    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, reward_scale, torch_dtype, rollout_local_buf, task_ids):
+        super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name, task_ids)
         self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
         self.local_buffer = []
         self.reward_scale = reward_scale
@@ -486,8 +630,8 @@ class RolloutWorkerActor(BaseWorkerActor):
 
 @ray.remote
 class EvaluationWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name, torch_dtype):
-        super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
+    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name, torch_dtype, task_ids):
+        super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name, task_ids)
         self.torch_dtype = torch_dtype
         print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
 
@@ -776,6 +920,68 @@ class TrainerActor(TrainerActorCom):
         os.makedirs(ckpt_dir, exist_ok=True)
         self.base_model.save_model(ckpt_dir, epoch=step)
         print(f"[Trainer {self.rank}] 已保存 checkpoint -> {ckpt_dir}/agent_lora_epoch_{step}, agent_extra_layers_epoch_{step}.pt")
+    
+    async def save_checkpoint(self, ckpt_dir: str, step: int):
+        """保存完整的训练状态（包含优化器和训练进度）"""
+        os.makedirs(ckpt_dir, exist_ok=True)
+        
+        # 保存模型权重
+        self.base_model.save_model(ckpt_dir, epoch=step)
+        
+        # 保存训练器状态
+        checkpoint = {
+            'global_step': self.global_step,
+            'policy_version': self.policy_version,
+            'random_state': {
+                'torch': torch.get_rng_state(),
+                'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                'numpy': np.random.get_state(),
+                'python': random.getstate(),
+            }
+        }
+        
+        # DeepSpeed 优化器状态通过 model 保存
+        checkpoint_path = os.path.join(ckpt_dir, f'trainer_state_step_{step}.pt')
+        torch.save(checkpoint, checkpoint_path)
+        
+        # 保存 DeepSpeed checkpoint（包含优化器状态）
+        ds_checkpoint_path = os.path.join(ckpt_dir, f'deepspeed_step_{step}')
+        self.model.save_checkpoint(ds_checkpoint_path, tag=f'step_{step}')
+        
+        print(f"[Trainer {self.rank}] 完整训练状态已保存:")
+        print(f"  - 模型: {ckpt_dir}/agent_lora_epoch_{step}")
+        print(f"  - 训练状态: {checkpoint_path}")
+        print(f"  - DeepSpeed: {ds_checkpoint_path}")
+    
+    async def load_checkpoint(self, ckpt_dir: str, step: int):
+        """恢复训练状态"""
+        checkpoint_path = os.path.join(ckpt_dir, f'trainer_state_step_{step}.pt')
+        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"无法找到训练状态文件: {checkpoint_path}")
+        
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # 恢复训练进度
+        self.global_step = checkpoint['global_step']
+        self.policy_version = checkpoint['policy_version']
+        
+        # 恢复随机数状态
+        torch.set_rng_state(checkpoint['random_state']['torch'])
+        if checkpoint['random_state']['cuda'] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(checkpoint['random_state']['cuda'])
+        np.random.set_state(checkpoint['random_state']['numpy'])
+        random.setstate(checkpoint['random_state']['python'])
+        
+        # 加载 DeepSpeed checkpoint（包含优化器状态）
+        ds_checkpoint_path = os.path.join(ckpt_dir, f'deepspeed_step_{step}')
+        _, client_state = self.model.load_checkpoint(ds_checkpoint_path, tag=f'step_{step}')
+        
+        print(f"[Trainer {self.rank}] 训练状态已恢复:")
+        print(f"  - global_step: {self.global_step}")
+        print(f"  - policy_version: {self.policy_version}")
+        
+        return True
 
     def _get_current_lr(self, current_step: int, peak_lr: float, warmup_steps: int, total_steps: int, start_step: int = 0) -> float:
         if current_step < start_step: return 0.0
@@ -1559,17 +1765,21 @@ def main(args):
         )
         for i in range(args.num_trainer_gpus)
     ]
+    # 解析 task_ids
+    task_ids = [int(tid.strip()) for tid in args.task_ids.split(',')]
+    print(f"\n使用 task IDs: {task_ids}\n")
+    
     inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg, stats_actor=stats_actor, torch_dtype=torch_dtype, inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms) for i in range(args.num_inference_actors)]
     rollout_workers = [
         RolloutWorkerActor.remote(
             inference_pool[i % args.num_inference_actors],
             replay_buffers[i % args.num_trainer_gpus], i, stats_actor, cfg, benchmark,
-            args.reward_scale, torch_dtype, args.rollout_local_buf
+            args.reward_scale, torch_dtype, args.rollout_local_buf, task_ids
         ) for i in range(args.num_rollout_workers)
     ]
     eval_workers = [
         EvaluationWorkerActor.remote(
-            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, benchmark, torch_dtype
+            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, benchmark, torch_dtype, task_ids
         ) for i in range(args.num_eval_workers)
     ]
     print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")
@@ -1632,20 +1842,64 @@ def main(args):
     for w in rollout_workers: w.run.remote()
     for w in eval_workers: w.run.remote()
 
-    print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
-    min_buffer_steps_for_start = args.train_batch_size * args.accumulation_steps
-    while not all(steps >= min_buffer_steps_for_start for steps in ray.get([rb.total_steps.remote() for rb in replay_buffers])):
-        total_steps_list = ray.get([rb.total_steps.remote() for rb in replay_buffers])
-        traj_counts = ray.get([rb.size.remote() for rb in replay_buffers])
-        print(f"等待所有经验池填充初始数据 (目标步数: {min_buffer_steps_for_start})... (当前步数: {total_steps_list}, 轨迹数: {traj_counts})")
-        time.sleep(5)
-    print("远程经验池已准备好，训练器将按需获取数据。")
+    # ================================================================
+    # Resume 逻辑：恢复训练状态
+    # ================================================================
+    start_global_step = 0
+    if hasattr(args, 'resume_step') and args.resume_step is not None:
+        print(f"\n{'='*80}")
+        print(f"Resume 模式：从步数 {args.resume_step} 恢复训练")
+        print(f"{'='*80}\n")
+        
+        # 1. 恢复 Trainer 状态（包含模型权重、优化器、随机数状态）
+        print("--- Resume 步骤 1: 恢复 Trainer 状态 ---")
+        load_tasks = [trainer.load_checkpoint.remote(args.resume_from, args.resume_step) 
+                      for trainer in trainer_group]
+        ray.get(load_tasks)
+        print("✓ Trainer 状态恢复完成\n")
+        
+        # 2. 广播恢复的权重到推理器
+        print("--- Resume 步骤 2: 同步权重到推理器 ---")
+        broadcast_task = trainer_group[0].broadcast_weights.remote(args.broadcast_group_name)
+        receive_tasks = [inf.receive_and_update_weights.remote(args.broadcast_group_name) 
+                         for inf in inference_pool]
+        ray.get([broadcast_task] + receive_tasks)
+        print("✓ 权重同步完成\n")
+        
+        # 3. 恢复 ReplayBuffer
+        print("--- Resume 步骤 3: 恢复经验回放缓冲区 ---")
+        load_buffer_tasks = []
+        for i, rb in enumerate(replay_buffers):
+            buffer_path = os.path.join(args.resume_from, f'replay_buffer_{i}_step_{args.resume_step}.pkl')
+            load_buffer_tasks.append(rb.load_buffer.remote(buffer_path))
+        ray.get(load_buffer_tasks)
+        print("✓ 经验回放缓冲区恢复完成\n")
+        
+        # 4. 恢复 Stats
+        print("--- Resume 步骤 4: 恢复统计信息 ---")
+        stats_path = os.path.join(args.resume_from, f'stats_step_{args.resume_step}.pkl')
+        ray.get(stats_actor.load_stats.remote(stats_path))
+        print("✓ 统计信息恢复完成\n")
+        
+        start_global_step = args.resume_step
+        print(f"{'='*80}")
+        print(f"Resume 完成！将从步数 {start_global_step} 继续训练到 {args.train_iters}")
+        print(f"{'='*80}\n")
+    else:
+        print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
+        min_buffer_steps_for_start = args.train_batch_size * args.accumulation_steps
+        while not all(steps >= min_buffer_steps_for_start for steps in ray.get([rb.total_steps.remote() for rb in replay_buffers])):
+            total_steps_list = ray.get([rb.total_steps.remote() for rb in replay_buffers])
+            traj_counts = ray.get([rb.size.remote() for rb in replay_buffers])
+            print(f"等待所有经验池填充初始数据 (目标步数: {min_buffer_steps_for_start})... (当前步数: {total_steps_list}, 轨迹数: {traj_counts})")
+            time.sleep(5)
+        print("远程经验池已准备好，训练器将按需获取数据。")
 
     print("\n--- 步骤 6: 开始主训练与同步循环 ---")
     start_time = time.time()
     last_log_time = time.time()
-    last_log_global_step = 0
-    global_step = 0
+    last_log_global_step = start_global_step
+    global_step = start_global_step
     while global_step < args.train_iters:
         t_train_start = time.time()
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
