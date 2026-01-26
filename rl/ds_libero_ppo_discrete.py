@@ -111,6 +111,8 @@ def parse_args():
                         help='Entropy coefficient (default: 0.00)')
     parser.add_argument('--kl-coef', type=float, default=0.1,
                         help='KL divergence coefficient (default: 0.1)')
+    parser.add_argument('--sigma', type=float, default=0.5,
+                        help='Sigma parameter for GIPO clip mode (default: 0.5)')
     
     # 奖励缩放
     parser.add_argument('--reward-scale', type=float, default=1.0,
@@ -817,7 +819,7 @@ class TrainerActor(TrainerActorCom):
     def __init__(self, rank, world_size, replay_buffer, cfg, train_batch_size, accumulation_steps, 
                  use_bf16, torch_dtype, policy_lr, value_lr, gamma, lambda_, clip_eps, vf_coef, 
                  ent_coef, kl_coef, reward_scale, value_warmup_steps, policy_warmup_steps, 
-                 policy_train_start_step, train_iters, clip_mode, recompute_value):
+                 policy_train_start_step, train_iters, clip_mode, recompute_value, sigma):
         super().__init__()
         self.rank = rank
         self.world_size = world_size
@@ -851,6 +853,7 @@ class TrainerActor(TrainerActorCom):
         self.train_iters = train_iters
         self.clip_mode = clip_mode
         self.recompute_value = recompute_value
+        self.sigma = sigma
         
         self.global_step = 0
         self.policy_version = 0  # 策略版本号，每次更新后递增
@@ -1195,9 +1198,8 @@ class TrainerActor(TrainerActorCom):
                 elif self.clip_mode == "gipo":
                     # GIPO: Log-Gauss soft clip
                     eps = 1e-9
-                    sigma = 1.0
                     r = ratio_flat.clamp_min(eps).detach()
-                    w_gauss = torch.exp(-0.5 * (torch.log(r) / sigma) ** 2)
+                    w_gauss = torch.exp(-0.5 * (torch.log(r) / self.sigma) ** 2)
                     u = w_gauss * r
                     
                     # suppressed
@@ -1761,7 +1763,7 @@ def main(args):
             ent_coef=args.ent_coef, kl_coef=args.kl_coef, reward_scale=args.reward_scale,
             value_warmup_steps=args.value_warmup_steps, policy_warmup_steps=args.policy_warmup_steps,
             policy_train_start_step=args.policy_train_start_step, train_iters=args.train_iters,
-            clip_mode=args.clip_mode, recompute_value=args.recompute_value
+            clip_mode=args.clip_mode, recompute_value=args.recompute_value, sigma=args.sigma
         )
         for i in range(args.num_trainer_gpus)
     ]
