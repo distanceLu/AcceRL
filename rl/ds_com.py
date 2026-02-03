@@ -14,18 +14,29 @@ def _unwrap_module(m):
     return getattr(m, "module", m)
 
 
-def _named_tensors_in_order(module):
+def _named_tensors_in_order(module, prefix=None):
     """
     只返回需要广播的张量：
       - 可训练参数 (requires_grad=True)
       - 可选的 buffers (比如 BN 的 running stats)
+    支持按前缀过滤。如果提供了 prefix (str)，只返回名字以该 prefix 开头的参数/buffer。
     """
+    all_params = dict(module.named_parameters(recurse=True))
+    all_buffers = dict(module.named_buffers(recurse=True))
+
+    if prefix:
+        filtered_params = {k: v for k, v in all_params.items() if k.startswith(prefix)}
+        filtered_buffers = {k: v for k, v in all_buffers.items() if k.startswith(prefix)}
+    else:
+        filtered_params = all_params
+        filtered_buffers = all_buffers
+
     params = sorted(
-        [(n, p) for n, p in module.named_parameters(recurse=True) if p.requires_grad],
+        [(n, p) for n, p in filtered_params.items() if p.requires_grad],
         key=lambda x: x[0]
     )
     buffers = sorted(
-        list(module.named_buffers(recurse=True)), key=lambda x: x[0]
+        list(filtered_buffers.items()), key=lambda x: x[0]
     )
     return params, buffers
 
@@ -108,7 +119,7 @@ class TrainerActorCom:
             master_port=master_port, group_name=group_name)
         print(f"TrainerActor Rank {self.rank}: 已作为 rank {my_rank_in_group} 加入广播组 '{group_name}'。")
 
-    def broadcast_weights(self, group_name):
+    def broadcast_weights(self, group_name, prefix=None):
         # 只在 src=0 的 Trainer 调用（你的主循环里就是这样）
         group_handle = _group_mgr.get_group_by_name(group_name)
         assert group_handle is not None, f"广播组 '{group_name}' 未初始化"
@@ -120,10 +131,11 @@ class TrainerActorCom:
         if zero_ctx is None:
             zero_ctx = contextlib.nullcontext
 
-        params, buffers = _named_tensors_in_order(module)
+        params, buffers = _named_tensors_in_order(module, prefix=prefix)
+        params_to_gather = [p for _, p in params]
         device = next(module.parameters()).device
 
-        with zero_ctx(module.parameters(), modifier_rank=0):
+        with zero_ctx(params_to_gather, modifier_rank=0):
             # 广播参数
             for name, p in params:
                 # p 此时在 rank0 才是完整的参数

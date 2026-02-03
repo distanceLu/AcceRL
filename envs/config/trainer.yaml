@@ -22,7 +22,7 @@ denoiser:
     max_grad_norm: 1.0
 
   optimizer:
-    lr: 1e-4
+    lr: 1e-5
     weight_decay: 1e-2
     eps: 1e-8
   
@@ -39,13 +39,13 @@ reward_model:
     focal_alpha: 0.99
 
   optimizer:
-    lr: 1e-4
-    min_lr: 1e-6
+    lr: 1e-5
+    min_lr: 1e-7
     T_max: 300
 
 trainer:
-  steps_per_epoch: 4
+  steps_per_epoch: 1
   batch_size: 8
-  grad_accum: 32
+  grad_accum: 128
   eval_interval: 10
   num_to_keep: 1
