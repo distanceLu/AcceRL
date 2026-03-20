@@ -85,11 +85,14 @@ python main_mbrl_gipo.py \
 如果您在学术研究中使用了 AcceRL 或其代码框架，请引用我们的论文：
 
 ```bibtex
-@article{lu2026accerl,
-  title={ACCERL: A DISTRIBUTED ASYNCHRONOUS REINFORCEMENT LEARNING AND WORLD MODEL FRAMEWORK FOR VISION-LANGUAGE-ACTION MODELS},
-  author={Lu, Chengxuan and Wang, Shukuan and Li, Yanjie and Liu, Wei and Jin, Shiji and Qian, Fuyuan and Li, Peiming and Sun, Baigui and Liu, Yang},
-  year={2026},
-  journal={arXiv preprint}
+@misc{lu2026accerldistributedasynchronousreinforcement,
+      title={AcceRL: A Distributed Asynchronous Reinforcement Learning and World Model Framework for Vision-Language-Action Models}, 
+      author={Chengxuan Lu and Shukuan Wang and Yanjie Li and Wei Liu and Shiji Jin and Fuyuan Qian and Peiming Li and Baigui Sun and Yang Liu},
+      year={2026},
+      eprint={2603.18464},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2603.18464}, 
 }
 ```
 
