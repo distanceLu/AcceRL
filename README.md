@@ -7,7 +7,7 @@
 
 当前，针对大规模 VLA 模型的强化学习微调面临着严重的计算瓶颈，这主要归因于传统同步 RL 框架中的同步屏障 (Synchronization barriers) 导致昂贵的 GPU 资源在等待缓慢的物理仿真器时处于空闲状态。为此，AcceRL 提出了一种完全异步且解耦的架构，并在分布式强化学习流水线中首次集成了可训练的世界模型 (World Model)，通过在“想象”中生成高保真虚拟体验，从根本上突破了物理仿真的采样效率瓶颈。
 
-## 🌟 核心贡献 (Key Contributions)
+##  核心贡献 (Key Contributions)
 
 AcceRL 在系统架构与算法设计上实现了双重突破：
 
@@ -20,7 +20,7 @@ AcceRL 在系统架构与算法设计上实现了双重突破：
 * **高斯重要性采样策略优化 (GIPO)**：针对异步框架中固有的策略延迟 (Policy lag) 问题，提出采用平滑的高斯信任域权重替代传统 PPO 的硬裁剪机制，从而在陈旧数据下仍能提供严格的稳定性和优越的收敛速度。
 * **细粒度对齐**：引入词表精简 (Vocabulary Slimming)、Token 级别策略优化与价值重计算 (Value Re-computation) 机制，彻底消除自回归生成中的数值不稳定性。
 
-## 📊 实验评估 (Empirical Evaluation)
+##  实验评估 (Empirical Evaluation)
 
 ### LIBERO 基准测试 SOTA (State-of-the-Art Performance)
 在 MuJoCo 驱动的 LIBERO 异构机器人操作基准测试中，AcceRL 全面超越了以 OpenVLA-OFT 为代表的监督微调基线，以及最新的 RL 框架。特别是在极易发生协变量偏移的 `LIBERO-Long` 长视距任务中，AcceRL 维持了极高的成功率。
@@ -34,7 +34,7 @@ AcceRL 在系统架构与算法设计上实现了双重突破：
 
 *(详细消融实验与学习曲线请参阅论文 Section 6)*
 
-## 🚀 快速开始 (Quick Start)
+##  快速开始 (Quick Start)
 
 ### 环境依赖安装
 本框架的分布式调度基于 `ray` 构建，模型训练与推理基于 `torch`。为保证代码顺利运行，请确保您的环境满足 `requirements.txt` 中的指定版本要求：
@@ -72,13 +72,11 @@ python main_mbrl_gipo.py \
     --train-iters 20
 ```
 
-## 🤝 致谢 (Acknowledgments)
+##  致谢 (Acknowledgments)
 感谢以下开源项目对本框架的启发与支持：
-* [RLinf](https://github.com/RLinf/RLinf)
-* [AReaL](https://github.com/inclusionAI/AReaL)
-* [OpenVLA](https://github.com/openvla/openvla)
 
-## 📖 引用 (Citation)
+
+##  引用 (Citation)
 
 如果您在学术研究中使用了 AcceRL 或其代码框架，请引用我们的论文：
 
