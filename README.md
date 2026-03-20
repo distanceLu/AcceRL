@@ -72,7 +72,7 @@ python main_mbrl_gipo.py \
 ```
 *(注：默认配置下框架在纯 CPU 上运行。可通过 `--trainer-num-gpus 1` 或 `--inference-num-gpus 1` 等参数灵活分配显卡资源。)*
 
-## 🛠 二次开发与模型替换指南 (Extension Guide)
+## 二次开发与模型替换指南 (Extension Guide)
 
 当您需要在真实集群中训练大规模基础模型时，只需保持接口语义不变，逐步替换掉 Fake 组件：
 
