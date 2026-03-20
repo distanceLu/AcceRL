@@ -389,6 +389,7 @@ class TrainerActor:
         vf_coef: float,
         ent_coef: float,
         kl_coef: float,
+        sigma: float,
         train_iters: int,
         sync_stats_with_ddp: bool = False,
         recompute_value: bool = False,
@@ -415,6 +416,7 @@ class TrainerActor:
         self.vf_coef = float(vf_coef)
         self.ent_coef = float(ent_coef)
         self.kl_coef = float(kl_coef)
+        self.sigma = float(sigma)
         self.train_iters = int(train_iters)
         self.sync_stats_with_ddp = bool(sync_stats_with_ddp)
         self.recompute_value = bool(recompute_value)
@@ -573,9 +575,14 @@ class TrainerActor:
             ratio = torch.exp(logp - logp_old)
             adv_expanded = normalized_adv.unsqueeze(-1).unsqueeze(-1)
             surr1 = ratio * adv_expanded
-            surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * adv_expanded
+            # GIPO: Gaussian-smoothed Trust Region Soft Clipping
+            eps = 1e-9
+            sigma = max(getattr(self, "sigma", 0.5), 1e-9)
+            r_detach = ratio.clamp_min(eps).detach()
+            coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
+            surr_soft = surr1 * coeff
 
-            policy_loss = -torch.mean(torch.min(surr1, surr2))
+            policy_loss = -torch.mean(surr_soft)
             value_loss = self.vf_coef * torch.mean((current_values - batch_value_targets) ** 2)
             entropy = torch.mean(dist_new.entropy())
             entropy_loss = -self.ent_coef * entropy
@@ -633,6 +640,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--lambda", dest="lambda_", type=float, default=0.95)
     parser.add_argument("--clip-eps", type=float, default=0.2)
+    parser.add_argument("--sigma", type=float, default=0.5)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--kl-coef", type=float, default=0.0)
@@ -715,6 +723,7 @@ def main(args) -> None:
         gamma=args.gamma,
         lambda_=args.lambda_,
         clip_eps=args.clip_eps,
+        sigma=args.sigma,
         vf_coef=args.vf_coef,
         ent_coef=args.ent_coef,
         kl_coef=args.kl_coef,

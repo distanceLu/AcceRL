@@ -519,6 +519,7 @@ class TrainerActor:
         vf_coef: float,
         ent_coef: float,
         kl_coef: float,
+        sigma: float,
         train_iters: int,
         policy_train_start_step: int = 0,
         device: str = "cpu",
@@ -537,6 +538,7 @@ class TrainerActor:
         self.vf_coef = float(vf_coef)
         self.ent_coef = float(ent_coef)
         self.kl_coef = float(kl_coef)
+        self.sigma = float(sigma)
         self.train_iters = int(train_iters)
         self.policy_train_start_step = int(policy_train_start_step)
         self.global_step = 0
@@ -626,7 +628,12 @@ class TrainerActor:
             ratio = torch.exp(logp - logp_old)
             adv_expand = normalized_adv.unsqueeze(-1).unsqueeze(-1)
             surr1 = ratio * adv_expand
-            surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * adv_expand
+            # GIPO: Gaussian-smoothed Trust Region Soft Clipping
+            eps = 1e-9
+            sigma = max(getattr(self, "sigma", 0.5), 1e-9)
+            r_detach = ratio.clamp_min(eps).detach()
+            coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
+            surr_soft = surr1 * coeff
 
             value_loss = self.vf_coef * torch.mean((value - mini_value_target) ** 2)
             if self.global_step < self.policy_train_start_step:
@@ -637,7 +644,7 @@ class TrainerActor:
                 kl_loss = torch.tensor(0.0, device=self.device)
                 loss = value_loss
             else:
-                policy_loss = -torch.mean(torch.min(surr1, surr2))
+                policy_loss = -torch.mean(surr_soft)
                 entropy = torch.mean(dist_new.entropy())
                 kl_div = torch.mean(kl_divergence(dist_old, dist_new))
                 entropy_loss = -self.ent_coef * entropy
@@ -693,6 +700,7 @@ def build_arg_parser():
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--lambda", dest="lambda_", type=float, default=0.95)
     parser.add_argument("--clip-eps", type=float, default=0.2)
+    parser.add_argument("--sigma", type=float, default=0.5)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--kl-coef", type=float, default=0.0)
@@ -782,6 +790,7 @@ def main(args) -> None:
         gamma=args.gamma,
         lambda_=args.lambda_,
         clip_eps=args.clip_eps,
+        sigma=args.sigma,
         vf_coef=args.vf_coef,
         ent_coef=args.ent_coef,
         kl_coef=args.kl_coef,
