@@ -7,7 +7,7 @@
 
 当前，针对大规模 VLA 模型的强化学习微调面临着严重的计算瓶颈，这主要归因于传统同步 RL 框架中的同步屏障 (Synchronization barriers) 导致昂贵的 GPU 资源在等待缓慢的物理仿真器时处于空闲状态。为此，AcceRL 提出了一种完全异步且解耦的架构，并在分布式强化学习流水线中首次集成了可训练的世界模型 (World Model)，通过在“想象”中生成高保真虚拟体验，从根本上突破了物理仿真的采样效率瓶颈。
 
-##  核心贡献 (Key Contributions)
+## 🌟 核心贡献 (Key Contributions)
 
 AcceRL 在系统架构与算法设计上实现了双重突破：
 
@@ -27,8 +27,8 @@ AcceRL 在系统架构与算法设计上实现了双重突破：
 
 | 算法框架 | Spatial (%) | Object (%) | Goal (%) | Long (%) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Ours (AcceRL)** | **99.6** | **100.0** | **98.8** | **99.1** |
-| SimpleVLA-RL | 99.4 | 99.8 | 99.2 | 98.5 |
+| **Ours (AcceRL)** | **99.6** | **100.0** | 98.8 | **99.1** |
+| SimpleVLA-RL | 99.4 | 99.8 | **99.2** | 98.5 |
 | RLinf-VLA | 99.4 | 99.8 | 98.8 | 94.0 |
 | OpenVLA-OFT | 96.2 | 98.3 | 96.2 | 90.7 |
 
@@ -36,15 +36,21 @@ AcceRL 在系统架构与算法设计上实现了双重突破：
 
 ## 🚀 快速开始 (Quick Start)
 
-### 依赖安装
-本框架的分布式调度基于 `ray` 构建，模型训练与推理基于 `torch`。
+### 环境依赖安装
+本框架的分布式调度基于 `ray` 构建，模型训练与推理基于 `torch`。为保证代码顺利运行，请确保您的环境满足 `requirements.txt` 中的指定版本要求：
+
 ```bash
-pip install ray torch numpy
+# 推荐克隆仓库后，直接通过 requirements.txt 安装依赖
+pip install -r requirements.txt
+
+# 或者手动安装核心依赖：
+pip install torch>=2.6.0 numpy>=2.2.6 ray>=2.54.0
 ```
+
 ### 运行极简示例
 为了便于研究人员复现和理解架构，我们提供了包含 `FakeEnv` 和抽象 `FakeModel` 的精简版 Ray 分布式训练脚本。
 
-###1. 运行无模型异步 RL (Model-Free Async RL):**
+**1. 运行无模型异步 RL (Model-Free Async RL):**
 使用 GIPO 算法进行标准异步强化学习，包含完整的宏观/微观解耦流水线。
 
 ```bash
@@ -54,23 +60,37 @@ python main_ray_gipo.py \
     --train-batch-size 32 \
     --recompute-value
 ```
-###2. 运行基于世界模型的 RL (Model-Based RL):
+
+**2. 运行基于世界模型的 RL (Model-Based RL):**
 部署包含 Policy Actor, Reward Actor 和 Denoiser (World Model) Actor 的完整微服务矩阵，执行“想象中学习”。
 
-```Bash
+```bash
 python main_mbrl_gipo.py \
     --num-rollout-workers 2 \
     --imagine-horizon 8 \
     --num-step-cond 4 \
     --train-iters 20
 ```
-###📖 引用 (Citation)
+
+## 🤝 致谢 (Acknowledgments)
+感谢以下开源项目对本框架的启发与支持：
+* [RLinf](https://github.com/RLinf/RLinf)
+* [AReaL](https://github.com/inclusionAI/AReaL)
+* [OpenVLA](https://github.com/openvla/openvla)
+
+## 📖 引用 (Citation)
+
 如果您在学术研究中使用了 AcceRL 或其代码框架，请引用我们的论文：
 
-Code snippet
+```bibtex
 @article{lu2026accerl,
   title={ACCERL: A DISTRIBUTED ASYNCHRONOUS REINFORCEMENT LEARNING AND WORLD MODEL FRAMEWORK FOR VISION-LANGUAGE-ACTION MODELS},
   author={Lu, Chengxuan and Wang, Shukuan and Li, Yanjie and Liu, Wei and Jin, Shiji and Qian, Fuyuan and Li, Peiming and Sun, Baigui and Liu, Yang},
   year={2026},
   journal={arXiv preprint}
 }
+```
+
+## 📄 许可证 (License)
+
+本项目采用 [MIT License](LICENSE) 授权。
