@@ -1,7 +1,7 @@
 # AcceRL: A Distributed Asynchronous Reinforcement Learning and World Model Framework for VLA Models
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Paper](https://img.shields.io/badge/Paper-ArXiv-red.svg)](#)
+[![Paper](https://img.shields.io/badge/Paper-ArXiv-red.svg)](https://arxiv.org/abs/2603.18464)
 
 本仓库包含了 **AcceRL** 的官方实现代码。AcceRL 是一个专为大规模视觉-语言-动作 (Vision-Language-Action, VLA) 模型设计的分布式异步强化学习框架。 
 
@@ -43,9 +43,12 @@ AcceRL 的 Model-Based 变体引入了独特的世界模型推演机制：
 为便于研究人员在本地单机或无 GPU 环境下快速理解和验证 AcceRL 的数据流拓扑与 GIPO 算法数学逻辑，我们提供了剥离了庞大 OpenVLA/DeepSpeed 依赖的**精简版可独立运行脚本** (`main_ray_gipo.py` 和 `main_mbrl_gipo.py`)，它们内置了轻量级的 `FakeEnv` 与 `FakeModel`。
 
 ### 环境依赖安装
+本框架的分布式调度基于 `ray` 构建，模型训练与推理基于 `torch`。请确保您的环境安装了以下特定版本的核心依赖：
+
 ```bash
-pip install ray torch numpy
+pip install torch>=2.6.0 numpy>=2.2.6 ray>=2.54.0
 ```
+*(或者通过克隆仓库后执行 `pip install -r requirements.txt` 安装)*
 
 ### 1. 运行无模型异步 RL (Model-Free Async RL)
 该脚本运行标准的分布式 GIPO 流水线。
@@ -69,7 +72,7 @@ python main_mbrl_gipo.py \
 ```
 *(注：默认配置下框架在纯 CPU 上运行。可通过 `--trainer-num-gpus 1` 或 `--inference-num-gpus 1` 等参数灵活分配显卡资源。)*
 
-##  二次开发与模型替换指南 (Extension Guide)
+## 🛠 二次开发与模型替换指南 (Extension Guide)
 
 当您需要在真实集群中训练大规模基础模型时，只需保持接口语义不变，逐步替换掉 Fake 组件：
 
@@ -79,6 +82,7 @@ python main_mbrl_gipo.py \
 4. **替换策略网络 (`FakeActorCritic` -> OpenVLA)**: 实现真实 VLA 模型的 `forward` 与 `post_process` 接口，输出离散 `action_tokens` 与用于环境执行的连续 `action_env`。
 
 替换完成后，分布式 Actor 框架和 GIPO 核心训练逻辑无需任何更改即可无缝扩展。
+
 
 ##  引用 (Citation)
 
@@ -95,7 +99,3 @@ python main_mbrl_gipo.py \
       url={https://arxiv.org/abs/2603.18464}, 
 }
 ```
-
-##  许可证 (License)
-
-本项目采用 [MIT License](LICENSE) 授权。
