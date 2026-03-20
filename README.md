@@ -40,6 +40,7 @@ AcceRL 在系统架构与算法设计上实现了双重突破：
 本框架的分布式调度基于 `ray` 构建，模型训练与推理基于 `torch`。
 ```bash
 pip install ray torch numpy
+```
 ### 运行极简示例
 为了便于研究人员复现和理解架构，我们提供了包含 `FakeEnv` 和抽象 `FakeModel` 的精简版 Ray 分布式训练脚本。
 
@@ -52,15 +53,17 @@ python main_ray_gipo.py \
     --train-iters 20 \
     --train-batch-size 32 \
     --recompute-value
+```
 ###2. 运行基于世界模型的 RL (Model-Based RL):
 部署包含 Policy Actor, Reward Actor 和 Denoiser (World Model) Actor 的完整微服务矩阵，执行“想象中学习”。
 
-Bash
+```Bash
 python main_mbrl_gipo.py \
     --num-rollout-workers 2 \
     --imagine-horizon 8 \
     --num-step-cond 4 \
     --train-iters 20
+```
 ###📖 引用 (Citation)
 如果您在学术研究中使用了 AcceRL 或其代码框架，请引用我们的论文：
 
