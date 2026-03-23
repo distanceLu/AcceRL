@@ -44,8 +44,19 @@ AcceRL consistently outperforms standard OpenVLA-OFT baselines and contemporary 
 To help researchers understand the data flow topology and GIPO logic, we provide **minimal, standalone scripts** (`main_ray_gipo.py` and `main_mbrl_gipo.py`) that remove heavy dependencies and utilize built-in `FakeEnv` and `FakeModel` components.
 
 ### Installation
-Ensure your environment meets the following version requirements:
-
+You can download and use AccRL by the following steps"
+1. Download the Code
+  git clone https://github.com/distanceLu/AcceRL.git
+  cd AcceRL
+2. Build the Environment:
+   conda create -n accrl_env python=3.10 -y 
+   conda activate accrl_env
+3. Install Dependencies
+   cd minimal_modelfree_GIPO
+   pip install -r requirements.txt
+4. Run the Standalone Test
+   To verify the installation, run the standalone script which uses a fake environment for testing
+   python main_ray_gipo_ds_standalone.py
 ```bash
 pip install torch>=2.6.0 numpy>=2.2.6 ray>=2.54.0
 ```
