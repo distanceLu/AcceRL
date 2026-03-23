@@ -133,5 +133,4 @@ If you use AcceRL or its codebase in your research, please cite our paper:
 }
 ```
 
-## 📄 License
-This project is licensed under the [MIT License](LICENSE).
+
