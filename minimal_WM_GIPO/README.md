@@ -1,13 +1,16 @@
 # Minimal MBRL GIPO
 
-This is a minimal, standalone distributed GIPO framework with "world model imagination rollouts" extracted from `rl/ds_wm_discrete_diffusion.py`. It preserves the core Ray actor architecture, imagination rollout logic, and DeepSpeed/ZeRO training paths, but strips away heavy dependencies on OpenVLA, LIBERO, real reward models, real diffusion samplers, and complex image preprocessing.
+This is a minimal, standalone distributed GIPO framework with "world model imagination rollouts" extracted from `main_mbrl_gipo_ds_standalone.py`. It preserves the core Ray actor architecture, imagination rollout logic, and DeepSpeed/ZeRO training paths, but strips away heavy dependencies on OpenVLA, LIBERO, real reward models, real diffusion samplers, and complex image preprocessing.
 
-The directory contains 4 files:
+The directory contains files:
 
 - `fake_env.py`
+- `ds_com.py`
 - `fake_models.py`
-- `main_mbrl_gipo.py`
+- `main_mbrl_gipo_ds_standalone.py`
 - `README.md`
+- `requirements.txt`
+- `requirements.txt`
 
 ## File Roles in This Directory
 
@@ -153,7 +156,7 @@ python main_mbrl_gipo.py
 For a more lightweight quick test:
 
 ```bash
-python main_mbrl_gipo.py \
+python main_mbrl_gipo_ds_standalone.py \
   --train-iters 5 \
   --num-rollout-workers 1 \
   --num-eval-workers 1 \
@@ -175,7 +178,8 @@ python main_mbrl_gipo.py
 If you want the trainer and inference actors to utilize a single GPU:
 
 ```bash
-python main_mbrl_gipo.py \
+python main_mbrl_gipo_ds_standalone.py \
+  --cuda-visible-devices "0,1" \
   --trainer-num-gpus 1 \
   --inference-num-gpus 0 \
   --reward-num-gpus 0 \
@@ -190,7 +194,7 @@ If you later wish to distribute the policy, reward, and transition dynamics acto
 
 After training, a checkpoint will be saved as:
 
-- `minimal_mbrl_gipo_ckpt.pt`
+- `.pt`
 
 ## How to Integrate Real Models
 
@@ -208,7 +212,7 @@ Ensure the interface semantics remain unchanged:
 
 The integration points are located at:
 
-- `DenoiserInferenceActor.request()` in `main_mbrl_gipo.py`.
+- `DenoiserInferenceActor.request()` in `main_mbrl_gipo_ds_standalone.py`.
 - `RolloutWorkerActor.predict_next_obs()`.
 
 ### Replacing `FakeRewardModel`
@@ -238,7 +242,8 @@ By preserving these, the `TrainerActor`, `RolloutWorkerActor`, and `EvaluationWo
 The current version enables DeepSpeed by default and utilizes `deepspeed.initialize` (retaining `ds_config` and ZeRO logic):
 
 ```bash
-python main_mbrl_gipo.py \
+python main_mbrl_gipo_ds_standalone.py \
+ --cuda-visible-devices "0,1" \
   --train-iters 5 \
   --train-batch-size 8 \
   --accumulation-steps 2 \
