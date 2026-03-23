@@ -46,21 +46,25 @@ To help researchers understand the data flow topology and GIPO logic, we provide
 ### Installation
 You can download and use AccRL by the following steps"
 1. Download the Code
+   ```bash
   git clone https://github.com/distanceLu/AcceRL.git
   cd AcceRL
+```
 2. Build the Environment:
+ ```bash
    conda create -n accrl_env python=3.10 -y 
    conda activate accrl_env
+```
 3. Install Dependencies
+ ```bash
    cd minimal_modelfree_GIPO
    pip install -r requirements.txt
+```
 4. Run the Standalone Test
    To verify the installation, run the standalone script which uses a fake environment for testing
-   python main_ray_gipo_ds_standalone.py
-```bash
-pip install torch>=2.6.0 numpy>=2.2.6 ray>=2.54.0
-```
-*(Alternatively, run `pip install -r requirements.txt` after cloning the repository)*
+    ```bash
+    python main_ray_gipo_ds_standalone.py
+    ```
 
 ### 1. Run Model-Free Asynchronous RL
 This script executes a standard distributed GIPO pipeline.
