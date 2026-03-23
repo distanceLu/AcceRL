@@ -7,7 +7,6 @@ import math
 import os
 import random
 import socket
-import sys
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -23,11 +22,7 @@ from torch.distributions import Categorical, kl
 from torch.utils.tensorboard import SummaryWriter
 from ray.exceptions import GetTimeoutError
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from rl.ds_com import InferenceActorCom, TrainerActorCom
+from ds_com import InferenceActorCom, TrainerActorCom
 
 NUM_ACTIONS_CHUNK = 4
 ACTION_DIM = 3
