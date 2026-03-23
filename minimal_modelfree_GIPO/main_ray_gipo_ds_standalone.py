@@ -7,6 +7,7 @@ import math
 import os
 import random
 import socket
+import sys
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -21,6 +22,10 @@ import torch.distributed as distributed
 from torch.distributions import Categorical, kl
 from torch.utils.tensorboard import SummaryWriter
 from ray.exceptions import GetTimeoutError
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from rl.ds_com import InferenceActorCom, TrainerActorCom
 
@@ -50,27 +55,27 @@ def resolve_torch_extensions_dir(user_path: str | None = None) -> str:
 
 def prewarm_deepspeed_ops(enabled: bool) -> None:
     if not enabled:
-        print("[DeepSpeed] 跳过预热（--no-prewarm-deepspeed-ops）")
+        print("[DeepSpeed] Skipping prewarm (--no-prewarm-deepspeed-ops).")
         return
     try:
         from deepspeed.ops.op_builder import CPUAdamBuilder, FusedAdamBuilder
     except Exception as exc:
-        print(f"[DeepSpeed] 预热跳过：无法导入 op builder ({exc})")
+        print(f"[DeepSpeed] Skipping prewarm: cannot import op builders ({exc})")
         return
-    print("[DeepSpeed] 开始预热编译 FusedAdam/CPUAdam（首次运行可能较慢）...")
+    print("[DeepSpeed] Starting prewarm for FusedAdam/CPUAdam (first run may be slow)...")
     try:
         FusedAdamBuilder().load(verbose=True)
     except Exception as exc:
-        print(f"[DeepSpeed] FusedAdam 预热失败，将在训练时按需处理: {exc}")
+        print(f"[DeepSpeed] FusedAdam prewarm failed; will fallback at runtime: {exc}")
     try:
         CPUAdamBuilder().load(verbose=True)
     except Exception as exc:
-        print(f"[DeepSpeed] CPUAdam 预热失败，将在训练时按需处理: {exc}")
-    print("[DeepSpeed] 预热阶段结束。")
+        print(f"[DeepSpeed] CPUAdam prewarm failed; will fallback at runtime: {exc}")
+    print("[DeepSpeed] Prewarm stage finished.")
 
 
 def sync_weights_blocking(trainer_actor, inference_actors, group_name: str, timeout_s: float = 120.0) -> None:
-    # 必须并发发起 broadcast 与 receive，避免双方互等导致死锁。
+    # Broadcast and receive must be launched concurrently to avoid handshake deadlocks.
     broadcast_ref = trainer_actor.broadcast_weights.remote(group_name)
     receive_refs = [inf.receive_and_update_weights.remote(group_name) for inf in inference_actors]
     all_refs = [broadcast_ref] + receive_refs
@@ -98,7 +103,7 @@ def wait_for_replay_ready(
         if rollout_refs:
             ready, _ = ray.wait(rollout_refs, num_returns=1, timeout=0.0)
             if ready:
-                # worker.run() 本应长期运行；若返回通常表示异常退出，直接抛出详细报错
+                # worker.run() should run persistently; returning usually means a crash.
                 ray.get(ready[0])
                 raise RuntimeError("A rollout worker exited unexpectedly during replay warmup.")
 

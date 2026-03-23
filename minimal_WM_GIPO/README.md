@@ -1,126 +1,126 @@
 # Minimal MBRL GIPO
 
-这是一个从 `rl/ds_wm_discrete_diffusion.py` 抽取出的最小化、可独立运行的“世界模型推演 + 分布式 GIPO”示例。它保留了核心 Ray actor 架构、imagination rollout 逻辑、以及 DeepSpeed/ZeRO 训练路径，但移除了 OpenVLA、Libero、真实奖励模型、真实扩散采样器和复杂图像预处理依赖。
+This is a minimal, standalone distributed GIPO framework with "world model imagination rollouts" extracted from `rl/ds_wm_discrete_diffusion.py`. It preserves the core Ray actor architecture, imagination rollout logic, and DeepSpeed/ZeRO training paths, but strips away heavy dependencies on OpenVLA, LIBERO, real reward models, real diffusion samplers, and complex image preprocessing.
 
-目录里的 4 个文件：
+The directory contains 4 files:
 
 - `fake_env.py`
 - `fake_models.py`
 - `main_mbrl_gipo.py`
 - `README.md`
 
-## 核心架构
+## Core Architecture
 
-这个最小版仍然保留了原脚本最关键的 actor 角色：
+This minimal version retains the most critical actor roles from the original script:
 
 - `StatsActor`
-  - 记录 rollout/eval 的回报、成功率、imagined reward 和时间统计。
+  - Logs training and evaluation statistics, including returns, success rates, imagined rewards, and time metrics.
 
 - `ReplayBufferActor`
-  - 存储 imagined rollout 之后得到的 GIPO 训练样本。
+  - Stores the GIPO training samples obtained after imagined rollouts.
 
 - `InferenceActor`
-  - 运行 `FakeActorCritic`
-  - 给策略提供：
-    - `action_tokens`
-    - 连续动作 `action_env`
-    - 行为策略 `logits`
-    - `value`
+  - Runs the `FakeActorCritic`.
+  - Provides the policy with:
+    - Discrete `action_tokens`
+    - Continuous `action_env`
+    - Behavior policy `logits`
+    - Value estimates (`value`)
 
 - `RewardInferenceActor`
-  - 运行 `FakeRewardModel`
-  - 给 imagined next observation 产生二分类 logits
-  - `softmax(logits)[1]` 被当作 `succ_prob`
-  - `argmax(logits)` 被当作 imagined rollout 的 `end` 信号
+  - Runs the `FakeRewardModel`.
+  - Generates binary classification logits for the imagined next observation.
+  - Uses `softmax(logits)[1]` as the success probability (`succ_prob`).
+  - Uses `argmax(logits)` as the termination (`end`) signal for the imagined rollout.
 
 - `DenoiserInferenceActor`
-  - 运行 `FakeDenoiser`
-  - 接受历史 observation 序列和动作序列，直接预测一个虚拟的下一个 observation
-  - 它在这里充当 transition dynamics
+  - Runs the `FakeDenoiser`.
+  - Accepts a sequence of historical observations and actions to directly predict a virtual next observation.
+  - Acts as the transition dynamics model in this context.
 
 - `RolloutWorkerActor`
-  - 先通过真实的 `FakeEnv` 收集一条真实 episode，作为 imagined rollout 的初始上下文
-  - 然后进入 `for j in range(self.imagine_horizon)` 的推演循环
-  - 每一步都调用：
-    - `InferenceActor` 选动作
-    - `DenoiserInferenceActor` 预测下一个状态
-    - `RewardInferenceActor` 预测奖励和是否结束
-  - 最后在 worker 内部直接计算 GAE，并把 GIPO 样本写入 `ReplayBufferActor`
+  - First, collects a real episode via the `FakeEnv` to serve as the initial context for the imagined rollout.
+  - Then, enters the imagination loop `for j in range(self.imagine_horizon)`.
+  - At each step, it invokes:
+    - `InferenceActor` to select an action.
+    - `DenoiserInferenceActor` to predict the next state.
+    - `RewardInferenceActor` to predict the reward and termination state.
+  - Finally, it computes Generalized Advantage Estimation (GAE) locally within the worker and writes the GIPO samples to the `ReplayBufferActor`.
 
 - `EvaluationWorkerActor`
-  - 直接在真实 `FakeEnv` 上跑确定性策略评估
+  - Executes deterministic policy evaluation directly on the real `FakeEnv`.
 
 - `TrainerActor`
-  - 从 `ReplayBufferActor` 取 imagined GIPO 样本
-  - 默认通过 `deepspeed.initialize` 执行训练，可切换 ZeRO stage
-  - 保留 GIPO 的核心数学：
-    - advantage 标准化
-    - clipped objective
-    - value loss
-    - entropy bonus
+  - Fetches imagined GIPO samples from the `ReplayBufferActor`.
+  - Executes training via `deepspeed.initialize` by default, with configurable ZeRO stages.
+  - Retains the core GIPO mathematics:
+    - Advantage normalization
+    - Clipped surrogate objective
+    - Value loss
+    - Entropy bonus
     - KL penalty
 
-## RolloutWorker 的工作方式
+## How RolloutWorker Operates
 
-这是整个世界模型版的核心。
+This is the core of the world model variant.
 
-### 1. 先收集一条真实 episode
+### 1. Collect a Real Episode First
 
-`RolloutWorkerActor.get_one_episode()` 会：
+`RolloutWorkerActor.get_one_episode()` will:
 
-1. 在 `FakeEnv` 中重置环境
-2. 用 `InferenceActor` 给策略采样动作
-3. 在真实环境执行这些动作
-4. 存下：
-   - 真实 observation 序列
-   - reward 序列
-   - done 序列
-   - 连续动作序列
+1. Reset the environment in `FakeEnv`.
+2. Use the `InferenceActor` to sample actions from the policy.
+3. Execute these actions in the real environment.
+4. Store the following:
+   - Real observation sequence
+   - Reward sequence
+   - Done sequence
+   - Continuous action sequence
 
-这些真实 episode 不直接用于训练，而是作为 imagined rollout 的初始条件。
+These real episodes are not directly used for training; instead, they serve as the initial conditions for the imagined rollouts.
 
-### 2. 再做 imagination rollout
+### 2. Perform Imagination Rollout
 
-`RolloutWorkerActor.run()` 中保留了原脚本最关键的结构：
+`RolloutWorkerActor.run()` retains the most critical structure from the original script:
 
 ```python
 for j in range(self.imagine_horizon):
-    # policy actor 选动作
-    # denoiser actor 预测 next obs
-    # reward actor 预测 succ_prob 和 end
+    # Policy actor selects an action
+    # Denoiser actor predicts the next obs
+    # Reward actor predicts succ_prob and end
 ```
 
-推演流程如下：
+The rollout pipeline proceeds as follows:
 
-1. 从真实 episode 里截出一个长度为 `num_step_cond` 的 observation 上下文窗口
-2. 用当前 imagined state 调用 `InferenceActor` 获取动作
-3. 把动作喂给 `DenoiserInferenceActor`，得到 imagined `next_obs`
-4. 把 `next_obs` 喂给 `RewardInferenceActor`
-5. 用 `succ_prob - last_succ_prob` 构造 imagined reward
-6. 如果 reward actor 给出 `end=1`，则提前结束 imagined rollout
-7. rollout 结束后，worker 直接计算 GAE 并写入 `ReplayBufferActor`
+1. Extract an observation context window of length `num_step_cond` from the real episode.
+2. Query the `InferenceActor` with the current imagined state to obtain an action.
+3. Feed the action to the `DenoiserInferenceActor` to generate the imagined `next_obs`.
+4. Feed `next_obs` to the `RewardInferenceActor`.
+5. Construct the imagined reward using `succ_prob - last_succ_prob`.
+6. If the reward actor outputs `end=1`, prematurely terminate the imagined rollout.
+7. Once the rollout is complete, the worker directly computes GAE and writes the data to the `ReplayBufferActor`.
 
-也就是说，训练数据不是来自真实环境长时间交互，而是来自：
+In essence, the training data does not come from long-term interactions with the real environment. Instead, it stems from:
 
-- 少量真实 episode 提供起点
-- 世界模型在虚拟空间中继续往前滚动
+- A few real episodes providing the starting point.
+- The world model continuously unrolling forward in the virtual space.
 
-## 本地运行
+## Local Execution
 
-安装最小依赖：
+Install the minimal dependencies:
 
 ```bash
 pip install ray torch numpy tensorboard
 ```
 
-进入目录运行：
+Navigate to the directory and run:
 
 ```bash
 cd /cpfs01/qianfy_workspace/openvla_oft_rl/minimal_mbrl_ppo
 python main_mbrl_gipo.py
 ```
 
-更轻量的快速测试：
+For a more lightweight quick test:
 
 ```bash
 python main_mbrl_gipo.py \
@@ -132,17 +132,17 @@ python main_mbrl_gipo.py \
   --imagine-horizon 4
 ```
 
-### 纯 CPU 运行
+### Pure CPU Execution
 
-默认就是纯 CPU：
+It runs on CPU by default:
 
 ```bash
 python main_mbrl_gipo.py
 ```
 
-### 单 GPU 运行
+### Single GPU Execution
 
-如果你想让 trainer 和推理 actor 使用单卡：
+If you want the trainer and inference actors to utilize a single GPU:
 
 ```bash
 python main_mbrl_gipo.py \
@@ -152,60 +152,60 @@ python main_mbrl_gipo.py \
   --denoiser-num-gpus 0
 ```
 
-如果你后续想细分策略/奖励/转移动力学 actor 到 GPU，也可以分别调：
+If you later wish to distribute the policy, reward, and transition dynamics actors across different GPUs, you can adjust them individually:
 
 - `--inference-num-gpus`
 - `--reward-num-gpus`
 - `--denoiser-num-gpus`
 
-训练结束后会保存：
+After training, a checkpoint will be saved as:
 
 - `minimal_mbrl_gipo_ckpt.pt`
 
-## 如何替换成真实模型
+## How to Integrate Real Models
 
-### 替换 `FakeDenoiser`
+### Replacing `FakeDenoiser`
 
-你最终要把 `fake_models.py` 里的 `FakeDenoiser` 替换成真实世界模型。
+You will ultimately need to replace `FakeDenoiser` in `fake_models.py` with your real world model.
 
-需要保持接口语义不变：
+Ensure the interface semantics remain unchanged:
 
-- 输入：
-  - `obs_batch`: 历史 observation 序列
-  - `act_batch`: 历史动作序列
-- 输出：
+- Inputs:
+  - `obs_batch`: Historical observation sequence.
+  - `act_batch`: Historical action sequence.
+- Output:
   - `next_obs`
 
-代码接入点在：
+The integration points are located at:
 
-- `main_mbrl_gipo.py` 里的 `DenoiserInferenceActor.request()`
-- `RolloutWorkerActor.predict_next_obs()`
+- `DenoiserInferenceActor.request()` in `main_mbrl_gipo.py`.
+- `RolloutWorkerActor.predict_next_obs()`.
 
-### 替换 `FakeRewardModel`
+### Replacing `FakeRewardModel`
 
-真实奖励模型需要继续输出 `[B, 2]` 的 logits，保持：
+The real reward model must continue to output logits of shape `[B, 2]`, maintaining the following rules:
 
-- `softmax(logits)[1]` 代表成功概率 `succ_prob`
-- `argmax(logits)` 代表是否终止 `end`
+- `softmax(logits)[1]` represents the success probability `succ_prob`.
+- `argmax(logits)` represents the termination signal `end`.
 
-代码接入点在：
+The integration points are located at:
 
-- `RewardInferenceActor.request()`
-- `RolloutWorkerActor.predict_rew_end()`
+- `RewardInferenceActor.request()`.
+- `RolloutWorkerActor.predict_rew_end()`.
 
-### 替换 `FakeActorCritic`
+### Replacing `FakeActorCritic`
 
-真实策略模型只要继续提供这几个接口即可：
+The real policy model simply needs to continue providing the following interfaces:
 
 - `prepare_inputs_batch(obs_list)`
 - `forward(obs_batch) -> (action_logits, values)`
 - `post_process(action_logits) -> (action_tokens, action_env)`
 
-这样 `TrainerActor`、`RolloutWorkerActor` 和 `EvaluationWorkerActor` 基本都不用大改。
+By preserving these, the `TrainerActor`, `RolloutWorkerActor`, and `EvaluationWorkerActor` will require almost no modifications.
 
-## DeepSpeed 与 TensorBoard
+## DeepSpeed & TensorBoard Integration
 
-当前版本默认开启 DeepSpeed，并使用 `deepspeed.initialize`（保留 `ds_config` 与 ZeRO 逻辑）：
+The current version enables DeepSpeed by default and utilizes `deepspeed.initialize` (retaining `ds_config` and ZeRO logic):
 
 ```bash
 python main_mbrl_gipo.py \
@@ -215,47 +215,47 @@ python main_mbrl_gipo.py \
   --imagine-horizon 4
 ```
 
-可通过 `--zero-stage {0,1,2,3}` 切换 ZeRO stage，或通过 `--ds-config-json /path/to/ds_config.json` 加载外部配置。若仅做纯 PyTorch 对照实验，可加 `--disable-deepspeed`。
+You can switch ZeRO stages using `--zero-stage {0,1,2,3}` or load an external configuration via `--ds-config-json /path/to/ds_config.json`. If you strictly want a pure PyTorch baseline comparison, append `--disable-deepspeed`.
 
-## ds_com Standalone 版本（世界模型）
+## ds_com Standalone Version (World Model)
 
-新增文件：`main_mbrl_gipo_ds_standalone.py`。该版本保留 `TrainerActorCom` / `InferenceActorCom` 通讯骨架与 DeepSpeed 初始化，并保留 `imagine_horizon` 推演循环，仅替换为 fake env / fake actor-critic / fake denoiser / fake reward。
+A new file is included: `main_mbrl_gipo_ds_standalone.py`. This version preserves the communication skeleton between `TrainerActorCom` and `InferenceActorCom`, DeepSpeed initialization, and the `imagine_horizon` rollout loop. It only replaces the environment and models with their "fake" counterparts (`fake env`, `fake actor-critic`, `fake denoiser`, `fake reward`).
 
-运行示例：
+Execution example:
 
 ```bash
 cd /cpfs01/qianfy_workspace/openvla_oft_rl/minimal_mbrl_ppo
 python main_mbrl_gipo_ds_standalone.py --train-iters 5 --num-rollout-workers 1 --imagine-horizon 4
 ```
 
-TensorBoard 日志目录默认是 `runs/minimal_mbrl_gipo`，查看命令：
+The default TensorBoard log directory is `runs/minimal_mbrl_gipo`. You can view it using:
 
 ```bash
 tensorboard --logdir runs/minimal_mbrl_gipo --port 6006
 ```
 
-## 这个最小版保留了什么
+## What is Retained in this Minimal Version
 
-- Ray actor 拓扑
-- 真实 episode 作为 imagined rollout 起点
-- reward actor + denoiser actor 共同驱动 imagination rollout
-- worker 端 GAE 计算
-- GIPO clip / value loss / entropy / KL
-- trainer / inference 解耦
+- Ray actor topology.
+- Using real episodes as the starting point for imagined rollouts.
+- The reward actor and denoiser actor jointly driving the imagination rollout.
+- GAE computation on the worker end.
+- GIPO clipping / value loss / entropy regularization / KL penalty.
+- Decoupling of the trainer and inference modules.
 
-## 这个最小版去掉了什么
+## What is Removed in this Minimal Version
 
-- OpenVLA
-- Libero
-- 真实视觉编码器
-- 真实 reward model
-- 真实 diffusion sampler
-- 复杂图像预处理和反归一化逻辑
+- OpenVLA.
+- LIBERO.
+- Real visual encoders.
+- Real reward models.
+- Real diffusion samplers.
+- Complex image preprocessing and denormalization logic.
 
-## 建议的后续扩展顺序
+## Suggested Extension Sequence
 
-1. 先把 `FakeDenoiser` 换成真实 transition model
-2. 再把 `FakeRewardModel` 换成真实奖励/终止预测模型
-3. 最后把 `FakeActorCritic` 换成真实策略网络
+1. First, replace `FakeDenoiser` with your real transition model.
+2. Second, replace `FakeRewardModel` with your real reward/termination prediction model.
+3. Finally, replace `FakeActorCritic` with your real policy network.
 
-这样最容易逐步验证 imagined rollout 是否工作正常。
+This order is the most effective way to incrementally verify whether the imagination rollout is functioning correctly.
