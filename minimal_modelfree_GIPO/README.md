@@ -3,9 +3,13 @@
 This repository contains a minimal, standalone, and runnable distributed Gaussian Importance sampling Policy Optimization (GIPO) framework. It is extracted from the full `ds_libero_gipo_discrete.py` pipeline. 
 
 This minimal version preserves the core **Ray Actor topology**, the **GIPO mathematical logic**, and the **DeepSpeed/ZeRO training paths**, while stripping away heavy dependencies like OpenVLA and LIBERO. It utilizes the following lightweight substitutes:
-* `fake_env.py`: A pure NumPy-based `FakeEnv`.
-* `fake_model.py`: A pure PyTorch-based `FakeActorCritic`.
-* `main_ray_gipo.py`: The streamlined Ray + GIPO main execution framework.
+- `fake_env.py`
+- `ds_com.py`
+- `fake_models.py`
+- `main_ray_gipo_ds_standalone.py`
+- `README.md`
+- `requirements.txt`
+- `requirements.txt`
 
 ## Architecture Overview
 
@@ -45,7 +49,8 @@ python main_ray_gipo.py
 
 **Lightweight Quick Test:**
 ```bash
-python main_ray_gipo.py \
+python main_ray_gipo_ds_standalone.py \
+  --cuda-visible-devices "0,1" \
   --train-iters 5 \
   --num-rollout-workers 1 \
   --num-eval-workers 1 \
@@ -56,7 +61,8 @@ python main_ray_gipo.py \
 **Hardware Allocation:**
 The framework runs on the CPU by default (`--trainer-num-gpus 0` and `--inference-num-gpus 0`). If you wish to allocate GPUs to the trainer or inference actors, adjust the flags accordingly:
 ```bash
-python main_ray_gipo.py \
+python main_ray_gipo_ds_standalone.py \
+  --cuda-visible-devices "0,1" \
   --trainer-num-gpus 1 \
   --inference-num-gpus 1 \
   --num-inference-actors 1
@@ -99,7 +105,8 @@ As long as these three interfaces are maintained, the distributed Actor framewor
 The current version enables **DeepSpeed** by default, utilizing `deepspeed.initialize` (including `ds_config` and ZeRO optimizations):
 
 ```bash
-python main_ray_gipo.py \
+python main_ray_gipo_ds_standalone.py \
+  --cuda-visible-devices "0,1" \
   --train-iters 5 \
   --train-batch-size 16 \
   --accumulation-steps 2
