@@ -13,22 +13,22 @@ AcceRL achieves breakthroughs in both system infrastructure and algorithmic desi
 
 ### 1. System-Level Decoupling & High Throughput
 * **Macro and Micro Asynchrony**: The system consists of independent `TrainerActor`, `InferenceActor`, and `RolloutWorkerActor`. By physically isolating environment interaction, model inference, and policy training, AcceRL eliminates the "straggler effect" and synchronization overhead.
-* **Super-linear Scaling**: Utilizing ZeRO-2 optimizations and dynamic batching, AcceRL exhibits super-linear scaling in throughput as the cluster expands. [cite_start]Hardware utilization remains consistently high, exceeding **94%** across multi-GPU nodes.
+* **Super-linear Scaling**: Utilizing ZeRO-2 optimizations and dynamic batching, AcceRL exhibits super-linear scaling in throughput as the cluster expands. Hardware utilization remains consistently high, exceeding **94%** across multi-GPU nodes.
 
 ### 2. World Model Driven "Learning in Imagination"
 The Model-Based variant of AcceRL introduces a unique imagination rollout mechanism:
 * **Real-World Context Initialization**: The `RolloutWorkerActor` first interacts with the real environment to collect a short trajectory, which serves as the initial visual context for imagination.
 * **Pixel-Level High-Fidelity Rollouts**: The system does not rely on compressed latent spaces. Instead, it utilizes a `DenoiserInferenceActor` (a Diffusion-based transition model) to predict high-fidelity pixel-level observations. These are processed by the `RewardInferenceActor` to output success probabilities and termination signals, enabling pure tensor-level environment stepping on GPUs.
-* [cite_start]**Extreme Sample Efficiency**: This mechanism bypasses slow physical simulators, boosting the online sample efficiency of VLA models by an astonishing **200x (20,000%)**.
+* **Extreme Sample Efficiency**: This mechanism bypasses slow physical simulators, boosting the online sample efficiency of VLA models by an astonishing **200x (20,000%)**.
 
 ### 3. Gaussian Importance sampling Policy Optimization (GIPO)
 * **Mitigating Policy Lag**: To handle the stale data inherent in asynchronous architectures, the `TrainerActor` implements **GIPO**. Unlike standard PPO's hard clipping, GIPO uses a smooth Gaussian trust weight to softly damp extreme importance ratios, providing superior stability and convergence.
-* [cite_start]**Algorithmic Fidelity**: The trainer performs **Value Re-computation** and **Token-level optimization** to ensure numerical robustness and precise credit assignment during the autoregressive generation process of large VLA backbones.
+* **Algorithmic Fidelity**: The trainer performs **Value Re-computation** and **Token-level optimization** to ensure numerical robustness and precise credit assignment during the autoregressive generation process of large VLA backbones.
 
 ##  Empirical Evaluation
 
 ### LIBERO Benchmark SOTA Performance
-AcceRL consistently outperforms standard OpenVLA-OFT baselines and contemporary RL frameworks on the LIBERO robot manipulation benchmark. [cite_start]Notably, it maintains a **99.1%** success rate in the challenging `LIBERO-Long` suite.
+AcceRL consistently outperforms standard OpenVLA-OFT baselines and contemporary RL frameworks on the LIBERO robot manipulation benchmark. Notably, it maintains a **99.1%** success rate in the challenging `LIBERO-Long` suite.
 
 | Framework | Spatial (%) | Object (%) | Goal (%) | Long (%) |
 | :--- | :---: | :---: | :---: | :---: |
@@ -44,45 +44,45 @@ AcceRL consistently outperforms standard OpenVLA-OFT baselines and contemporary 
 To help researchers understand the data flow topology and GIPO logic, we provide **minimal, standalone scripts** (`main_ray_gipo_ds_standalone.py` and `main_mbrl_gipo_ds_standalone.py`) that remove heavy dependencies and utilize built-in `FakeEnv` and `FakeModel` components.
 
 ### Installation
-You can download and use AccRL by the following steps"
-You can download and use **AcceRL** by following these steps:
-您可以按照以下步骤下载并使用 **AcceRL**：
+
+You can download and set up **AcceRL** by following these steps:
 
 #### 1. Download the Code 
 First, clone the repository and enter the project directory:
 
-` ` `bash
+```bash
 git clone https://github.com/distanceLu/AcceRL.git
 cd AcceRL
-` ` `
+```
 
 #### 2. Build the Environment 
 We recommend using **Python 3.10** to ensure compatibility with modern AI libraries:
-` ` `bash
+
+```bash
 # Create a new conda environment 
 conda create -n accrl_env python=3.10 -y
 
 # Activate the environment 
 conda activate accrl_env
-` ` `
+```
 
 #### 3. Install Dependencies 
 Navigate to the specific algorithm directory and install the required packages:
 
-` ` `bash
+```bash
 # Enter the Model-free GIPO directory 
 cd minimal_modelfree_GIPO
 
 # Install from requirements.txt 
 pip install -r requirements.txt
-` ` `
+```
 
 #### 4. Run the Standalone Test 
 To verify the installation, run the standalone script which uses a **Fake Environment** for testing:
 
-` ` `bash
+```bash
 python main_ray_gipo_ds_standalone.py
-` ` `
+```
 
 ### 1. Run Model-Free Asynchronous RL
 This script executes a standard distributed GIPO pipeline(make sure you have at least two GPU).
