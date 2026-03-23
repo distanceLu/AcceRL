@@ -45,31 +45,50 @@ To help researchers understand the data flow topology and GIPO logic, we provide
 
 ### Installation
 You can download and use AccRL by the following steps"
-1. Download the Code
-   ```bash
-  git clone https://github.com/distanceLu/AcceRL.git
-  cd AcceRL
-```
-2. Build the Environment:
- ```bash
-   conda create -n accrl_env python=3.10 -y 
-   conda activate accrl_env
-```
-3. Install Dependencies
- ```bash
-   cd minimal_modelfree_GIPO
-   pip install -r requirements.txt
-```
-4. Run the Standalone Test
-   To verify the installation, run the standalone script which uses a fake environment for testing
-    ```bash
-    python main_ray_gipo_ds_standalone.py
-    ```
+You can download and use **AcceRL** by following these steps:
+您可以按照以下步骤下载并使用 **AcceRL**：
+
+#### 1. Download the Code 
+First, clone the repository and enter the project directory:
+
+` ` `bash
+git clone https://github.com/distanceLu/AcceRL.git
+cd AcceRL
+` ` `
+
+#### 2. Build the Environment 
+We recommend using **Python 3.10** to ensure compatibility with modern AI libraries:
+` ` `bash
+# Create a new conda environment 
+conda create -n accrl_env python=3.10 -y
+
+# Activate the environment 
+conda activate accrl_env
+` ` `
+
+#### 3. Install Dependencies 
+Navigate to the specific algorithm directory and install the required packages:
+
+` ` `bash
+# Enter the Model-free GIPO directory 
+cd minimal_modelfree_GIPO
+
+# Install from requirements.txt 
+pip install -r requirements.txt
+` ` `
+
+#### 4. Run the Standalone Test 
+To verify the installation, run the standalone script which uses a **Fake Environment** for testing:
+
+` ` `bash
+python main_ray_gipo_ds_standalone.py
+` ` `
 
 ### 1. Run Model-Free Asynchronous RL
-This script executes a standard distributed GIPO pipeline.
+This script executes a standard distributed GIPO pipeline(make sure you have at least two GPU).
 ```bash
 python main_ray_gipo.py \
+    --cuda-visible-devices "0,1" \
     --num-rollout-workers 1 \
     --num-eval-workers 1 \
     --train-iters 5 \
@@ -81,6 +100,7 @@ python main_ray_gipo.py \
 This script initializes the full World Model Actor matrix to demonstrate "learning in imagination."
 ```bash
 python main_mbrl_gipo.py \
+    --cuda-visible-devices "0,1" \
     --num-rollout-workers 1 \
     --imagine-horizon 4 \
     --num-step-cond 4 \
