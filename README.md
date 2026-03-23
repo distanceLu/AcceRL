@@ -83,11 +83,11 @@ To verify the installation, run the standalone script which uses a **Fake Enviro
 ```bash
 python main_ray_gipo_ds_standalone.py
 ```
-
+(For versions incorporating a world model, the steps remain essentially the same.)
 ### 1. Run Model-Free Asynchronous RL
 This script executes a standard distributed GIPO pipeline(make sure you have at least two GPU).
 ```bash
-python main_ray_gipo.py \
+python main_ray_gipo_ds_standalone.py \
     --cuda-visible-devices "0,1" \
     --num-rollout-workers 1 \
     --num-eval-workers 1 \
@@ -99,7 +99,7 @@ python main_ray_gipo.py \
 ### 2. Run Model-Based RL (World Model)
 This script initializes the full World Model Actor matrix to demonstrate "learning in imagination."
 ```bash
-python main_mbrl_gipo.py \
+python main_mbrl_gipo_ds_standalone.py \
     --cuda-visible-devices "0,1" \
     --num-rollout-workers 1 \
     --imagine-horizon 4 \
