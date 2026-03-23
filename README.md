@@ -42,7 +42,8 @@ AcceRL consistently outperforms standard OpenVLA-OFT baselines and contemporary 
 ## Quick Start & Local Reproduction
 
 To help researchers understand the data flow topology and GIPO logic, we provide **minimal, standalone scripts** (`main_ray_gipo_ds_standalone.py` and `main_mbrl_gipo_ds_standalone.py`) that remove heavy dependencies and utilize built-in `FakeEnv` and `FakeModel` components.
-
+* 📁 **[Minimal Model-Free GIPO](./minimal_modelfree_GIPO/)**: The standard asynchronous RL pipeline.
+* 📁 **[Minimal Model-Based GIPO (World Model)](./minimal_WM_GIPO/)**: The pipeline featuring our imagination rollout mechanism.
 ### Installation
 
 You can download and set up **AcceRL** by following these steps:
