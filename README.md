@@ -41,7 +41,7 @@ AcceRL consistently outperforms standard OpenVLA-OFT baselines and contemporary 
 
 ## Quick Start & Local Reproduction
 
-To help researchers understand the data flow topology and GIPO logic, we provide **minimal, standalone scripts** (`main_ray_gipo.py` and `main_mbrl_gipo.py`) that remove heavy dependencies and utilize built-in `FakeEnv` and `FakeModel` components.
+To help researchers understand the data flow topology and GIPO logic, we provide **minimal, standalone scripts** (`main_ray_gipo_ds_standalone.py` and `main_mbrl_gipo_ds_standalone.py`) that remove heavy dependencies and utilize built-in `FakeEnv` and `FakeModel` components.
 
 ### Installation
 You can download and use AccRL by the following steps"
