@@ -211,7 +211,7 @@ class MLPActorCriticDiscrete(nn.Module):
 
 
 if __name__ == "__main__":
-    from rl.metaworld_env import MetaWorldWrapperDiscrete
+    from rl.envs.metaworld_env import MetaWorldWrapperDiscrete
     n_action_bins = 256
     model = MLPActorCriticDiscrete(torch_dtype=torch.float32, state_dim=39, action_dim=4, n_action_bins=n_action_bins)
     env = MetaWorldWrapperDiscrete(env_name="reach-v3")
