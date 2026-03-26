@@ -10,27 +10,27 @@ ACTION="${1:-start}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-lcx-openvla-oft2}"
 
 TASK_NAME="${TASK_NAME:-reach-v3}"
-ROLLOUT_STEPS_PER_ITER="${ROLLOUT_STEPS_PER_ITER:-25}"
+ROLLOUT_STEPS_PER_ITER="${ROLLOUT_STEPS_PER_ITER:-10}"
 WARMUP_STEPS="${WARMUP_STEPS:-500}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
 BUFFER_HORIZON_STEPS="${BUFFER_HORIZON_STEPS:-20000}"
-POLICY_LR="${POLICY_LR:-1e-5}"
-VALUE_LR="${VALUE_LR:-1e-4}"
+POLICY_LR="${POLICY_LR:-1e-4}"
+VALUE_LR="${VALUE_LR:-1e-3}"
 GAMMA="${GAMMA:-0.99}"
 LAMBDA_VALUE="${LAMBDA_VALUE:-0.95}"
 ENT_COEF="${ENT_COEF:-0.00}"
 BASE_EXP_NAME="${BASE_EXP_NAME:-simple}"
-
-SEEDS_STRING="${SEEDS:-142 23 64 450 99}"
+TRAIN_ITERS="${TRAIN_ITERS:-100000}"
+SEEDS_STRING="${SEEDS:-22 64 99 234 360}"
 CLIP_MODES_STRING="${CLIP_MODES:-ppo sapo gipo}"
-GPU_IDS_STRING="${GPU_IDS:-4 5 6 7}"
-GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.2 0.5 1.0 2.0}"
+GPU_IDS_STRING="${GPU_IDS:-6 7}"
+GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.1 0.2 0.5 1.0 2.0}"
 
 SESSION_ROOT="${SESSION_ROOT:-logs/metaworld_ppo_discrete_simple_multi}"
-RUNS_ROOT="${RUNS_ROOT:-runs/MetaWorldSimple/${TASK_NAME}}"
+RUNS_ROOT="${RUNS_ROOT:-runs/MetaWorldSimple/${TASK_NAME}/100k-stale-1e-4}"
 LATEST_SESSION_FILE="${SESSION_ROOT}/latest_session.txt"
 
-AUTO_TENSORBOARD="${AUTO_TENSORBOARD:-1}"
+AUTO_TENSORBOARD="${AUTO_TENSORBOARD:-0}"
 TENSORBOARD_HOST="${TENSORBOARD_HOST:-0.0.0.0}"
 TENSORBOARD_PORT="${TENSORBOARD_PORT:-}"
 FORCE_STOP="${FORCE_STOP:-0}"
@@ -243,7 +243,7 @@ start_jobs() {
         for seed in "${seed_array[@]}"; do
           local gpu_id="${gpu_ids_array[$((job_idx % ${#gpu_ids_array[@]}))]}"
           local run_name="${BASE_EXP_NAME}_${clip_mode}_${sigma_tag}_seed${seed}"
-          local exp_name="${BASE_EXP_NAME}_${sigma_tag}_seed${seed}"
+          local exp_name="${BASE_EXP_NAME}_seed${seed}_${clip_mode}_${sigma_tag}"
           local log_file="${session_dir}/${run_name}.log"
           local pid_file="${session_dir}/${run_name}.pid"
 
@@ -266,6 +266,8 @@ start_jobs() {
             --exp-name "${exp_name}"
             --no-bf16
             --cuda-visible-devices "${gpu_id}"
+            --train-iters "${TRAIN_ITERS}"
+            --log-dir "${RUNS_ROOT}"
           )
 
           echo "[launch] clip_mode=${clip_mode} sigma=${sigma} seed=${seed} gpu=${gpu_id}"
@@ -286,7 +288,7 @@ start_jobs() {
       for seed in "${seed_array[@]}"; do
         local gpu_id="${gpu_ids_array[$((job_idx % ${#gpu_ids_array[@]}))]}"
         local run_name="${BASE_EXP_NAME}_${clip_mode}_seed${seed}"
-        local exp_name="${BASE_EXP_NAME}_seed${seed}"
+        local exp_name="${BASE_EXP_NAME}_seed${seed}_${clip_mode}"
         local log_file="${session_dir}/${run_name}.log"
         local pid_file="${session_dir}/${run_name}.pid"
 
@@ -308,6 +310,8 @@ start_jobs() {
           --exp-name "${exp_name}"
           --no-bf16
           --cuda-visible-devices "${gpu_id}"
+          --train-iters "${TRAIN_ITERS}"
+          --log-dir "${RUNS_ROOT}"
         )
 
         echo "[launch] clip_mode=${clip_mode} seed=${seed} gpu=${gpu_id}"
