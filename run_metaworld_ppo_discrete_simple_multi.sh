@@ -9,7 +9,7 @@ ACTION="${1:-start}"
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-lcx-openvla-oft2}"
 
-TASK_NAME="${TASK_NAME:-reach-v3}"
+TASK_NAME="${TASK_NAME:-button-press-topdown-v3}"
 ROLLOUT_STEPS_PER_ITER="${ROLLOUT_STEPS_PER_ITER:-10}"
 WARMUP_STEPS="${WARMUP_STEPS:-500}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
@@ -23,7 +23,7 @@ BASE_EXP_NAME="${BASE_EXP_NAME:-simple}"
 TRAIN_ITERS="${TRAIN_ITERS:-100000}"
 SEEDS_STRING="${SEEDS:-22 64 99 234 360}"
 CLIP_MODES_STRING="${CLIP_MODES:-ppo sapo gipo}"
-GPU_IDS_STRING="${GPU_IDS:-6 7}"
+GPU_IDS_STRING="${GPU_IDS:-4 5 6 7}"
 GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.1 0.2 0.5 1.0 2.0}"
 
 SESSION_ROOT="${SESSION_ROOT:-logs/metaworld_ppo_discrete_simple_multi}"
@@ -220,6 +220,38 @@ start_jobs() {
   printf '%s\n' "${CONDA_DEFAULT_ENV:-unknown}" > "${session_dir}/conda_env.txt"
   printf '%s\n' "$(command -v python)" > "${session_dir}/python_path.txt"
 
+  python - <<PYSCRIPT
+import json, sys
+
+summary = {
+    "timestamp": "${timestamp}",
+    "session_dir": "${session_dir}",
+    "runs_root": "${RUNS_ROOT}",
+    "task_name": "${TASK_NAME}",
+    "base_exp_name": "${BASE_EXP_NAME}",
+    "conda_env": "${CONDA_DEFAULT_ENV:-unknown}",
+    "seeds": [int(s) for s in "${SEEDS_STRING}".split()],
+    "clip_modes": "${CLIP_MODES_STRING}".split(),
+    "gpu_ids": "${GPU_IDS_STRING}".split(),
+    "gipo_sigmas": [float(s) for s in "${GIPO_SIGMAS_STRING}".split()],
+    "policy_lr": "${POLICY_LR}",
+    "value_lr": "${VALUE_LR}",
+    "gamma": float("${GAMMA}"),
+    "lambda_value": float("${LAMBDA_VALUE}"),
+    "ent_coef": float("${ENT_COEF}"),
+    "train_batch_size": int("${TRAIN_BATCH_SIZE}"),
+    "buffer_horizon_steps": int("${BUFFER_HORIZON_STEPS}"),
+    "rollout_steps_per_iter": int("${ROLLOUT_STEPS_PER_ITER}"),
+    "warmup_steps": int("${WARMUP_STEPS}"),
+    "train_iters": int("${TRAIN_ITERS}"),
+}
+
+out_path = "${session_dir}/summary.json"
+with open(out_path, "w") as f:
+    json.dump(summary, f, indent=2, ensure_ascii=False)
+print(f"summary saved -> {out_path}")
+PYSCRIPT
+
   echo "Conda 环境: ${CONDA_DEFAULT_ENV:-unknown}"
   echo "Python: $(command -v python)"
   echo "任务名: ${TASK_NAME}"
@@ -243,7 +275,7 @@ start_jobs() {
         for seed in "${seed_array[@]}"; do
           local gpu_id="${gpu_ids_array[$((job_idx % ${#gpu_ids_array[@]}))]}"
           local run_name="${BASE_EXP_NAME}_${clip_mode}_${sigma_tag}_seed${seed}"
-          local exp_name="${BASE_EXP_NAME}_seed${seed}_${clip_mode}_${sigma_tag}"
+          local exp_name="${BASE_EXP_NAME}_${TASK_NAME}_seed${seed}_${clip_mode}_${sigma_tag}"
           local log_file="${session_dir}/${run_name}.log"
           local pid_file="${session_dir}/${run_name}.pid"
 
@@ -288,7 +320,7 @@ start_jobs() {
       for seed in "${seed_array[@]}"; do
         local gpu_id="${gpu_ids_array[$((job_idx % ${#gpu_ids_array[@]}))]}"
         local run_name="${BASE_EXP_NAME}_${clip_mode}_seed${seed}"
-        local exp_name="${BASE_EXP_NAME}_seed${seed}_${clip_mode}"
+        local exp_name="${BASE_EXP_NAME}_${TASK_NAME}_seed${seed}_${clip_mode}"
         local log_file="${session_dir}/${run_name}.log"
         local pid_file="${session_dir}/${run_name}.pid"
 

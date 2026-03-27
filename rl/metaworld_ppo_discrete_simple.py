@@ -718,6 +718,12 @@ def parse_args() -> argparse.Namespace:
         dest="use_bf16",
         help="Disable bfloat16",
     )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help="Log directory",
+    )
     return parser.parse_args()
 
 
@@ -734,7 +740,10 @@ def main() -> None:
         args.exp_name = f"simple_{args.task_name.replace('-', '_')}"
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = Path("runs") / "MetaWorldSimple" / args.task_name / f"{args.exp_name}_{args.clip_mode}_{timestamp}"
+    if args.log_dir is None:
+        log_dir = Path("runs") / "MetaWorldSimple" / args.task_name / f"{args.exp_name}_{timestamp}"
+    else:
+        log_dir = Path(args.log_dir) / f"{args.exp_name}_{timestamp}"
     ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else log_dir / "checkpoints"
     log_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
