@@ -9,25 +9,29 @@ ACTION="${1:-start}"
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-lcx-openvla-oft2}"
 
-TASK_NAME="${TASK_NAME:-button-press-topdown-v3}"
-ROLLOUT_STEPS_PER_ITER="${ROLLOUT_STEPS_PER_ITER:-10}"
-WARMUP_STEPS="${WARMUP_STEPS:-500}"
+TASK_NAME="${TASK_NAME:-disassemble-v3}"
+ROLLOUT_STEPS_PER_ITER="${ROLLOUT_STEPS_PER_ITER:-500}"
+WARMUP_STEPS="${WARMUP_STEPS:-10}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
+SAMPLE_ROUNDS="${SAMPLE_ROUNDS:-10}"
+REUSE_PER_BATCH="${REUSE_PER_BATCH:-10}"
+ACTOR_EVERY="${ACTOR_EVERY:-10}"
 BUFFER_HORIZON_STEPS="${BUFFER_HORIZON_STEPS:-20000}"
-POLICY_LR="${POLICY_LR:-1e-4}"
-VALUE_LR="${VALUE_LR:-1e-3}"
+POLICY_LR="${POLICY_LR:-3e-4}"
+VALUE_LR="${VALUE_LR:-3e-3}"
 GAMMA="${GAMMA:-0.99}"
 LAMBDA_VALUE="${LAMBDA_VALUE:-0.95}"
 ENT_COEF="${ENT_COEF:-0.00}"
+REWARD_SCALE="${REWARD_SCALE:-0.001}"
 BASE_EXP_NAME="${BASE_EXP_NAME:-simple}"
-TRAIN_ITERS="${TRAIN_ITERS:-100000}"
+TRAIN_ITERS="${TRAIN_ITERS:-1000}"
 SEEDS_STRING="${SEEDS:-22 64 99 234 360}"
 CLIP_MODES_STRING="${CLIP_MODES:-ppo sapo gipo}"
-GPU_IDS_STRING="${GPU_IDS:-4 5 6 7}"
+GPU_IDS_STRING="${GPU_IDS:-0 1 2 3}"
 GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.1 0.2 0.5 1.0 2.0}"
 
 SESSION_ROOT="${SESSION_ROOT:-logs/metaworld_ppo_discrete_simple_multi}"
-RUNS_ROOT="${RUNS_ROOT:-runs/MetaWorldSimple/${TASK_NAME}/100k-stale-1e-4}"
+RUNS_ROOT="${RUNS_ROOT:-runs/MetaWorldSimple/${TASK_NAME}/1k-stale-sample10-reuse10-actor10-3e-4}"
 LATEST_SESSION_FILE="${SESSION_ROOT}/latest_session.txt"
 
 AUTO_TENSORBOARD="${AUTO_TENSORBOARD:-0}"
@@ -240,10 +244,14 @@ summary = {
     "lambda_value": float("${LAMBDA_VALUE}"),
     "ent_coef": float("${ENT_COEF}"),
     "train_batch_size": int("${TRAIN_BATCH_SIZE}"),
+    "sample_rounds": int("${SAMPLE_ROUNDS}"),
+    "reuse_per_batch": int("${REUSE_PER_BATCH}"),
+    "actor_every": int("${ACTOR_EVERY}"),
     "buffer_horizon_steps": int("${BUFFER_HORIZON_STEPS}"),
     "rollout_steps_per_iter": int("${ROLLOUT_STEPS_PER_ITER}"),
     "warmup_steps": int("${WARMUP_STEPS}"),
     "train_iters": int("${TRAIN_ITERS}"),
+    "reward_scale": float("${REWARD_SCALE}"),
 }
 
 out_path = "${session_dir}/summary.json"
@@ -286,6 +294,9 @@ PYSCRIPT
             --rollout-steps-per-iter "${ROLLOUT_STEPS_PER_ITER}"
             --warmup-steps "${WARMUP_STEPS}"
             --train-batch-size "${TRAIN_BATCH_SIZE}"
+            --sample-rounds "${SAMPLE_ROUNDS}"
+            --reuse-per-batch "${REUSE_PER_BATCH}"
+            --actor-every "${ACTOR_EVERY}"
             --buffer-horizon-steps "${BUFFER_HORIZON_STEPS}"
             --policy-lr "${POLICY_LR}"
             --value-lr "${VALUE_LR}"
@@ -300,6 +311,7 @@ PYSCRIPT
             --cuda-visible-devices "${gpu_id}"
             --train-iters "${TRAIN_ITERS}"
             --log-dir "${RUNS_ROOT}"
+            --reward-scale "${REWARD_SCALE}"
           )
 
           echo "[launch] clip_mode=${clip_mode} sigma=${sigma} seed=${seed} gpu=${gpu_id}"
@@ -331,6 +343,9 @@ PYSCRIPT
           --rollout-steps-per-iter "${ROLLOUT_STEPS_PER_ITER}"
           --warmup-steps "${WARMUP_STEPS}"
           --train-batch-size "${TRAIN_BATCH_SIZE}"
+          --sample-rounds "${SAMPLE_ROUNDS}"
+          --reuse-per-batch "${REUSE_PER_BATCH}"
+          --actor-every "${ACTOR_EVERY}"
           --buffer-horizon-steps "${BUFFER_HORIZON_STEPS}"
           --policy-lr "${POLICY_LR}"
           --value-lr "${VALUE_LR}"
@@ -344,6 +359,7 @@ PYSCRIPT
           --cuda-visible-devices "${gpu_id}"
           --train-iters "${TRAIN_ITERS}"
           --log-dir "${RUNS_ROOT}"
+          --reward-scale "${REWARD_SCALE}"
         )
 
         echo "[launch] clip_mode=${clip_mode} seed=${seed} gpu=${gpu_id}"

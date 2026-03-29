@@ -340,6 +340,9 @@ def run_ppo_updates(
     optimizer: torch.optim.Optimizer,
     buffer: TransitionBuffer,
     train_batch_size: int,
+    sample_rounds: int,
+    reuse_per_batch: int,
+    actor_every: int,
     clip_eps: float,
     ent_coef: float,
     kl_coef: float,
@@ -350,16 +353,12 @@ def run_ppo_updates(
 ) -> Dict[str, float]:
     device = model.device
     actual_buffer_size = len(buffer)
-    obs_t, action_token_t, old_logits_t, advantage_t, value_target_t = buffer.as_tensors(
-        device, sample_size=train_batch_size
-    )
-    num_samples = obs_t.shape[0]
-    if num_samples == 0:
+    if actual_buffer_size == 0:
         return {}
-
-    adv_mean = advantage_t.mean()
-    adv_std = advantage_t.std(unbiased=False).clamp_min(1e-8)
-    normalized_adv = (advantage_t - adv_mean) / adv_std
+    sample_rounds = max(1, int(sample_rounds))
+    reuse_per_batch = max(1, int(reuse_per_batch))
+    actor_every = max(1, int(actor_every))
+    num_samples = min(train_batch_size, actual_buffer_size)
 
     metrics = {
         "loss": [],
@@ -374,90 +373,109 @@ def run_ppo_updates(
     }
     optimizer_steps = 0
 
-    batch_obs = obs_t
-    batch_action = action_token_t
-    batch_old_logits = old_logits_t
-    batch_adv = normalized_adv
-    batch_value_target = value_target_t
+    for sample_idx in range(sample_rounds):
+        obs_t, action_token_t, old_logits_t, advantage_t, value_target_t = buffer.as_tensors(
+            device, sample_size=train_batch_size
+        )
+        if obs_t.shape[0] == 0:
+            continue
 
-    action_logits, value = model(batch_obs)
-    action_logits = action_logits.to(torch.float32)
-    value = value.to(torch.float32)
-    batch_old_logits = batch_old_logits.to(torch.float32)
-    batch_adv = batch_adv.to(torch.float32)
-    batch_value_target = batch_value_target.to(torch.float32)
-    dist = torch.distributions.Categorical(logits=action_logits)
-    logp = dist.log_prob(batch_action)
-    
-    with torch.no_grad():
-        dist_old = torch.distributions.Categorical(logits=batch_old_logits)
-        logp_old = dist_old.log_prob(batch_action)
+        adv_mean = advantage_t.mean()
+        adv_std = advantage_t.std(unbiased=False).clamp_min(1e-8)
+        batch_adv = ((advantage_t - adv_mean) / adv_std).to(torch.float32)
+        batch_obs = obs_t
+        batch_action = action_token_t
+        batch_old_logits = old_logits_t.to(torch.float32)
+        batch_value_target = value_target_t.to(torch.float32)
 
-    kl_div_tensor = torch.distributions.kl.kl_divergence(dist_old, dist)
-    kl_loss = kl_coef * torch.mean(kl_div_tensor)
-    ratio = torch.exp(logp - logp_old)
+        with torch.no_grad():
+            dist_old = torch.distributions.Categorical(logits=batch_old_logits)
+            logp_old = dist_old.log_prob(batch_action)
 
-    adv_expanded = batch_adv.unsqueeze(-1)
-    surr1 = ratio * adv_expanded
-    
-    if clip_mode == "gipo":
-        eps = 1e-9
-        r_detach = ratio.clamp_min(eps).detach()
-        coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
-        surr_soft = surr1 * coeff
-        policy_loss = -torch.mean(surr_soft)
-    elif clip_mode == "ppo":
-        surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_expanded
-        policy_loss = -torch.min(surr1, surr2).mean()
-    elif clip_mode == "sapo":
-        tau_pos = 1.0
-        tau_neg = 2.0
-        ratio_min = 1e-6
-        ratio_max = 1e6
-        r = ratio.clamp(ratio_min, ratio_max)
+        for reuse_idx in range(reuse_per_batch):
+            action_logits, value = model(batch_obs)
+            action_logits = action_logits.to(torch.float32)
+            value = value.to(torch.float32)
+            dist = torch.distributions.Categorical(logits=action_logits)
+            logp = dist.log_prob(batch_action)
+            entropy = dist.entropy().mean()
 
-        tau_pos_t = torch.full_like(adv_expanded, tau_pos)
-        tau_neg_t = torch.full_like(adv_expanded, tau_neg)
-        tau = torch.where(adv_expanded > 0, tau_pos_t, tau_neg_t)
+            ratio = torch.exp(logp - logp_old)
+            adv_expanded = batch_adv.unsqueeze(-1)
+            surr1 = ratio * adv_expanded
 
-        x = tau * (r - 1.0)
-        gate = torch.sigmoid(x) * (4.0 / tau)
+            do_actor_update = (reuse_idx % actor_every) == 0
+            actor_scale = 1.0 / math.sqrt(float(reuse_idx + 1))
 
-        surr_sapo = gate * adv_expanded
-        policy_loss = -torch.mean(surr_sapo)
-    else:
-        raise ValueError(f"Invalid CLIP_MODE: {clip_mode}")
+            if clip_mode == "gipo":
+                eps = 1e-9
+                r_detach = ratio.clamp_min(eps).detach()
+                coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
+                surr_soft = surr1 * coeff
+                base_policy_loss = -torch.mean(surr_soft)
+            elif clip_mode == "ppo":
+                surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_expanded
+                base_policy_loss = -torch.min(surr1, surr2).mean()
+            elif clip_mode == "sapo":
+                tau_pos = 1.0
+                tau_neg = 2.0
+                ratio_min = 1e-6
+                ratio_max = 1e6
+                r = ratio.clamp(ratio_min, ratio_max)
 
-    value_loss = vf_coef * torch.mean((value - batch_value_target) ** 2)
-    entropy = dist.entropy().mean()
-    ent_loss = -ent_coef * entropy
-    loss = policy_loss + value_loss + ent_loss + kl_loss
+                tau_pos_t = torch.full_like(adv_expanded, tau_pos)
+                tau_neg_t = torch.full_like(adv_expanded, tau_neg)
+                tau = torch.where(adv_expanded > 0, tau_pos_t, tau_neg_t)
 
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-    optimizer.step()
-    optimizer_steps += 1
+                x = tau * (r - 1.0)
+                gate = torch.sigmoid(x) * (4.0 / tau)
+                surr_sapo = gate * adv_expanded
+                base_policy_loss = -torch.mean(surr_sapo)
+            else:
+                raise ValueError(f"Invalid CLIP_MODE: {clip_mode}")
 
-    clip_frac = ((ratio - 1.0).abs() > clip_eps).float().mean()
-    approx_kl = (logp_old - logp).mean()
-    var_target = torch.var(batch_value_target, unbiased=False)
-    if var_target < 1e-12:
-        explained_variance = torch.tensor(0.0, device=device)
-    else:
-        explained_variance = 1.0 - torch.var(
-            batch_value_target - value, unbiased=False
-        ) / (var_target + 1e-12)
+            if do_actor_update:
+                policy_loss = base_policy_loss * actor_scale
+            else:
+                policy_loss = torch.zeros((), device=device, dtype=torch.float32)
 
-    metrics["loss"].append(float(loss.item()))
-    metrics["policy_loss"].append(float(policy_loss.item()))
-    metrics["value_loss"].append(float(value_loss.item()))
-    metrics["entropy"].append(float(entropy.item()))
-    metrics["kl_loss"].append(float(kl_loss.item()))
-    metrics["approx_kl"].append(float(approx_kl.item()))
-    metrics["clip_frac"].append(float(clip_frac.item()))
-    metrics["grad_norm"].append(float(grad_norm))
-    metrics["explained_variance"].append(float(explained_variance.item()))
+            approx_kl = (logp_old - logp).mean()
+            if do_actor_update:
+                kl_div_tensor = torch.distributions.kl.kl_divergence(dist_old, dist)
+                kl_loss = kl_coef * torch.mean(kl_div_tensor)
+                ent_loss = -ent_coef * entropy
+            else:
+                kl_loss = torch.zeros((), device=device, dtype=torch.float32)
+                ent_loss = torch.zeros((), device=device, dtype=torch.float32)
+
+            value_loss = vf_coef * torch.mean((value - batch_value_target) ** 2)
+            loss = policy_loss + value_loss + ent_loss + kl_loss
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+            optimizer_steps += 1
+
+            clip_frac = ((ratio - 1.0).abs() > clip_eps).float().mean()
+            var_target = torch.var(batch_value_target, unbiased=False)
+            if var_target < 1e-12:
+                explained_variance = torch.tensor(0.0, device=device)
+            else:
+                explained_variance = 1.0 - torch.var(
+                    batch_value_target - value, unbiased=False
+                ) / (var_target + 1e-12)
+
+            metrics["loss"].append(float(loss.item()))
+            metrics["policy_loss"].append(float(policy_loss.item()))
+            metrics["value_loss"].append(float(value_loss.item()))
+            metrics["entropy"].append(float(entropy.item()))
+            metrics["kl_loss"].append(float(kl_loss.item()))
+            metrics["approx_kl"].append(float(approx_kl.item()))
+            metrics["clip_frac"].append(float(clip_frac.item()))
+            metrics["grad_norm"].append(float(grad_norm))
+            metrics["explained_variance"].append(float(explained_variance.item()))
+
 
     result = {
         key: float(np.mean(values)) if values else 0.0 for key, values in metrics.items()
@@ -465,8 +483,7 @@ def run_ppo_updates(
     result["optimizer_steps"] = float(optimizer_steps)
     result["buffer_size"] = float(actual_buffer_size)
     result["sample_size"] = float(num_samples)
-    result["adv_mean"] = float(adv_mean.item())
-    result["adv_std"] = float(adv_std.item())
+    result["utd_estimate"] = float(sample_rounds * reuse_per_batch)
     return result
 
 
@@ -607,7 +624,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warmup-steps",
         type=int,
-        default=500,
+        default=50,
         help="Collect at least this many env steps before updating",
     )
     parser.add_argument(
@@ -622,10 +639,28 @@ def parse_args() -> argparse.Namespace:
         default=512,
         help="Mini-batch size for PPO updates",
     )
+    parser.add_argument(
+        "--sample-rounds",
+        type=int,
+        default=2,
+        help="每次更新从 replay buffer 重采样的轮数",
+    )
+    parser.add_argument(
+        "--reuse-per-batch",
+        type=int,
+        default=2,
+        help="每批采样数据重复训练次数",
+    )
+    parser.add_argument(
+        "--actor-every",
+        type=int,
+        default=2,
+        help="每隔多少次 reuse 执行一次 actor 更新（其余偏向 value 更新）",
+    )
     parser.add_argument("--policy-lr", type=float, default=1e-5, help="Policy learning rate")
     parser.add_argument("--value-lr", type=float, default=1e-4, help="Value learning rate")
-    parser.add_argument("--policy-warmup-steps", type=int, default=500, help="Policy network warmup steps")
-    parser.add_argument("--value-warmup-steps", type=int, default=500, help="Value network warmup steps")
+    parser.add_argument("--policy-warmup-steps", type=int, default=10, help="Policy network warmup steps")
+    parser.add_argument("--value-warmup-steps", type=int, default=10, help="Value network warmup steps")
     parser.add_argument("--policy-train-start-step", type=int, default=0, help="Start training policy network at step N")
     parser.add_argument("--weight-decay", type=float, default=0.0, help="AdamW weight decay")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
@@ -649,7 +684,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--moving-avg-window",
         type=int,
-        default=1000,
+        default=100,
         help="Window size for rollout statistics",
     )
     parser.add_argument(
@@ -840,6 +875,9 @@ def main() -> None:
                     optimizer=optimizer,
                     buffer=buffer,
                     train_batch_size=args.train_batch_size,
+                    sample_rounds=args.sample_rounds,
+                    reuse_per_batch=args.reuse_per_batch,
+                    actor_every=args.actor_every,
                     clip_eps=args.clip_eps,
                     ent_coef=args.ent_coef,
                     kl_coef=args.kl_coef,
