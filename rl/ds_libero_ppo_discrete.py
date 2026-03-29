@@ -170,6 +170,12 @@ def parse_args():
     parser.add_argument('--resume-from', type=str, default=None,
                         help='Resume training from checkpoint directory (will load all parameters from saved args.json)')
     
+    # Evaluation 参数
+    parser.add_argument('--eval-deterministic', action='store_true', default=True,
+                        help='Use deterministic actions during evaluation (default: True)')
+    parser.add_argument('--no-eval-deterministic', action='store_false', dest='eval_deterministic',
+                        help='Use stochastic actions during evaluation')
+    
     args = parser.parse_args()
     
     # 如果是 resume 模式，加载保存的参数
@@ -513,6 +519,7 @@ class ReplayBufferActor:
         self.insert_counter = state['insert_counter']
         print(f"ReplayBuffer 已从 {load_path} 加载 (轨迹数: {len(self.trajectories)}, 步数: {self.total_steps()})")
 
+
 class BaseWorkerActor:
     """rollout 和 eval worker 的共享逻辑。"""
     def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, task_ids):
@@ -632,10 +639,11 @@ class RolloutWorkerActor(BaseWorkerActor):
 
 @ray.remote
 class EvaluationWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name, torch_dtype, task_ids):
+    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name, torch_dtype, task_ids, deterministic=True):
         super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name, task_ids)
         self.torch_dtype = torch_dtype
-        print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
+        self.deterministic = deterministic
+        print(f"EvaluationWorker {self.wid}: 环境初始化完成，deterministic={self.deterministic}")
 
     def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
         self.current_env_idx = (self.current_env_idx + 1) % self.num_tasks
@@ -654,7 +662,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
                 step_count = 0
                 while not done:
                     inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
-                    action_env, _, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
+                    action_env, _, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=self.deterministic))
                     step_count += 1
                     for i in range(len(action_env)):
                         single_action = action_env[i]
@@ -1739,7 +1747,7 @@ def main(args):
         object_store_memory=object_store_memory_bytes
     )
 
-    log_dir = f"runs/Libero/{args.benchmark}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}"
+    log_dir = f"runs/Libero/{args.benchmark}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}_{args.clip_mode}"
     writer = SummaryWriter(log_dir)
 
     # 保存命令行参数到log_dir中的json文件
@@ -1781,7 +1789,7 @@ def main(args):
     ]
     eval_workers = [
         EvaluationWorkerActor.remote(
-            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, benchmark, torch_dtype, task_ids
+            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, benchmark, torch_dtype, task_ids, args.eval_deterministic
         ) for i in range(args.num_eval_workers)
     ]
     print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")
