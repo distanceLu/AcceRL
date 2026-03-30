@@ -230,6 +230,13 @@ def inspect_job(
     run_dir_value = str(selected.run_dir) if selected is not None else "-"
     stale_run_dirs_value = "|".join(stale_run_dirs) if stale_run_dirs else "-"
     done_reason_value = done_reason or "-"
+    sigma_neg_ratio = row.get("sigma_neg_ratio", "")
+    if not sigma_neg_ratio:
+        sigma_neg_ratio = (
+            "0.5"
+            if row.get("clip_mode") == "gipo" and row.get("sigma", "-") not in ("", "-")
+            else "-"
+        )
 
     return {
         "job_index": row["job_index"],
@@ -237,6 +244,7 @@ def inspect_job(
         "task_name": row["task_name"],
         "clip_mode": row["clip_mode"],
         "sigma": row["sigma"],
+        "sigma_neg_ratio": sigma_neg_ratio,
         "seed": row["seed"],
         "status": status,
         "pid": str(pid) if pid is not None else "-",
@@ -265,6 +273,7 @@ def emit_tsv(rows: List[Dict[str, str]]) -> None:
         "task_name",
         "clip_mode",
         "sigma",
+        "sigma_neg_ratio",
         "seed",
         "status",
         "pid",

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,15 @@ ROW_RE = re.compile(
     r"(?P<mean>[-+0-9.eE]+)\s*±\s*(?P<std>[-+0-9.eE]+)\s*"
     r"\(n=(?P<n_kept>\d+)/(?P<n_expected>\d+),\s*seeds=\[(?P<seeds>[^\]]*)\]\)\s*$"
 )
+SEED_VALUE_RE = re.compile(
+    r"^- seed=(?P<seed>\d+)\s+value=(?P<value>[-+0-9.eE]+)\s+\(.*\)\s*$"
+)
+
+ELO_INITIAL_RATING = 1000.0
+ELO_SCALE = 400.0
+ELO_ITERATIONS = 10000
+ELO_TOLERANCE = 1e-12
+ELO_EPSILON = 1e-12
 
 
 @dataclass
@@ -25,6 +35,37 @@ class SummaryEntry:
     metric_tag: str
     min_iter: int
     algo_stats: Dict[str, Dict[str, str]]
+    algo_seed_values: Dict[str, Dict[int, float]]
+
+
+@dataclass(frozen=True)
+class PairwiseMatch:
+    task_name: str
+    task_root: Path
+    summary_file: Path
+    metric_tag: str
+    min_iter: int
+    seed: Optional[int]
+    algo_a: str
+    algo_b: str
+    value_a: float
+    value_b: float
+
+
+@dataclass
+class EloStanding:
+    label: str
+    rating: float = ELO_INITIAL_RATING
+    matches: int = 0
+    wins: int = 0
+    draws: int = 0
+    losses: int = 0
+
+    @property
+    def win_rate(self) -> float:
+        if self.matches == 0:
+            return 0.0
+        return (self.wins + 0.5 * self.draws) / self.matches
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,20 +96,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_gipo_value(label: str) -> Optional[float]:
+    v = label.strip().lower()
+    if not v.startswith("gipo"):
+        return None
+    m = re.search(r"([-+]?\d*\.?\d+)", v)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
 def algo_sort_key(label: str) -> Tuple[int, float]:
     v = label.strip().lower()
     if v == "ppo":
         return (0, 0.0)
     if v == "sapo":
         return (1, 0.0)
-    if v.startswith("gipo"):
-        m = re.search(r"([-+]?\d*\.?\d+)", v)
-        if m:
-            try:
-                return (2, float(m.group(1)))
-            except ValueError:
-                return (2, 1e9)
-        return (2, 1e9)
+    gipo_value = parse_gipo_value(label)
+    if gipo_value is not None:
+        return (2, gipo_value)
     return (3, 0.0)
 
 
@@ -91,11 +140,13 @@ def infer_regime(task_root: Path, summary_file: Path) -> str:
 
 
 def parse_summary_file(summary_file: Path) -> Optional[SummaryEntry]:
-    lines = summary_file.read_text().splitlines()
+    lines = summary_file.read_text(encoding="utf-8").splitlines()
     task_root: Optional[Path] = None
     metric_tag: Optional[str] = None
     min_iter: Optional[int] = None
     algo_stats: Dict[str, Dict[str, str]] = {}
+    algo_seed_values: Dict[str, Dict[int, float]] = {}
+    current_label: Optional[str] = None
 
     for raw in lines:
         line = raw.strip()
@@ -127,6 +178,19 @@ def parse_summary_file(summary_file: Path) -> Optional[SummaryEntry]:
                 "n_expected": m_row.group("n_expected"),
                 "seeds": m_row.group("seeds").strip(),
             }
+            algo_seed_values.setdefault(label, {})
+            current_label = label
+            continue
+
+        m_seed_value = SEED_VALUE_RE.match(line)
+        if current_label is not None and m_seed_value:
+            seed = int(m_seed_value.group("seed"))
+            value = float(m_seed_value.group("value"))
+            algo_seed_values.setdefault(current_label, {})[seed] = value
+            continue
+
+        if line.startswith("### "):
+            current_label = None
 
     if task_root is None or metric_tag is None or min_iter is None or not algo_stats:
         return None
@@ -138,6 +202,7 @@ def parse_summary_file(summary_file: Path) -> Optional[SummaryEntry]:
         metric_tag=metric_tag,
         min_iter=min_iter,
         algo_stats=algo_stats,
+        algo_seed_values=algo_seed_values,
     )
 
 
@@ -151,15 +216,31 @@ def gather_entries(search_root: Path, pattern: str) -> List[SummaryEntry]:
     return entries
 
 
+def should_exclude_from_filtered_table(label: str) -> bool:
+    gipo_value = parse_gipo_value(label)
+    return gipo_value in {0.1, 2.0}
+
+
+def collect_algo_labels(entries: Sequence[SummaryEntry]) -> List[str]:
+    return sorted({label for entry in entries for label in entry.algo_stats.keys()}, key=algo_sort_key)
+
+
+def filter_algo_labels(algo_labels: Sequence[str]) -> List[str]:
+    return [label for label in algo_labels if not should_exclude_from_filtered_table(label)]
+
+
 def make_data_markdown_table(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> str:
     headers = ["ID", "Task", "Regime", "Metric", "MinIter", *algo_labels]
     align = ["---"] * len(headers)
     rows = ["| " + " | ".join(headers) + " |", "| " + " | ".join(align) + " |"]
+    displayed_algo_labels = set(algo_labels)
 
     for idx, e in enumerate(entries, start=1):
         best_mean: Optional[float] = None
         best_labels = set()
         for label, stat in e.algo_stats.items():
+            if label not in displayed_algo_labels:
+                continue
             try:
                 m = float(stat["mean"])
             except (KeyError, ValueError):
@@ -201,6 +282,262 @@ def make_meta_markdown_table(entries: Sequence[SummaryEntry]) -> str:
             + " |"
         )
     return "\n".join(rows) + "\n"
+
+
+def make_pairwise_matches(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> List[PairwiseMatch]:
+    matches: List[PairwiseMatch] = []
+
+    for entry in entries:
+        entry_labels = [
+            label
+            for label in algo_labels
+            if label in entry.algo_seed_values and entry.algo_seed_values[label]
+        ]
+        for idx, algo_a in enumerate(entry_labels):
+            seeds_a = entry.algo_seed_values[algo_a]
+            for algo_b in entry_labels[idx + 1 :]:
+                seeds_b = entry.algo_seed_values[algo_b]
+                shared_seeds = sorted(set(seeds_a) & set(seeds_b))
+                for seed in shared_seeds:
+                    matches.append(
+                        PairwiseMatch(
+                            task_name=entry.task_name,
+                            task_root=entry.task_root,
+                            summary_file=entry.summary_file,
+                            metric_tag=entry.metric_tag,
+                            min_iter=entry.min_iter,
+                            seed=seed,
+                            algo_a=algo_a,
+                            algo_b=algo_b,
+                            value_a=seeds_a[seed],
+                            value_b=seeds_b[seed],
+                        )
+                    )
+
+    return sorted(
+        matches,
+        key=lambda match: (
+            match.task_name,
+            str(match.task_root),
+            str(match.summary_file),
+            match.metric_tag,
+            match.min_iter,
+            match.seed is None,
+            match.seed if match.seed is not None else -1,
+            algo_sort_key(match.algo_a),
+            algo_sort_key(match.algo_b),
+        ),
+    )
+
+
+def make_mean_pairwise_matches(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> List[PairwiseMatch]:
+    matches: List[PairwiseMatch] = []
+
+    for entry in entries:
+        entry_means: Dict[str, float] = {}
+        for label in algo_labels:
+            stat = entry.algo_stats.get(label)
+            if not stat:
+                continue
+            try:
+                entry_means[label] = float(stat["mean"])
+            except (KeyError, ValueError):
+                continue
+
+        entry_labels = [label for label in algo_labels if label in entry_means]
+        for idx, algo_a in enumerate(entry_labels):
+            for algo_b in entry_labels[idx + 1 :]:
+                matches.append(
+                    PairwiseMatch(
+                        task_name=entry.task_name,
+                        task_root=entry.task_root,
+                        summary_file=entry.summary_file,
+                        metric_tag=entry.metric_tag,
+                        min_iter=entry.min_iter,
+                        seed=None,
+                        algo_a=algo_a,
+                        algo_b=algo_b,
+                        value_a=entry_means[algo_a],
+                        value_b=entry_means[algo_b],
+                    )
+                )
+
+    return sorted(
+        matches,
+        key=lambda match: (
+            match.task_name,
+            str(match.task_root),
+            str(match.summary_file),
+            match.metric_tag,
+            match.min_iter,
+            algo_sort_key(match.algo_a),
+            algo_sort_key(match.algo_b),
+        ),
+    )
+
+
+def summarize_pairwise_matches(matches: Sequence[PairwiseMatch]) -> Dict[Tuple[str, str], Dict[str, float]]:
+    pair_stats: Dict[Tuple[str, str], Dict[str, float]] = {}
+
+    for match in matches:
+        pair = tuple(sorted((match.algo_a, match.algo_b), key=algo_sort_key))
+        if pair not in pair_stats:
+            pair_stats[pair] = {"matches": 0.0, pair[0]: 0.0, pair[1]: 0.0}
+
+        stat = pair_stats[pair]
+        stat["matches"] += 1.0
+        if match.value_a > match.value_b:
+            stat[match.algo_a] += 1.0
+        elif match.value_a < match.value_b:
+            stat[match.algo_b] += 1.0
+        else:
+            stat[match.algo_a] += 0.5
+            stat[match.algo_b] += 0.5
+
+    return pair_stats
+
+
+def compute_elo_rankings_from_matches(
+    matches: Sequence[PairwiseMatch], algo_labels: Sequence[str]
+) -> List[EloStanding]:
+    standings = {label: EloStanding(label=label) for label in algo_labels}
+    pair_stats = summarize_pairwise_matches(matches)
+
+    for match in matches:
+        standing_a = standings[match.algo_a]
+        standing_b = standings[match.algo_b]
+
+        if match.value_a > match.value_b:
+            standing_a.wins += 1
+            standing_b.losses += 1
+        elif match.value_a < match.value_b:
+            standing_a.losses += 1
+            standing_b.wins += 1
+        else:
+            standing_a.draws += 1
+            standing_b.draws += 1
+
+        standing_a.matches += 1
+        standing_b.matches += 1
+
+    active_labels = [label for label, standing in standings.items() if standing.matches > 0]
+    if active_labels:
+        strengths = {label: 1.0 for label in active_labels}
+
+        for _ in range(ELO_ITERATIONS):
+            updated_strengths = dict(strengths)
+            max_change = 0.0
+
+            for label in active_labels:
+                observed_score = standings[label].wins + 0.5 * standings[label].draws
+                denom = 0.0
+                for pair, stat in pair_stats.items():
+                    if label not in pair:
+                        continue
+                    other = pair[1] if pair[0] == label else pair[0]
+                    denom += stat["matches"] / max(strengths[label] + strengths[other], ELO_EPSILON)
+
+                if denom <= 0.0:
+                    updated = strengths[label]
+                else:
+                    updated = max(observed_score / denom, ELO_EPSILON)
+
+                updated_strengths[label] = updated
+                max_change = max(max_change, abs(updated - strengths[label]))
+
+            mean_strength = sum(updated_strengths.values()) / len(active_labels)
+            if mean_strength > 0.0:
+                for label in active_labels:
+                    updated_strengths[label] /= mean_strength
+
+            strengths = updated_strengths
+            if max_change < ELO_TOLERANCE:
+                break
+
+        raw_ratings = {
+            label: ELO_SCALE * math.log10(max(strengths[label], ELO_EPSILON))
+            for label in active_labels
+        }
+        mean_raw_rating = sum(raw_ratings.values()) / len(active_labels)
+        for label in active_labels:
+            standings[label].rating = ELO_INITIAL_RATING + raw_ratings[label] - mean_raw_rating
+
+    return sorted(standings.values(), key=lambda standing: (-standing.rating, algo_sort_key(standing.label)))
+
+
+def compute_elo_rankings(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> List[EloStanding]:
+    return compute_elo_rankings_from_matches(make_pairwise_matches(entries, algo_labels), algo_labels)
+
+
+def compute_mean_elo_rankings(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> List[EloStanding]:
+    return compute_elo_rankings_from_matches(make_mean_pairwise_matches(entries, algo_labels), algo_labels)
+
+
+def make_elo_markdown_table_from_standings(standings: Sequence[EloStanding]) -> str:
+    total_matches = sum(standing.matches for standing in standings)
+    if not standings or total_matches == 0:
+        return "无可用于 ELO 的配对数据。\n"
+
+    headers = ["Rank", "Algo", "ELO", "Matches", "Wins", "Draws", "Losses", "WinRate"]
+    align = ["---"] * len(headers)
+    rows = ["| " + " | ".join(headers) + " |", "| " + " | ".join(align) + " |"]
+
+    for rank, standing in enumerate(standings, start=1):
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    str(rank),
+                    standing.label,
+                    f"{standing.rating:.2f}",
+                    str(standing.matches),
+                    str(standing.wins),
+                    str(standing.draws),
+                    str(standing.losses),
+                    f"{standing.win_rate * 100:.2f}%",
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(rows) + "\n"
+
+
+def make_elo_markdown_table(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> str:
+    return make_elo_markdown_table_from_standings(compute_elo_rankings(entries, algo_labels))
+
+
+def make_mean_elo_markdown_table(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> str:
+    return make_elo_markdown_table_from_standings(compute_mean_elo_rankings(entries, algo_labels))
+
+
+def build_markdown_content(
+    entries: Sequence[SummaryEntry],
+    algo_labels: Sequence[str],
+    filtered_algo_labels: Sequence[str],
+) -> str:
+    data_md = make_data_markdown_table(entries, algo_labels)
+    filtered_data_md = make_data_markdown_table(entries, filtered_algo_labels)
+    elo_md = make_elo_markdown_table(entries, algo_labels)
+    filtered_elo_md = make_elo_markdown_table(entries, filtered_algo_labels)
+    mean_elo_md = make_mean_elo_markdown_table(entries, algo_labels)
+    filtered_mean_elo_md = make_mean_elo_markdown_table(entries, filtered_algo_labels)
+    meta_md = make_meta_markdown_table(entries)
+    return (
+        "## 数据表\n\n"
+        + data_md
+        + "\n## 数据表（过滤 gipo 0.1 / gipo 2.0）\n\n"
+        + filtered_data_md
+        + "\n## ELO 排名（按共同 seed）\n\n"
+        + elo_md
+        + "\n## ELO 排名（按共同 seed，过滤 gipo 0.1 / gipo 2.0）\n\n"
+        + filtered_elo_md
+        + "\n## ELO 排名（按多 seed 平均分）\n\n"
+        + mean_elo_md
+        + "\n## ELO 排名（按多 seed 平均分，过滤 gipo 0.1 / gipo 2.0）\n\n"
+        + filtered_mean_elo_md
+        + "\n## 元信息表（TaskRoot / SummaryFile）\n\n"
+        + meta_md
+    )
 
 
 def write_data_csv(entries: Sequence[SummaryEntry], algo_labels: Sequence[str], path: Path) -> None:
@@ -252,9 +589,29 @@ def write_data_csv(entries: Sequence[SummaryEntry], algo_labels: Sequence[str], 
             writer.writerow(row)
 
 
+def write_elo_csv(standings: Sequence[EloStanding], path: Path) -> None:
+    fieldnames = ["rank", "algo", "elo", "matches", "wins", "draws", "losses", "win_rate"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for rank, standing in enumerate(standings, start=1):
+            writer.writerow(
+                {
+                    "rank": rank,
+                    "algo": standing.label,
+                    "elo": f"{standing.rating:.2f}",
+                    "matches": standing.matches,
+                    "wins": standing.wins,
+                    "draws": standing.draws,
+                    "losses": standing.losses,
+                    "win_rate": f"{standing.win_rate:.4f}",
+                }
+            )
+
+
 def write_meta_csv(entries: Sequence[SummaryEntry], path: Path) -> None:
     fieldnames = ["id", "task", "task_root", "summary_file"]
-    with path.open("w", newline="") as f:
+    with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for idx, e in enumerate(entries, start=1):
@@ -280,28 +637,37 @@ def main() -> None:
         return
 
     entries = sorted(entries, key=lambda x: (x.task_name, str(x.task_root), str(x.summary_file)))
-    algo_labels = sorted({k for e in entries for k in e.algo_stats.keys()}, key=algo_sort_key)
-
-    data_md = make_data_markdown_table(entries, algo_labels)
-    meta_md = make_meta_markdown_table(entries)
-    markdown_content = (
-        "## 数据表\n\n"
-        + data_md
-        + "\n## 元信息表（TaskRoot / SummaryFile）\n\n"
-        + meta_md
-    )
+    algo_labels = collect_algo_labels(entries)
+    filtered_algo_labels = filter_algo_labels(algo_labels)
+    elo_standings = compute_elo_rankings(entries, algo_labels)
+    filtered_elo_standings = compute_elo_rankings(entries, filtered_algo_labels)
+    mean_elo_standings = compute_mean_elo_rankings(entries, algo_labels)
+    filtered_mean_elo_standings = compute_mean_elo_rankings(entries, filtered_algo_labels)
+    markdown_content = build_markdown_content(entries, algo_labels, filtered_algo_labels)
     print(markdown_content)
 
     output_md = search_root / f"{args.output_prefix}.md"
     output_csv = search_root / f"{args.output_prefix}.csv"
     output_meta_csv = search_root / f"{args.output_prefix}_meta.csv"
-    output_md.write_text(markdown_content)
+    output_elo_csv = search_root / f"{args.output_prefix}_elo.csv"
+    output_filtered_elo_csv = search_root / f"{args.output_prefix}_elo_filtered.csv"
+    output_mean_elo_csv = search_root / f"{args.output_prefix}_elo_mean.csv"
+    output_filtered_mean_elo_csv = search_root / f"{args.output_prefix}_elo_mean_filtered.csv"
+    output_md.write_text(markdown_content, encoding="utf-8")
     write_data_csv(entries, algo_labels, output_csv)
     write_meta_csv(entries, output_meta_csv)
+    write_elo_csv(elo_standings, output_elo_csv)
+    write_elo_csv(filtered_elo_standings, output_filtered_elo_csv)
+    write_elo_csv(mean_elo_standings, output_mean_elo_csv)
+    write_elo_csv(filtered_mean_elo_standings, output_filtered_mean_elo_csv)
 
     print(f"[Saved] markdown: {output_md}")
     print(f"[Saved] csv     : {output_csv}")
     print(f"[Saved] meta csv: {output_meta_csv}")
+    print(f"[Saved] elo csv(seed): {output_elo_csv}")
+    print(f"[Saved] elo csv(seed, filtered): {output_filtered_elo_csv}")
+    print(f"[Saved] elo csv(mean): {output_mean_elo_csv}")
+    print(f"[Saved] elo csv(mean, filtered): {output_filtered_mean_elo_csv}")
     print(f"[Done] entries={len(entries)} algos={len(algo_labels)}")
 
 

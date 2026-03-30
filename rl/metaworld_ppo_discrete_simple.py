@@ -349,7 +349,8 @@ def run_ppo_updates(
     vf_coef: float,
     max_grad_norm: float,
     clip_mode: str,
-    sigma: float,
+    sigma_pos: float,
+    sigma_neg: float,
 ) -> Dict[str, float]:
     device = model.device
     actual_buffer_size = len(buffer)
@@ -408,6 +409,9 @@ def run_ppo_updates(
             actor_scale = 1.0 / math.sqrt(float(reuse_idx + 1))
 
             if clip_mode == "gipo":
+                sigma_pos_t = torch.full_like(adv_expanded, sigma_pos)
+                sigma_neg_t = torch.full_like(adv_expanded, sigma_neg)
+                sigma = torch.where(adv_expanded > 0, sigma_pos_t, sigma_neg_t)
                 eps = 1e-9
                 r_detach = ratio.clamp_min(eps).detach()
                 coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
@@ -669,6 +673,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ent-coef", type=float, default=0.00, help="Entropy coefficient")
     parser.add_argument("--kl-coef", type=float, default=0.1, help="KL divergence coefficient")
     parser.add_argument("--sigma", type=float, default=1.0, help="Sigma parameter for GIPO")
+    parser.add_argument("--sigma-neg-ratio", type=float, default=0.5, help="Sigma negative ratio for GIPO")
     parser.add_argument("--vf-coef", type=float, default=0.5, help="Value loss coefficient")
     parser.add_argument(
         "--max-grad-norm", type=float, default=1.0, help="Gradient clipping norm"
@@ -772,7 +777,7 @@ def main() -> None:
     set_seed(args.seed)
 
     if args.exp_name is None:
-        args.exp_name = f"simple_{args.task_name.replace('-', '_')}"
+        args.exp_name = f"debug_{args.task_name.replace('-', '_')}"
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if args.log_dir is None:
@@ -884,7 +889,8 @@ def main() -> None:
                     vf_coef=args.vf_coef,
                     max_grad_norm=args.max_grad_norm,
                     clip_mode=args.clip_mode,
-                    sigma=args.sigma,
+                    sigma_pos=args.sigma,
+                    sigma_neg=args.sigma * args.sigma_neg_ratio,
                 )
                 global_update_steps += int(update_metrics.get("optimizer_steps", 0.0))
             update_time = time.time() - t_update_start

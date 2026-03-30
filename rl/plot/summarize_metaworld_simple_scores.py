@@ -14,8 +14,8 @@ from tensorboard.compat.proto import types_pb2
 
 
 RUN_NAME_RE = re.compile(
-    r"simple_seed(?P<seed>\d+)_(?P<algo>ppo|sapo|gipo)"
-    r"(?:_sigma(?P<sigma>\d+p\d+))?_",
+    r"_seed(?P<seed>\d+)_(?P<algo>ppo|sapo|gipo)"
+    r"(?:_sigma(?P<sigma>\d+(?:p\d+)?))?(?:_|$)",
     re.IGNORECASE,
 )
 
@@ -121,14 +121,43 @@ def tensor_scalar_to_float(tensor: tensor_pb2.TensorProto) -> Optional[float]:
     return None
 
 
+def parse_sigma_value(raw_value: object) -> Optional[float]:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+    if isinstance(raw_value, str):
+        value = raw_value.strip().lower().replace("p", ".")
+        if not value:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def parse_sigma_from_name(name: str) -> Optional[float]:
+    match = RUN_NAME_RE.search(name)
+    if not match:
+        return None
+    return parse_sigma_value(match.group("sigma"))
+
+
 def extract_run_identity(run_dir: Path) -> Tuple[str, Optional[int], Optional[float], str]:
     args_path = run_dir / "args.json"
     if args_path.exists():
         try:
-            cfg = json.loads(args_path.read_text())
+            cfg = json.loads(args_path.read_text(encoding="utf-8"))
             clip_mode = str(cfg.get("clip_mode", "")).lower()
             seed = int(cfg["seed"]) if "seed" in cfg else None
-            sigma = float(cfg["sigma"]) if "sigma" in cfg and cfg.get("sigma") is not None else None
+            sigma = parse_sigma_value(cfg.get("sigma"))
+            if sigma is None:
+                sigma = parse_sigma_value(cfg.get("sigma_pos"))
+            if sigma is None:
+                sigma = parse_sigma_from_name(str(cfg.get("exp_name", "")))
+            if sigma is None:
+                sigma = parse_sigma_from_name(run_dir.name)
             if clip_mode in {"ppo", "sapo"}:
                 return clip_mode, seed, None, clip_mode
             if clip_mode == "gipo":
@@ -142,12 +171,9 @@ def extract_run_identity(run_dir: Path) -> Tuple[str, Optional[int], Optional[fl
     if m:
         algo = m.group("algo").lower()
         seed = int(m.group("seed"))
-        sigma_token = m.group("sigma")
         if algo != "gipo":
             return algo, seed, None, algo
-        sigma = None
-        if sigma_token:
-            sigma = float(sigma_token.replace("p", "."))
+        sigma = parse_sigma_value(m.group("sigma"))
         return "gipo", seed, sigma, f"gipo_sigma{sigma:.1f}" if sigma is not None else "gipo_sigma_unknown"
 
     return "unknown", None, None, "unknown"
@@ -231,6 +257,8 @@ def pretty_label(label: str) -> str:
         return "ppo"
     if label == "sapo":
         return "sapo"
+    if label == "gipo_sigma_unknown":
+        return "gipo unknown"
     if label.startswith("gipo_sigma"):
         return f"gipo {label.replace('gipo_sigma', '')}"
     return label

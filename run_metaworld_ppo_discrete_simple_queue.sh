@@ -15,14 +15,14 @@ USER_SET_POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS+x}"
 USER_POLL_INTERVAL_SECS_VALUE="${POLL_INTERVAL_SECS-}"
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-lcx-openvla-oft2}"
-
-TASKS_STRING="${TASKS:-door-close-v3 door-lock-v3 door-open-v3 door-unlock-v3 drawer-close-v3 drawer-open-v3 faucet-close-v3 faucet-open-v3 hammer-v3 hand-insert-v3 handle-press-side-v3 handle-press-v3 handle-pull-side-v3 handle-pull-v3 lever-pull-v3 peg-insert-side-v3 peg-unplug-side-v3 pick-out-of-hole-v3 pick-place-v3 pick-place-wall-v3 plate-slide-back-side-v3 plate-slide-back-v3 plate-slide-side-v3 plate-slide-v3 push-back-v3 push-v3 push-wall-v3 reach-v3 reach-wall-v3 shelf-place-v3 soccer-v3 stick-pull-v3 stick-push-v3 sweep-into-v3 sweep-v3 window-close-v3 window-open-v3}"
+# assembly-v3 basketball-v3 bin-picking-v3 box-close-v3 button-press-topdown-v3 button-press-topdown-wall-v3 button-press-v3 button-press-wall-v3 coffee-button-v3 coffee-pull-v3 coffee-push-v3 dial-turn-v3 disassemble-v3 door-close-v3 door-lock-v3 door-open-v3 door-unlock-v3 drawer-close-v3 drawer-open-v3 faucet-close-v3 faucet-open-v3 hammer-v3 hand-insert-v3 handle-press-side-v3 handle-press-v3 handle-pull-side-v3 handle-pull-v3 lever-pull-v3 peg-insert-side-v3 peg-unplug-side-v3 pick-out-of-hole-v3 pick-place-v3 pick-place-wall-v3 plate-slide-back-side-v3 plate-slide-back-v3 plate-slide-side-v3 plate-slide-v3 push-back-v3 push-v3 push-wall-v3 reach-v3 reach-wall-v3 shelf-place-v3 soccer-v3 stick-pull-v3 stick-push-v3 sweep-into-v3 sweep-v3 window-close-v3 window-open-v3
+TASKS_STRING="${TASKS:-assembly-v3 basketball-v3 bin-picking-v3 box-close-v3 button-press-topdown-v3 button-press-topdown-wall-v3 button-press-v3 button-press-wall-v3 coffee-button-v3 coffee-pull-v3}"
 ROLLOUT_STEPS_PER_ITER="${ROLLOUT_STEPS_PER_ITER:-500}"
 WARMUP_STEPS="${WARMUP_STEPS:-10}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
-SAMPLE_ROUNDS="${SAMPLE_ROUNDS:-10}"
-REUSE_PER_BATCH="${REUSE_PER_BATCH:-10}"
-ACTOR_EVERY="${ACTOR_EVERY:-10}"
+SAMPLE_ROUNDS="${SAMPLE_ROUNDS:-5}"
+REUSE_PER_BATCH="${REUSE_PER_BATCH:-2}"
+ACTOR_EVERY="${ACTOR_EVERY:-2}"
 BUFFER_HORIZON_STEPS="${BUFFER_HORIZON_STEPS:-20000}"
 POLICY_LR="${POLICY_LR:-3e-4}"
 VALUE_LR="${VALUE_LR:-3e-3}"
@@ -30,19 +30,20 @@ GAMMA="${GAMMA:-0.99}"
 LAMBDA_VALUE="${LAMBDA_VALUE:-0.95}"
 ENT_COEF="${ENT_COEF:-0.00}"
 REWARD_SCALE="${REWARD_SCALE:-0.001}"
-BASE_EXP_NAME="${BASE_EXP_NAME:-simple}"
-TRAIN_ITERS="${TRAIN_ITERS:-1000}"
-SEEDS_STRING="${SEEDS:-22 64 99 234 360}"
+BASE_EXP_NAME="${BASE_EXP_NAME:-fresh}"
+TRAIN_ITERS="${TRAIN_ITERS:-10000}"
+SEEDS_STRING="${SEEDS:-22 64 99}"
 CLIP_MODES_STRING="${CLIP_MODES:-ppo sapo gipo}"
-GPU_IDS_STRING="${GPU_IDS:-0 1 2 3}"
-GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.1 0.2 0.5 1.0 2.0}"
+GPU_IDS_STRING="${GPU_IDS:-4 5 6 7}"
+GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.2 0.5 1.0}"
+GIPO_SIGMA_NEG_RATIOS_STRING="${GIPO_SIGMA_NEG_RATIOS:-0.5 1.0}"
 
 RUNS_BASE_ROOT="${RUNS_BASE_ROOT:-runs/MetaWorldSimple}"
-RUN_GROUP_NAME="${RUN_GROUP_NAME:-1k-stale-sample10-reuse10-actor10-3e-4}"
+RUN_GROUP_NAME="${RUN_GROUP_NAME:-10k-stale-sample5-reuse2-actor2}"
 SESSION_ROOT="${SESSION_ROOT:-logs/metaworld_ppo_discrete_simple_queue}"
 LATEST_SESSION_FILE="${SESSION_ROOT}/latest_session.txt"
 
-MAX_PARALLEL="${MAX_PARALLEL:-}"
+MAX_PARALLEL="${MAX_PARALLEL:-80}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-30}"
 COMPLETION_RATIO="${COMPLETION_RATIO:-0.95}"
 FORCE_STOP="${FORCE_STOP:-0}"
@@ -63,6 +64,7 @@ declare -a seed_array=()
 declare -a clip_modes_array=()
 declare -a gpu_ids_array=()
 declare -a gipo_sigmas_array=()
+declare -a gipo_sigma_neg_ratios_array=()
 declare -a used_gpu_ids_array=()
 
 usage() {
@@ -78,6 +80,7 @@ usage() {
   SEEDS="22 64 99 234 360"
   CLIP_MODES="ppo sapo gipo"
   GIPO_SIGMAS="0.1 0.2 0.5 1.0 2.0"
+  GIPO_SIGMA_NEG_RATIOS="0.5 1.0"
   GPU_IDS="0 1 2 3"
   MAX_PARALLEL=8
   POLL_INTERVAL_SECS=30
@@ -158,6 +161,7 @@ materialize_arrays() {
   read -r -a clip_modes_array <<< "${CLIP_MODES_STRING}"
   read -r -a gpu_ids_array <<< "${GPU_IDS_STRING}"
   read -r -a gipo_sigmas_array <<< "${GIPO_SIGMAS_STRING}"
+  read -r -a gipo_sigma_neg_ratios_array <<< "${GIPO_SIGMA_NEG_RATIOS_STRING}"
 }
 
 validate_runtime_config() {
@@ -181,6 +185,10 @@ validate_runtime_config() {
   fi
   if [[ " ${clip_modes_array[*]} " == *" gipo "* ]] && [[ ${#gipo_sigmas_array[@]} -eq 0 ]]; then
     echo "启用 gipo 时，GIPO_SIGMAS 不能为空。" >&2
+    exit 1
+  fi
+  if [[ " ${clip_modes_array[*]} " == *" gipo "* ]] && [[ ${#gipo_sigma_neg_ratios_array[@]} -eq 0 ]]; then
+    echo "启用 gipo 时，GIPO_SIGMA_NEG_RATIOS 不能为空。" >&2
     exit 1
   fi
 
@@ -222,6 +230,7 @@ write_session_env() {
     printf 'CLIP_MODES_STRING=%q\n' "${CLIP_MODES_STRING}"
     printf 'GPU_IDS_STRING=%q\n' "${GPU_IDS_STRING}"
     printf 'GIPO_SIGMAS_STRING=%q\n' "${GIPO_SIGMAS_STRING}"
+    printf 'GIPO_SIGMA_NEG_RATIOS_STRING=%q\n' "${GIPO_SIGMA_NEG_RATIOS_STRING}"
     printf 'RUNS_BASE_ROOT=%q\n' "${RUNS_BASE_ROOT}"
     printf 'RUN_GROUP_NAME=%q\n' "${RUN_GROUP_NAME}"
     printf 'MAX_PARALLEL=%q\n' "${MAX_PARALLEL}"
@@ -262,7 +271,7 @@ ensure_session_runtime_dirs() {
   mkdir -p "${session_dir}/meta"
   touch "${session_dir}/all_pids.txt"
   if [[ ! -f "${session_dir}/launch_history.tsv" ]]; then
-    printf 'timestamp\tjob_key\ttask_name\tclip_mode\tsigma\tseed\tgpu_id\tpid\tlog_file\n' > "${session_dir}/launch_history.tsv"
+    printf 'timestamp\tjob_key\ttask_name\tclip_mode\tsigma\tsigma_neg_ratio\tseed\tgpu_id\tpid\tlog_file\n' > "${session_dir}/launch_history.tsv"
   fi
 }
 
@@ -271,9 +280,9 @@ create_jobs_manifest() {
   local jobs_file="${session_dir}/jobs.tsv"
   JOB_TOTAL_COUNT=0
 
-  printf 'job_index\tjob_key\ttask_name\tclip_mode\tsigma\tseed\texp_name\ttask_runs_root\ttrain_iters\n' > "${jobs_file}"
+  printf 'job_index\tjob_key\ttask_name\tclip_mode\tsigma\tsigma_neg_ratio\tseed\texp_name\ttask_runs_root\ttrain_iters\n' > "${jobs_file}"
 
-  local task_name clip_mode seed sigma sigma_tag job_key task_runs_root
+  local task_name clip_mode seed sigma sigma_tag sigma_neg_ratio sigma_neg_ratio_tag job_key task_runs_root
   for task_name in "${task_array[@]}"; do
     task_runs_root="${RUNS_BASE_ROOT}/${task_name}/${RUN_GROUP_NAME}"
     mkdir -p "${task_runs_root}"
@@ -281,20 +290,23 @@ create_jobs_manifest() {
       if [[ "${clip_mode}" == "gipo" ]]; then
         for sigma in "${gipo_sigmas_array[@]}"; do
           sigma_tag="sigma${sigma//./p}"
-          for seed in "${seed_array[@]}"; do
-            JOB_TOTAL_COUNT=$((JOB_TOTAL_COUNT + 1))
-            job_key="${BASE_EXP_NAME}_${task_name}_seed${seed}_${clip_mode}_${sigma_tag}"
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-              "${JOB_TOTAL_COUNT}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${seed}" \
-              "${job_key}" "${task_runs_root}" "${TRAIN_ITERS}" >> "${jobs_file}"
+          for sigma_neg_ratio in "${gipo_sigma_neg_ratios_array[@]}"; do
+            sigma_neg_ratio_tag="neg${sigma_neg_ratio//./p}"
+            for seed in "${seed_array[@]}"; do
+              JOB_TOTAL_COUNT=$((JOB_TOTAL_COUNT + 1))
+              job_key="${BASE_EXP_NAME}_${task_name}_seed${seed}_${clip_mode}_${sigma_tag}_${sigma_neg_ratio_tag}"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "${JOB_TOTAL_COUNT}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${sigma_neg_ratio}" "${seed}" \
+                "${job_key}" "${task_runs_root}" "${TRAIN_ITERS}" >> "${jobs_file}"
+            done
           done
         done
       else
         for seed in "${seed_array[@]}"; do
           JOB_TOTAL_COUNT=$((JOB_TOTAL_COUNT + 1))
           job_key="${BASE_EXP_NAME}_${task_name}_seed${seed}_${clip_mode}"
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "${JOB_TOTAL_COUNT}" "${job_key}" "${task_name}" "${clip_mode}" "-" "${seed}" \
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "${JOB_TOTAL_COUNT}" "${job_key}" "${task_name}" "${clip_mode}" "-" "-" "${seed}" \
             "${job_key}" "${task_runs_root}" "${TRAIN_ITERS}" >> "${jobs_file}"
         done
       fi
@@ -318,6 +330,7 @@ summary = {
     "clip_modes": ${CLIP_MODES_STRING@Q}.split(),
     "gpu_ids": ${GPU_IDS_STRING@Q}.split(),
     "gipo_sigmas": [float(value) for value in ${GIPO_SIGMAS_STRING@Q}.split()] if ${GIPO_SIGMAS_STRING@Q}.strip() else [],
+    "gipo_sigma_neg_ratios": [float(value) for value in ${GIPO_SIGMA_NEG_RATIOS_STRING@Q}.split()] if ${GIPO_SIGMA_NEG_RATIOS_STRING@Q}.strip() else [],
     "train_iters": int(${TRAIN_ITERS@Q}),
     "max_parallel": int(${MAX_PARALLEL@Q}),
     "poll_interval_secs": int(${POLL_INTERVAL_SECS@Q}),
@@ -400,8 +413,8 @@ parse_status_snapshot() {
   MISSING_COUNT=0
   used_gpu_ids_array=()
 
-  local job_index job_key task_name clip_mode sigma seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
-  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
+  local job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
+  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
     [[ "${job_index}" == "job_index" ]] && continue
     TOTAL_COUNT=$((TOTAL_COUNT + 1))
     case "${status}" in
@@ -433,8 +446,8 @@ print_progress_summary() {
 cleanup_stale_runs() {
   local status_file="${CURRENT_SESSION_DIR}/status_snapshot.tsv"
   local deleted_count=0
-  local job_index job_key task_name clip_mode sigma seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
-  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
+  local job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
+  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
     [[ "${job_index}" == "job_index" ]] && continue
     if [[ "${status}" != "stale" ]] || [[ -z "${stale_run_dirs}" ]] || [[ "${stale_run_dirs}" == "-" ]]; then
       continue
@@ -463,12 +476,13 @@ append_launch_history() {
   local task_name="$3"
   local clip_mode="$4"
   local sigma="$5"
-  local seed="$6"
-  local gpu_id="$7"
-  local pid="$8"
-  local log_file="$9"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${timestamp}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${seed}" "${gpu_id}" "${pid}" "${log_file}" \
+  local sigma_neg_ratio="$6"
+  local seed="$7"
+  local gpu_id="$8"
+  local pid="$9"
+  local log_file="${10}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${timestamp}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${sigma_neg_ratio}" "${seed}" "${gpu_id}" "${pid}" "${log_file}" \
     >> "${CURRENT_SESSION_DIR}/launch_history.tsv"
 }
 
@@ -478,11 +492,12 @@ write_meta_file() {
   local task_name="$3"
   local clip_mode="$4"
   local sigma="$5"
-  local seed="$6"
-  local gpu_id="$7"
-  local pid="$8"
-  local log_file="$9"
-  local launched_at="${10}"
+  local sigma_neg_ratio="$6"
+  local seed="$7"
+  local gpu_id="$8"
+  local pid="$9"
+  local log_file="${10}"
+  local launched_at="${11}"
   python - <<PY
 import json
 
@@ -491,6 +506,7 @@ payload = {
     "task_name": ${task_name@Q},
     "clip_mode": ${clip_mode@Q},
     "sigma": None if ${sigma@Q} == "-" else ${sigma@Q},
+    "sigma_neg_ratio": None if ${sigma_neg_ratio@Q} == "-" else ${sigma_neg_ratio@Q},
     "seed": int(${seed@Q}),
     "gpu_id": ${gpu_id@Q},
     "pid": int(${pid@Q}),
@@ -508,8 +524,9 @@ launch_job() {
   local task_name="$2"
   local clip_mode="$3"
   local sigma="$4"
-  local seed="$5"
-  local gpu_id="$6"
+  local sigma_neg_ratio="$5"
+  local seed="$6"
+  local gpu_id="$7"
 
   local task_runs_root="${RUNS_BASE_ROOT}/${task_name}/${RUN_GROUP_NAME}"
   local log_file="${CURRENT_SESSION_DIR}/logs/${job_key}.log"
@@ -547,17 +564,17 @@ launch_job() {
   )
 
   if [[ "${clip_mode}" == "gipo" ]]; then
-    cmd+=( --sigma "${sigma}" )
+    cmd+=( --sigma "${sigma}" --sigma-neg-ratio "${sigma_neg_ratio}" )
   fi
 
-  log "[launch] task=${task_name} clip_mode=${clip_mode} sigma=${sigma} seed=${seed} gpu=${gpu_id}"
+  log "[launch] task=${task_name} clip_mode=${clip_mode} sigma=${sigma} sigma_neg_ratio=${sigma_neg_ratio} seed=${seed} gpu=${gpu_id}"
   nohup "${cmd[@]}" > "${log_file}" 2>&1 &
 
   local pid=$!
   printf '%s\n' "${pid}" > "${pid_file}"
   printf '%s\n' "${pid}" >> "${CURRENT_SESSION_DIR}/all_pids.txt"
-  append_launch_history "${launched_at}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${seed}" "${gpu_id}" "${pid}" "${log_file}"
-  write_meta_file "${meta_file}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${seed}" "${gpu_id}" "${pid}" "${log_file}" "${launched_at}"
+  append_launch_history "${launched_at}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${sigma_neg_ratio}" "${seed}" "${gpu_id}" "${pid}" "${log_file}"
+  write_meta_file "${meta_file}" "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${sigma_neg_ratio}" "${seed}" "${gpu_id}" "${pid}" "${log_file}" "${launched_at}"
   log "[launch] pid=${pid} log=${log_file}"
 }
 
@@ -583,8 +600,8 @@ launch_missing_jobs() {
 
   local launched_count=0
   local status_file="${CURRENT_SESSION_DIR}/status_snapshot.tsv"
-  local job_index job_key task_name clip_mode sigma seed status pid pid_alive current_gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
-  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma seed status pid pid_alive current_gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
+  local job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive current_gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
+  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive current_gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
     [[ "${job_index}" == "job_index" ]] && continue
     [[ "${status}" != "missing" ]] && continue
 
@@ -608,7 +625,7 @@ launch_missing_jobs() {
       break
     fi
 
-    launch_job "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${seed}" "${selected_gpu}"
+    launch_job "${job_key}" "${task_name}" "${clip_mode}" "${sigma}" "${sigma_neg_ratio}" "${seed}" "${selected_gpu}"
     gpu_loads["${selected_gpu}"]=$((gpu_loads["${selected_gpu}"] + 1))
     launched_count=$((launched_count + 1))
   done < "${status_file}"
@@ -668,15 +685,17 @@ print_supervisor_status() {
 
 print_status_details() {
   local status_file="${CURRENT_SESSION_DIR}/status_snapshot.tsv"
-  local job_index job_key task_name clip_mode sigma seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
-  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
+  local job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file
+  while IFS=$'\t' read -r job_index job_key task_name clip_mode sigma sigma_neg_ratio seed status pid pid_alive gpu_id last_iter target_iters progress_ratio done_reason run_dir stale_run_dirs log_file; do
     [[ "${job_index}" == "job_index" ]] && continue
     local status_tag="[${status^^}]"
     local progress_text="${last_iter}/${target_iters}"
     if [[ "${sigma}" == "-" || -z "${sigma}" ]]; then
       echo "${status_tag} #${job_index} task=${task_name} clip_mode=${clip_mode} seed=${seed} progress=${progress_text} gpu=${gpu_id:--} pid=${pid:--} log=${log_file:--}"
-    else
+    elif [[ "${sigma_neg_ratio}" == "-" || -z "${sigma_neg_ratio}" ]]; then
       echo "${status_tag} #${job_index} task=${task_name} clip_mode=${clip_mode} sigma=${sigma} seed=${seed} progress=${progress_text} gpu=${gpu_id:--} pid=${pid:--} log=${log_file:--}"
+    else
+      echo "${status_tag} #${job_index} task=${task_name} clip_mode=${clip_mode} sigma=${sigma} sigma_neg_ratio=${sigma_neg_ratio} seed=${seed} progress=${progress_text} gpu=${gpu_id:--} pid=${pid:--} log=${log_file:--}"
     fi
     if [[ -n "${run_dir}" && "${run_dir}" != "-" ]]; then
       echo "          run_dir=${run_dir}"

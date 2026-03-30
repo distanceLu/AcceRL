@@ -9,7 +9,7 @@ ACTION="${1:-start}"
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-lcx-openvla-oft2}"
 
-TASK_NAME="${TASK_NAME:-disassemble-v3}"
+TASK_NAME="${TASK_NAME:-handle-pull-side-v3}"
 ROLLOUT_STEPS_PER_ITER="${ROLLOUT_STEPS_PER_ITER:-500}"
 WARMUP_STEPS="${WARMUP_STEPS:-10}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
@@ -27,8 +27,9 @@ BASE_EXP_NAME="${BASE_EXP_NAME:-simple}"
 TRAIN_ITERS="${TRAIN_ITERS:-1000}"
 SEEDS_STRING="${SEEDS:-22 64 99 234 360}"
 CLIP_MODES_STRING="${CLIP_MODES:-ppo sapo gipo}"
-GPU_IDS_STRING="${GPU_IDS:-0 1 2 3}"
-GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.1 0.2 0.5 1.0 2.0}"
+GPU_IDS_STRING="${GPU_IDS:-4 5 6 7}"
+GIPO_SIGMAS_STRING="${GIPO_SIGMAS:-0.2 0.5 1.0}"
+GIPO_SIGMA_NEG_RATIOS_STRING="${GIPO_SIGMA_NEG_RATIOS:-0.5 1.0}"
 
 SESSION_ROOT="${SESSION_ROOT:-logs/metaworld_ppo_discrete_simple_multi}"
 RUNS_ROOT="${RUNS_ROOT:-runs/MetaWorldSimple/${TASK_NAME}/1k-stale-sample10-reuse10-actor10-3e-4}"
@@ -51,6 +52,7 @@ usage() {
   SEEDS="142 23 64 450 99"
   GPU_IDS="4 5 6 7"
   GIPO_SIGMAS="0.2 0.5 1.0 2.0"
+  GIPO_SIGMA_NEG_RATIOS="0.5 1.0"
   AUTO_TENSORBOARD=1
   SESSION_DIR=logs/metaworld_ppo_discrete_simple_multi/<timestamp>
   FORCE_STOP=1
@@ -192,10 +194,12 @@ start_jobs() {
   local -a clip_modes_array
   local -a gpu_ids_array
   local -a gipo_sigmas_array
+  local -a gipo_sigma_neg_ratios_array
   read -r -a seed_array <<< "${SEEDS_STRING}"
   read -r -a clip_modes_array <<< "${CLIP_MODES_STRING}"
   read -r -a gpu_ids_array <<< "${GPU_IDS_STRING}"
   read -r -a gipo_sigmas_array <<< "${GIPO_SIGMAS_STRING}"
+  read -r -a gipo_sigma_neg_ratios_array <<< "${GIPO_SIGMA_NEG_RATIOS_STRING}"
 
   if [[ ${#seed_array[@]} -eq 0 ]]; then
     echo "SEEDS 不能为空。" >&2
@@ -214,6 +218,11 @@ start_jobs() {
 
   if [[ " ${clip_modes_array[*]} " == *" gipo "* ]] && [[ ${#gipo_sigmas_array[@]} -eq 0 ]]; then
     echo "启用 gipo 时，GIPO_SIGMAS 不能为空。" >&2
+    exit 1
+  fi
+
+  if [[ " ${clip_modes_array[*]} " == *" gipo "* ]] && [[ ${#gipo_sigma_neg_ratios_array[@]} -eq 0 ]]; then
+    echo "启用 gipo 时，GIPO_SIGMA_NEG_RATIOS 不能为空。" >&2
     exit 1
   fi
 
@@ -238,6 +247,7 @@ summary = {
     "clip_modes": "${CLIP_MODES_STRING}".split(),
     "gpu_ids": "${GPU_IDS_STRING}".split(),
     "gipo_sigmas": [float(s) for s in "${GIPO_SIGMAS_STRING}".split()],
+    "gipo_sigma_neg_ratios": [float(s) for s in "${GIPO_SIGMA_NEG_RATIOS_STRING}".split()],
     "policy_lr": "${POLICY_LR}",
     "value_lr": "${VALUE_LR}",
     "gamma": float("${GAMMA}"),
@@ -267,6 +277,7 @@ PYSCRIPT
   echo "seed: ${seed_array[*]}"
   echo "GPU: ${gpu_ids_array[*]}"
   echo "gipo sigma: ${gipo_sigmas_array[*]}"
+  echo "gipo sigma-neg-ratio: ${gipo_sigma_neg_ratios_array[*]}"
   echo "会话目录: ${session_dir}"
   echo "训练日志根目录: ${RUNS_ROOT}"
   echo
@@ -278,54 +289,59 @@ PYSCRIPT
   for clip_mode in "${clip_modes_array[@]}"; do
     if [[ "${clip_mode}" == "gipo" ]]; then
       local sigma
+      local sigma_neg_ratio
       for sigma in "${gipo_sigmas_array[@]}"; do
         local sigma_tag="sigma${sigma//./p}"
-        for seed in "${seed_array[@]}"; do
-          local gpu_id="${gpu_ids_array[$((job_idx % ${#gpu_ids_array[@]}))]}"
-          local run_name="${BASE_EXP_NAME}_${clip_mode}_${sigma_tag}_seed${seed}"
-          local exp_name="${BASE_EXP_NAME}_${TASK_NAME}_seed${seed}_${clip_mode}_${sigma_tag}"
-          local log_file="${session_dir}/${run_name}.log"
-          local pid_file="${session_dir}/${run_name}.pid"
+        for sigma_neg_ratio in "${gipo_sigma_neg_ratios_array[@]}"; do
+          local sigma_neg_ratio_tag="neg${sigma_neg_ratio//./p}"
+          for seed in "${seed_array[@]}"; do
+            local gpu_id="${gpu_ids_array[$((job_idx % ${#gpu_ids_array[@]}))]}"
+            local run_name="${BASE_EXP_NAME}_${clip_mode}_${sigma_tag}_${sigma_neg_ratio_tag}_seed${seed}"
+            local exp_name="${BASE_EXP_NAME}_${TASK_NAME}_seed${seed}_${clip_mode}_${sigma_tag}_${sigma_neg_ratio_tag}"
+            local log_file="${session_dir}/${run_name}.log"
+            local pid_file="${session_dir}/${run_name}.pid"
 
-          local -a cmd=(
-            env CUDA_VISIBLE_DEVICES="${gpu_id}"
-            python rl/metaworld_ppo_discrete_simple.py
-            --task-name "${TASK_NAME}"
-            --rollout-steps-per-iter "${ROLLOUT_STEPS_PER_ITER}"
-            --warmup-steps "${WARMUP_STEPS}"
-            --train-batch-size "${TRAIN_BATCH_SIZE}"
-            --sample-rounds "${SAMPLE_ROUNDS}"
-            --reuse-per-batch "${REUSE_PER_BATCH}"
-            --actor-every "${ACTOR_EVERY}"
-            --buffer-horizon-steps "${BUFFER_HORIZON_STEPS}"
-            --policy-lr "${POLICY_LR}"
-            --value-lr "${VALUE_LR}"
-            --gamma "${GAMMA}"
-            --lambda "${LAMBDA_VALUE}"
-            --ent-coef "${ENT_COEF}"
-            --clip-mode "${clip_mode}"
-            --sigma "${sigma}"
-            --seed "${seed}"
-            --exp-name "${exp_name}"
-            --no-bf16
-            --cuda-visible-devices "${gpu_id}"
-            --train-iters "${TRAIN_ITERS}"
-            --log-dir "${RUNS_ROOT}"
-            --reward-scale "${REWARD_SCALE}"
-          )
+            local -a cmd=(
+              env CUDA_VISIBLE_DEVICES="${gpu_id}"
+              python rl/metaworld_ppo_discrete_simple.py
+              --task-name "${TASK_NAME}"
+              --rollout-steps-per-iter "${ROLLOUT_STEPS_PER_ITER}"
+              --warmup-steps "${WARMUP_STEPS}"
+              --train-batch-size "${TRAIN_BATCH_SIZE}"
+              --sample-rounds "${SAMPLE_ROUNDS}"
+              --reuse-per-batch "${REUSE_PER_BATCH}"
+              --actor-every "${ACTOR_EVERY}"
+              --buffer-horizon-steps "${BUFFER_HORIZON_STEPS}"
+              --policy-lr "${POLICY_LR}"
+              --value-lr "${VALUE_LR}"
+              --gamma "${GAMMA}"
+              --lambda "${LAMBDA_VALUE}"
+              --ent-coef "${ENT_COEF}"
+              --clip-mode "${clip_mode}"
+              --sigma "${sigma}"
+              --sigma-neg-ratio "${sigma_neg_ratio}"
+              --seed "${seed}"
+              --exp-name "${exp_name}"
+              --no-bf16
+              --cuda-visible-devices "${gpu_id}"
+              --train-iters "${TRAIN_ITERS}"
+              --log-dir "${RUNS_ROOT}"
+              --reward-scale "${REWARD_SCALE}"
+            )
 
-          echo "[launch] clip_mode=${clip_mode} sigma=${sigma} seed=${seed} gpu=${gpu_id}"
-          nohup "${cmd[@]}" > "${log_file}" 2>&1 &
+            echo "[launch] clip_mode=${clip_mode} sigma=${sigma} sigma_neg_ratio=${sigma_neg_ratio} seed=${seed} gpu=${gpu_id}"
+            nohup "${cmd[@]}" > "${log_file}" 2>&1 &
 
-          local pid=$!
-          printf '%s\n' "${pid}" > "${pid_file}"
-          printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "${pid}" "${clip_mode}" "${seed}" "${sigma}" "${gpu_id}" "${log_file}" >> "${train_pid_file}"
-          printf '%s\n' "${pid}" >> "${all_pid_file}"
-          echo "         pid=${pid} log=${log_file}"
+            local pid=$!
+            printf '%s\n' "${pid}" > "${pid_file}"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "${pid}" "${clip_mode}" "${seed}" "${sigma}" "${sigma_neg_ratio}" "${gpu_id}" "${log_file}" >> "${train_pid_file}"
+            printf '%s\n' "${pid}" >> "${all_pid_file}"
+            echo "         pid=${pid} log=${log_file}"
 
-          job_idx=$((job_idx + 1))
-          launch_count=$((launch_count + 1))
+            job_idx=$((job_idx + 1))
+            launch_count=$((launch_count + 1))
+          done
         done
       done
     else
@@ -367,8 +383,8 @@ PYSCRIPT
 
         local pid=$!
         printf '%s\n' "${pid}" > "${pid_file}"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-          "${pid}" "${clip_mode}" "${seed}" "-" "${gpu_id}" "${log_file}" >> "${train_pid_file}"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "${pid}" "${clip_mode}" "${seed}" "-" "-" "${gpu_id}" "${log_file}" >> "${train_pid_file}"
         printf '%s\n' "${pid}" >> "${all_pid_file}"
         echo "         pid=${pid} log=${log_file}"
 
@@ -417,25 +433,49 @@ status_jobs() {
   local running_count=0
   local exited_count=0
   if [[ -f "${train_pid_file}" ]]; then
-    while IFS=$'\t' read -r pid clip_mode seed sigma gpu_id log_file; do
+    local -a fields
+    while IFS=$'\t' read -r -a fields; do
+      local pid="${fields[0]:-}"
+      local clip_mode="${fields[1]:-}"
+      local seed="${fields[2]:-}"
+      local sigma="-"
+      local sigma_neg_ratio="-"
+      local gpu_id=""
+      local log_file=""
       [[ -z "${pid}" ]] && continue
-      if [[ -z "${log_file}" ]]; then
-        log_file="${gpu_id}"
-        gpu_id="${sigma}"
-        sigma="-"
-      fi
+      case "${#fields[@]}" in
+        7|*)
+          sigma="${fields[3]:--}"
+          sigma_neg_ratio="${fields[4]:--}"
+          gpu_id="${fields[5]:-}"
+          log_file="${fields[6]:-}"
+          ;;
+        6)
+          sigma="${fields[3]:--}"
+          gpu_id="${fields[4]:-}"
+          log_file="${fields[5]:-}"
+          ;;
+        5)
+          gpu_id="${fields[3]:-}"
+          log_file="${fields[4]:-}"
+          ;;
+      esac
       if is_pid_running "${pid}"; then
         if [[ "${sigma}" == "-" || -z "${sigma}" ]]; then
           echo "[RUNNING] pid=${pid} clip_mode=${clip_mode} seed=${seed} gpu=${gpu_id} log=${log_file}"
-        else
+        elif [[ "${sigma_neg_ratio}" == "-" || -z "${sigma_neg_ratio}" ]]; then
           echo "[RUNNING] pid=${pid} clip_mode=${clip_mode} sigma=${sigma} seed=${seed} gpu=${gpu_id} log=${log_file}"
+        else
+          echo "[RUNNING] pid=${pid} clip_mode=${clip_mode} sigma=${sigma} sigma_neg_ratio=${sigma_neg_ratio} seed=${seed} gpu=${gpu_id} log=${log_file}"
         fi
         running_count=$((running_count + 1))
       else
         if [[ "${sigma}" == "-" || -z "${sigma}" ]]; then
           echo "[EXITED] pid=${pid} clip_mode=${clip_mode} seed=${seed} gpu=${gpu_id} log=${log_file}"
-        else
+        elif [[ "${sigma_neg_ratio}" == "-" || -z "${sigma_neg_ratio}" ]]; then
           echo "[EXITED] pid=${pid} clip_mode=${clip_mode} sigma=${sigma} seed=${seed} gpu=${gpu_id} log=${log_file}"
+        else
+          echo "[EXITED] pid=${pid} clip_mode=${clip_mode} sigma=${sigma} sigma_neg_ratio=${sigma_neg_ratio} seed=${seed} gpu=${gpu_id} log=${log_file}"
         fi
         exited_count=$((exited_count + 1))
       fi
