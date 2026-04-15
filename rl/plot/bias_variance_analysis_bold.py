@@ -297,71 +297,207 @@ def compute_gradient_stats(policy, behavior_policy, env, state='S0', target_acti
     return result
 
 
-def find_pareto_optimal(stats):
-    """
-    找出帕累托最优的算法
-    
-    Args:
-        stats: 统计结果字典
-    
-    Returns:
-        list: 帕累托最优算法的名称列表
-    """
-    # 定义所有算法及其对应的偏差和方差
+def summarize_algorithm_metrics(stats):
+    """汇总各算法的偏差、方差和MSE，并返回MSE最优算法。"""
     algorithms = {
         'No-Clip': {
             'bias': 0.0,  # No-Clip是基准，偏差为0
-            'variance': stats['Var_g_is']
+            'variance': stats['Var_g_is'],
+            'gradient_values': stats['g_is_values'],
         },
         'GIPO(σ=0.1)': {
             'bias': abs(stats['E_g_wis_sigma_0.1'] - stats['E_g_is']),
-            'variance': stats['Var_g_wis_sigma_0.1']
+            'variance': stats['Var_g_wis_sigma_0.1'],
+            'gradient_values': stats['g_wis_values_sigma_0.1'],
         },
         'GIPO(σ=0.3)': {
             'bias': abs(stats['E_g_wis_sigma_0.3'] - stats['E_g_is']),
-            'variance': stats['Var_g_wis_sigma_0.3']
+            'variance': stats['Var_g_wis_sigma_0.3'],
+            'gradient_values': stats['g_wis_values_sigma_0.3'],
         },
         'GIPO(σ=0.5)': {
             'bias': abs(stats['E_g_wis_sigma_0.5'] - stats['E_g_is']),
-            'variance': stats['Var_g_wis_sigma_0.5']
+            'variance': stats['Var_g_wis_sigma_0.5'],
+            'gradient_values': stats['g_wis_values_sigma_0.5'],
         },
         'GIPO(σ=1.0)': {
             'bias': abs(stats['E_g_wis_sigma_1.0'] - stats['E_g_is']),
-            'variance': stats['Var_g_wis_sigma_1.0']
+            'variance': stats['Var_g_wis_sigma_1.0'],
+            'gradient_values': stats['g_wis_values_sigma_1.0'],
         },
         'GIPO(σ=2.0)': {
             'bias': abs(stats['E_g_wis_sigma_2.0'] - stats['E_g_is']),
-            'variance': stats['Var_g_wis_sigma_2.0']
+            'variance': stats['Var_g_wis_sigma_2.0'],
+            'gradient_values': stats['g_wis_values_sigma_2.0'],
         },
         'PPO': {
             'bias': abs(stats['E_g_ppo'] - stats['E_g_is']),
-            'variance': stats['Var_g_ppo']
+            'variance': stats['Var_g_ppo'],
+            'gradient_values': stats['g_ppo_values'],
         },
         'SAPO': {
             'bias': abs(stats['E_g_sapo'] - stats['E_g_is']),
-            'variance': stats['Var_g_sapo']
+            'variance': stats['Var_g_sapo'],
+            'gradient_values': stats['g_sapo_values'],
         }
     }
-    
-    # 找出帕累托最优的算法
-    pareto_optimal = []
-    
-    for alg_name, alg_metrics in algorithms.items():
-        is_pareto = True
-        for other_name, other_metrics in algorithms.items():
-            if alg_name == other_name:
-                continue
-            # 检查是否存在另一个算法在偏差和方差上都优于当前算法
-            if (other_metrics['bias'] <= alg_metrics['bias'] and 
-                other_metrics['variance'] <= alg_metrics['variance'] and
-                (other_metrics['bias'] < alg_metrics['bias'] or 
-                 other_metrics['variance'] < alg_metrics['variance'])):
-                is_pareto = False
-                break
-        if is_pareto:
-            pareto_optimal.append(alg_name)
-    
-    return pareto_optimal, algorithms
+
+    for alg_metrics in algorithms.values():
+        alg_metrics['mse'] = alg_metrics['bias'] ** 2 + alg_metrics['variance']
+        gradient_values = np.array(list(alg_metrics['gradient_values'].values()), dtype=float)
+        alg_metrics['excluded_from_ranking'] = np.allclose(gradient_values, 0.0, atol=1e-12)
+        alg_metrics['exclusion_reason'] = (
+            'zero policy gradient (fully clipped)'
+            if alg_metrics['excluded_from_ranking']
+            else None
+        )
+
+    eligible_algorithms = [
+        name for name, metrics in algorithms.items()
+        if not metrics['excluded_from_ranking']
+    ]
+    best_algorithm = None
+    if eligible_algorithms:
+        best_algorithm = min(
+            eligible_algorithms,
+            key=lambda name: algorithms[name]['mse']
+        )
+    return best_algorithm, algorithms
+
+
+def collect_ratio_scatter_points(policy, behavior_policy, env):
+    """收集所有非终止状态上的 (behavior_prob, policy_prob) 散点数据。"""
+    points = []
+    for state in ['S0', 'S1', 'S2']:
+        for action in env.actions:
+            behavior_prob = behavior_policy.get_prob(state, action)
+            policy_prob = policy.get_prob(state, action)
+            ratio = policy_prob / behavior_prob if behavior_prob > 0 else np.inf
+            points.append({
+                'state': state,
+                'action': action,
+                'behavior_prob': behavior_prob,
+                'policy_prob': policy_prob,
+                'ratio': ratio,
+            })
+    return points
+
+
+def snapshot_policy_probs(policy, env):
+    """导出策略在每个非终止状态上的动作概率。"""
+    probs = {}
+    for state in ['S0', 'S1', 'S2']:
+        probs[state] = {action: float(policy.get_prob(state, action)) for action in env.actions}
+    return probs
+
+
+def write_mse_ranking_markdown(all_cases, output_dir):
+    """将MSE排名和策略信息写入Markdown文件。"""
+    os.makedirs(output_dir, exist_ok=True)
+    md_path = os.path.join(output_dir, "mse_ranking_summary.md")
+
+    lines = []
+    lines.append("# MSE Ranking Summary")
+    lines.append("")
+    lines.append("Ranking rule: `MSE = Bias^2 + Variance` (smaller is better).")
+    lines.append("Algorithms with zero policy gradient (fully clipped) are excluded from ranking.")
+    lines.append("")
+
+    lines.append("## Rankings")
+    lines.append("")
+    skipped_cases = []
+    ranked_case_count = 0
+
+    for case_item in all_cases:
+        case_name = case_item['display_name']
+        best_algorithm, algorithms = summarize_algorithm_metrics(case_item['stats'])
+        mse_values = np.array([algorithms[name]['mse'] for name in sorted(algorithms.keys())], dtype=float)
+        if np.allclose(mse_values, mse_values[0], atol=1e-12, rtol=1e-9):
+            skipped_cases.append(case_name)
+            continue
+
+        ranked_case_count += 1
+        lines.append(f"### {case_name}")
+        if best_algorithm is None:
+            lines.append("- Best MSE: `None`")
+        else:
+            lines.append(f"- Best MSE: `{best_algorithm}`")
+
+        ranking_items = [
+            item for item in algorithms.items()
+            if not item[1]['excluded_from_ranking']
+        ]
+        lines.append("")
+        lines.append("| Algorithm | Bias | Variance | MSE |")
+        lines.append("|---|---:|---:|---:|")
+        for alg_name, metrics in sorted(ranking_items, key=lambda item: item[1]['mse']):
+            lines.append(
+                f"| `{alg_name}` | {metrics['bias']:.6f} | {metrics['variance']:.6f} | {metrics['mse']:.6f} |"
+            )
+
+        excluded_algorithms = [
+            (name, metrics) for name, metrics in algorithms.items()
+            if metrics['excluded_from_ranking']
+        ]
+        if excluded_algorithms:
+            lines.append("")
+            lines.append("Excluded from ranking:")
+            for alg_name, metrics in excluded_algorithms:
+                lines.append(f"- `{alg_name}`: {metrics['exclusion_reason']} (MSE={metrics['mse']:.6f})")
+        lines.append("")
+
+    if ranked_case_count == 0:
+        lines.append("No case is ranked because all cases have identical MSE values across algorithms.")
+        lines.append("")
+
+    if skipped_cases:
+        lines.append("Skipped cases with identical MSE for all algorithms:")
+        for case_name in skipped_cases:
+            lines.append(f"- `{case_name}`")
+        lines.append("")
+
+    lines.append("## Strategy Details")
+    lines.append("")
+    lines.append("Policy probabilities are listed as `up/down/left/right` for states `S0/S1/S2`.")
+    lines.append("")
+
+    for case_item in all_cases:
+        lines.append(f"### {case_item['display_name']}")
+        lines.append(f"- Target policy: `{case_item['target_name']}`")
+        lines.append(f"- Target description: {case_item['target_description']}")
+        lines.append(f"- Behavior case: `{case_item['case_name']}`")
+        lines.append(f"- Behavior description: {case_item['case_description']}")
+        if case_item['behavior_components'] is None:
+            lines.append("- Behavior composition: direct policy (`mu = pi`)")
+        else:
+            component_str = ", ".join(
+                [f"{name}:{weight:.2f}" for name, weight in case_item['behavior_components']]
+            )
+            lines.append(f"- Behavior composition: {component_str}")
+
+        lines.append("")
+        lines.append("Target policy probabilities:")
+        lines.append("")
+        lines.append("| State | Up | Down | Left | Right |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for state in ['S0', 'S1', 'S2']:
+            p = case_item['target_policy_probs'][state]
+            lines.append(f"| `{state}` | {p['up']:.4f} | {p['down']:.4f} | {p['left']:.4f} | {p['right']:.4f} |")
+
+        lines.append("")
+        lines.append("Behavior policy probabilities:")
+        lines.append("")
+        lines.append("| State | Up | Down | Left | Right |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for state in ['S0', 'S1', 'S2']:
+            p = case_item['behavior_policy_probs'][state]
+            lines.append(f"| `{state}` | {p['up']:.4f} | {p['down']:.4f} | {p['left']:.4f} | {p['right']:.4f} |")
+        lines.append("")
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print(f"MSE ranking markdown saved to: {md_path}")
 
 
 def create_mixed_policy(env, policy_weights):
@@ -373,38 +509,111 @@ def create_mixed_policy(env, policy_weights):
         policy_weights: 字典，格式为 {策略名称: (权重, 策略对象)}
     
     Returns:
-        SoftmaxPolicy: 近似混合分布的softmax策略
-        dict: 混合策略的概率分布
+        SoftmaxPolicy: 状态相关的混合softmax策略
+        dict: S0状态下混合策略的概率分布（用于打印）
     """
-    # 计算混合策略的概率分布
-    mixed_probs = {}
-    for a in env.actions:
-        mixed_probs[a] = sum(weight * policy.get_prob('S0', a) 
-                            for _, (weight, policy) in policy_weights.items())
-    
-    # 计算对应的softmax theta值
-    # 情况1: up=left, down=right，使用[0, a, 0, a]形式
-    if abs(mixed_probs['up'] - mixed_probs['left']) < 0.01 and abs(mixed_probs['down'] - mixed_probs['right']) < 0.01:
-        ratio = mixed_probs['down'] / mixed_probs['up']
-        theta = [0, np.log(ratio), 0, np.log(ratio)]
-    # 情况2: up=down, left=right，使用[0, 0, a, a]形式
-    elif abs(mixed_probs['up'] - mixed_probs['down']) < 0.01 and abs(mixed_probs['left'] - mixed_probs['right']) < 0.01:
-        ratio = mixed_probs['left'] / mixed_probs['up']
-        theta = [0, 0, np.log(ratio), np.log(ratio)]
-    # 情况3: 其他情况，使用[0, a, b, c]形式
-    else:
-        ratio_down = mixed_probs['down'] / mixed_probs['up']
-        ratio_left = mixed_probs['left'] / mixed_probs['up']
-        ratio_right = mixed_probs['right'] / mixed_probs['up']
-        theta = [0, np.log(ratio_down), np.log(ratio_left), np.log(ratio_right)]
-    
-    # 创建softmax策略
+    eps = 1e-12
     mu = SoftmaxPolicy(env)
-    mu.set_theta('S0', theta)
-    mu.set_theta('S1', theta)
-    mu.set_theta('S2', theta)
-    
-    return mu, mixed_probs, theta
+
+    # 按状态混合，避免把所有状态都近似成S0上的同一分布。
+    mixed_probs_by_state = {}
+    for state in ['S0', 'S1', 'S2']:
+        mixed_probs = {}
+        for a in env.actions:
+            mixed_probs[a] = sum(
+                weight * policy.get_prob(state, a)
+                for _, (weight, policy) in policy_weights.items()
+            )
+        mixed_probs_by_state[state] = mixed_probs
+
+        ref_prob = max(mixed_probs['up'], eps)
+        theta = [
+            0.0,
+            float(np.log(max(mixed_probs['down'], eps) / ref_prob)),
+            float(np.log(max(mixed_probs['left'], eps) / ref_prob)),
+            float(np.log(max(mixed_probs['right'], eps) / ref_prob)),
+        ]
+        mu.set_theta(state, theta)
+
+    mixed_probs_s0 = mixed_probs_by_state['S0']
+    theta_s0 = [
+        mu.theta['S0']['up'],
+        mu.theta['S0']['down'],
+        mu.theta['S0']['left'],
+        mu.theta['S0']['right'],
+    ]
+
+    return mu, mixed_probs_s0, theta_s0
+
+
+def build_state_invariant_policy(env, theta):
+    """在所有非终止状态上使用同一组 theta 构建策略。"""
+    policy = SoftmaxPolicy(env)
+    for state in ['S0', 'S1', 'S2']:
+        policy.set_theta(state, theta)
+    return policy
+
+
+def build_state_dependent_policy(env, probs_by_state):
+    """按状态指定动作概率构建策略（每个状态概率和需为1）。"""
+    policy = SoftmaxPolicy(env)
+    eps = 1e-12
+    for state in ['S0', 'S1', 'S2']:
+        state_probs = probs_by_state[state]
+        prob_sum = sum(float(state_probs[a]) for a in env.actions)
+        if not np.isclose(prob_sum, 1.0, atol=1e-8):
+            raise ValueError(f"{state} 的动作概率和应为1，当前为 {prob_sum}")
+
+        # 通过对数概率比将离散分布精确映射到 softmax 参数。
+        ref_prob = max(float(state_probs['up']), eps)
+        theta = [
+            0.0,
+            float(np.log(max(float(state_probs['down']), eps) / ref_prob)),
+            float(np.log(max(float(state_probs['left']), eps) / ref_prob)),
+            float(np.log(max(float(state_probs['right']), eps) / ref_prob)),
+        ]
+        policy.set_theta(state, theta)
+    return policy
+
+
+def print_case_report(case_name, description, mu, stats, env, policy_weights=None, mixed_probs=None, theta=None):
+    """打印单个 case 的详细分析结果。"""
+    print("\n" + "=" * 80)
+    print(f"{case_name}: {description}")
+    print("=" * 80)
+
+    if policy_weights is None:
+        print("策略说明: 使用直接指定策略 μ")
+        print("策略的概率分布:")
+        for a in env.actions:
+            print(f"  {a}: {mu.get_prob('S0', a):.4f}")
+    else:
+        print("混合策略组成:")
+        for name, (weight, _) in policy_weights.items():
+            print(f"  {weight*100:.0f}% {name}")
+        print("混合策略的概率分布:")
+        for a in env.actions:
+            print(f"  {a}: {mixed_probs[a]:.4f}")
+        print(f"对应的theta值: {[round(x, 4) for x in theta]}")
+
+    print(f"\nμ(上|S0): {mu.get_prob('S0', 'up'):.4f}")
+    print(f"μ(下|S0): {mu.get_prob('S0', 'down'):.4f}")
+    print(f"μ(左|S0): {mu.get_prob('S0', 'left'):.4f}")
+    print(f"μ(右|S0): {mu.get_prob('S0', 'right'):.4f}")
+    print(f"\nV(S0): {stats['V']['S0']:.4f}")
+    print(f"A(S0, 右): {stats['A']['S0']['right']:.4f}")
+    print(f"\n重要性采样比:")
+    for a, rho in stats['rho_values'].items():
+        print(f"  {a}: {rho:.4f}")
+
+    print(f"\nIS估计量期望: {stats['E_g_is']:.6f}")
+    print(f"IS估计量方差: {stats['Var_g_is']:.6f}")
+    print(f"WIS估计量期望: {stats['E_g_wis']:.6f}")
+    print(f"WIS估计量方差: {stats['Var_g_wis']:.6f}")
+    print(f"PPO估计量期望: {stats['E_g_ppo']:.6f}")
+    print(f"PPO估计量方差: {stats['Var_g_ppo']:.6f}")
+    print(f"SAPO估计量期望: {stats['E_g_sapo']:.6f}")
+    print(f"SAPO估计量方差: {stats['Var_g_sapo']:.6f}")
 
 
 def parse_args():
@@ -420,210 +629,221 @@ def parse_args():
         "--pareto-border",
         dest="pareto_border",
         action="store_true",
-        help="Enable black border for Pareto-optimal markers.",
+        help="Enable black border for highlighted best-MSE markers.",
     )
     parser.add_argument(
         "--no-pareto-border",
         dest="pareto_border",
         action="store_false",
-        help="Disable black border for Pareto-optimal markers.",
+        help="Disable black border for highlighted best-MSE markers.",
+    )
+    parser.add_argument(
+        "--save-images",
+        action="store_true",
+        help="Save output figures as PNG and PDF.",
     )
     parser.set_defaults(pareto_border=True)
     return parser.parse_args()
 
 
-def main(output_dir="rollouts/grid", pareto_border=True):
+def main(output_dir="rollouts/grid", pareto_border=True, save_images=False):
     env = GridWorld2x2(gamma=0.9)
     
-    # 目标策略π：偏好'下'和'右' (θ=[0,1,0,1])
-    pi = SoftmaxPolicy(env)
-    pi.set_theta('S0', [0, 1, 0, 1])
-    pi.set_theta('S1', [0, 1, 0, 1])
-    pi.set_theta('S2', [0, 1, 0, 1])
-    
-    print("=" * 80)
-    print("目标策略π: 偏好'下'和'右' (θ=[0,1,0,1])")
-    print("=" * 80)
-    print(f"π(上|S0): {pi.get_prob('S0', 'up'):.4f}")
-    print(f"π(下|S0): {pi.get_prob('S0', 'down'):.4f}")
-    print(f"π(左|S0): {pi.get_prob('S0', 'left'):.4f}")
-    print(f"π(右|S0): {pi.get_prob('S0', 'right'):.4f}")
-    
-    # 定义基础子策略
+    # 定义基础行为子策略
     random_policy = UniformPolicy(env)  # 随机策略：每个动作25%
     
-    prefer_right_policy = SoftmaxPolicy(env)  # 偏好右策略：theta=[0,0,0,1]
-    prefer_right_policy.set_theta('S0', [0, 0, 0, 1])
-    prefer_right_policy.set_theta('S1', [0, 0, 0, 1])
-    prefer_right_policy.set_theta('S2', [0, 0, 0, 1])
-    
-    prefer_down_policy = SoftmaxPolicy(env)  # 偏好下策略：theta=[0,1,0,0]
-    prefer_down_policy.set_theta('S0', [0, 1, 0, 0])
-    prefer_down_policy.set_theta('S1', [0, 1, 0, 0])
-    prefer_down_policy.set_theta('S2', [0, 1, 0, 0])
-    
-    prefer_left_policy = SoftmaxPolicy(env)  # 偏好左策略：theta=[0,0,1,0]
-    prefer_left_policy.set_theta('S0', [0, 0, 1, 0])
-    prefer_left_policy.set_theta('S1', [0, 0, 1, 0])
-    prefer_left_policy.set_theta('S2', [0, 0, 1, 0])
+    prefer_right_policy = build_state_invariant_policy(env, [0, 0, 0, 1])  # 偏好右
+    prefer_down_policy = build_state_invariant_policy(env, [0, 1, 0, 0])   # 偏好下
 
-    prefer_up_policy = SoftmaxPolicy(env)  # 偏好下策略：theta=[0,1,0,0]
-    prefer_up_policy.set_theta('S0', [1, 0, 0, 0])
-    prefer_up_policy.set_theta('S1', [1, 0, 0, 0])
-    prefer_up_policy.set_theta('S2', [1, 0, 0, 0])
-    
-    # 情况A：μ = 100%随机策略
-    print("\n" + "=" * 80)
-    print("情况A: μ = 100%随机策略")
-    print("=" * 80)
-    
-    policy_weights_A = {
-        'random': (1.0, random_policy)
-    }
-    mu_A, mixed_probs_A, theta_A = create_mixed_policy(env, policy_weights_A)
-    
-    print("混合策略组成: 100%随机策略")
-    print("混合策略的概率分布:")
-    for a in env.actions:
-        print(f"  {a}: {mixed_probs_A[a]:.4f}")
-    print(f"对应的theta值: {theta_A}")
-    
-    stats_A = compute_gradient_stats(pi, mu_A, env, state='S0', target_action='right')
-    
-    print(f"\nμ(上|S0): {mu_A.get_prob('S0', 'up'):.4f}")
-    print(f"μ(下|S0): {mu_A.get_prob('S0', 'down'):.4f}")
-    print(f"μ(左|S0): {mu_A.get_prob('S0', 'left'):.4f}")
-    print(f"μ(右|S0): {mu_A.get_prob('S0', 'right'):.4f}")
-    print(f"\nV(S0): {stats_A['V']['S0']:.4f}")
-    print(f"A(S0, 右): {stats_A['A']['S0']['right']:.4f}")
-    print(f"\n重要性采样比:")
-    for a, rho in stats_A['rho_values'].items():
-        print(f"  {a}: {rho:.4f}")
-    
-    print(f"\nIS估计量期望: {stats_A['E_g_is']:.6f}")
-    print(f"IS估计量方差: {stats_A['Var_g_is']:.6f}")
-    print(f"WIS估计量期望: {stats_A['E_g_wis']:.6f}")
-    print(f"WIS估计量方差: {stats_A['Var_g_wis']:.6f}")
-    print(f"PPO估计量期望: {stats_A['E_g_ppo']:.6f}")
-    print(f"PPO估计量方差: {stats_A['Var_g_ppo']:.6f}")
-    print(f"SAPO估计量期望: {stats_A['E_g_sapo']:.6f}")
-    print(f"SAPO估计量方差: {stats_A['Var_g_sapo']:.6f}")
-    
-    # 情况B：μ = 40%随机策略 + 30%偏好右策略 + 30%偏好下策略
-    print("\n" + "=" * 80)
-    print("情况B: μ = 40%随机策略 + 30%偏好右策略 + 30%偏好下策略")
-    print("=" * 80)
-    
-    policy_weights_B = {
-        'random': (0.4, random_policy),
-        'prefer_right': (0.3, prefer_right_policy),
-        'prefer_down': (0.3, prefer_down_policy)
-    }
-    mu_B, mixed_probs_B, theta_B = create_mixed_policy(env, policy_weights_B)
-    
-    print("混合策略组成:")
-    for name, (weight, _) in policy_weights_B.items():
-        print(f"  {weight*100:.0f}% {name}")
-    print("混合策略的概率分布:")
-    for a in env.actions:
-        print(f"  {a}: {mixed_probs_B[a]:.4f}")
-    print(f"对应的theta值: {theta_B}")
-    
-    stats_B = compute_gradient_stats(pi, mu_B, env, state='S0', target_action='right')
-    
-    print(f"\nμ(上|S0): {mu_B.get_prob('S0', 'up'):.4f}")
-    print(f"μ(下|S0): {mu_B.get_prob('S0', 'down'):.4f}")
-    print(f"μ(左|S0): {mu_B.get_prob('S0', 'left'):.4f}")
-    print(f"μ(右|S0): {mu_B.get_prob('S0', 'right'):.4f}")
-    print(f"\nV(S0): {stats_B['V']['S0']:.4f}")
-    print(f"A(S0, 右): {stats_B['A']['S0']['right']:.4f}")
-    print(f"\n重要性采样比:")
-    for a, rho in stats_B['rho_values'].items():
-        print(f"  {a}: {rho:.4f}")
-    
-    print(f"\nIS估计量期望: {stats_B['E_g_is']:.6f}")
-    print(f"IS估计量方差: {stats_B['Var_g_is']:.6f}")
-    print(f"WIS估计量期望: {stats_B['E_g_wis']:.6f}")
-    print(f"WIS估计量方差: {stats_B['Var_g_wis']:.6f}")
-    print(f"PPO估计量期望: {stats_B['E_g_ppo']:.6f}")
-    print(f"PPO估计量方差: {stats_B['Var_g_ppo']:.6f}")
-    print(f"SAPO估计量期望: {stats_B['E_g_sapo']:.6f}")
-    print(f"SAPO估计量方差: {stats_B['Var_g_sapo']:.6f}")
-    
-    # 情况C：μ = 20%随机策略 + 40%偏好右策略 + 40%偏好下策略
-    print("\n" + "=" * 80)
-    print("情况C: μ = 20%随机策略 + 40%偏好右策略 + 40%偏好下策略")
-    print("=" * 80)
-    
-    policy_weights_C = {
-        'random': (0.2, random_policy),
-        'prefer_right': (0.4, prefer_right_policy),
-        'prefer_down': (0.4, prefer_down_policy)
-    }
-    mu_C, mixed_probs_C, theta_C = create_mixed_policy(env, policy_weights_C)
-    
-    print("混合策略组成:")
-    for name, (weight, _) in policy_weights_C.items():
-        print(f"  {weight*100:.0f}% {name}")
-    print("混合策略的概率分布:")
-    for a in env.actions:
-        print(f"  {a}: {mixed_probs_C[a]:.4f}")
-    print(f"对应的theta值: {theta_C}")
-    
-    stats_C = compute_gradient_stats(pi, mu_C, env, state='S0', target_action='right')
-    
-    print(f"\nμ(上|S0): {mu_C.get_prob('S0', 'up'):.4f}")
-    print(f"μ(下|S0): {mu_C.get_prob('S0', 'down'):.4f}")
-    print(f"μ(左|S0): {mu_C.get_prob('S0', 'left'):.4f}")
-    print(f"μ(右|S0): {mu_C.get_prob('S0', 'right'):.4f}")
-    print(f"\nV(S0): {stats_C['V']['S0']:.4f}")
-    print(f"A(S0, 右): {stats_C['A']['S0']['right']:.4f}")
-    print(f"\n重要性采样比:")
-    for a, rho in stats_C['rho_values'].items():
-        print(f"  {a}: {rho:.4f}")
-    
-    print(f"\nIS估计量期望: {stats_C['E_g_is']:.6f}")
-    print(f"IS估计量方差: {stats_C['Var_g_is']:.6f}")
-    print(f"WIS估计量期望: {stats_C['E_g_wis']:.6f}")
-    print(f"WIS估计量方差: {stats_C['Var_g_wis']:.6f}")
-    print(f"PPO估计量期望: {stats_C['E_g_ppo']:.6f}")
-    print(f"PPO估计量方差: {stats_C['Var_g_ppo']:.6f}")
-    print(f"SAPO估计量期望: {stats_C['E_g_sapo']:.6f}")
-    print(f"SAPO估计量方差: {stats_C['Var_g_sapo']:.6f}")
-    
-    # 情况D：μ = π（策略mu与pi一致）
-    print("\n" + "=" * 80)
-    print("情况D: μ = π（策略mu与pi一致）")
-    print("=" * 80)
-    
-    # 直接使用pi策略作为mu
-    mu_D = pi
-    
-    print("策略说明: μ = π（完全一致）")
-    print("策略的概率分布:")
-    for a in env.actions:
-        print(f"  {a}: {mu_D.get_prob('S0', a):.4f}")
-    
-    stats_D = compute_gradient_stats(pi, mu_D, env, state='S0', target_action='right')
-    
-    print(f"\nμ(上|S0): {mu_D.get_prob('S0', 'up'):.4f}")
-    print(f"μ(下|S0): {mu_D.get_prob('S0', 'down'):.4f}")
-    print(f"μ(左|S0): {mu_D.get_prob('S0', 'left'):.4f}")
-    print(f"μ(右|S0): {mu_D.get_prob('S0', 'right'):.4f}")
-    print(f"\nV(S0): {stats_D['V']['S0']:.4f}")
-    print(f"A(S0, 右): {stats_D['A']['S0']['right']:.4f}")
-    print(f"\n重要性采样比:")
-    for a, rho in stats_D['rho_values'].items():
-        print(f"  {a}: {rho:.4f}")
-    
-    print(f"\nIS估计量期望: {stats_D['E_g_is']:.6f}")
-    print(f"IS估计量方差: {stats_D['Var_g_is']:.6f}")
-    print(f"WIS估计量期望: {stats_D['E_g_wis']:.6f}")
-    print(f"WIS估计量方差: {stats_D['Var_g_wis']:.6f}")
-    print(f"PPO估计量期望: {stats_D['E_g_ppo']:.6f}")
-    print(f"PPO估计量方差: {stats_D['Var_g_ppo']:.6f}")
-    print(f"SAPO估计量期望: {stats_D['E_g_sapo']:.6f}")
-    print(f"SAPO估计量方差: {stats_D['Var_g_sapo']:.6f}")
+    # 更温和、更“正常”的状态相关策略：每个状态都保留一定概率走正确方向。
+    normal_policy_1 = build_state_dependent_policy(
+        env,
+        {
+            'S0': {'up': 0.30, 'down': 0.20, 'left': 0.30, 'right': 0.20},
+            'S1': {'up': 0.40, 'down': 0.15, 'left': 0.10, 'right': 0.35},
+            'S2': {'up': 0.20, 'down': 0.35, 'left': 0.30, 'right': 0.15},
+        },
+    )
+    normal_policy_2 = build_state_dependent_policy(
+        env,
+        {
+            'S0': {'up': 0.25, 'down': 0.30, 'left': 0.20, 'right': 0.25},
+            'S1': {'up': 0.20, 'down': 0.45, 'left': 0.15, 'right': 0.20},
+            'S2': {'up': 0.15, 'down': 0.25, 'left': 0.15, 'right': 0.45},
+        },
+    )
+    normal_policy_3 = build_state_dependent_policy(
+        env,
+        {
+            'S0': {'up': 0.20, 'down': 0.35, 'left': 0.20, 'right': 0.25},
+            'S1': {'up': 0.15, 'down': 0.40, 'left': 0.20, 'right': 0.25},
+            'S2': {'up': 0.25, 'down': 0.15, 'left': 0.15, 'right': 0.45},
+        },
+    )
+    normal_policy_4 = build_state_dependent_policy(
+        env,
+        {
+            'S0': {'up': 0.32, 'down': 0.18, 'left': 0.28, 'right': 0.22},
+            'S1': {'up': 0.28, 'down': 0.24, 'left': 0.28, 'right': 0.20},
+            'S2': {'up': 0.24, 'down': 0.20, 'left': 0.30, 'right': 0.26},
+        },
+    )
+    normal_policy_5 = build_state_dependent_policy(
+        env,
+        {
+            'S0': {'up': 0.12, 'down': 0.38, 'left': 0.12, 'right': 0.38},
+            'S1': {'up': 0.12, 'down': 0.52, 'left': 0.21, 'right': 0.15},
+            'S2': {'up': 0.10, 'down': 0.16, 'left': 0.22, 'right': 0.52},
+        },
+    )
+
+    # 多个“温和且靠近最优”的目标策略，模拟训练早/中/后阶段。
+    target_policy_specs = [
+        {
+            'name': 'PI-1 (Mild)',
+            'description': '温和偏向最优方向，仍保留较多探索',
+            'policy': build_state_dependent_policy(
+                env,
+                {
+                    'S0': {'up': 0.20, 'down': 0.30, 'left': 0.20, 'right': 0.30},
+                    'S1': {'up': 0.15, 'down': 0.45, 'left': 0.25, 'right': 0.15},
+                    'S2': {'up': 0.15, 'down': 0.15, 'left': 0.25, 'right': 0.45},
+                },
+            ),
+        },
+        {
+            'name': 'PI-2 (Better)',
+            'description': '进一步偏向最优方向（S0向右/下，S1向下，S2向右）',
+            'policy': build_state_dependent_policy(
+                env,
+                {
+                    'S0': {'up': 0.10, 'down': 0.40, 'left': 0.10, 'right': 0.40},
+                    'S1': {'up': 0.10, 'down': 0.60, 'left': 0.20, 'right': 0.10},
+                    'S2': {'up': 0.10, 'down': 0.10, 'left': 0.20, 'right': 0.60},
+                },
+            ),
+        },
+        {
+            'name': 'PI-3 (Near-Optimal)',
+            'description': '接近最优但非确定性，仍保留小概率探索',
+            'policy': build_state_dependent_policy(
+                env,
+                {
+                    'S0': {'up': 0.05, 'down': 0.45, 'left': 0.05, 'right': 0.45},
+                    'S1': {'up': 0.05, 'down': 0.75, 'left': 0.10, 'right': 0.10},
+                    'S2': {'up': 0.05, 'down': 0.10, 'left': 0.10, 'right': 0.75},
+                },
+            ),
+        },
+    ]
+
+    all_cases = []
+    for target_spec in target_policy_specs:
+        pi = target_spec['policy']
+        print("\n" + "=" * 80)
+        print(f"目标策略 {target_spec['name']}: {target_spec['description']}")
+        print("=" * 80)
+        print(f"π(上|S0): {pi.get_prob('S0', 'up'):.4f}")
+        print(f"π(下|S0): {pi.get_prob('S0', 'down'):.4f}")
+        print(f"π(左|S0): {pi.get_prob('S0', 'left'):.4f}")
+        print(f"π(右|S0): {pi.get_prob('S0', 'right'):.4f}")
+
+        case_specs = [
+            {
+                'name': 'A (Random-100%)',
+                'description': 'μ = 100%随机策略',
+                'policy_weights': {
+                    '随机': (1.0, random_policy),
+                },
+            },
+            {
+                'name': 'B (40%Rand+30%Right+30%Down)',
+                'description': 'μ = 40%随机策略 + 30%偏好右策略 + 30%偏好下策略',
+                'policy_weights': {
+                    '随机': (0.4, random_policy),
+                    '偏好右': (0.3, prefer_right_policy),
+                    '偏好下': (0.3, prefer_down_policy),
+                },
+            },
+            {
+                'name': 'C (20%Rand+40%Right+40%Down)',
+                'description': 'μ = 20%随机策略 + 40%偏好右策略 + 40%偏好下策略',
+                'policy_weights': {
+                    '随机': (0.2, random_policy),
+                    '偏好右': (0.4, prefer_right_policy),
+                    '偏好下': (0.4, prefer_down_policy),
+                },
+            },
+            {
+                'name': 'D (μ=π)',
+                'description': 'μ = π（策略mu与pi一致）',
+                'direct_policy': pi,
+            },
+            {
+                'name': 'E (Mild-Mix-1)',
+                'description': 'μ 为温和行为混合，结合偏保守与探索分量以形成更宽的ratio散点',
+                'policy_weights': {
+                    '温和1': (0.45, normal_policy_1),
+                    '保守温和': (0.35, normal_policy_4),
+                    '随机': (0.2, random_policy),
+                },
+            },
+            {
+                'name': 'F (Mild-Mix-2)',
+                'description': 'μ 为温和行为混合，结合目标导向与探索分量以形成叶状ratio散点',
+                'policy_weights': {
+                    '温和2': (0.45, normal_policy_2),
+                    '目标导向温和': (0.35, normal_policy_5),
+                    '随机': (0.2, random_policy),
+                },
+            },
+            {
+                'name': 'G (Mild-Mix-3)',
+                'description': 'μ 为多温和策略混合，同时保留绕行与朝终点动作，构造更明显的ratio张角',
+                'policy_weights': {
+                    '温和3': (0.4, normal_policy_3),
+                    '保守温和': (0.3, normal_policy_4),
+                    '目标导向温和': (0.3, normal_policy_5),
+                },
+            },
+        ]
+
+        for case_spec in case_specs:
+            policy_weights = case_spec.get('policy_weights')
+            if policy_weights is None:
+                mu = case_spec['direct_policy']
+                mixed_probs = None
+                theta = None
+            else:
+                mu, mixed_probs, theta = create_mixed_policy(env, policy_weights)
+
+            stats = compute_gradient_stats(pi, mu, env, state='S0', target_action='right')
+            print_case_report(
+                case_name=f"{target_spec['name']} | {case_spec['name']}",
+                description=case_spec['description'],
+                mu=mu,
+                stats=stats,
+                env=env,
+                policy_weights=policy_weights,
+                mixed_probs=mixed_probs,
+                theta=theta,
+            )
+            all_cases.append({
+                'target_name': target_spec['name'],
+                'target_description': target_spec['description'],
+                'case_name': case_spec['name'],
+                'case_description': case_spec['description'],
+                'display_name': f"{target_spec['name']} | {case_spec['name']}",
+                'plot_name': f"{target_spec['name'].split()[0]} | {case_spec['name'].split()[0]}",
+                'stats': stats,
+                'ratio_points': collect_ratio_scatter_points(pi, mu, env),
+                'target_policy_probs': snapshot_policy_probs(pi, env),
+                'behavior_policy_probs': snapshot_policy_probs(mu, env),
+                'behavior_components': (
+                    None if policy_weights is None
+                    else [(name, float(weight)) for name, (weight, _) in policy_weights.items()]
+                ),
+            })
     
     # 总结对比表格
     print("\n" + "=" * 80)
@@ -631,16 +851,18 @@ def main(output_dir="rollouts/grid", pareto_border=True):
     print("=" * 80)
     
     # 打印期望相关的表头
-    header_exp = f"{'情况':<20} {'E_g_is':<15}"
+    name_col_width = 56
+    header_exp = f"{'情况':<{name_col_width}} {'E_g_is':<15}"
     header_exp += f" {'E_g_wis(σ=0.1)':<18} {'E_g_wis(σ=0.3)':<18} {'E_g_wis(σ=0.5)':<18} {'E_g_wis(σ=1.0)':<18} {'E_g_wis(σ=2.0)':<18}"
     header_exp += f" {'E_g_ppo':<15} {'E_g_sapo':<15}"
     print(header_exp)
     print("-" * 120)
     
     # 打印期望相关的数据
-    for case_name, stats in [('A (100%随机)', stats_A), ('B (40%随机+30%右+30%下)', stats_B), 
-                              ('C (20%随机+40%右+40%下)', stats_C), ('D (μ=π)', stats_D)]:
-        row = f"{case_name:<20} {stats['E_g_is']:>14.6f}"
+    for case_item in all_cases:
+        case_name = case_item['display_name']
+        stats = case_item['stats']
+        row = f"{case_name:<{name_col_width}} {stats['E_g_is']:>14.6f}"
         row += f" {stats['E_g_wis_sigma_0.1']:>17.6f}"
         row += f" {stats['E_g_wis_sigma_0.3']:>17.6f}"
         row += f" {stats['E_g_wis_sigma_0.5']:>17.6f}"
@@ -655,16 +877,17 @@ def main(output_dir="rollouts/grid", pareto_border=True):
     print("=" * 80)
     
     # 打印方差相关的表头
-    header_var = f"{'情况':<20} {'Var_g_is':<15}"
+    header_var = f"{'情况':<{name_col_width}} {'Var_g_is':<15}"
     header_var += f" {'Var_g_wis(σ=0.1)':<18} {'Var_g_wis(σ=0.3)':<18} {'Var_g_wis(σ=0.5)':<18} {'Var_g_wis(σ=1.0)':<18} {'Var_g_wis(σ=2.0)':<18}"
     header_var += f" {'Var_g_ppo':<15} {'Var_g_sapo':<15}"
     print(header_var)
     print("-" * 120)
     
     # 打印方差相关的数据
-    for case_name, stats in [('A (100%随机)', stats_A), ('B (40%随机+30%右+30%下)', stats_B), 
-                              ('C (20%随机+40%右+40%下)', stats_C), ('D (μ=π)', stats_D)]:
-        row = f"{case_name:<20} {stats['Var_g_is']:>14.6f}"
+    for case_item in all_cases:
+        case_name = case_item['display_name']
+        stats = case_item['stats']
+        row = f"{case_name:<{name_col_width}} {stats['Var_g_is']:>14.6f}"
         row += f" {stats['Var_g_wis_sigma_0.1']:>17.6f}"
         row += f" {stats['Var_g_wis_sigma_0.3']:>17.6f}"
         row += f" {stats['Var_g_wis_sigma_0.5']:>17.6f}"
@@ -679,15 +902,16 @@ def main(output_dir="rollouts/grid", pareto_border=True):
     print("=" * 80)
     
     # 打印偏差相关的表头
-    header_bias = f"{'情况':<20} {'|E_g_wis(σ=0.1)-E_g_is|':<25} {'|E_g_wis(σ=0.3)-E_g_is|':<25} {'|E_g_wis(σ=0.5)-E_g_is|':<25} {'|E_g_wis(σ=1.0)-E_g_is|':<25} {'|E_g_wis(σ=2.0)-E_g_is|':<25}"
+    header_bias = f"{'情况':<{name_col_width}} {'|E_g_wis(σ=0.1)-E_g_is|':<25} {'|E_g_wis(σ=0.3)-E_g_is|':<25} {'|E_g_wis(σ=0.5)-E_g_is|':<25} {'|E_g_wis(σ=1.0)-E_g_is|':<25} {'|E_g_wis(σ=2.0)-E_g_is|':<25}"
     header_bias += f" {'|E_g_ppo-E_g_is|':<20} {'|E_g_sapo-E_g_is|':<22}"
     print(header_bias)
     print("-" * 150)
     
     # 打印偏差相关的数据（使用绝对值）
-    for case_name, stats in [('A (100%随机)', stats_A), ('B (40%随机+30%右+30%下)', stats_B), 
-                              ('C (20%随机+40%右+40%下)', stats_C), ('D (μ=π)', stats_D)]:
-        row = f"{case_name:<20}"
+    for case_item in all_cases:
+        case_name = case_item['display_name']
+        stats = case_item['stats']
+        row = f"{case_name:<{name_col_width}}"
         row += f" {abs(stats['E_g_wis_sigma_0.1'] - stats['E_g_is']):>24.6f}"
         row += f" {abs(stats['E_g_wis_sigma_0.3'] - stats['E_g_is']):>24.6f}"
         row += f" {abs(stats['E_g_wis_sigma_0.5'] - stats['E_g_is']):>24.6f}"
@@ -697,230 +921,243 @@ def main(output_dir="rollouts/grid", pareto_border=True):
         row += f" {abs(stats['E_g_sapo'] - stats['E_g_is']):>21.6f}"
         print(row)
     
-    # 帕累托最优分析
+    # MSE总结
     print("\n" + "=" * 80)
-    print("帕累托最优分析（基于偏差绝对值和方差）")
+    print("总结对比 - MSE")
     print("=" * 80)
-    print("说明：帕累托最优算法是指在偏差和方差两个指标上，不存在其他算法同时优于它的算法")
-    print("（偏差和方差都是越小越好）\n")
-    
-    all_cases = [
-        ('A (100%随机)', stats_A),
-        ('B (40%随机+30%右+30%下)', stats_B),
-        ('C (20%随机+40%右+40%下)', stats_C),
-        ('D (μ=π)', stats_D)
-    ]
-    
-    for case_name, stats in all_cases:
-        pareto_optimal, algorithms = find_pareto_optimal(stats)
+
+    header_mse = f"{'情况':<{name_col_width}} {'MSE(No-Clip)':<15} {'MSE(GIPO 0.1)':<15} {'MSE(GIPO 0.3)':<15} {'MSE(GIPO 0.5)':<15} {'MSE(GIPO 1.0)':<15} {'MSE(GIPO 2.0)':<15} {'MSE(PPO)':<15} {'MSE(SAPO)':<15}"
+    print(header_mse)
+    print("-" * 180)
+
+    for case_item in all_cases:
+        case_name = case_item['display_name']
+        stats = case_item['stats']
+        _, algorithms = summarize_algorithm_metrics(stats)
+        row = f"{case_name:<{name_col_width}}"
+        row += f" {algorithms['No-Clip']['mse']:>14.6f}"
+        row += f" {algorithms['GIPO(σ=0.1)']['mse']:>14.6f}"
+        row += f" {algorithms['GIPO(σ=0.3)']['mse']:>14.6f}"
+        row += f" {algorithms['GIPO(σ=0.5)']['mse']:>14.6f}"
+        row += f" {algorithms['GIPO(σ=1.0)']['mse']:>14.6f}"
+        row += f" {algorithms['GIPO(σ=2.0)']['mse']:>14.6f}"
+        row += f" {algorithms['PPO']['mse']:>14.6f}"
+        row += f" {algorithms['SAPO']['mse']:>14.6f}"
+        print(row)
+
+    print("\n" + "=" * 80)
+    print("MSE最优算法分析")
+    print("=" * 80)
+    print("说明：使用 MSE = Bias^2 + Variance 综合比较算法，越小越好。")
+    print("若某算法在当前case下所有动作的策略梯度都为0（完全clip），则不参与排名，并在下方说明。\n")
+
+    for case_item in all_cases:
+        case_name = case_item['display_name']
+        stats = case_item['stats']
+        best_algorithm, algorithms = summarize_algorithm_metrics(stats)
+        excluded_algorithms = [
+            name for name, metrics in algorithms.items()
+            if metrics['excluded_from_ranking']
+        ]
         print(f"{case_name}:")
-        print(f"  帕累托最优算法: {', '.join(pareto_optimal)}")
+        if best_algorithm is None:
+            print("  MSE最优算法: None")
+        else:
+            print(f"  MSE最优算法: {best_algorithm}")
         print(f"  算法详细指标:")
-        for alg_name in sorted(algorithms.keys()):
-            alg_metrics = algorithms[alg_name]
-            is_pareto = "✓" if alg_name in pareto_optimal else " "
-            print(f"    [{is_pareto}] {alg_name:<15} 偏差: {alg_metrics['bias']:>10.6f}, 方差: {alg_metrics['variance']:>10.6f}")
+        ranking_items = [
+            item for item in algorithms.items()
+            if not item[1]['excluded_from_ranking']
+        ]
+        for alg_name, alg_metrics in sorted(ranking_items, key=lambda item: item[1]['mse']):
+            is_best = "*" if best_algorithm is not None and alg_name == best_algorithm else " "
+            print(
+                f"    [{is_best}] {alg_name:<15} "
+                f"偏差: {alg_metrics['bias']:>10.6f}, "
+                f"方差: {alg_metrics['variance']:>10.6f}, "
+                f"MSE: {alg_metrics['mse']:>10.6f}"
+            )
+        if excluded_algorithms:
+            print("  不参与排名的算法:")
+            for alg_name in excluded_algorithms:
+                reason = algorithms[alg_name]['exclusion_reason']
+                print(
+                    f"    - {alg_name}: {reason}, "
+                    f"MSE={algorithms[alg_name]['mse']:.6f}"
+                )
         print()
-    
-    # 绘制偏差-方差图
+
+    write_mse_ranking_markdown(all_cases, output_dir)
+
+    # 绘制成对的偏差-方差图与ratio散点图
     print("\n" + "=" * 80)
-    print("绘制偏差-方差图...")
+    print("绘制 Bias-Variance / Ratio Scatter 配对图...")
     print("=" * 80)
-    
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
-    
-    # 绘制第一个子图：2x2网格世界环境（田字格，边缘不出头）
-    ax_grid = axes[0, 0]
-    ax_grid.set_xlim(0, 2)
-    ax_grid.set_ylim(0, 2)
-    ax_grid.set_aspect('equal')
-    ax_grid.axis('off')
-    
-    # 绘制田字格：外框 + 中间十字线，线段正好落在[0,2]边界上
-    for i in range(3):
-        # 水平线段：从 x=0 到 x=2
-        ax_grid.plot([0, 2], [i, i], color='black', linewidth=2)
-        # 垂直线段：从 y=0 到 y=2
-        ax_grid.plot([i, i], [0, 2], color='black', linewidth=2)
-    
-    # 标注状态名称（使用下标）
-    # 左上角 S₀
-    ax_grid.text(0.5, 1.5, 'S$_0$', fontsize=20, fontweight='bold', ha='center', va='center')
-    # 右上角 S₁
-    ax_grid.text(1.5, 1.5, 'S$_1$', fontsize=20, fontweight='bold', ha='center', va='center')
-    # 左下角 S₂
-    ax_grid.text(0.5, 0.5, 'S$_2$', fontsize=20, fontweight='bold', ha='center', va='center')
-    # 右下角 S_G
-    ax_grid.text(1.5, 0.5, 'S$_G$', fontsize=20, fontweight='bold', ha='center', va='center')
-    
-    ax_grid.set_title('GridWorld 2×2 Environment', fontsize=12, fontweight='bold')
-    
-    # Algorithm names and corresponding colors and markers
-    # 颜色与 TensorBoard 绘图示例保持一致：
-    # PPO: 深蓝色 #1f77b4, GIPO: 橙色 #ff7f0e, SAPO: 绿色 #2ca02c
-    # 不同 σ 使用同一颜色、不同形状区分
+
+    plot_cases = all_cases
+    pairs_per_row = 2
+    ncols = pairs_per_row * 2
+    nrows = math.ceil(len(plot_cases) / pairs_per_row)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.6 * ncols, 4.2 * nrows))
+    axes = np.atleast_2d(axes)
+
     algorithm_styles = {
-        'No-Clip':      {'color': '#d62728', 'marker': 'X', 'size': 100},  # 红色，区分于其它算法
+        'No-Clip':      {'color': '#d62728', 'marker': 'X', 'size': 100},
         'GIPO(σ=0.1)':  {'color': '#ff7f0e', 'marker': 'o', 'size': 80},
-        'GIPO(σ=0.3)':  {'color': '#ff7f0e', 'marker': 'P', 'size': 80},  # 五边形
+        'GIPO(σ=0.3)':  {'color': '#ff7f0e', 'marker': 'P', 'size': 80},
         'GIPO(σ=0.5)':  {'color': '#ff7f0e', 'marker': 's', 'size': 80},
         'GIPO(σ=1.0)':  {'color': '#ff7f0e', 'marker': '^', 'size': 80},
         'GIPO(σ=2.0)':  {'color': '#ff7f0e', 'marker': 'v', 'size': 80},
         'PPO':          {'color': '#1f77b4', 'marker': 'D', 'size': 80},
         'SAPO':         {'color': '#2ca02c', 'marker': 'p', 'size': 80}
     }
-    
-    # Case name mapping to English
-    case_name_map = {
-        'A (100%随机)': 'Case A',
-        'B (40%随机+30%右+30%下)': 'Case B',
-        'C (20%随机+40%右+40%下)': 'Case C',
-        'D (μ=π)': 'Case D (μ=π)'
+    ratio_state_styles = {
+        'S0': '#1f77b4',
+        'S1': '#ff7f0e',
+        'S2': '#2ca02c',
     }
-    
-    # Plot subplots for first 3 cases only (放在其他3个子图中)
-    plot_positions = [(0, 1), (1, 0), (1, 1)]
-    plot_cases = all_cases[:3]
+
     plot_data = []
     global_biases = []
     global_variances = []
+    global_prob_values = []
 
-    for case_name, stats in plot_cases:
-        pareto_optimal, algorithms = find_pareto_optimal(stats)
-        plot_data.append((case_name, pareto_optimal, algorithms))
+    for case_item in plot_cases:
+        plot_name = case_item['plot_name']
+        stats = case_item['stats']
+        ratio_points = case_item['ratio_points']
+        best_algorithm, algorithms = summarize_algorithm_metrics(stats)
+        plot_data.append((plot_name, best_algorithm, algorithms, ratio_points))
         global_biases.extend([alg['bias'] for alg in algorithms.values()])
         global_variances.extend([alg['variance'] for alg in algorithms.values()])
+        for point in ratio_points:
+            global_prob_values.extend([point['behavior_prob'], point['policy_prob']])
 
-    # Unified axis range for all 3 case subplots.
     global_bias_min = min(global_biases)
     global_bias_max = max(global_biases)
     global_var_min = min(global_variances)
     global_var_max = max(global_variances)
-
     global_bias_range = global_bias_max - global_bias_min
     global_var_range = global_var_max - global_var_min
     bias_margin = global_bias_range * 0.1 if global_bias_range > 0 else 1e-3
     var_margin = global_var_range * 0.1 if global_var_range > 0 else 1e-3
-
     global_xlim = (global_bias_min - bias_margin, global_bias_max + bias_margin)
     global_ylim = (global_var_min - var_margin, global_var_max + var_margin)
 
-    for idx, (case_name, pareto_optimal, algorithms) in enumerate(plot_data):
-        ax = axes[plot_positions[idx]]
+    prob_max = max(global_prob_values) if global_prob_values else 1.0
+    prob_margin = max(0.02, prob_max * 0.05)
+    prob_limit = (0.0, min(1.0, prob_max + prob_margin))
 
-        # Plot all algorithms:
-        # draw larger markers first, smaller markers later (on top).
-        # For same-size overlap, draw PPO earlier so GIPO points stay visible.
+    for idx, (plot_name, best_algorithm, algorithms, ratio_points) in enumerate(plot_data):
+        row = idx // pairs_per_row
+        pair_col = (idx % pairs_per_row) * 2
+        ax_bv = axes[row, pair_col]
+        ax_ratio = axes[row, pair_col + 1]
+
         sorted_alg_names = sorted(
             algorithms.keys(),
             key=lambda name: (
-                -algorithm_styles[name]['size'],      # larger first
-                0 if name == 'PPO' else 1,            # PPO earlier in ties
-                name
+                0 if best_algorithm is not None and name == best_algorithm else 1,
+                -algorithm_styles[name]['size'],
+                name,
             )
         )
         for alg_name in sorted_alg_names:
             alg_metrics = algorithms[alg_name]
             style = algorithm_styles[alg_name]
-            is_pareto = alg_name in pareto_optimal
+            is_best = best_algorithm is not None and alg_name == best_algorithm
+            is_excluded = alg_metrics['excluded_from_ranking']
 
             scatter_kwargs = {
                 'c': style['color'],
                 'marker': style['marker'],
-                's': style['size'],  # fixed marker size for all algorithms
-                'alpha': 1.0,  # keep colors identical to legend
+                's': style['size'],
+                'alpha': 0.35 if is_excluded else 1.0,
                 'label': alg_name,
-                'zorder': 3 if is_pareto else 2
+                'zorder': 3 if is_best else 2,
             }
-            if is_pareto and pareto_border:
+            if is_best and pareto_border:
                 scatter_kwargs['edgecolors'] = 'black'
                 scatter_kwargs['linewidths'] = 2
-            ax.scatter(alg_metrics['bias'], alg_metrics['variance'], **scatter_kwargs)
-        
-        # Plot Pareto frontier (connect Pareto optimal points)
-        pareto_points = [(algorithms[alg]['bias'], algorithms[alg]['variance']) 
-                         for alg in pareto_optimal]
-        if len(pareto_points) > 1:
-            # Sort by bias
-            pareto_points.sort(key=lambda x: x[0])
-            pareto_x = [p[0] for p in pareto_points]
-            pareto_y = [p[1] for p in pareto_points]
-            # 虚线风格与示例中的网格线风格一致（--，适中粗细）
-            ax.plot(pareto_x, pareto_y, linestyle='--', color='black',
-                    alpha=0.6, linewidth=2, label='Pareto Frontier')
-        
-        # 轴标签和标题风格向示例对齐：较大的字体和加粗标题
-        ax.set_xlabel('Bias', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Variance', fontsize=14, fontweight='bold')
-        ax.set_title(case_name_map.get(case_name, case_name),
-                     fontsize=16, fontweight='bold')
-        # 刻度字体大小
-        ax.tick_params(axis='both', which='major', labelsize=12)
-        # 网格线使用虚线与示例一致
-        ax.grid(True, alpha=0.3, linestyle='--')
-        
-        # Use unified global axis range across all 3 case subplots.
-        ax.set_xlim(*global_xlim)
-        ax.set_ylim(*global_ylim)
-    
-    # Create handles for shared legend using the algorithm styles
+            ax_bv.scatter(alg_metrics['bias'], alg_metrics['variance'], **scatter_kwargs)
+
+        summary_lines = []
+        if best_algorithm is None:
+            summary_lines.append("Best MSE: None")
+        else:
+            summary_lines.append(f"Best MSE: {best_algorithm}")
+        excluded_names = [name for name, metrics in algorithms.items() if metrics['excluded_from_ranking']]
+        if excluded_names:
+            summary_lines.append(f"Excluded: {', '.join(excluded_names)}")
+        ax_bv.text(
+            0.03, 0.97,
+            "\n".join(summary_lines),
+            transform=ax_bv.transAxes,
+            va='top',
+            fontsize=9,
+            bbox={'boxstyle': 'round,pad=0.2', 'facecolor': 'white', 'alpha': 0.8, 'edgecolor': 'none'},
+        )
+        ax_bv.set_xlabel('Bias', fontsize=12, fontweight='bold')
+        ax_bv.set_ylabel('Variance', fontsize=12, fontweight='bold')
+        ax_bv.set_title(f"{plot_name} | Bias-Variance", fontsize=11, fontweight='bold')
+        ax_bv.tick_params(axis='both', which='major', labelsize=10)
+        ax_bv.grid(True, alpha=0.3, linestyle='--')
+        ax_bv.set_xlim(*global_xlim)
+        ax_bv.set_ylim(*global_ylim)
+
+        for point in ratio_points:
+            ax_ratio.scatter(
+                point['behavior_prob'],
+                point['policy_prob'],
+                color=ratio_state_styles[point['state']],
+                s=55,
+                alpha=0.9,
+                edgecolors='white',
+                linewidths=0.5,
+            )
+        ax_ratio.plot(
+            [prob_limit[0], prob_limit[1]],
+            [prob_limit[0], prob_limit[1]],
+            linestyle='--',
+            color='black',
+            alpha=0.6,
+            linewidth=1.8,
+        )
+        ax_ratio.text(0.04, 0.93, 'y = x (ratio = 1)', transform=ax_ratio.transAxes, fontsize=9)
+        ax_ratio.set_xlabel('Behavior Probability', fontsize=12, fontweight='bold')
+        ax_ratio.set_ylabel('Current Policy Probability', fontsize=12, fontweight='bold')
+        ax_ratio.set_title(f"{plot_name} | Ratio Scatter", fontsize=11, fontweight='bold')
+        ax_ratio.tick_params(axis='both', which='major', labelsize=10)
+        ax_ratio.grid(True, alpha=0.3, linestyle='--')
+        ax_ratio.set_xlim(*prob_limit)
+        ax_ratio.set_ylim(*prob_limit)
+        ax_ratio.set_aspect('equal', adjustable='box')
+
+    total_axes = nrows * ncols
+    used_axes = len(plot_cases) * 2
+    for flat_idx in range(used_axes, total_axes):
+        row = flat_idx // ncols
+        col = flat_idx % ncols
+        axes[row, col].axis('off')
+
     import matplotlib.lines as mlines
     legend_handles = []
     legend_labels = []
-    
-    # matplotlib的ncol参数是按列填充的（从上到下，然后从左到右）
-    # 要实现每行4个的效果，需要重新组织顺序
-    # 期望的显示（按行）：
-    # 行1: GIPO(σ=0.1), GIPO(σ=0.3), GIPO(σ=0.5), GIPO(σ=1.0)
-    # 行2: GIPO(σ=2.0), No-Clip, PPO, SAPO
-    # 行3: Pareto Frontier
-    
-    # 由于matplotlib按列填充，共3行4列，需要按列的顺序添加
-    # 列1（从上到下）: GIPO(σ=0.1), GIPO(σ=2.0), Pareto Frontier
-    # 列2（从上到下）: GIPO(σ=0.3), No-Clip, (空)
-    # 列3（从上到下）: GIPO(σ=0.5), PPO, (空)
-    # 列4（从上到下）: GIPO(σ=1.0), SAPO, (空)
-    
-    legend_order_by_column = [
-        # 列1
+
+    algorithm_order = [
         'GIPO(σ=0.1)',
-        'GIPO(σ=2.0)',
-        'Pareto Frontier',
-        # 列2
         'GIPO(σ=0.3)',
-        'No-Clip',
-        None,  # 占位符
-        # 列3
         'GIPO(σ=0.5)',
-        'PPO',
-        None,  # 占位符
-        # 列4
         'GIPO(σ=1.0)',
+        'GIPO(σ=2.0)',
+        'No-Clip',
+        'PPO',
         'SAPO',
-        None,  # 占位符
     ]
-    
-    for alg_name in legend_order_by_column:
-        if alg_name is None:
-            # 添加空白占位符
-            handle = mlines.Line2D([0], [0], marker='', color='none', linestyle='')
-            legend_handles.append(handle)
-            legend_labels.append('')
-        elif alg_name == 'Pareto Frontier':
-            # Pareto Frontier 是线型
-            handle = mlines.Line2D(
-                [0], [0],
-                linestyle='--',
-                color='black',
-                alpha=0.6,
-                linewidth=2
-            )
-            legend_handles.append(handle)
-            legend_labels.append(alg_name)
-        elif alg_name in algorithm_styles:
-            # 其他算法是标记点
-            style = algorithm_styles[alg_name]
-            handle = mlines.Line2D(
+    for alg_name in algorithm_order:
+        style = algorithm_styles[alg_name]
+        legend_handles.append(
+            mlines.Line2D(
                 [0], [0],
                 marker=style['marker'],
                 color='none',
@@ -929,36 +1166,52 @@ def main(output_dir="rollouts/grid", pareto_border=True):
                 markersize=math.sqrt(style['size']),
                 alpha=1.0,
             )
-            legend_handles.append(handle)
-            legend_labels.append(alg_name)
-    
-    # Create a shared legend below the title，字体大小与示例一致风格（相对较大）
-    # 调整为每行4个：共9个项目，第一排4个，第二排4个，第三排1个
+        )
+        legend_labels.append(alg_name)
+
+    for state_name, color in ratio_state_styles.items():
+        legend_handles.append(
+            mlines.Line2D(
+                [0], [0],
+                marker='o',
+                color='none',
+                markerfacecolor=color,
+                markeredgecolor='white',
+                markersize=8,
+            )
+        )
+        legend_labels.append(f'Ratio Scatter {state_name}')
+
+    legend_handles.append(
+        mlines.Line2D([0], [0], linestyle='--', color='black', alpha=0.6, linewidth=2)
+    )
+    legend_labels.append('y = x (ratio = 1)')
+
     fig.legend(
         legend_handles,
         legend_labels,
         loc='upper center',
-        ncol=4,  # 每行4个
-        fontsize=14,
+        ncol=6,
+        fontsize=11,
         framealpha=0.9,
-        bbox_to_anchor=(0.1, 0.96, 0.8, 0.1),  # 降低y坐标，从0.98改为0.96
-        handlelength=2.5,
-        handletextpad=0.8,
-        columnspacing=2.0,  # 增加列间距
+        bbox_to_anchor=(0.5, 0.995),
+        handlelength=2.4,
+        handletextpad=0.6,
+        columnspacing=1.5,
     )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.965], pad=2.0, w_pad=1.6, h_pad=1.8)
     
-    # Increase spacing between subplots to prevent overlap
-    # 由于图例位置降低，可以增加子图区域，从0.90改为0.92
-    plt.tight_layout(rect=[0, 0, 1, 0.92], pad=2.0, w_pad=1.5, h_pad=1.5)
-    
-    # 保存图片（同时导出 PDF 和 PNG）
-    os.makedirs(output_dir, exist_ok=True)
-    output_pdf = os.path.join(output_dir, 'bias_variance_analysis.pdf')
-    output_png = os.path.join(output_dir, 'bias_variance_analysis.png')
-    plt.savefig(output_pdf, dpi=300, bbox_inches='tight', format='pdf')
-    plt.savefig(output_png, dpi=300, bbox_inches='tight', format='png')
-    print(f"图片已保存为: {output_pdf}")
-    print(f"图片已保存为: {output_png}")
+    if save_images:
+        os.makedirs(output_dir, exist_ok=True)
+        output_pdf = os.path.join(output_dir, 'bias_variance_analysis.pdf')
+        output_png = os.path.join(output_dir, 'bias_variance_analysis.png')
+        plt.savefig(output_pdf, dpi=300, bbox_inches='tight', format='pdf')
+        plt.savefig(output_png, dpi=300, bbox_inches='tight', format='png')
+        print(f"图片已保存为: {output_pdf}")
+        print(f"图片已保存为: {output_png}")
+    else:
+        print("未保存图片（默认关闭，可使用 --save-images 开启 PNG/PDF 导出）。")
     
     # 显示图片
     plt.show()
@@ -966,4 +1219,8 @@ def main(output_dir="rollouts/grid", pareto_border=True):
 
 if __name__ == "__main__":
     args = parse_args()
-    main(output_dir=args.output_dir, pareto_border=args.pareto_border)
+    main(
+        output_dir=args.output_dir,
+        pareto_border=args.pareto_border,
+        save_images=args.save_images,
+    )

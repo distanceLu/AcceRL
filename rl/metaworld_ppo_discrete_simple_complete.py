@@ -9,14 +9,18 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple
+from enum import Enum
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 os.environ.setdefault("TMPDIR", "/dev/shm")
 
+import gymnasium as gym
 import numpy as np
 import torch
+import torch.nn as nn
+from gymnasium import spaces
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -26,30 +30,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from torch.utils.tensorboard import SummaryWriter
 
 
-
-import argparse
-from enum import Enum
-from typing import Dict, Optional, Tuple
-
-import gymnasium as gym
-import numpy as np
-from gymnasium import spaces
-import os
-import time
-from pathlib import Path
-from typing import Dict, Any, Tuple, List
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-
-
 class MLPActorCriticDiscrete(nn.Module):
     """
-    简单的 MLP-based Actor-Critic 模型，用于低维状态输入。
-    
-    接口与 ActorCritic (discrete) 保持一致，方便替换使用。
+    A simple MLP-based Actor-Critic model for low-dimensional state inputs.
+
+    The interface is compatible with ActorCritic (discrete), so it can be swapped in easily.
     """
     
     def __init__(self, torch_dtype: torch.dtype = torch.float32, 
@@ -62,19 +47,19 @@ class MLPActorCriticDiscrete(nn.Module):
         self.state_dim = state_dim
         self.action_dim = action_dim
         
-        # 动作离散化参数
-        self.n_action_bins = n_action_bins  # 默认 256 bins
+        # Action discretization parameters
+        self.n_action_bins = n_action_bins  # default: 256 bins
         self.hidden_dim = hidden_dim
         
-        # 共享 MLP 编码器
+        # Shared MLP encoder
         self.shared_encoder = nn.Sequential(
             nn.Linear(state_dim, self.hidden_dim),
             nn.ReLU(),
             nn.LayerNorm(self.hidden_dim),
         )
         
-        # Policy head: 输出离散动作 logits
-        # 输出维度: action_dim * n_action_bins
+        # Policy head: output discrete-action logits
+        # Output shape: action_dim * n_action_bins
         self.policy_head = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.ReLU(),
@@ -83,7 +68,6 @@ class MLPActorCriticDiscrete(nn.Module):
         )
         
         # Value head
-        # 1205 zzq 尝试增加value_head的层 
         self.value_head = nn.Sequential(
             nn.Linear(self.hidden_dim, self.n_action_bins),
             nn.ReLU(),
@@ -95,16 +79,16 @@ class MLPActorCriticDiscrete(nn.Module):
         
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
         """
-        将可训练参数分为 'policy' 和 'value' 两组。
+        Split trainable parameters into 'policy' and 'value' groups.
         """
         policy_params = []
         value_params = []
         
-        # Policy 包含: shared_encoder, policy_head
+        # Policy includes: shared_encoder, policy_head
         policy_params.extend(list(self.shared_encoder.parameters()))
         policy_params.extend(list(self.policy_head.parameters()))
         
-        # Value 只包含: value_head
+        # Value includes only: value_head
         value_params.extend(list(self.value_head.parameters()))
         
         return [
@@ -114,23 +98,23 @@ class MLPActorCriticDiscrete(nn.Module):
     
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        前向传播
+        Forward pass.
 
         Args:
-            state: (B, state_dim) 状态张量
+            state: (B, state_dim) state tensor
         
         Returns:
             action_logits: (B, action_dim, n_action_bins)
-            value: (B,) 状态价值估计
+            value: (B,) state-value estimate
         """
         
-        # 确保状态在正确的设备和 dtype
+        # Ensure state is on the correct device and dtype
         state = state.to(self.device).to(self.model_dtype)
         
-        # 共享编码器
+        # Shared encoder
         features = self.shared_encoder(state)  # (B, 512)
         
-        # Policy head: 输出 logits
+        # Policy head: output logits
         policy_out = self.policy_head(features)  # (B, action_dim * n_action_bins)
         B = policy_out.shape[0]
         action_logits = policy_out.view(B, self.action_dim, self.n_action_bins)
@@ -142,21 +126,21 @@ class MLPActorCriticDiscrete(nn.Module):
     
     def post_process(self, logits: torch.Tensor, deterministic: List[bool]) -> Tuple[torch.distributions.Categorical, torch.Tensor, np.ndarray]:
         """
-        后处理 logits 以生成离散动作
+        Post-process logits to produce discrete actions.
         
         Args:
             logits: (B, action_dim, n_action_bins)
-            deterministic: List[bool] 每个样本是否使用确定性策略
+            deterministic: List[bool] whether each sample uses deterministic policy
         
         Returns:
-            dist: Categorical 分布
-            action_token_ids: (B, action_dim) 采样的 token IDs (torch.Tensor)
-            discrete_actions: (B, action_dim) 离散动作值 [0, n_action_bins-1] (np.ndarray)
+            dist: Categorical distribution
+            action_token_ids: (B, action_dim) sampled token IDs (torch.Tensor)
+            discrete_actions: (B, action_dim) discrete action values [0, n_action_bins-1] (np.ndarray)
         """
-        # 1. 创建分布
+        # 1. Build distribution
         dist = torch.distributions.Categorical(logits=logits)
         
-        # 2. 采样动作
+        # 2. Sample actions
         stochastic_tokens = dist.sample()
         deterministic_tokens = torch.argmax(logits, dim=-1)
         
@@ -169,19 +153,19 @@ class MLPActorCriticDiscrete(nn.Module):
             is_deterministic_tensor, deterministic_tokens, stochastic_tokens
         )
         
-        # 3. 返回离散动作（直接返回 token IDs）
-        # token_id 范围: [0, n_action_bins-1]
+        # 3. Return discrete actions (token IDs directly)
+        # token_id range: [0, n_action_bins-1]
         discrete_actions = action_token_ids.cpu().numpy().astype(np.int32)  # (B, action_dim)
         
         return dist, action_token_ids, discrete_actions
     
     def prepare_inputs_batch(self, obs_list: List):
         """
-        将观测列表准备为批次输入
+        Prepare a batch input from a list of observations.
         
         Args:
-            obs_list: List，每个元素是:
-                - np.ndarray: (state_dim,) 状态向量
+            obs_list: List, each item is:
+                - np.ndarray: (state_dim,) state vector
         
         Returns:
             states: (B, state_dim)
@@ -191,7 +175,7 @@ class MLPActorCriticDiscrete(nn.Module):
         return states
     
     def save_model(self, save_path: str, epoch: int | None = None):
-        """保存模型权重"""
+        """Save model weights."""
         os.makedirs(save_path, exist_ok=True)
         
         if epoch is not None:
@@ -206,30 +190,30 @@ class MLPActorCriticDiscrete(nn.Module):
             'action_dim': self.action_dim,
         }, ckpt_path)
         
-        print(f"[MLPActorCritic] 模型已保存到: {ckpt_path}")
+        print(f"[MLPActorCritic] Model saved to: {ckpt_path}")
     
     def load_model(self, load_path: str, epoch: int | None = None):
-        """加载模型权重"""
+        """Load model weights."""
         if epoch is not None:
             ckpt_path = Path(load_path) / f"mlp_actor_critic_epoch_{epoch}.pt"
         else:
             ckpt_path = Path(load_path) / "mlp_actor_critic.pt"
         
         if not ckpt_path.exists():
-            print(f"[MLPActorCritic] 警告: checkpoint 文件不存在: {ckpt_path}")
+            print(f"[MLPActorCritic] Warning: checkpoint file not found: {ckpt_path}")
             return
         
         checkpoint = torch.load(ckpt_path, map_location=self.device)
         self.load_state_dict(checkpoint['model_state_dict'])
         
-        print(f"[MLPActorCritic] 模型已从 {ckpt_path} 加载")
+        print(f"[MLPActorCritic] Model loaded from {ckpt_path}")
     
     def get_norm_stats(self):
         """
-        返回归一化统计信息（占位符，保持接口兼容性）
-        MLP 模型不需要特殊的归一化统计
+        Return normalization stats (placeholder for interface compatibility).
+        The MLP model does not require special normalization statistics.
         """
-        # 返回一个简单的恒等归一化
+        # Return a simple identity normalization
         return {
             "mean": np.zeros(self.action_dim),
             "std": np.ones(self.action_dim),
@@ -249,11 +233,11 @@ if not hasattr(gym.vector, "AutoresetMode"):
 
 class MetaWorldWrapperDiscrete(gym.Env):
     """
-    MetaWorld 单任务离散动作封装。
+    MetaWorld single-task discrete-action wrapper.
 
-    - 外部输入离散 token 动作（每维 [0, bins-1]）
-    - 内部映射为 MetaWorld 需要的连续动作（每维 [-1, 1]）
-    - 观测直接使用底层环境的低维状态向量（通常为 39 维）
+    - Externally takes discrete token actions (each dim in [0, bins-1]).
+    - Internally maps them to continuous actions required by MetaWorld (each dim in [-1, 1]).
+    - Observations directly use the low-dimensional state vector from the base env (typically 39D).
     """
 
     metadata = {"render_modes": ["rgb_array", None]}
@@ -268,7 +252,7 @@ class MetaWorldWrapperDiscrete(gym.Env):
     ) -> None:
         super().__init__()
         if bins < 2:
-            raise ValueError(f"bins 必须 >= 2，当前为 {bins}")
+            raise ValueError(f"bins must be >= 2, got {bins}")
 
         self.env_name = env_name
         self.bins = int(bins)
@@ -438,7 +422,7 @@ class TransitionBuffer:
         self, device: torch.device, sample_size: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.transitions:
-            raise ValueError("TransitionBuffer 为空，无法采样。")
+            raise ValueError("TransitionBuffer is empty; cannot sample.")
 
         transitions = list(self.transitions)
         if sample_size is not None and sample_size < len(transitions):
@@ -592,7 +576,7 @@ def resolve_device(device_arg: str) -> torch.device:
         return torch.device("cpu")
     if device_arg == "cuda":
         if not torch.cuda.is_available():
-            raise RuntimeError("请求使用 CUDA，但当前不可用。")
+            raise RuntimeError("CUDA was requested, but it is not available.")
         return torch.device("cuda")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -957,13 +941,13 @@ def resolve_resume_path(resume_from: str) -> Path:
         return resume_path
     candidates = sorted(resume_path.glob("simple_state_iter_*.pt"))
     if not candidates:
-        raise FileNotFoundError(f"在 {resume_path} 下未找到 simple_state_iter_*.pt")
+        raise FileNotFoundError(f"No simple_state_iter_*.pt found under {resume_path}")
     return candidates[-1]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="MetaWorld 单机单进程轻量 PPO 训练脚本"
+        description="Lightweight single-machine single-process PPO training script for MetaWorld"
     )
     parser.add_argument(
         "--task-name",
@@ -975,7 +959,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cuda-visible-devices",
         type=str,
-        default=os.environ.get("CUDA_VISIBLE_DEVICES", "6,7"),
+        default=os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
         help="CUDA visible devices",
     )
     parser.add_argument(
@@ -991,7 +975,7 @@ def parse_args() -> argparse.Namespace:
         "--rollout-steps-per-iter",
         type=int,
         default=500,
-        help="每轮外循环在进入 update 之前，先从环境中收集多少步 transition",
+        help="Number of environment transitions to collect before each update phase",
     )
     parser.add_argument(
         "--warmup-steps",
@@ -1015,19 +999,19 @@ def parse_args() -> argparse.Namespace:
         "--sample-rounds",
         type=int,
         default=10,
-        help="每次更新从 replay buffer 重采样的轮数",
+        help="Number of re-sampling rounds from replay buffer per update",
     )
     parser.add_argument(
         "--reuse-per-batch",
         type=int,
         default=10,
-        help="每批采样数据重复训练次数",
+        help="Number of times to reuse each sampled batch for training",
     )
     parser.add_argument(
         "--actor-every",
         type=int,
         default=10,
-        help="每隔多少次 reuse 执行一次 actor 更新（其余偏向 value 更新）",
+        help="Run one actor update every N reuse steps (others focus on value updates)",
     )
     parser.add_argument("--policy-lr", type=float, default=3e-4, help="Policy learning rate")
     parser.add_argument("--value-lr", type=float, default=3e-3, help="Value learning rate")

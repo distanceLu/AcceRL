@@ -335,6 +335,34 @@ def update_learning_rates(
             group["lr"] = value_lr
 
 
+def build_policy_prob_pairs(
+    old_pi_chunks: List[np.ndarray], new_pi_chunks: List[np.ndarray]
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    if not old_pi_chunks or not new_pi_chunks:
+        return None
+
+    old_pi = np.concatenate(old_pi_chunks, axis=0).astype(np.float64, copy=False)
+    new_pi = np.concatenate(new_pi_chunks, axis=0).astype(np.float64, copy=False)
+    finite_mask = np.isfinite(old_pi) & np.isfinite(new_pi)
+    old_pi = old_pi[finite_mask]
+    new_pi = new_pi[finite_mask]
+    if old_pi.size == 0:
+        return None
+    return old_pi, new_pi
+
+
+def save_latest_policy_prob_pairs(
+    output_path: Path,
+    old_pi: np.ndarray,
+    new_pi: np.ndarray,
+) -> None:
+    old_pi_line = ",".join(map(repr, old_pi.tolist()))
+    new_pi_line = ",".join(map(repr, new_pi.tolist()))
+    with open(output_path, "w", encoding="utf-8") as file:
+        file.write(f"old_pi,{old_pi_line}\n")
+        file.write(f"new_pi,{new_pi_line}\n")
+
+
 def run_ppo_updates(
     model: MLPActorCriticDiscrete,
     optimizer: torch.optim.Optimizer,
@@ -351,11 +379,12 @@ def run_ppo_updates(
     clip_mode: str,
     sigma_pos: float,
     sigma_neg: float,
-) -> Dict[str, float]:
+    kernel_type: str,
+) -> Tuple[Dict[str, float], Optional[Tuple[np.ndarray, np.ndarray]]]:
     device = model.device
     actual_buffer_size = len(buffer)
     if actual_buffer_size == 0:
-        return {}
+        return {}, None
     sample_rounds = max(1, int(sample_rounds))
     reuse_per_batch = max(1, int(reuse_per_batch))
     actor_every = max(1, int(actor_every))
@@ -373,6 +402,8 @@ def run_ppo_updates(
         "explained_variance": [],
     }
     optimizer_steps = 0
+    old_pi_chunks: List[np.ndarray] = []
+    new_pi_chunks: List[np.ndarray] = []
 
     for sample_idx in range(sample_rounds):
         obs_t, action_token_t, old_logits_t, advantage_t, value_target_t = buffer.as_tensors(
@@ -402,6 +433,8 @@ def run_ppo_updates(
             entropy = dist.entropy().mean()
 
             ratio = torch.exp(logp - logp_old)
+            old_pi_chunks.append(torch.exp(logp_old).detach().reshape(-1).cpu().numpy())
+            new_pi_chunks.append(torch.exp(logp).detach().reshape(-1).cpu().numpy())
             adv_expanded = batch_adv.unsqueeze(-1)
             surr1 = ratio * adv_expanded
 
@@ -414,7 +447,15 @@ def run_ppo_updates(
                 sigma = torch.where(adv_expanded > 0, sigma_pos_t, sigma_neg_t)
                 eps = 1e-9
                 r_detach = ratio.clamp_min(eps).detach()
-                coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
+                if kernel_type == "gaussian":
+                    coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
+                elif kernel_type == "laplacian":
+                    coeff = torch.exp(-torch.abs(torch.log(r_detach) / sigma))
+                elif kernel_type == "cauchy":
+                    coeff = 1.0 / (1.0 + (torch.log(r_detach) / sigma) ** 2)
+                else:
+                    raise ValueError(f"Invalid KERNEL_TYPE: {kernel_type}")
+                # coeff = torch.exp(-0.5 * (torch.log(r_detach) / sigma) ** 2)
                 surr_soft = surr1 * coeff
                 base_policy_loss = -torch.mean(surr_soft)
             elif clip_mode == "ppo":
@@ -488,7 +529,15 @@ def run_ppo_updates(
     result["buffer_size"] = float(actual_buffer_size)
     result["sample_size"] = float(num_samples)
     result["utd_estimate"] = float(sample_rounds * reuse_per_batch)
-    return result
+    policy_prob_pairs = build_policy_prob_pairs(old_pi_chunks, new_pi_chunks)
+    if policy_prob_pairs is not None:
+        old_pi_np, new_pi_np = policy_prob_pairs
+        ratio_np = new_pi_np / np.clip(old_pi_np, 1e-12, None)
+        result["ratio_mean"] = float(np.mean(ratio_np))
+        result["ratio_std"] = float(np.std(ratio_np))
+        result["ratio_min"] = float(np.min(ratio_np))
+        result["ratio_max"] = float(np.max(ratio_np))
+    return result, policy_prob_pairs
 
 
 @torch.no_grad()
@@ -618,17 +667,17 @@ def parse_args() -> argparse.Namespace:
         help="Training device",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--train-iters", type=int, default=30000, help="Outer iterations")
+    parser.add_argument("--train-iters", type=int, default=1000, help="Outer iterations")
     parser.add_argument(
         "--rollout-steps-per-iter",
         type=int,
-        default=25,
+        default=500,
         help="每轮外循环在进入 update 之前，先从环境中收集多少步 transition",
     )
     parser.add_argument(
         "--warmup-steps",
         type=int,
-        default=50,
+        default=10,
         help="Collect at least this many env steps before updating",
     )
     parser.add_argument(
@@ -646,23 +695,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sample-rounds",
         type=int,
-        default=2,
+        default=10,
         help="每次更新从 replay buffer 重采样的轮数",
     )
     parser.add_argument(
         "--reuse-per-batch",
         type=int,
-        default=2,
+        default=10,
         help="每批采样数据重复训练次数",
     )
     parser.add_argument(
         "--actor-every",
         type=int,
-        default=2,
+        default=10,
         help="每隔多少次 reuse 执行一次 actor 更新（其余偏向 value 更新）",
     )
-    parser.add_argument("--policy-lr", type=float, default=1e-5, help="Policy learning rate")
-    parser.add_argument("--value-lr", type=float, default=1e-4, help="Value learning rate")
+    parser.add_argument("--policy-lr", type=float, default=3e-4, help="Policy learning rate")
+    parser.add_argument("--value-lr", type=float, default=3e-3, help="Value learning rate")
     parser.add_argument("--policy-warmup-steps", type=int, default=10, help="Policy network warmup steps")
     parser.add_argument("--value-warmup-steps", type=int, default=10, help="Value network warmup steps")
     parser.add_argument("--policy-train-start-step", type=int, default=0, help="Start training policy network at step N")
@@ -674,11 +723,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-coef", type=float, default=0.1, help="KL divergence coefficient")
     parser.add_argument("--sigma", type=float, default=1.0, help="Sigma parameter for GIPO")
     parser.add_argument("--sigma-neg-ratio", type=float, default=0.5, help="Sigma negative ratio for GIPO")
+    parser.add_argument("--kernel-type", type=str, default="gaussian", choices=["gaussian", "laplacian", "cauchy"], help="Kernel type for GIPO")
     parser.add_argument("--vf-coef", type=float, default=0.5, help="Value loss coefficient")
     parser.add_argument(
         "--max-grad-norm", type=float, default=1.0, help="Gradient clipping norm"
     )
-    parser.add_argument("--reward-scale", type=float, default=1.0, help="Reward scaling")
+    parser.add_argument("--reward-scale", type=float, default=0.001, help="Reward scaling")
     parser.add_argument(
         "--clip-mode",
         type=str,
@@ -785,6 +835,7 @@ def main() -> None:
     else:
         log_dir = Path(args.log_dir) / f"{args.exp_name}_{timestamp}"
     ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else log_dir / "checkpoints"
+    policy_prob_pairs_path = log_dir / "policy_prob_pairs_latest.csv"
     log_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -859,6 +910,7 @@ def main() -> None:
                 rollout_successes.append(item.success)
 
             update_metrics: Dict[str, float] = {}
+            policy_prob_pairs: Optional[Tuple[np.ndarray, np.ndarray]] = None
             t_update_start = time.time()
             if global_env_steps >= args.warmup_steps and len(buffer) >= args.train_batch_size:
                 current_value_lr = get_current_lr(
@@ -875,7 +927,7 @@ def main() -> None:
                     start_step=args.policy_train_start_step,
                 )
                 update_learning_rates(optimizer, current_policy_lr, current_value_lr)
-                update_metrics = run_ppo_updates(
+                update_metrics, policy_prob_pairs = run_ppo_updates(
                     model=model,
                     optimizer=optimizer,
                     buffer=buffer,
@@ -891,8 +943,17 @@ def main() -> None:
                     clip_mode=args.clip_mode,
                     sigma_pos=args.sigma,
                     sigma_neg=args.sigma * args.sigma_neg_ratio,
+                    kernel_type=args.kernel_type,
                 )
                 global_update_steps += int(update_metrics.get("optimizer_steps", 0.0))
+                if policy_prob_pairs is not None:
+                    old_pi_np, new_pi_np = policy_prob_pairs
+                    if iteration % 100 == 0:
+                        save_latest_policy_prob_pairs(
+                            output_path=policy_prob_pairs_path,
+                            old_pi=old_pi_np,
+                            new_pi=new_pi_np,
+                        )
             update_time = time.time() - t_update_start
 
             current_time = time.time()

@@ -1337,7 +1337,7 @@ def ppo_update(
 
 def main():
     """主函数：执行PPO强化学习训练"""
-    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
     # 配置路径
     current_dir = Path.cwd()
@@ -1349,23 +1349,24 @@ def main():
     print("=" * 80)
 
     # 训练配置
-    num_iterations = 100  # 训练迭代次数
+    num_iterations = 1000  # 训练迭代次数
     num_trajectories_per_iter = 5  # 每次迭代收集的轨迹数
     rollout_max_steps = 8  # 每次rollout的最大步数
     rollout_batch_size = 8  # rollout批大小
 
     # PPO配置
-    learning_rate = 1e-5
+    learning_rate = 3e-6
     clip_ratio = 0.2
     value_coef = 0.5
     entropy_coef = 0.0
     max_grad_norm = 0.5
     ppo_epochs = 1
     ppo_batch_size = 8
-    gradient_accumulation_steps = 32
+    gradient_accumulation_steps = 64
+    num_samples_for_rollout = 1024
 
     # 设置TensorBoard
-    log_dir = current_dir / "runs/simple_diffusion_wm_rl" / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_wm_train_slide"
+    log_dir = current_dir / "runs/simple_diffusion_wm_rl" / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_wm_train_slide2"
     writer = SummaryWriter(log_dir=str(log_dir))
     print(f"TensorBoard logs will be saved to: {log_dir}")
 
@@ -1448,7 +1449,7 @@ def main():
 
         # 1. 收集初始数据
         print(f"收集 {num_trajectories_per_iter} 条轨迹的初始数据...")
-        if len(obs_list) == 0 or iteration % 5 == 0:
+        if len(obs_list) == 0 or iteration % 5 == 0 or len(obs_list) < num_samples_for_rollout:
             obs_list_t, act_list_t, rew_list_t, step_counts_t, instructions_t = collect_initial_obs_act_from_libero(
                 env=libero_env,
                 actor=actor,
@@ -1468,13 +1469,12 @@ def main():
             step_counts.extend(step_counts_t)
             instructions.extend(instructions_t)
 
-        if len(obs_list) == 0:
-            print("警告：未收集到有效轨迹，跳过此次迭代")
+        if len(obs_list) < num_samples_for_rollout:
+            print(f"样本数量不足{num_samples_for_rollout},（当前={len(obs_list)}），跳过本次 rollout")
             continue
 
         # 随机采样数据用于rollout
         num_available_samples = len(obs_list)
-        num_samples_for_rollout = min(512, num_available_samples)
         sample_indices = torch.randperm(num_available_samples)[:num_samples_for_rollout].tolist()
         
         # 从列表中选择样本
@@ -1496,9 +1496,9 @@ def main():
 
         print("训练 World Model...")
         wm_bs = 1024
-        start_buffer_size = 4096
+        start_buffer_size = 1024
         if num_available_samples < start_buffer_size:
-            print(f"样本数量不足512（当前={num_available_samples}），跳过本次 World Model 训练")
+            print(f"样本数量不足{start_buffer_size},（当前={num_available_samples}），跳过本次 World Model 训练")
         else:
             sample_indices_wm = torch.randperm(num_available_samples)[:wm_bs].tolist()
             obs_wm = torch.stack([obs_list[i] for i in sample_indices_wm], dim=0)

@@ -61,7 +61,7 @@ except ImportError:
     yaml = None
 
 # MetaWorld 和 MLP Actor-Critic 组件
-from rl.metaworld_env import MetaWorldWrapperDiscrete
+from rl.envs.metaworld_env import MetaWorldWrapperDiscrete
 from rl.policies.mlp_actor_critic import MLPActorCriticDiscrete
 # 训练/推理通信（保持接口不变）
 from ds_com import TrainerActorCom, InferenceActorCom

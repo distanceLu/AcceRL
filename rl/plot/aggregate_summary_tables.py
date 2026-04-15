@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 
 TASK_ROOT_RE = re.compile(r"^Task root\s*:\s*(.+)\s*$")
+REGIME_RE = re.compile(r"^Regime\s*:\s*(.+)\s*$")
 METRIC_TAG_RE = re.compile(r"^Metric tag\s*:\s*(.+)\s*$")
 MIN_ITER_RE = re.compile(r"^Min iteration\s*:\s*(\d+)\s*$")
 ROW_RE = re.compile(
@@ -18,6 +19,15 @@ ROW_RE = re.compile(
 )
 SEED_VALUE_RE = re.compile(
     r"^- seed=(?P<seed>\d+)\s+value=(?P<value>[-+0-9.eE]+)\s+\(.*\)\s*$"
+)
+FILTERED_LABEL_RE = re.compile(r"^- \[(?P<label>[^\]]+)\]\s+seed=(?P<seed>\d+)\s+run=.*$")
+GIPO_INTERNAL_LABEL_RE = re.compile(
+    r"^gipo_sigma(?P<sigma>unknown|[-+]?\d*\.?\d+)(?:_neg(?P<sigma_neg_ratio>[-+]?\d*\.?\d+))?$",
+    re.IGNORECASE,
+)
+GIPO_PRETTY_LABEL_RE = re.compile(
+    r"^gipo\s+(?P<sigma>unknown|[-+]?\d*\.?\d+)(?:\s+neg\s+(?P<sigma_neg_ratio>[-+]?\d*\.?\d+))?$",
+    re.IGNORECASE,
 )
 
 ELO_INITIAL_RATING = 1000.0
@@ -36,6 +46,8 @@ class SummaryEntry:
     min_iter: int
     algo_stats: Dict[str, Dict[str, str]]
     algo_seed_values: Dict[str, Dict[int, float]]
+    all_algo_labels: List[str]
+    regime: str
 
 
 @dataclass(frozen=True)
@@ -96,29 +108,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parse_gipo_value(label: str) -> Optional[float]:
-    v = label.strip().lower()
-    if not v.startswith("gipo"):
-        return None
-    m = re.search(r"([-+]?\d*\.?\d+)", v)
-    if not m:
+def parse_float_token(raw_value: Optional[str]) -> Optional[float]:
+    if raw_value is None:
         return None
     try:
-        return float(m.group(1))
+        return float(raw_value)
     except ValueError:
         return None
 
 
-def algo_sort_key(label: str) -> Tuple[int, float]:
+def parse_gipo_label_components(label: str) -> Optional[Tuple[Optional[float], float]]:
+    raw_label = label.strip().lower()
+    internal_match = GIPO_INTERNAL_LABEL_RE.fullmatch(raw_label)
+    if internal_match:
+        sigma_raw = internal_match.group("sigma")
+        sigma = None if sigma_raw == "unknown" else parse_float_token(sigma_raw)
+        sigma_neg_ratio = parse_float_token(internal_match.group("sigma_neg_ratio"))
+        return sigma, 1.0 if sigma_neg_ratio is None else sigma_neg_ratio
+
+    normalized_label = " ".join(raw_label.replace("_unknown", " unknown").split())
+    pretty_match = GIPO_PRETTY_LABEL_RE.fullmatch(normalized_label)
+    if pretty_match:
+        sigma_raw = pretty_match.group("sigma")
+        sigma = None if sigma_raw == "unknown" else parse_float_token(sigma_raw)
+        sigma_neg_ratio = parse_float_token(pretty_match.group("sigma_neg_ratio"))
+        return sigma, 1.0 if sigma_neg_ratio is None else sigma_neg_ratio
+
+    return None
+
+
+def algo_sort_key(label: str) -> Tuple[int, float, float]:
     v = label.strip().lower()
     if v == "ppo":
-        return (0, 0.0)
+        return (0, 0.0, 0.0)
     if v == "sapo":
-        return (1, 0.0)
-    gipo_value = parse_gipo_value(label)
-    if gipo_value is not None:
-        return (2, gipo_value)
-    return (3, 0.0)
+        return (1, 0.0, 0.0)
+    parsed_gipo = parse_gipo_label_components(label)
+    if parsed_gipo is not None:
+        sigma, sigma_neg_ratio = parsed_gipo
+        return (2, sigma if sigma is not None else 1e9, sigma_neg_ratio)
+    return (3, 0.0, 0.0)
 
 
 def infer_task_name(task_root: Path) -> str:
@@ -139,14 +168,43 @@ def infer_regime(task_root: Path, summary_file: Path) -> str:
     return "stale"
 
 
-def parse_summary_file(summary_file: Path) -> Optional[SummaryEntry]:
+def parse_summary_file(summary_file: Path) -> List[SummaryEntry]:
     lines = summary_file.read_text(encoding="utf-8").splitlines()
+    entries = []
+    
     task_root: Optional[Path] = None
     metric_tag: Optional[str] = None
     min_iter: Optional[int] = None
+    regime: Optional[str] = None
     algo_stats: Dict[str, Dict[str, str]] = {}
     algo_seed_values: Dict[str, Dict[int, float]] = {}
+    all_algo_labels = set()
     current_label: Optional[str] = None
+
+    def save_entry():
+        nonlocal task_root, metric_tag, min_iter, regime, algo_stats, algo_seed_values, all_algo_labels, current_label
+        if task_root is not None and metric_tag is not None and min_iter is not None and algo_stats:
+            if regime is None:
+                regime = infer_regime(task_root, summary_file)
+            entries.append(SummaryEntry(
+                summary_file=summary_file,
+                task_root=task_root,
+                task_name=infer_task_name(task_root),
+                metric_tag=metric_tag,
+                min_iter=min_iter,
+                algo_stats=algo_stats,
+                algo_seed_values=algo_seed_values,
+                all_algo_labels=sorted(all_algo_labels, key=algo_sort_key),
+                regime=regime,
+            ))
+        task_root = None
+        metric_tag = None
+        min_iter = None
+        regime = None
+        algo_stats = {}
+        algo_seed_values = {}
+        all_algo_labels = set()
+        current_label = None
 
     for raw in lines:
         line = raw.strip()
@@ -155,7 +213,13 @@ def parse_summary_file(summary_file: Path) -> Optional[SummaryEntry]:
 
         m_task = TASK_ROOT_RE.match(line)
         if m_task:
+            save_entry()
             task_root = Path(m_task.group(1).strip())
+            continue
+
+        m_regime = REGIME_RE.match(line)
+        if m_regime:
+            regime = m_regime.group(1).strip()
             continue
 
         m_metric = METRIC_TAG_RE.match(line)
@@ -179,6 +243,7 @@ def parse_summary_file(summary_file: Path) -> Optional[SummaryEntry]:
                 "seeds": m_row.group("seeds").strip(),
             }
             algo_seed_values.setdefault(label, {})
+            all_algo_labels.add(label)
             current_label = label
             continue
 
@@ -189,44 +254,67 @@ def parse_summary_file(summary_file: Path) -> Optional[SummaryEntry]:
             algo_seed_values.setdefault(current_label, {})[seed] = value
             continue
 
+        m_filtered_label = FILTERED_LABEL_RE.match(line)
+        if m_filtered_label:
+            all_algo_labels.add(m_filtered_label.group("label").strip())
+            continue
+
         if line.startswith("### "):
             current_label = None
 
-    if task_root is None or metric_tag is None or min_iter is None or not algo_stats:
-        return None
-
-    return SummaryEntry(
-        summary_file=summary_file,
-        task_root=task_root,
-        task_name=infer_task_name(task_root),
-        metric_tag=metric_tag,
-        min_iter=min_iter,
-        algo_stats=algo_stats,
-        algo_seed_values=algo_seed_values,
-    )
+    save_entry()
+    return entries
 
 
 def gather_entries(search_root: Path, pattern: str) -> List[SummaryEntry]:
     summary_files = sorted(search_root.rglob(pattern))
     entries: List[SummaryEntry] = []
     for file_path in summary_files:
-        parsed = parse_summary_file(file_path)
-        if parsed is not None:
-            entries.append(parsed)
+        parsed_entries = parse_summary_file(file_path)
+        entries.extend(parsed_entries)
     return entries
 
 
 def should_exclude_from_filtered_table(label: str) -> bool:
-    gipo_value = parse_gipo_value(label)
-    return gipo_value in {0.1, 2.0}
+    parsed_gipo = parse_gipo_label_components(label)
+    if parsed_gipo is None:
+        return False
+    sigma, _ = parsed_gipo
+    return sigma in {0.1, 2.0}
 
 
 def collect_algo_labels(entries: Sequence[SummaryEntry]) -> List[str]:
-    return sorted({label for entry in entries for label in entry.algo_stats.keys()}, key=algo_sort_key)
+    return sorted(
+        {
+            label
+            for entry in entries
+            for label in entry.algo_stats.keys()
+            if label != "unknown"
+        },
+        key=algo_sort_key,
+    )
 
 
 def filter_algo_labels(algo_labels: Sequence[str]) -> List[str]:
     return [label for label in algo_labels if not should_exclude_from_filtered_table(label)]
+
+
+def compute_iqm(values: Sequence[float]) -> Optional[float]:
+    if not values:
+        return None
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+    trim = int(n * 0.25)
+    if n - 2 * trim <= 0:
+        return sum(sorted_values) / n
+    central = sorted_values[trim : n - trim]
+    return sum(central) / len(central)
+
+
+def safe_normalize_score(value: float, score_min: float, score_max: float) -> float:
+    if score_max <= score_min:
+        return 0.5
+    return (value - score_min) / (score_max - score_min)
 
 
 def make_data_markdown_table(entries: Sequence[SummaryEntry], algo_labels: Sequence[str]) -> str:
@@ -238,6 +326,7 @@ def make_data_markdown_table(entries: Sequence[SummaryEntry], algo_labels: Seque
     for idx, e in enumerate(entries, start=1):
         best_mean: Optional[float] = None
         best_labels = set()
+        row_means: Dict[str, float] = {}
         for label, stat in e.algo_stats.items():
             if label not in displayed_algo_labels:
                 continue
@@ -245,23 +334,40 @@ def make_data_markdown_table(entries: Sequence[SummaryEntry], algo_labels: Seque
                 m = float(stat["mean"])
             except (KeyError, ValueError):
                 continue
+            row_means[label] = m
             if best_mean is None or m > best_mean:
                 best_mean = m
                 best_labels = {label}
             elif m == best_mean:
                 best_labels.add(label)
 
+        score_min = min(row_means.values()) if row_means else 0.0
+        score_max = max(row_means.values()) if row_means else 1.0
+
         row = [
             str(idx),
             e.task_name,
-            infer_regime(e.task_root, e.summary_file),
+            e.regime,
             e.metric_tag,
             str(e.min_iter),
         ]
         for label in algo_labels:
             if label in e.algo_stats:
                 s = e.algo_stats[label]
-                cell = f"{s['mean']} ± {s['std']} (n={s['n_kept']}/{s['n_expected']})"
+                mean_value = row_means.get(label)
+                seed_values = list(e.algo_seed_values.get(label, {}).values())
+                iqm_value = compute_iqm(seed_values)
+                norm_value = (
+                    safe_normalize_score(mean_value, score_min, score_max)
+                    if mean_value is not None
+                    else None
+                )
+                iqm_text = "-" if iqm_value is None else f"{iqm_value:.4f}"
+                norm_text = "-" if norm_value is None else f"{norm_value:.4f}"
+                cell = (
+                    f"{s['mean']} ± {s['std']} (n={s['n_kept']}/{s['n_expected']}, "
+                    f"IQM={iqm_text}, Norm={norm_text})"
+                )
                 if label in best_labels:
                     cell = f"**{cell}**"
                 row.append(cell)
@@ -525,15 +631,15 @@ def build_markdown_content(
     return (
         "## 数据表\n\n"
         + data_md
-        + "\n## 数据表（过滤 gipo 0.1 / gipo 2.0）\n\n"
+        + "\n## 数据表（过滤 gipo sigma 0.1 / 2.0）\n\n"
         + filtered_data_md
         + "\n## ELO 排名（按共同 seed）\n\n"
         + elo_md
-        + "\n## ELO 排名（按共同 seed，过滤 gipo 0.1 / gipo 2.0）\n\n"
+        + "\n## ELO 排名（按共同 seed，过滤 gipo sigma 0.1 / 2.0）\n\n"
         + filtered_elo_md
         + "\n## ELO 排名（按多 seed 平均分）\n\n"
         + mean_elo_md
-        + "\n## ELO 排名（按多 seed 平均分，过滤 gipo 0.1 / gipo 2.0）\n\n"
+        + "\n## ELO 排名（按多 seed 平均分，过滤 gipo sigma 0.1 / 2.0）\n\n"
         + filtered_mean_elo_md
         + "\n## 元信息表（TaskRoot / SummaryFile）\n\n"
         + meta_md
@@ -557,6 +663,8 @@ def write_data_csv(entries: Sequence[SummaryEntry], algo_labels: Sequence[str], 
                 f"{safe}_n_kept",
                 f"{safe}_n_expected",
                 f"{safe}_seeds",
+                f"{safe}_iqm",
+                f"{safe}_norm",
             ]
         )
 
@@ -564,10 +672,22 @@ def write_data_csv(entries: Sequence[SummaryEntry], algo_labels: Sequence[str], 
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for idx, e in enumerate(entries, start=1):
+            row_means: Dict[str, float] = {}
+            for label in algo_labels:
+                stat = e.algo_stats.get(label)
+                if not stat:
+                    continue
+                try:
+                    row_means[label] = float(stat["mean"])
+                except (KeyError, ValueError):
+                    continue
+            score_min = min(row_means.values()) if row_means else 0.0
+            score_max = max(row_means.values()) if row_means else 1.0
+
             row: Dict[str, str] = {
                 "id": str(idx),
                 "task": e.task_name,
-                "regime": infer_regime(e.task_root, e.summary_file),
+                "regime": e.regime,
                 "metric": e.metric_tag,
                 "min_iter": str(e.min_iter),
             }
@@ -580,12 +700,24 @@ def write_data_csv(entries: Sequence[SummaryEntry], algo_labels: Sequence[str], 
                     row[f"{safe}_n_kept"] = s["n_kept"]
                     row[f"{safe}_n_expected"] = s["n_expected"]
                     row[f"{safe}_seeds"] = s["seeds"]
+                    mean_value = row_means.get(label)
+                    seed_values = list(e.algo_seed_values.get(label, {}).values())
+                    iqm_value = compute_iqm(seed_values)
+                    norm_value = (
+                        safe_normalize_score(mean_value, score_min, score_max)
+                        if mean_value is not None
+                        else None
+                    )
+                    row[f"{safe}_iqm"] = "" if iqm_value is None else f"{iqm_value:.4f}"
+                    row[f"{safe}_norm"] = "" if norm_value is None else f"{norm_value:.4f}"
                 else:
                     row[f"{safe}_mean"] = ""
                     row[f"{safe}_std"] = ""
                     row[f"{safe}_n_kept"] = ""
                     row[f"{safe}_n_expected"] = ""
                     row[f"{safe}_seeds"] = ""
+                    row[f"{safe}_iqm"] = ""
+                    row[f"{safe}_norm"] = ""
             writer.writerow(row)
 
 
@@ -636,39 +768,54 @@ def main() -> None:
         print(f"[Info] 在 {search_root} 下未找到可解析的 summary 文件（glob={args.glob}）")
         return
 
-    entries = sorted(entries, key=lambda x: (x.task_name, str(x.task_root), str(x.summary_file)))
-    algo_labels = collect_algo_labels(entries)
-    filtered_algo_labels = filter_algo_labels(algo_labels)
-    elo_standings = compute_elo_rankings(entries, algo_labels)
-    filtered_elo_standings = compute_elo_rankings(entries, filtered_algo_labels)
-    mean_elo_standings = compute_mean_elo_rankings(entries, algo_labels)
-    filtered_mean_elo_standings = compute_mean_elo_rankings(entries, filtered_algo_labels)
-    markdown_content = build_markdown_content(entries, algo_labels, filtered_algo_labels)
-    print(markdown_content)
+    entries_by_regime: Dict[str, List[SummaryEntry]] = {}
+    for entry in entries:
+        entries_by_regime.setdefault(entry.regime, []).append(entry)
 
+    all_markdown_blocks = []
+    
+    for regime in sorted(entries_by_regime.keys()):
+        regime_entries = sorted(entries_by_regime[regime], key=lambda item: (item.task_name, str(item.task_root), str(item.summary_file)))
+        algo_labels = collect_algo_labels(regime_entries)
+        filtered_algo_labels = filter_algo_labels(algo_labels)
+        
+        elo_standings = compute_elo_rankings(regime_entries, algo_labels)
+        filtered_elo_standings = compute_elo_rankings(regime_entries, filtered_algo_labels)
+        mean_elo_standings = compute_mean_elo_rankings(regime_entries, algo_labels)
+        filtered_mean_elo_standings = compute_mean_elo_rankings(regime_entries, filtered_algo_labels)
+        
+        markdown_content = build_markdown_content(regime_entries, algo_labels, filtered_algo_labels)
+        all_markdown_blocks.append(f"# Regime: {regime}\n\n{markdown_content}")
+        
+        regime_prefix = f"{args.output_prefix}_{regime}"
+        write_elo_csv(elo_standings, search_root / f"{regime_prefix}_elo.csv")
+        write_elo_csv(filtered_elo_standings, search_root / f"{regime_prefix}_elo_filtered.csv")
+        write_elo_csv(mean_elo_standings, search_root / f"{regime_prefix}_elo_mean.csv")
+        write_elo_csv(filtered_mean_elo_standings, search_root / f"{regime_prefix}_elo_mean_filtered.csv")
+
+    final_markdown = "\n\n".join(all_markdown_blocks)
+    
     output_md = search_root / f"{args.output_prefix}.md"
     output_csv = search_root / f"{args.output_prefix}.csv"
     output_meta_csv = search_root / f"{args.output_prefix}_meta.csv"
-    output_elo_csv = search_root / f"{args.output_prefix}_elo.csv"
-    output_filtered_elo_csv = search_root / f"{args.output_prefix}_elo_filtered.csv"
-    output_mean_elo_csv = search_root / f"{args.output_prefix}_elo_mean.csv"
-    output_filtered_mean_elo_csv = search_root / f"{args.output_prefix}_elo_mean_filtered.csv"
-    output_md.write_text(markdown_content, encoding="utf-8")
-    write_data_csv(entries, algo_labels, output_csv)
-    write_meta_csv(entries, output_meta_csv)
-    write_elo_csv(elo_standings, output_elo_csv)
-    write_elo_csv(filtered_elo_standings, output_filtered_elo_csv)
-    write_elo_csv(mean_elo_standings, output_mean_elo_csv)
-    write_elo_csv(filtered_mean_elo_standings, output_filtered_mean_elo_csv)
+    
+    output_md.write_text(final_markdown, encoding="utf-8")
+    
+    all_entries = sorted(entries, key=lambda item: (item.task_name, str(item.task_root), str(item.summary_file)))
+    all_algo_labels = collect_algo_labels(all_entries)
+    write_data_csv(all_entries, all_algo_labels, output_csv)
+    write_meta_csv(all_entries, output_meta_csv)
 
+    print("")
+    print("=" * 110)
+    print("### 最终汇总")
+    print("=" * 110)
+    print(final_markdown)
     print(f"[Saved] markdown: {output_md}")
     print(f"[Saved] csv     : {output_csv}")
     print(f"[Saved] meta csv: {output_meta_csv}")
-    print(f"[Saved] elo csv(seed): {output_elo_csv}")
-    print(f"[Saved] elo csv(seed, filtered): {output_filtered_elo_csv}")
-    print(f"[Saved] elo csv(mean): {output_mean_elo_csv}")
-    print(f"[Saved] elo csv(mean, filtered): {output_filtered_mean_elo_csv}")
-    print(f"[Done] entries={len(entries)} algos={len(algo_labels)}")
+    print(f"[Saved] elo csvs saved with regime suffixes")
+    print(f"[Done] entries={len(entries)}")
 
 
 if __name__ == "__main__":
