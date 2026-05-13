@@ -689,6 +689,7 @@ if __name__ == "__main__":
                     inputs_t = prepare_one_obs(cfg, actor.processor, observations[i], task_descriptions[i], TORCH_DTYPE)
                     inputs_t_list.append(inputs_t)
                     need_generation_indices.append(i)
+
             
             # 2. 为需要生成新动作的环境批量生成动作
             if inputs_t_list:

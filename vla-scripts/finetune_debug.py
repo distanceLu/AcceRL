@@ -5,7 +5,21 @@ Fine-tunes OpenVLA via LoRA (No DDP version for easier debugging).
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2" 
+os.environ["VULKAN_VISIBLE_DEVICES"] = "1" 
+
+# 必须在任何 TFDS/RLDS 相关东西之前
+# 让tf不使用gpu
+
+import tensorflow as tf
+# 先隐藏
+tf.config.set_visible_devices([], "GPU")
+# 再检查：这里应该是 []
+print("TF visible GPUs:", [d for d in tf.config.get_visible_devices() if d.device_type == "GPU"])
+# 或者检查 logical（这里也应该是 []）
+print("TF logical GPUs:", tf.config.list_logical_devices("GPU"))
+
+
 os.environ["WANDB_MODE"] = "disabled"
 import time
 from collections import deque
@@ -73,8 +87,16 @@ class FinetuneConfig:
     vla_path: str = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
 
     # Dataset
-    data_root_dir: Path = Path("/cpfs01/lcx_workspace/data/openvla/modified_libero_rlds")      # Directory containing RLDS datasets
-    dataset_name: str = "libero_spatial_no_noops"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    # ManiSkill PickCube-v1 (Panda, pd_ee_delta_pose) RLDS build produced by
+    # rlds_dataset_builder/maniskill_pickcube.  The directory layout is
+    #   <data_root_dir>/<dataset_name>/<version>/...
+    # so data_root_dir is the TFDS root, not the <dataset>/<version> subdir.
+    
+    # 160文件位置
+    data_root_dir: Path = Path("/data/disk1/lcx_stu4/rlds")
+    # 149文件位置
+    #data_root_dir: Path = Path("/mnt/data2/lcx_stu4/maniskill/demos/rlds")      # Directory containing RLDS datasets
+    dataset_name: str = "maniskill_pickcube"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
     run_root_dir: Path = Path("runs/imitation")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
@@ -83,7 +105,7 @@ class FinetuneConfig:
     use_diffusion: bool = False                      # If True, trains continuous action head with diffusion modeling objective (DDIM)
     num_diffusion_steps_train: int = 50              # (When `diffusion==True`) Number of diffusion steps used for training
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
-    num_images_in_input: int = 1                     # Number of images in the VLA input (default: 1)
+    num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = False                        # If True, includes robot proprioceptive state in input
 
     # Training configuration
@@ -99,6 +121,46 @@ class FinetuneConfig:
     save_freq: int = 10                          # Checkpoint saving frequency in steps
     save_latest_checkpoint_only: bool = True        # If True, saves only 1 checkpoint, overwriting latest checkpoint
                                                      #   (If False, saves all checkpoints)
+    enable_success_rate_checkpoints: bool = True    # If True, save milestone checkpoints when success rate crosses thresholds
+    success_rate_save_thresholds: str = "0.6,0.7,0.8"  # Comma-separated success-rate milestones in [0, 1]
+    success_rate_metric_name: str = "avg_success_rate"  # Primary eval metric name to monitor for milestone saves
+    success_rate_metric_aliases: str = "avg_success_rate,global_success_rate,eval_success_rate"  # Fallback metric names
+    success_rate_checkpoint_root_dir: Path = Path("/cpfs01/lcx_stu4_workspace/openvla_oft_rl/rl/policy_cpt")  # Root directory for milestone checkpoints
+
+    # Real-environment LIBERO evaluation
+    use_libero_env_eval: bool = False               # If True, run LIBERO rollout evaluation during training
+    libero_eval_freq: int = 10_000                  # Frequency (in optimizer steps) for LIBERO rollout evaluation
+    libero_eval_task_suite_name: str = "libero_spatial"  # LIBERO task suite to evaluate
+    libero_eval_num_trials_per_task: int = 50       # Number of evaluation episodes per task
+    libero_eval_max_tasks: Optional[int] = None     # Optional cap on number of tasks to evaluate
+    libero_eval_num_workers: int = 10               # Number of environment worker processes for LIBERO evaluation
+    libero_eval_num_steps_wait: int = 10            # Initial no-op steps to stabilize the scene
+    libero_eval_num_open_loop_steps: int = NUM_ACTIONS_CHUNK  # Actions executed before re-querying the policy
+    libero_eval_initial_states_path: str = "DEFAULT"  # DEFAULT or a path to initial states JSON
+    libero_eval_env_img_res: int = 256              # Environment render resolution for LIBERO eval
+    libero_eval_center_crop: bool = True            # Match eval preprocessing to image-aug training checkpoints
+    libero_eval_unnorm_key: Optional[str] = None    # Optional override for action un-normalization stats key
+    libero_eval_seed: int = 7                       # Random seed for LIBERO eval reproducibility
+
+    # Real-environment ManiSkill evaluation (single-task PickCube-v1 by default)
+    use_maniskill_env_eval: bool = False             # If True, run ManiSkill rollout evaluation during training
+    maniskill_eval_freq: int = 200                   # Frequency (in optimizer steps) for ManiSkill rollout evaluation
+    maniskill_eval_task_id: str = "PickCube-v1"      # Gym ID of the ManiSkill task to evaluate
+    maniskill_eval_obs_mode: str = "rgbd"            # ManiSkill observation mode (must include sensor_data RGB)
+    maniskill_eval_control_mode: str = "pd_ee_delta_pose"  # Action space matching the training data
+    maniskill_eval_camera_name: str = "base_camera"  # Primary camera key under obs["sensor_data"][...] for policy image
+    maniskill_eval_wrist_camera_name: str = "hand_camera"  # Wrist camera key under obs["sensor_data"][...]
+    maniskill_eval_robot_uids: str = "panda_wristcam"  # Robot UID (use panda_wristcam for dual-camera eval)
+    maniskill_eval_camera_res: int = 224             # Force camera resolution to match training distribution
+    maniskill_eval_num_episodes: int = 50            # Total number of evaluation episodes
+    maniskill_eval_num_envs: int = 10                # Number of vectorized envs run per batch
+    maniskill_eval_max_steps: int = 200              # Per-episode env step budget
+    maniskill_eval_num_open_loop_steps: int = NUM_ACTIONS_CHUNK  # Actions executed before re-querying the policy
+    maniskill_eval_seed: int = 0                     # Base seed; per-env seed = base + ep_idx + i
+    maniskill_eval_unnorm_key: Optional[str] = None  # Optional override for action un-normalization stats key
+    maniskill_eval_language_instruction: str = "pick up the red cube and place it at the green target"  # Must match the RLDS builder
+    maniskill_eval_sim_backend: str = "auto"         # ManiSkill sim backend: "auto" / "gpu" / "cpu"
+
     resume: bool = False                             # If True, resumes from checkpoint
     resume_step: Optional[int] = None                # (When `resume==True`) Step number that we are resuming from
     image_aug: bool = True                           # If True, trains with image augmentations (HIGHLY RECOMMENDED)
@@ -408,6 +470,1183 @@ def log_metrics_to_wandb(metrics, prefix, step, wandb_entity) -> None:
         else:
             log_dict[f"{prefix}/{name.replace('_', ' ').title()}"] = value
     wandb_entity.log(log_dict, step=step)
+
+
+def parse_success_rate_thresholds(thresholds: str) -> Tuple[float, ...]:
+    parsed_thresholds = set()
+    for raw_value in thresholds.split(","):
+        raw_value = raw_value.strip()
+        if not raw_value:
+            continue
+        threshold = float(raw_value)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"Invalid success-rate milestone `{threshold}`; expected a value in [0, 1].")
+        parsed_thresholds.add(threshold)
+    return tuple(sorted(parsed_thresholds))
+
+
+def resolve_metric_value(metrics: Dict[str, float], primary_name: str, aliases: str) -> Tuple[Optional[str], Optional[float]]:
+    candidate_names = [primary_name]
+    candidate_names.extend(alias.strip() for alias in aliases.split(",") if alias.strip())
+
+    metrics_lower_map = {metric_name.lower(): metric_name for metric_name in metrics}
+    for candidate_name in candidate_names:
+        if candidate_name in metrics:
+            return candidate_name, float(metrics[candidate_name])
+
+        matched_metric_name = metrics_lower_map.get(candidate_name.lower())
+        if matched_metric_name is not None:
+            return matched_metric_name, float(metrics[matched_metric_name])
+
+    return None, None
+
+
+def get_vla_norm_stats(
+    vla,
+    preferred_norm_stats: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None,
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    candidate_modules = [vla]
+    for attr_name in ("model", "base_model"):
+        maybe_module = getattr(vla, attr_name, None)
+        if maybe_module is not None:
+            candidate_modules.append(maybe_module)
+            nested_model = getattr(maybe_module, "model", None)
+            if nested_model is not None:
+                candidate_modules.append(nested_model)
+
+    norm_stats = preferred_norm_stats
+    if norm_stats is None:
+        for module in candidate_modules:
+            module_norm_stats = getattr(module, "norm_stats", None)
+            if module_norm_stats:
+                norm_stats = module_norm_stats
+                break
+
+    if not norm_stats:
+        raise ValueError("Current model does not expose `norm_stats`, so LIBERO evaluation cannot resolve `unnorm_key`.")
+
+    for module in candidate_modules:
+        try:
+            module.norm_stats = norm_stats
+        except Exception:
+            pass
+
+    return norm_stats
+
+
+def resolve_libero_eval_unnorm_key(
+    cfg,
+    vla,
+    norm_stats: Optional[Dict[str, Dict]] = None,
+    preferred_norm_stats: Optional[Dict[str, Dict]] = None,
+) -> str:
+    if cfg.libero_eval_unnorm_key is not None:
+        return cfg.libero_eval_unnorm_key
+
+    if norm_stats is None:
+        norm_stats = get_vla_norm_stats(vla, preferred_norm_stats=preferred_norm_stats)
+
+    candidate_keys = [cfg.libero_eval_task_suite_name, f"{cfg.libero_eval_task_suite_name}_no_noops", cfg.dataset_name]
+    for candidate_key in candidate_keys:
+        if candidate_key in norm_stats:
+            return candidate_key
+
+    raise ValueError(
+        f"Could not resolve a LIBERO eval unnorm key for task suite `{cfg.libero_eval_task_suite_name}`. "
+        f"Available keys: {sorted(norm_stats.keys())}"
+    )
+
+
+def resolve_maniskill_eval_unnorm_key(
+    cfg,
+    vla,
+    norm_stats: Optional[Dict[str, Dict]] = None,
+    preferred_norm_stats: Optional[Dict[str, Dict]] = None,
+) -> str:
+    if cfg.maniskill_eval_unnorm_key is not None:
+        return cfg.maniskill_eval_unnorm_key
+
+    if norm_stats is None:
+        norm_stats = get_vla_norm_stats(vla, preferred_norm_stats=preferred_norm_stats)
+
+    candidate_keys = [cfg.dataset_name, "maniskill_pickcube"]
+    for candidate_key in candidate_keys:
+        if candidate_key and candidate_key in norm_stats:
+            return candidate_key
+
+    raise ValueError(
+        f"Could not resolve a ManiSkill eval unnorm key (tried `{cfg.dataset_name}`, `maniskill_pickcube`). "
+        f"Available keys: {sorted(norm_stats.keys())}"
+    )
+
+
+def build_maniskill_eval_cfg(cfg, vla, proprio_projector, preferred_norm_stats=None) -> SimpleNamespace:
+    """Build the SimpleNamespace consumed by ``get_vla_action_batch`` / ``get_action``."""
+    norm_stats = get_vla_norm_stats(vla, preferred_norm_stats=preferred_norm_stats)
+    unnorm_key = resolve_maniskill_eval_unnorm_key(
+        cfg,
+        vla,
+        norm_stats=norm_stats,
+        preferred_norm_stats=preferred_norm_stats,
+    )
+    use_proprio = cfg.use_proprio and proprio_projector is not None
+    if use_proprio and "proprio" not in norm_stats.get(unnorm_key, {}):
+        print(
+            f"Warning: norm_stats for `{unnorm_key}` does not include proprio statistics. "
+            "Disabling proprio for ManiSkill evaluation."
+        )
+        use_proprio = False
+
+    return SimpleNamespace(
+        model_family="openvla",
+        center_crop=cfg.libero_eval_center_crop,
+        num_images_in_input=cfg.num_images_in_input,
+        use_proprio=use_proprio,
+        unnorm_key=unnorm_key,
+    )
+
+
+def build_libero_eval_cfg(cfg, vla, proprio_projector, preferred_norm_stats=None) -> SimpleNamespace:
+    norm_stats = get_vla_norm_stats(vla, preferred_norm_stats=preferred_norm_stats)
+    unnorm_key = resolve_libero_eval_unnorm_key(
+        cfg,
+        vla,
+        norm_stats=norm_stats,
+        preferred_norm_stats=preferred_norm_stats,
+    )
+    use_proprio = cfg.use_proprio and proprio_projector is not None
+    if use_proprio and "proprio" not in norm_stats.get(unnorm_key, {}):
+        print(
+            f"Warning: norm_stats for `{unnorm_key}` does not include proprio statistics. "
+            "Disabling proprio for LIBERO evaluation."
+        )
+        use_proprio = False
+
+    return SimpleNamespace(
+        model_family="openvla",
+        center_crop=cfg.libero_eval_center_crop,
+        num_images_in_input=cfg.num_images_in_input,
+        use_proprio=use_proprio,
+        unnorm_key=unnorm_key,
+    )
+
+
+def _get_libero_task_max_steps(task_suite_name: str) -> int:
+    task_max_steps = {
+        "libero_spatial": 220,
+        "libero_object": 280,
+        "libero_goal": 300,
+        "libero_10": 520,
+        "libero_90": 400,
+    }
+    if task_suite_name not in task_max_steps:
+        raise ValueError(f"Unsupported LIBERO task suite `{task_suite_name}` for training-time evaluation.")
+    return task_max_steps[task_suite_name]
+
+
+def _get_libero_eval_task_ids(cfg):
+    from libero.libero import benchmark
+
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict[cfg.libero_eval_task_suite_name]()
+    num_tasks = task_suite.n_tasks
+    if cfg.libero_eval_max_tasks is not None and cfg.libero_eval_max_tasks > 0:
+        num_tasks = min(num_tasks, cfg.libero_eval_max_tasks)
+    return list(range(num_tasks))
+
+
+def _safe_conn_send(conn, payload) -> bool:
+    try:
+        conn.send(payload)
+        return True
+    except (BrokenPipeError, EOFError, OSError):
+        return False
+
+
+def get_vla_action_batch(
+    eval_cfg,
+    vla,
+    processor,
+    observations,
+    task_descriptions,
+    proprio_projector=None,
+    use_film=False,
+):
+    """
+    Batched VLA inference for discrete action prediction.
+    Processes multiple observations in a single GPU forward pass for much
+    higher throughput than sequential single-observation calls.
+    """
+    import numpy as np
+    from experiments.robot.openvla_utils import prepare_images_for_vla, normalize_proprio
+
+    B = len(observations)
+    if B == 0:
+        return []
+
+    device = next(vla.parameters()).device
+    dtype = torch.bfloat16
+
+    with torch.inference_mode():
+        all_input_ids = []
+        all_attention_masks = []
+        all_pixel_values = []
+        all_proprios = []
+
+        for obs, task_label in zip(observations, task_descriptions):
+            images = [obs["full_image"]]
+            if eval_cfg.num_images_in_input > 1:
+                images.extend([obs[k] for k in obs.keys() if "wrist" in k])
+            images = prepare_images_for_vla(images, eval_cfg)
+            primary = images.pop(0)
+
+            prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+            inputs = processor(prompt, primary)
+
+            if images:
+                wrist_pvs = [processor(prompt, img)["pixel_values"] for img in images]
+                inputs["pixel_values"] = torch.cat(
+                    [inputs["pixel_values"]] + wrist_pvs, dim=1
+                )
+
+            input_ids = inputs["input_ids"]
+            attention_mask = inputs["attention_mask"]
+
+            if not torch.all(input_ids[:, -1] == 29871):
+                input_ids = torch.cat(
+                    [input_ids, torch.tensor([[29871]], dtype=input_ids.dtype)], dim=1
+                )
+                attention_mask = torch.cat(
+                    [attention_mask, torch.ones((1, 1), dtype=attention_mask.dtype)], dim=1
+                )
+
+            all_input_ids.append(input_ids)
+            all_attention_masks.append(attention_mask)
+            all_pixel_values.append(inputs["pixel_values"])
+
+            if eval_cfg.use_proprio and proprio_projector is not None:
+                proprio_norm_stats = vla.norm_stats[eval_cfg.unnorm_key]["proprio"]
+                normalized = normalize_proprio(obs["state"], proprio_norm_stats)
+                all_proprios.append(torch.tensor(normalized, dtype=dtype))
+            else:
+                all_proprios.append(None)
+
+        # Right-pad all prompts to equal length so action token positions align
+        max_len = max(ids.shape[1] for ids in all_input_ids)
+        pad_token_id = processor.tokenizer.pad_token_id or 0
+
+        padded_ids = []
+        padded_masks = []
+        for i in range(B):
+            ids = all_input_ids[i]
+            mask = all_attention_masks[i]
+            pad_len = max_len - ids.shape[1]
+            if pad_len > 0:
+                ids = torch.cat(
+                    [ids, torch.full((1, pad_len), pad_token_id, dtype=ids.dtype)], dim=1
+                )
+                mask = torch.cat(
+                    [mask, torch.zeros((1, pad_len), dtype=mask.dtype)], dim=1
+                )
+            padded_ids.append(ids)
+            padded_masks.append(mask)
+
+        batch_input_ids = torch.cat(padded_ids, dim=0).to(device)
+        batch_attention_mask = torch.cat(padded_masks, dim=0).to(device)
+        batch_pixel_values = torch.cat(all_pixel_values, dim=0).to(device, dtype=dtype)
+
+        NUM_PROMPT_TOKENS = batch_input_ids.shape[-1] - 1
+
+        # Append placeholder action tokens + stop token (mirrors _prepare_input_for_action_prediction)
+        placeholder = torch.ones(
+            (B, ACTION_DIM * NUM_ACTIONS_CHUNK), device=device, dtype=batch_input_ids.dtype
+        )
+        batch_input_ids = torch.cat([batch_input_ids, placeholder], dim=-1)
+        stop = torch.full((B, 1), STOP_INDEX, device=device, dtype=batch_input_ids.dtype)
+        batch_input_ids = torch.cat([batch_input_ids, stop], dim=-1)
+
+        mask_ext = torch.ones(
+            (B, batch_input_ids.shape[-1] - batch_attention_mask.shape[-1]),
+            device=device, dtype=batch_attention_mask.dtype,
+        )
+        batch_attention_mask = torch.cat([batch_attention_mask, mask_ext], dim=-1)
+
+        # Build labels (mirrors _prepare_labels_for_action_prediction)
+        labels = torch.full((B, max_len), IGNORE_INDEX, device=device, dtype=batch_input_ids.dtype)
+        ARBIT = ACTION_TOKEN_BEGIN_IDX + 1
+        labels_action = torch.full(
+            (B, ACTION_DIM * NUM_ACTIONS_CHUNK), ARBIT, device=device, dtype=labels.dtype
+        )
+        labels_stop = torch.full((B, 1), STOP_INDEX, device=device, dtype=labels.dtype)
+        labels = torch.cat([labels, labels_action, labels_stop], dim=-1)
+
+        input_embeddings = vla.get_input_embeddings()(batch_input_ids)
+        all_actions_mask = vla._process_action_masks(labels)
+
+        language_embeddings = input_embeddings[~all_actions_mask].reshape(
+            B, -1, input_embeddings.shape[2]
+        )
+        input_embeddings = input_embeddings * ~all_actions_mask.unsqueeze(-1)
+
+        projected_patch_embeddings = vla._process_vision_features(
+            batch_pixel_values, language_embeddings, use_film
+        )
+
+        use_proprio = eval_cfg.use_proprio and proprio_projector is not None and all_proprios[0] is not None
+        if use_proprio:
+            batch_proprio = torch.stack(all_proprios).to(device, dtype=dtype)
+            projected_patch_embeddings = vla._process_proprio_features(
+                projected_patch_embeddings, batch_proprio, proprio_projector
+            )
+
+        NUM_PATCHES = vla.vision_backbone.get_num_patches() * vla.vision_backbone.get_num_images_in_input()
+        if use_proprio:
+            NUM_PATCHES += 1
+
+        multimodal_embeddings, multimodal_attention_mask = vla._build_multimodal_attention(
+            input_embeddings, projected_patch_embeddings, batch_attention_mask
+        )
+
+        output = vla.language_model(
+            input_ids=None,
+            attention_mask=multimodal_attention_mask,
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=multimodal_embeddings,
+            labels=None,
+            use_cache=None,
+            output_attentions=False,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+        action_start = NUM_PATCHES + NUM_PROMPT_TOKENS
+        action_end = action_start + ACTION_DIM * NUM_ACTIONS_CHUNK
+        predicted_token_ids = output.logits[:, action_start:action_end].argmax(dim=2).cpu().numpy()
+
+        discretized = vla.vocab_size - predicted_token_ids
+        discretized = np.clip(discretized - 1, a_min=0, a_max=vla.bin_centers.shape[0] - 1)
+
+        all_actions = []
+        for b in range(B):
+            normalized = vla.bin_centers[discretized[b]].reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+            actions = vla._unnormalize_actions(normalized, eval_cfg.unnorm_key)
+            all_actions.append([actions[i] for i in range(len(actions))])
+
+        return all_actions
+
+
+def _run_libero_task_slice(task_ids, cfg, eval_cfg, resize_size, conn):
+    import json
+    import numpy as np
+
+    from experiments.robot.libero.libero_utils import (
+        get_libero_dummy_action,
+        get_libero_env,
+        get_libero_image,
+        get_libero_wrist_image,
+        quat2axisangle,
+    )
+    from experiments.robot.openvla_utils import resize_image_for_policy
+    from experiments.robot.robot_utils import normalize_gripper_action, invert_gripper_action
+    from libero.libero import benchmark
+
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict[cfg.libero_eval_task_suite_name]()
+    task_max_steps = _get_libero_task_max_steps(cfg.libero_eval_task_suite_name)
+
+    total_successes = 0
+    total_episodes = 0
+    per_task_metrics = {}
+
+    try:
+        for task_id in task_ids:
+            task = task_suite.get_task(task_id)
+            env, task_description = get_libero_env(task, "openvla", resolution=cfg.libero_eval_env_img_res)
+            initial_states = task_suite.get_task_init_states(task_id)
+            custom_initial_states = None
+            if cfg.libero_eval_initial_states_path != "DEFAULT":
+                with open(cfg.libero_eval_initial_states_path, "r") as file:
+                    custom_initial_states = json.load(file)
+
+            task_successes = 0
+            task_episodes = 0
+            max_trials = min(cfg.libero_eval_num_trials_per_task, len(initial_states))
+
+            try:
+                for episode_idx in range(max_trials):
+                    if custom_initial_states is None:
+                        initial_state = initial_states[episode_idx]
+                    else:
+                        task_key = task_description.replace(" ", "_")
+                        episode_key = f"demo_{episode_idx}"
+                        episode_info = custom_initial_states[task_key][episode_key]
+                        if not episode_info["success"]:
+                            continue
+                        initial_state = np.array(episode_info["initial_state"])
+
+                    env.reset()
+                    obs = env.set_init_state(initial_state)
+                    action_queue = deque(maxlen=cfg.libero_eval_num_open_loop_steps)
+                    success = False
+                    t = 0
+
+                    while t < task_max_steps + cfg.libero_eval_num_steps_wait:
+                        if t < cfg.libero_eval_num_steps_wait:
+                            obs, _, done, _ = env.step(get_libero_dummy_action("openvla"))
+                            t += 1
+                            if done:
+                                success = True
+                                break
+                            continue
+
+                        if len(action_queue) == 0:
+                            primary_image = get_libero_image(obs)
+                            wrist_image = get_libero_wrist_image(obs)
+                            observation = {
+                                "full_image": resize_image_for_policy(primary_image, resize_size),
+                                "wrist_image": resize_image_for_policy(wrist_image, resize_size),
+                                "state": np.concatenate(
+                                    (
+                                        obs["robot0_eef_pos"],
+                                        quat2axisangle(obs["robot0_eef_quat"]),
+                                        obs["robot0_gripper_qpos"],
+                                    )
+                                ),
+                            }
+                            if not _safe_conn_send(
+                                conn,
+                                {
+                                    "type": "action_request",
+                                    "task_description": task_description,
+                                    "observation": observation,
+                                },
+                            ):
+                                return
+                            try:
+                                actions = conn.recv()
+                            except (EOFError, BrokenPipeError, OSError):
+                                print("LIBERO eval worker: parent connection lost, exiting.", flush=True)
+                                return
+                            action_queue.extend(actions)
+
+                        action = np.asarray(action_queue.popleft()).copy()
+                        action = normalize_gripper_action(action, binarize=True)
+                        action = invert_gripper_action(action)
+                        obs, _, done, _ = env.step(action.tolist())
+                        t += 1
+                        if done:
+                            success = True
+                            break
+
+                    task_episodes += 1
+                    total_episodes += 1
+                    if success:
+                        task_successes += 1
+                        total_successes += 1
+            finally:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+
+            task_success_rate = float(task_successes) / float(task_episodes) if task_episodes > 0 else 0.0
+            per_task_metrics[task_description] = {
+                "episodes": task_episodes,
+                "successes": task_successes,
+                "success_rate": task_success_rate,
+            }
+
+        _safe_conn_send(
+            conn,
+            {
+                "type": "result",
+                "total_successes": total_successes,
+                "total_episodes": total_episodes,
+                "per_task_metrics": per_task_metrics,
+            },
+        )
+    except Exception as exc:
+        import traceback
+        import sys
+
+        tb_str = traceback.format_exc()
+        print(f"LIBERO eval worker exception:\n{tb_str}", file=sys.stderr, flush=True)
+        _safe_conn_send(
+            conn,
+            {
+                "type": "error",
+                "error": repr(exc),
+                "traceback": tb_str,
+            },
+        )
+    finally:
+        conn.close()
+
+
+def _run_libero_real_eval_parallel(
+    cfg,
+    eval_cfg,
+    resize_size,
+    vla,
+    processor,
+    action_head,
+    proprio_projector,
+    noisy_action_projector,
+    log_step,
+):
+    import numpy as np
+
+    from experiments.robot.robot_utils import get_action
+
+    task_ids = _get_libero_eval_task_ids(cfg)
+    if cfg.libero_eval_num_open_loop_steps != NUM_ACTIONS_CHUNK:
+        print(
+            f"Warning: libero_eval_num_open_loop_steps ({cfg.libero_eval_num_open_loop_steps}) does not match "
+            f"NUM_ACTIONS_CHUNK ({NUM_ACTIONS_CHUNK})."
+        )
+
+    num_workers = max(1, min(cfg.libero_eval_num_workers, len(task_ids)))
+    task_slices = [task_ids[i::num_workers] for i in range(num_workers)]
+    task_slices = [task_slice for task_slice in task_slices if task_slice]
+    ctx = mp.get_context("spawn")
+    processes = []
+    parent_conns = []
+    total_successes = 0
+    total_episodes = 0
+    per_task_metrics = {}
+
+    for task_slice in task_slices:
+        parent_conn, child_conn = ctx.Pipe()
+        process = ctx.Process(
+            target=_run_libero_task_slice,
+            args=(task_slice, cfg, eval_cfg, resize_size, child_conn),
+        )
+        process.start()
+        child_conn.close()
+        processes.append(process)
+        parent_conns.append(parent_conn)
+
+    use_batched_inference = action_head is None
+    if use_batched_inference:
+        print(f"LIBERO eval: using batched inference with {num_workers} workers")
+
+    try:
+        active_conns = list(parent_conns)
+        failed_workers = []
+        while active_conns:
+            ready_conns = mp.connection.wait(active_conns, timeout=2.0)
+
+            action_requests = []
+            for conn in ready_conns:
+                try:
+                    message = conn.recv()
+                except EOFError:
+                    active_conns.remove(conn)
+                    conn.close()
+                    failed_workers.append(conn)
+                    print("Warning: LIBERO eval worker closed unexpectedly (EOFError). Check worker stderr for details.")
+                    continue
+                message_type = message["type"]
+                if message_type == "action_request":
+                    action_requests.append((conn, message))
+                elif message_type == "result":
+                    total_successes += message["total_successes"]
+                    total_episodes += message["total_episodes"]
+                    per_task_metrics.update(message["per_task_metrics"])
+                    active_conns.remove(conn)
+                    conn.close()
+                elif message_type == "error":
+                    active_conns.remove(conn)
+                    conn.close()
+                    failed_workers.append(conn)
+                    print(
+                        "LIBERO eval worker failed with error:\n"
+                        f"{message['error']}\n{message['traceback']}"
+                    )
+                else:
+                    raise ValueError(f"Unknown worker message type: {message_type}")
+
+            if action_requests:
+                if use_batched_inference:
+                    observations = [msg["observation"] for _, msg in action_requests]
+                    task_descriptions = [msg["task_description"] for _, msg in action_requests]
+                    batch_results = get_vla_action_batch(
+                        eval_cfg=eval_cfg,
+                        vla=vla,
+                        processor=processor,
+                        observations=observations,
+                        task_descriptions=task_descriptions,
+                        proprio_projector=proprio_projector,
+                        use_film=cfg.use_film,
+                    )
+                    for (conn, _), actions in zip(action_requests, batch_results):
+                        conn.send(actions)
+                else:
+                    for conn, msg in action_requests:
+                        actions = get_action(
+                            cfg=eval_cfg,
+                            model=vla,
+                            obs=msg["observation"],
+                            task_label=msg["task_description"],
+                            processor=processor,
+                            action_head=action_head,
+                            proprio_projector=proprio_projector,
+                            noisy_action_projector=noisy_action_projector,
+                            use_film=cfg.use_film,
+                        )
+                        conn.send(actions)
+
+            for idx, proc in enumerate(processes):
+                if not proc.is_alive() and proc.exitcode and proc.exitcode != 0:
+                    if idx < len(parent_conns) and parent_conns[idx] in active_conns:
+                        print(f"Warning: LIBERO eval worker PID {proc.pid} exited with code {proc.exitcode}")
+                        try:
+                            parent_conns[idx].close()
+                        except Exception:
+                            pass
+                        active_conns = [c for c in active_conns if c is not parent_conns[idx]]
+            if not active_conns:
+                break
+    finally:
+        for conn in parent_conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        for process in processes:
+            process.join(timeout=1.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
+
+    for proc in processes:
+        if proc.exitcode and proc.exitcode != 0:
+            print(f"Warning: LIBERO eval worker PID {proc.pid} exited with code {proc.exitcode}")
+
+    return total_successes, total_episodes, per_task_metrics
+
+
+def _run_libero_real_eval_sequential(
+    cfg,
+    eval_cfg,
+    resize_size,
+    vla,
+    processor,
+    action_head,
+    proprio_projector,
+    noisy_action_projector,
+    log_step,
+):
+    import json
+    import numpy as np
+    from libero.libero import benchmark
+
+    from experiments.robot.libero.libero_utils import (
+        get_libero_dummy_action,
+        get_libero_env,
+        get_libero_image,
+        get_libero_wrist_image,
+        quat2axisangle,
+    )
+    from experiments.robot.openvla_utils import resize_image_for_policy
+    from experiments.robot.robot_utils import get_action, invert_gripper_action, normalize_gripper_action
+
+    task_max_steps = _get_libero_task_max_steps(cfg.libero_eval_task_suite_name)
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict[cfg.libero_eval_task_suite_name]()
+    num_tasks = task_suite.n_tasks
+    if cfg.libero_eval_num_open_loop_steps != NUM_ACTIONS_CHUNK:
+        print(
+            f"Warning: libero_eval_num_open_loop_steps ({cfg.libero_eval_num_open_loop_steps}) does not match "
+            f"NUM_ACTIONS_CHUNK ({NUM_ACTIONS_CHUNK})."
+        )
+    if cfg.libero_eval_max_tasks is not None and cfg.libero_eval_max_tasks > 0:
+        num_tasks = min(num_tasks, cfg.libero_eval_max_tasks)
+
+    per_task_metrics = {}
+    total_successes = 0
+    total_episodes = 0
+
+    for task_id in tqdm.tqdm(range(num_tasks), desc=f"LIBERO eval @ {log_step}", leave=False):
+        task = task_suite.get_task(task_id)
+        env, task_description = get_libero_env(task, "openvla", resolution=cfg.libero_eval_env_img_res)
+        initial_states = task_suite.get_task_init_states(task_id)
+        custom_initial_states = None
+        if cfg.libero_eval_initial_states_path != "DEFAULT":
+            with open(cfg.libero_eval_initial_states_path, "r") as file:
+                custom_initial_states = json.load(file)
+
+        task_successes = 0
+        task_episodes = 0
+        max_trials = min(cfg.libero_eval_num_trials_per_task, len(initial_states))
+
+        try:
+            for episode_idx in range(max_trials):
+                if custom_initial_states is None:
+                    initial_state = initial_states[episode_idx]
+                else:
+                    task_key = task_description.replace(" ", "_")
+                    episode_key = f"demo_{episode_idx}"
+                    episode_info = custom_initial_states[task_key][episode_key]
+                    if not episode_info["success"]:
+                        continue
+                    initial_state = np.array(episode_info["initial_state"])
+
+                env.reset()
+                obs = env.set_init_state(initial_state)
+                action_queue = deque(maxlen=cfg.libero_eval_num_open_loop_steps)
+                success = False
+                t = 0
+
+                try:
+                    while t < task_max_steps + cfg.libero_eval_num_steps_wait:
+                        if t < cfg.libero_eval_num_steps_wait:
+                            obs, _, done, _ = env.step(get_libero_dummy_action("openvla"))
+                            t += 1
+                            continue
+
+                        if len(action_queue) == 0:
+                            primary_image = get_libero_image(obs)
+                            wrist_image = get_libero_wrist_image(obs)
+                            observation = {
+                                "full_image": resize_image_for_policy(primary_image, resize_size),
+                                "wrist_image": resize_image_for_policy(wrist_image, resize_size),
+                                "state": np.concatenate(
+                                    (
+                                        obs["robot0_eef_pos"],
+                                        quat2axisangle(obs["robot0_eef_quat"]),
+                                        obs["robot0_gripper_qpos"],
+                                    )
+                                ),
+                            }
+                            actions = get_action(
+                                cfg=eval_cfg,
+                                model=vla,
+                                obs=observation,
+                                task_label=task_description,
+                                processor=processor,
+                                action_head=action_head,
+                                proprio_projector=proprio_projector,
+                                noisy_action_projector=noisy_action_projector,
+                                use_film=cfg.use_film,
+                            )
+                            action_queue.extend(actions)
+
+                        action = action_queue.popleft()
+                        action = normalize_gripper_action(action, binarize=True)
+                        action = invert_gripper_action(action)
+
+                        obs, _, done, _ = env.step(action.tolist())
+                        if done:
+                            success = True
+                            break
+                        t += 1
+                except Exception as e:
+                    import traceback
+                    print(f"LIBERO eval episode error (task={task_id}, ep={episode_idx}): {e}")
+                    traceback.print_exc()
+
+                task_episodes += 1
+                total_episodes += 1
+                if success:
+                    task_successes += 1
+                    total_successes += 1
+        finally:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+        task_success_rate = float(task_successes) / float(task_episodes) if task_episodes > 0 else 0.0
+        per_task_metrics[task_description] = {
+            "episodes": task_episodes,
+            "successes": task_successes,
+            "success_rate": task_success_rate,
+        }
+
+    return total_successes, total_episodes, per_task_metrics
+
+
+def run_libero_real_eval(
+    cfg,
+    vla,
+    processor,
+    action_head,
+    proprio_projector,
+    noisy_action_projector,
+    train_dataset_statistics,
+    log_step,
+    run_dir,
+    writer: Optional[SummaryWriter] = None,
+) -> Dict[str, float]:
+    from experiments.robot.robot_utils import get_image_resize_size, set_seed_everywhere
+
+    module_modes = []
+    for module in (vla, action_head, proprio_projector, noisy_action_projector):
+        if module is not None:
+            module_modes.append((module, module.training))
+            module.eval()
+
+    eval_log_dir = run_dir / "libero_eval"
+    os.makedirs(eval_log_dir, exist_ok=True)
+    log_path = eval_log_dir / f"step_{log_step}.log"
+
+    try:
+        set_seed_everywhere(cfg.libero_eval_seed)
+        eval_cfg = build_libero_eval_cfg(
+            cfg,
+            vla,
+            proprio_projector,
+            preferred_norm_stats=train_dataset_statistics,
+        )
+        resize_size = get_image_resize_size(eval_cfg)
+
+        if cfg.libero_eval_num_workers > 1:
+            total_successes, total_episodes, per_task_metrics = _run_libero_real_eval_parallel(
+                cfg=cfg,
+                eval_cfg=eval_cfg,
+                resize_size=resize_size,
+                vla=vla,
+                processor=processor,
+                action_head=action_head,
+                proprio_projector=proprio_projector,
+                noisy_action_projector=noisy_action_projector,
+                log_step=log_step,
+            )
+        else:
+            total_successes, total_episodes, per_task_metrics = _run_libero_real_eval_sequential(
+                cfg=cfg,
+                eval_cfg=eval_cfg,
+                resize_size=resize_size,
+                vla=vla,
+                processor=processor,
+                action_head=action_head,
+                proprio_projector=proprio_projector,
+                noisy_action_projector=noisy_action_projector,
+                log_step=log_step,
+            )
+
+        with open(log_path, "w") as log_file:
+            log_file.write(f"step={log_step}\n")
+            log_file.write(f"task_suite={cfg.libero_eval_task_suite_name}\n")
+            log_file.write(f"num_trials_per_task={cfg.libero_eval_num_trials_per_task}\n")
+            log_file.write(f"num_workers={cfg.libero_eval_num_workers}\n")
+            for task_description, task_stats in per_task_metrics.items():
+                log_file.write(
+                    f"task={task_description} episodes={task_stats['episodes']} successes={task_stats['successes']} "
+                    f"success_rate={task_stats['success_rate']:.4f}\n"
+                )
+
+        success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0
+        avg_success_rate = (
+            sum(task_stats["success_rate"] for task_stats in per_task_metrics.values()) / float(len(per_task_metrics))
+            if per_task_metrics
+            else 0.0
+        )
+        eval_metrics = {
+            "success_rate": success_rate,
+            "avg_success_rate": avg_success_rate,
+            "global_success_rate": success_rate,
+            "libero_total_episodes": float(total_episodes),
+            "libero_total_successes": float(total_successes),
+            "libero_num_tasks": float(len(per_task_metrics)),
+        }
+
+        if writer is not None:
+            writer.add_scalar("libero_eval/success_rate", success_rate, log_step)
+            writer.add_scalar("libero_eval/avg_success_rate", avg_success_rate, log_step)
+            writer.add_scalar("libero_eval/total_episodes", total_episodes, log_step)
+            writer.add_scalar("libero_eval/total_successes", total_successes, log_step)
+            for task_description, task_stats in per_task_metrics.items():
+                sanitized_task_description = task_description.replace(" ", "_").replace("/", "_")
+                writer.add_scalar(f"libero_eval/tasks/{sanitized_task_description}", task_stats["success_rate"], log_step)
+
+        wandb.log(
+            {
+                "LIBERO Eval/Success Rate": success_rate,
+                "LIBERO Eval/Average Task Success Rate": avg_success_rate,
+                "LIBERO Eval/Total Episodes": total_episodes,
+                "LIBERO Eval/Total Successes": total_successes,
+            },
+            step=log_step,
+        )
+        print(
+            f"LIBERO real-env eval at step {log_step}: avg_success_rate={avg_success_rate:.4f}, "
+            f"global_success_rate={success_rate:.4f}, successes={total_successes}/{total_episodes}, "
+            f"workers={cfg.libero_eval_num_workers}"
+        )
+        return eval_metrics
+    finally:
+        for module, was_training in module_modes:
+            module.train(was_training)
+
+
+def run_maniskill_real_eval(
+    cfg,
+    vla,
+    processor,
+    action_head,
+    proprio_projector,
+    noisy_action_projector,
+    train_dataset_statistics,
+    log_step,
+    run_dir,
+    writer: Optional[SummaryWriter] = None,
+) -> Dict[str, float]:
+    """ManiSkill (PickCube-v1 by default) rollout evaluator.
+
+    Mirrors ``run_libero_real_eval`` so that the returned metric dict slots into
+    ``maybe_save_success_rate_checkpoints`` without any code changes downstream.
+    """
+    import numpy as np
+
+    from experiments.robot.maniskill.maniskill_utils import (
+        build_maniskill_env,
+        clip_maniskill_action,
+        extract_done_mask,
+        extract_maniskill_observation,
+        extract_success_mask,
+        seeds_for_batch,
+    )
+    from experiments.robot.robot_utils import set_seed_everywhere
+
+    module_modes = []
+    for module in (vla, action_head, proprio_projector, noisy_action_projector):
+        if module is not None:
+            module_modes.append((module, module.training))
+            module.eval()
+
+    eval_log_dir = run_dir / "maniskill_eval"
+    os.makedirs(eval_log_dir, exist_ok=True)
+    log_path = eval_log_dir / f"step_{log_step}.log"
+
+    try:
+        set_seed_everywhere(cfg.maniskill_eval_seed)
+
+        eval_cfg = build_maniskill_eval_cfg(
+            cfg,
+            vla,
+            proprio_projector,
+            preferred_norm_stats=train_dataset_statistics,
+        )
+
+        if action_head is not None:
+            print(
+                "Warning: ManiSkill eval currently uses the discrete-action batched path "
+                "(`get_vla_action_batch`); a non-None `action_head` is being ignored."
+            )
+
+        total_episodes_target = int(cfg.maniskill_eval_num_episodes)
+        if total_episodes_target <= 0:
+            raise ValueError(f"maniskill_eval_num_episodes must be positive, got {total_episodes_target}")
+        num_envs = int(min(cfg.maniskill_eval_num_envs, total_episodes_target))
+        if num_envs <= 0:
+            raise ValueError(f"maniskill_eval_num_envs must be positive, got {cfg.maniskill_eval_num_envs}")
+
+        env = build_maniskill_env(
+            task_id=cfg.maniskill_eval_task_id,
+            num_envs=num_envs,
+            obs_mode=cfg.maniskill_eval_obs_mode,
+            control_mode=cfg.maniskill_eval_control_mode,
+            camera_name=cfg.maniskill_eval_camera_name,
+            wrist_camera_name=(
+                cfg.maniskill_eval_wrist_camera_name
+                if eval_cfg.num_images_in_input > 1
+                else None
+            ),
+            camera_res=cfg.maniskill_eval_camera_res,
+            max_episode_steps=cfg.maniskill_eval_max_steps,
+            sim_backend=cfg.maniskill_eval_sim_backend,
+            robot_uids=(
+                cfg.maniskill_eval_robot_uids
+                if eval_cfg.num_images_in_input > 1
+                else None
+            ),
+        )
+        if cfg.maniskill_eval_num_open_loop_steps != NUM_ACTIONS_CHUNK:
+            print(
+                f"Warning: maniskill_eval_num_open_loop_steps ({cfg.maniskill_eval_num_open_loop_steps}) "
+                f"does not match NUM_ACTIONS_CHUNK ({NUM_ACTIONS_CHUNK})."
+            )
+
+        total_successes = 0
+        total_episodes = 0
+        per_batch_metrics = []
+        ep_idx = 0
+
+        try:
+            while ep_idx < total_episodes_target:
+                this_batch = min(num_envs, total_episodes_target - ep_idx)
+                # The vectorized env was built with `num_envs` envs; if the
+                # tail batch is smaller we still step all envs but only count
+                # the first `this_batch` for stats.
+                batch_seeds = list(seeds_for_batch(cfg.maniskill_eval_seed, ep_idx, num_envs))
+
+                obs, _ = env.reset(seed=batch_seeds)
+
+                succeeded = np.zeros(num_envs, dtype=bool)
+                finished = np.zeros(num_envs, dtype=bool)
+                action_queues = [deque(maxlen=cfg.maniskill_eval_num_open_loop_steps) for _ in range(num_envs)]
+
+                for _ in range(cfg.maniskill_eval_max_steps):
+                    if all(len(q) == 0 for q in action_queues):
+                        observations = [
+                            extract_maniskill_observation(
+                                obs,
+                                env_idx=i,
+                                camera_name=cfg.maniskill_eval_camera_name,
+                                use_proprio=eval_cfg.use_proprio,
+                                wrist_camera_name=cfg.maniskill_eval_wrist_camera_name,
+                                include_wrist_image=eval_cfg.num_images_in_input > 1,
+                            )
+                            for i in range(num_envs)
+                        ]
+                        task_descs = [cfg.maniskill_eval_language_instruction] * num_envs
+                        batch_actions = get_vla_action_batch(
+                            eval_cfg=eval_cfg,
+                            vla=vla,
+                            processor=processor,
+                            observations=observations,
+                            task_descriptions=task_descs,
+                            proprio_projector=proprio_projector if eval_cfg.use_proprio else None,
+                            use_film=cfg.use_film,
+                        )
+                        for i in range(num_envs):
+                            action_queues[i].extend(batch_actions[i])
+
+                    step_action = np.stack(
+                        [np.asarray(action_queues[i].popleft(), dtype=np.float32) for i in range(num_envs)],
+                        axis=0,
+                    )
+                    step_action = clip_maniskill_action(step_action)
+
+                    obs, _reward, terminated, truncated, info = env.step(step_action)
+
+                    succ_mask = extract_success_mask(info, num_envs)
+                    new_success = succ_mask & ~finished
+                    succeeded |= new_success
+                    done_mask = extract_done_mask(terminated, truncated, num_envs)
+                    finished |= new_success | done_mask
+
+                    if finished.all():
+                        break
+
+                batch_successes = int(succeeded[:this_batch].sum())
+                total_successes += batch_successes
+                total_episodes += this_batch
+                per_batch_metrics.append(
+                    {
+                        "ep_start": ep_idx,
+                        "ep_end": ep_idx + this_batch,
+                        "successes": batch_successes,
+                        "episodes": this_batch,
+                        "seeds": batch_seeds[:this_batch],
+                    }
+                )
+                ep_idx += this_batch
+        finally:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+        success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0
+        avg_success_rate = success_rate  # single-task eval: per-task average == global
+
+        with open(log_path, "w") as log_file:
+            log_file.write(f"step={log_step}\n")
+            log_file.write(f"task_id={cfg.maniskill_eval_task_id}\n")
+            log_file.write(f"control_mode={cfg.maniskill_eval_control_mode}\n")
+            log_file.write(f"obs_mode={cfg.maniskill_eval_obs_mode}\n")
+            log_file.write(f"camera={cfg.maniskill_eval_camera_name}@{cfg.maniskill_eval_camera_res}\n")
+            log_file.write(f"num_envs={num_envs}\n")
+            log_file.write(f"num_episodes={total_episodes}\n")
+            log_file.write(f"max_steps={cfg.maniskill_eval_max_steps}\n")
+            log_file.write(f"open_loop_steps={cfg.maniskill_eval_num_open_loop_steps}\n")
+            log_file.write(f"successes={total_successes}\n")
+            log_file.write(f"success_rate={success_rate:.4f}\n")
+            for batch_stats in per_batch_metrics:
+                log_file.write(
+                    "batch ep=[{ep_start},{ep_end}) successes={successes}/{episodes} "
+                    "seeds={seeds}\n".format(**batch_stats)
+                )
+
+        eval_metrics = {
+            "success_rate": success_rate,
+            "avg_success_rate": avg_success_rate,
+            "global_success_rate": success_rate,
+            "maniskill_total_episodes": float(total_episodes),
+            "maniskill_total_successes": float(total_successes),
+            "maniskill_num_envs": float(num_envs),
+        }
+
+        if writer is not None:
+            writer.add_scalar("maniskill_eval/success_rate", success_rate, log_step)
+            writer.add_scalar("maniskill_eval/avg_success_rate", avg_success_rate, log_step)
+            writer.add_scalar("maniskill_eval/total_episodes", total_episodes, log_step)
+            writer.add_scalar("maniskill_eval/total_successes", total_successes, log_step)
+
+        wandb.log(
+            {
+                "ManiSkill Eval/Success Rate": success_rate,
+                "ManiSkill Eval/Average Task Success Rate": avg_success_rate,
+                "ManiSkill Eval/Total Episodes": total_episodes,
+                "ManiSkill Eval/Total Successes": total_successes,
+            },
+            step=log_step,
+        )
+        print(
+            f"ManiSkill real-env eval at step {log_step}: success_rate={success_rate:.4f}, "
+            f"successes={total_successes}/{total_episodes}, "
+            f"task={cfg.maniskill_eval_task_id}, num_envs={num_envs}"
+        )
+        return eval_metrics
+    finally:
+        for module, was_training in module_modes:
+            module.train(was_training)
+
+
+def _ensure_cached_module_files_writable(obj) -> None:
+    """
+    HuggingFace caches dynamic module files (e.g. processing_prismatic.py) from the
+    model directory. If the source files are read-only, the cached copies inherit those
+    permissions. When processor.save_pretrained() is called, custom_object_save() uses
+    shutil.copy which preserves permissions.  If multiple auto-mapped classes share the
+    same module file, the second copy attempt fails with PermissionError because the
+    destination was already written as read-only by the first copy.
+
+    This helper makes the cached source files writable so that shutil.copy produces
+    writable destinations, preventing the PermissionError cascade.
+    """
+    import sys as _sys
+    import stat
+
+    seen = set()
+    objects_to_check = [obj]
+    if hasattr(obj, "attributes"):
+        for attr_name in getattr(obj, "attributes", []):
+            attr = getattr(obj, attr_name, None)
+            if attr is not None:
+                objects_to_check.append(attr)
+    if hasattr(obj, "config"):
+        objects_to_check.append(obj.config)
+
+    for o in objects_to_check:
+        module_name = type(o).__module__
+        module = _sys.modules.get(module_name)
+        if module is None or not hasattr(module, "__file__") or module.__file__ is None:
+            continue
+        fpath = Path(module.__file__)
+        if fpath in seen or not fpath.exists():
+            continue
+        seen.add(fpath)
+        current_mode = fpath.stat().st_mode
+        if not (current_mode & stat.S_IWUSR):
+            try:
+                fpath.chmod(current_mode | stat.S_IWUSR | stat.S_IWGRP)
+            except OSError:
+                pass
 
 
 def save_training_checkpoint(

@@ -7,7 +7,7 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也�
 os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
 # 注意: CUDA_VISIBLE_DEVICES 现在通过命令行参数设置
-# os.environ["CUDA_VISIBLE_DEVICES"] = "6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
 # 防止 transformers 库的 tokenizer 并行化警告
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["VK_ICD_FILENAMES"] = "/etc/vulkan/icd.d/nvidia_icd.json"
@@ -21,6 +21,7 @@ from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 import math
 
+
 import numpy as np
 
 import ray
@@ -31,125 +32,133 @@ import deepspeed
 import torch.distributed as distributed 
 from torch.utils.tensorboard import SummaryWriter
 
-# MetaWorld + MLP 组件与常量
-from rl.policies.mlp_actor_critic import MLPActorCriticDiscrete
+# OpenVLA 组件与常量
+# zzq1120 单独从openvla_utils取出这两个方法
+from experiments.robot.sole_utils import (
+    get_processor,
+)
+
+from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
+from experiments.robot.libero.libero_utils import GenerateConfig
+from rl.actor_critic_model_discrete import ActorCritic
+from rl.utils import prepare_one_obs
+from rl.maniskill_env import ManiSkillSingleEnv
 # 训练/推理通信（保持接口不变）
 from ds_com import TrainerActorCom, InferenceActorCom
 from rl.com_utils import find_free_port
 
-STATE_DIM = 39
-ACTION_DIM = 4
-N_ACTION_BINS = 256
-METAWORLD_TASK_NAMES = [
-    "assembly-v3",
-    "basketball-v3",
-    "bin-picking-v3",
-    "box-close-v3",
-    "button-press-topdown-v3",
-    "button-press-topdown-wall-v3",
-    "button-press-v3",
-    "button-press-wall-v3",
-    "coffee-button-v3",
-    "coffee-pull-v3",
-    "coffee-push-v3",
-    "dial-turn-v3",
-    "disassemble-v3",
-    "door-close-v3",
-    "door-lock-v3",
-    "door-open-v3",
-    "door-unlock-v3",
-    "drawer-close-v3",
-    "drawer-open-v3",
-    "faucet-close-v3",
-    "faucet-open-v3",
-    "hammer-v3",
-    "hand-insert-v3",
-    "handle-press-side-v3",
-    "handle-press-v3",
-    "handle-pull-side-v3",
-    "handle-pull-v3",
-    "lever-pull-v3",
-    "peg-insert-side-v3",
-    "peg-unplug-side-v3",
-    "pick-out-of-hole-v3",
-    "pick-place-v3",
-    "pick-place-wall-v3",
-    "plate-slide-back-side-v3",
-    "plate-slide-back-v3",
-    "plate-slide-side-v3",
-    "plate-slide-v3",
-    "push-back-v3",
-    "push-v3",
-    "push-wall-v3",
-    "reach-v3",
-    "reach-wall-v3",
-    "shelf-place-v3",
-    "soccer-v3",
-    "stick-pull-v3",
-    "stick-push-v3",
-    "sweep-into-v3",
-    "sweep-v3",
-    "window-close-v3",
-    "window-open-v3",
-]
+#region agent log
+def _agent_log(hypothesis_id: str, location: str, message: str, data: Dict = None, run_id: str = "pre-fix"):
+    """调试日志：写入 .cursor/debug.log（NDJSON）。"""
+    try:
+        payload = {
+            "id": f"log_{int(time.time() * 1000)}",
+            "timestamp": int(time.time() * 1000),
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+        }
+        log_path = "/cpfs01/liuwei_workspace/openvla_oft_rl/.cursor/debug.log"
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        # 调试失败不影响主流程
+        pass
+#endregion agent log
+
+
+class _SimpleEngine:
+    """单机 / world_size=1 时绕开 DeepSpeed.initialize 的最小引擎封装。"""
+    def __init__(self, module: torch.nn.Module, optimizer: torch.optim.Optimizer, grad_accum_steps: int):
+        self.module = module
+        self.optimizer = optimizer
+        self.grad_accum_steps = int(max(1, grad_accum_steps))
+        self._accum = 0
+
+    def parameters(self):
+        return self.module.parameters()
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+    def backward(self, loss: torch.Tensor):
+        loss.backward()
+        self._accum += 1
+
+    def is_gradient_accumulation_boundary(self) -> bool:
+        return (self._accum % self.grad_accum_steps) == 0
+
+    def step(self):
+        if self.is_gradient_accumulation_boundary():
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
 
 # ================================================================
 # 0. 超参数与配置 - 命令行参数解析
 # ================================================================
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='MetaWorld MLP PPO Training')
+    parser = argparse.ArgumentParser(description='OpenVLA RL Training (PPO - No World Model)')
     
     # 环境变量
-    parser.add_argument('--cuda-visible-devices', type=str, default='6,7',
+    parser.add_argument('--cuda-visible-devices', type=str, default='4,5',
                         help='CUDA visible devices (default: 6,7)')
     
-    # 仅用于日志分组
-    parser.add_argument('--benchmark', type=str, default='metaworld',
-                        help='Experiment tag for logging (default: metaworld)')
-
-    parser.add_argument(
-        '--task-name',
-        type=str,
-        default='reach-v3',
-        choices=METAWORLD_TASK_NAMES,
-        help=f"MetaWorld task name (all tasks): {', '.join(METAWORLD_TASK_NAMES)}",
-    )
-    
-    # Task IDs
-    parser.add_argument('--task-ids', type=str, default='0,1,2,3,4,5,6,7,8,9',
-                        help='Comma-separated list of task IDs (default: 0,1,2,3,4,5,6,7,8,9)')
+    # ManiSkill 环境参数
+    parser.add_argument('--maniskill-task', type=str, default='PickCube-v1',
+                        help='ManiSkill task ID (default: PickCube-v1)')
+    parser.add_argument('--camera-name', type=str, default='base_camera',
+                        help='ManiSkill camera name (default: base_camera)')
+    parser.add_argument('--camera-res', type=int, default=224,
+                        help='Camera resolution (default: 224, match training distribution)')
+    parser.add_argument('--wrist-camera-name', type=str, default='hand_camera',
+                        help='ManiSkill wrist camera name (default: hand_camera)')
+    parser.add_argument('--robot-uids', type=str, default='panda_wristcam',
+                        help='ManiSkill robot UID; use panda_wristcam for dual-camera (default: panda_wristcam)')
+    parser.add_argument('--max-episode-steps', type=int, default=200,
+                        help='Max steps per episode (default: 100)')
+    parser.add_argument('--language-instruction', type=str,
+                        default='pick up the red cube and place it at the green target',
+                        help='Language instruction for the task')
+    parser.add_argument('--unnorm-key', type=str, default='maniskill_pickcube',
+                        help='Action un-normalization key (default: maniskill_pickcube)')
+    parser.add_argument('--sim-backend', type=str, default='cpu',
+                        choices=['gpu', 'cpu', 'auto'],
+                        help='ManiSkill sim backend (default: cpu)')
     
     # 分布式系统参数
     parser.add_argument('--num-trainer-gpus', type=int, default=1,
                         help='Number of trainer GPUs (default: 1)')
     parser.add_argument('--num-inference-actors', type=int, default=1,
                         help='Number of inference actors (default: 1)')
-    parser.add_argument('--num-rollout-workers', type=int, default=1,
-                        help='Number of rollout workers (default: 2)')
-    parser.add_argument('--num-eval-workers', type=int, default=10,
-                        help='Number of evaluation workers (default: 20)')
+    parser.add_argument('--num-rollout-workers', type=int, default=10,
+                        help='Number of rollout workers, each runs 1 ManiSkill env (default: 10)')
+    parser.add_argument('--num-eval-workers', type=int, default=5,
+                        help='Number of evaluation workers, each runs 1 ManiSkill env (default: 5)')
     parser.add_argument('--rollout-local-buf', type=int, default=64,
                         help='Rollout local buffer size (default: 64)')
-    parser.add_argument('--inference-batch', type=int, default=8,
+    parser.add_argument('--inference-batch', type=int, default=5,
                         help='Inference batch size (default: 8)')
     parser.add_argument('--inference-timeout-ms', type=int, default=300,
                         help='Inference timeout in milliseconds (default: 300)')
-    parser.add_argument('--replay-capacity', type=int, default=20000,
+    parser.add_argument('--replay-capacity', type=int, default=1000,
                         help='Replay buffer capacity (default: 1000)')
-    parser.add_argument('--train-batch-size', type=int, default=512,
+    parser.add_argument('--train-batch-size', type=int, default=12,
                         help='Training batch size (default: 12)')
-    parser.add_argument('--accumulation-steps', type=int, default=1,
-                        help='Gradient accumulation steps')
-    parser.add_argument('--train-iters', type=int, default=30000,
+    parser.add_argument('--accumulation-steps', type=int, default=8,
+                        help='Gradient accumulation steps (default: 21)')
+    parser.add_argument('--train-iters', type=int, default=60000,
                         help='Total training iterations (default: 30000)')
     
     # Ray 对象存储
-    parser.add_argument('--object-store-memory-gb', type=int, default=64,
+    parser.add_argument('--object-store-memory-gb', type=int, default=256,
                         help='Ray object store memory in GB (default: 256)')
     
     # Checkpoint
-    parser.add_argument('--ckpt-dir', type=str, default='/cpfs01/liuwei_workspace/models/finetune_rl',
+    parser.add_argument('--ckpt-dir', type=str, default='/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/rl_maniskill',
                         help='Checkpoint directory (default: /cpfs01/liuwei_workspace/models/finetune_rl)')
     parser.add_argument('--ckpt-every-steps', type=int, default=2000000,
                         help='Save checkpoint every N steps (default: 2000000)')
@@ -175,9 +184,9 @@ def parse_args():
                         help='Reward scaling factor (default: 1.0)')
     
     # 学习率调度参数
-    parser.add_argument('--value-lr', type=float, default=1e-4,
+    parser.add_argument('--value-lr', type=float, default=3e-5,
                         help='Value network learning rate (default: 1e-4)')
-    parser.add_argument('--policy-lr', type=float, default=1e-5,
+    parser.add_argument('--policy-lr', type=float, default=3e-6,
                         help='Policy network learning rate (default: 1e-5)')
     parser.add_argument('--value-warmup-steps', type=int, default=500,
                         help='Value network warmup steps (default: 500)')
@@ -196,30 +205,35 @@ def parse_args():
     parser.add_argument('--broadcast-group-name', type=str, default='trainer_to_inference_broadcast',
                         help='Broadcast group name (default: trainer_to_inference_broadcast)')
     
+    # OpenVLA 加载配置
     parser.add_argument('--use-bf16', action='store_true', default=True,
                         help='Use bfloat16 (default: True)')
     parser.add_argument('--no-bf16', action='store_false', dest='use_bf16',
                         help='Disable bfloat16')
+    parser.add_argument('--use-proprio', action='store_true', default=False,
+                        help='Use proprioceptive state (default: False)')
+    parser.add_argument('--num-images-in-input', type=int, default=2,
+                        help='Number of images in input (default: 2, base_camera + hand_camera)')
+    parser.add_argument('--pretrained-checkpoint', type=str,
+                        default='/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/20260429_182819_openvla-7b+maniskill_pickcube+b64+lr-0.0005+lora-r32+dropout-0.0--image_aug',
+                        help='Pretrained checkpoint path')
+    parser.add_argument('--checkpoint2', type=str,
+                        default='',
+                        help='Second checkpoint path')
     
-    parser.add_argument('--clip-mode', type=str, default='gipo',
+    parser.add_argument('--clip-mode', type=str, default='ppo',
                         choices=['ppo', 'sapo', 'gipo'],
-                        help='Clipping mode (default: gipo)')
+                        help='Clipping mode (default: ppo)')
     parser.add_argument('--exp-name', type=str, default=None,
                         help='Experiment name (default: auto-generated based on clip-mode)')
     
     # GAE 重计算选项
-    parser.add_argument('--recompute-value', action='store_true', default=False,
+    parser.add_argument('--recompute-value', action='store_true', default=True,
                         help='Recompute value using current model before GAE calculation (default: False)')
     
     # Resume 功能
     parser.add_argument('--resume-from', type=str, default=None,
                         help='Resume training from checkpoint directory (will load all parameters from saved args.json)')
-    
-    # Evaluation 参数
-    parser.add_argument('--eval-deterministic', action='store_true', default=True,
-                        help='Use deterministic actions during evaluation (default: True)')
-    parser.add_argument('--no-eval-deterministic', action='store_false', dest='eval_deterministic',
-                        help='Use stochastic actions during evaluation')
     
     args = parser.parse_args()
     
@@ -272,7 +286,7 @@ def parse_args():
     
     # 如果没有提供 exp_name，自动生成
     if args.exp_name is None:
-        args.exp_name = f"MetaWorld_MLP_{args.clip_mode}_discrete"
+        args.exp_name = f"ManiSkill_{args.maniskill_task}_{args.clip_mode}_DISCRETE"
     
     return args
 
@@ -282,10 +296,10 @@ def parse_args():
 @dataclass
 class Trajectory:
     """完整轨迹，用于按轨迹存储和 GAE 重计算"""
-    obs_list: List[np.ndarray]                # 每个时间步的低维状态向量
-    action_tokens: np.ndarray                 # shape: [T, ACTION_DIM]
+    obs_list: List[Dict[str, torch.Tensor]]  # 每个时间步的 obs (prepare_one_obs 的结果)
+    action_tokens: np.ndarray                 # shape: [T, NUM_ACTIONS_CHUNK, ACTION_DIM]
     rewards: np.ndarray                       # shape: [T,]
-    behaviour_logits: np.ndarray              # shape: [T, ACTION_DIM, VOCAB_SIZE]
+    behaviour_logits: np.ndarray              # shape: [T, NUM_ACTIONS_CHUNK, ACTION_DIM, VOCAB_SIZE]
     old_values: np.ndarray                    # shape: [T,] - RolloutWorker 收集时的 value
     bootstrap_value: float                    # 截断时的 bootstrap value
     is_terminal: bool                         # True=完整 episode，False=截断
@@ -299,10 +313,10 @@ class Trajectory:
 @dataclass
 class Experience:
     """单个样本，用于训练时的 mini-batch"""
-    obs: np.ndarray                         # 低维状态向量
-    action_token: np.ndarray                # 采样的离散动作 token (shape: [ACTION_DIM])
+    obs: Dict[str, torch.Tensor]            # prepare_one_obs 的结果（CPU tensors）
+    action_token: np.ndarray                # 采样的离散动作 token (shape: [NUM_ACTIONS_CHUNK, ACTION_DIM])
     advantage: float
-    behaviour_logits: np.ndarray            # 行为策略的 logits (shape: [ACTION_DIM, VOCAB_SIZE])
+    behaviour_logits: np.ndarray            # 行为策略的 logits (shape: [NUM_ACTIONS_CHUNK, ACTION_DIM, VOCAB_SIZE])
     value_target: float
 
 # ================================================================
@@ -564,102 +578,96 @@ class ReplayBufferActor:
         self.insert_counter = state['insert_counter']
         print(f"ReplayBuffer 已从 {load_path} 加载 (轨迹数: {len(self.trajectories)}, 步数: {self.total_steps()})")
 
-
 class BaseWorkerActor:
-    """rollout 和 eval worker 的共享逻辑。"""
-    def __init__(self, infer, replay, wid, stats_actor, task_name, task_ids):
+    """rollout 和 eval worker 的共享逻辑（ManiSkill 单环境版本，与 LIBERO 架构一致）。"""
+    def __init__(self, infer, replay, wid, stats_actor, cfg, env_args):
+        os.environ["VK_ICD_FILENAMES"] = "/etc/vulkan/icd.d/nvidia_icd.json"
+
         self.infer = infer
         self.replay = replay
         self.stats_actor = stats_actor
-        from rl.envs.metaworld_env import MetaWorldWrapperDiscrete
-
-        self.task_name = task_name
-        # 对外暴露 task_ids 列表
-        self.task_ids = task_ids
-        self.num_tasks = len(task_ids)
-        print(
-            f"BaseWorker {wid}: 正在初始化 {self.num_tasks} 个 MetaWorld 环境，"
-            f"task={self.task_name}, task_ids={task_ids}..."
-        )
-        self.envs = [
-            MetaWorldWrapperDiscrete(
-                env_name=self.task_name,
-                bins=N_ACTION_BINS,
-                render_mode="rgb_array"
-            ) for _ in task_ids]
-        print(f"BaseWorker {wid}: 环境初始化完成。")
-        
-        self.env = None
-        self.current_env_idx = -1
+        self.cfg = cfg
+        self.processor = get_processor(cfg)
         self.wid = wid
-        self.current_env_name = None
+
+        print(f"BaseWorker {wid}: 正在初始化 ManiSkill 环境 ({env_args['maniskill_task']})...")
+        self.env = ManiSkillSingleEnv(
+            task_id=env_args["maniskill_task"],
+            camera_name=env_args["camera_name"],
+            camera_res=env_args["camera_res"],
+            max_episode_steps=env_args["max_episode_steps"],
+            use_proprio=cfg.use_proprio,
+            sim_backend=env_args["sim_backend"],
+            language_instruction=env_args["language_instruction"],
+            render_backend="sapien_cuda:0",
+            wrist_camera_name=env_args.get("wrist_camera_name"),
+            robot_uids=env_args.get("robot_uids"),
+        )
+        print(f"BaseWorker {wid}: 环境初始化完成。")
+
+        self.task_description = self.env.task_description
+        self.current_env_name = self.env.get_name()
 
 @ray.remote(num_gpus=0.01)
 class RolloutWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, replay, wid, stats_actor, task_name, reward_scale, rollout_local_buf, task_ids):
-        super().__init__(infer, replay, wid, stats_actor, task_name, task_ids)
-        self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
+    def __init__(self, infer, replay, wid, stats_actor, cfg, env_args, reward_scale, torch_dtype, rollout_local_buf):
+        super().__init__(infer, replay, wid, stats_actor, cfg, env_args)
         self.local_buffer = []
         self.reward_scale = reward_scale
+        self.torch_dtype = torch_dtype
         self.rollout_local_buf = rollout_local_buf
-
-    def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[np.ndarray, Dict]:
-        failure_counts = np.array([sum(history) for history in self.env_outcome])
-        env_weights = failure_counts + 1
-        probabilities = env_weights / np.sum(env_weights)
-        self.current_env_idx = np.random.choice(self.num_tasks, p=probabilities)
-        self.env = self.envs[self.current_env_idx]
-        obs, info = self.env.reset(seed=seed)
-        self.current_env_name = getattr(self.env, "get_name", lambda: getattr(self.env, "env_name", "metaworld"))()
-        return obs, info
 
     def run(self):
         try:
-            current_seed = int(time.time() * 1000) + self.wid + os.getpid()
-            obs, info = self._reset_and_select_env(seed=current_seed)
+            current_seed = (int(time.time() * 1000) + self.wid + os.getpid()) % (2**32)
+            obs, info = self.env.reset(seed=current_seed)
             reward_sum, time_start, step_count_total = 0.0, time.time(), 0
             step_count = 0
             while True:
+                inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
                 action_env, action_token, logits, value, policy_version = ray.get(
-                    self.infer.request.remote(obs, deterministic=False)
+                    self.infer.request.remote(inputs_t, deterministic=False)
                 )
-                nxt, r, term, trunc, info = self.env.step(action_env)
-                reward_sum += r
-                chunk_reward = r * self.reward_scale
-                step_count_total += 1
-                done = bool(term or trunc)
-                # 记录当前时间戳作为 insert_step
+                chunk_reward, done = 0.0, False
+                for i in range(len(action_env)):
+                    single_action = action_env[i]
+                    nxt, r, term, trunc, info = self.env.step(single_action)
+                    reward_sum += r
+                    chunk_reward += r * self.reward_scale
+                    step_count_total += 1
+                    if term or trunc:
+                        done = True
+                        break
                 insert_step = int(time.time() * 1000)
-                self.local_buffer.append((obs, action_token, chunk_reward, logits, value, policy_version, insert_step))
+                self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value, policy_version, insert_step))
                 obs = nxt
                 step_count += 1
 
                 if done:
                     step_time = (time.time() - time_start) / max(step_count_total, 1)
-                    success = float(info.get('success', info.get('is_success', 0.0)))
-                    self.env_outcome[self.current_env_idx].append(1.0 - success)
+                    success = float(info.get('is_success', 0.0))
                     self.stats_actor.add_episode_return.remote(
-                        self.current_env_name,
-                        reward_sum,
-                        step_time,
-                        step_count_total,
-                        success,
-                        actor_id=self.wid,
-                        step_num=step_count_total,
+                        self.current_env_name, reward_sum, step_time,
+                        step_count_total, success,
+                        actor_id=self.wid, step_num=step_count,
                     )
                     step_count = 0
                     reward_sum = 0.0
-                    if self.local_buffer: 
+                    if self.local_buffer:
                         self._process_traj(self.local_buffer, bootstrap_val=0.0, is_terminal=True)
                     self.local_buffer.clear()
-                    current_seed = int(time.time() * 1000) + self.wid + os.getpid()
-                    obs, info = self._reset_and_select_env(seed=current_seed)
+                    current_seed = (int(time.time() * 1000) + self.wid + os.getpid()) % (2**32)
+                    obs, info = self.env.reset(seed=current_seed)
                     time_start, step_count_total = time.time(), 0
                 elif len(self.local_buffer) == self.rollout_local_buf + 1:
                     _, _, _, _, bootstrap_val, _, _ = self.local_buffer[-1]
                     self._process_traj(self.local_buffer[:-1], bootstrap_val=bootstrap_val, is_terminal=False)
                     self.local_buffer = [self.local_buffer[-1]]
-        except Exception as e: import traceback; print(f"[ERROR] RolloutWorker {self.wid} run() 崩溃: {e}", flush=True); traceback.print_exc(); raise
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] RolloutWorker {self.wid} run() 崩溃: {e}", flush=True)
+            traceback.print_exc()
+            raise
 
     def _process_traj(self, traj_segment, bootstrap_val: float, is_terminal: bool):
         """打包轨迹原始数据，不计算 GAE（由 Trainer 统一计算）"""
@@ -678,48 +686,44 @@ class RolloutWorkerActor(BaseWorkerActor):
 
 @ray.remote(num_gpus=0.01)
 class EvaluationWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, wid, stats_actor, task_name, task_ids, deterministic=True):
-        super().__init__(infer, None, wid, stats_actor, task_name, task_ids)
-        self.deterministic = deterministic
-        print(f"EvaluationWorker {self.wid}: 环境初始化完成，deterministic={self.deterministic}")
-
-    def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[np.ndarray, Dict]:
-        self.current_env_idx = (self.current_env_idx + 1) % self.num_tasks
-        self.env = self.envs[self.current_env_idx]
-        obs, info = self.env.reset(seed=seed)
-        self.current_env_name = getattr(self.env, "get_name", lambda: getattr(self.env, "env_name", "metaworld"))()
-        return obs, info
+    def __init__(self, infer, wid, stats_actor, cfg, env_args, torch_dtype):
+        super().__init__(infer, None, wid, stats_actor, cfg, env_args)
+        self.torch_dtype = torch_dtype
+        print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
 
     def run(self):
         try:
-            current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
-            obs, info = self._reset_and_select_env(seed=current_seed)
+            current_seed = (int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)) % (2**32)
+            obs, info = self.env.reset(seed=current_seed)
             while True:
                 reward_sum, time_start, step_count_total, done = 0.0, time.time(), 0, False
                 step_count = 0
                 while not done:
-                    action_env, _, _, _, _ = ray.get(
-                        self.infer.request.remote(obs, deterministic=self.deterministic)
-                    )
+                    inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
+                    action_env, _, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
                     step_count += 1
-                    obs, r, term, trunc, info = self.env.step(action_env)
-                    reward_sum += r
-                    step_count_total += 1
-                    done = bool(term or trunc)
+                    for i in range(len(action_env)):
+                        single_action = action_env[i]
+                        obs, r, term, trunc, info = self.env.step(single_action)
+                        reward_sum += r
+                        step_count_total += 1
+                        if term or trunc:
+                            done = True
+                            break
                 step_time = (time.time() - time_start) / max(step_count_total, 1)
-                success = float(info.get('success', info.get('is_success', 0.0)))
+                success = float(info.get('is_success', 0.0))
                 self.stats_actor.add_episode_return.remote(
                     f"eval_{self.current_env_name}",
-                    reward_sum,
-                    step_time,
-                    step_count_total,
-                    success,
-                    actor_id=None,
-                    step_num=step_count_total,
+                    reward_sum, step_time, step_count_total, success,
+                    actor_id=None, step_num=step_count,
                 )
-                current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
-                obs, info = self._reset_and_select_env(seed=current_seed)
-        except Exception as e: import traceback; print(f"[ERROR] EvaluationWorker {self.wid} run() 崩溃: {e}", flush=True); traceback.print_exc(); raise
+                current_seed = (int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)) % (2**32)
+                obs, info = self.env.reset(seed=current_seed)
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] EvaluationWorker {self.wid} run() 崩溃: {e}", flush=True)
+            traceback.print_exc()
+            raise
 
 
 # ================================================================
@@ -727,18 +731,15 @@ class EvaluationWorkerActor(BaseWorkerActor):
 # ================================================================
 @ray.remote(num_gpus=0.5)
 class InferenceActor(InferenceActorCom):
-    def __init__(self, actor_id, stats_actor, torch_dtype, inference_batch, inference_timeout_ms):
+    def __init__(self, actor_id, cfg, stats_actor, torch_dtype, inference_batch, inference_timeout_ms):
         super().__init__()
         self.actor_id = actor_id
-        print(f"InferenceActor {actor_id}: 正在加载 MLPActorCriticDiscrete...")
-        self.model = MLPActorCriticDiscrete(
-            torch_dtype=torch_dtype,
-            state_dim=STATE_DIM,
-            action_dim=ACTION_DIM,
-            n_action_bins=N_ACTION_BINS,
-        )
+        print(f"InferenceActor {actor_id}: 正在加载 OpenVLA ActorCritic...")
+        self.model = ActorCritic(cfg, torch_dtype=torch_dtype)
         self.model.cuda()
         self.model.eval()
+        self.processor = self.model.processor
+        self.cfg = cfg
         self.stats_actor = stats_actor
         self.policy_version = 0  # 策略版本号，每次更新权重时递增
 
@@ -764,7 +765,7 @@ class InferenceActor(InferenceActorCom):
         """覆盖基类方法，接收权重后自增策略版本"""
         super().receive_and_update_weights(group_name)
         self.policy_version += 1
-        if self.actor_id == 0 and random.random() < 0.001:
+        if self.actor_id == 0:
             print(f"InferenceActor {self.actor_id}: 已更新到 policy_version={self.policy_version}")
 
     def _on_bg_task_done(self, task: asyncio.Task):
@@ -775,10 +776,10 @@ class InferenceActor(InferenceActorCom):
             print(f"[ERROR] InferenceActor {self.actor_id} 后台任务异常: {e}", flush=True)
             traceback.print_exc()
 
-    async def request(self, obs: np.ndarray, deterministic: bool = False):
+    async def request(self, inputs_t: Dict[str, torch.Tensor], deterministic: bool = False):
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
-        self.requests.append((obs, deterministic))
+        self.requests.append((inputs_t, deterministic))
         self.promises.append(fut)
         return await fut
 
@@ -797,28 +798,40 @@ class InferenceActor(InferenceActorCom):
             self.requests, self.promises = [], []
             self.last_process_time = time.time()
             
-            obs_list = [r[0] for r in requests_to_process]
+            inputs_list = [r[0] for r in requests_to_process]
             deterministic_flags = [r[1] for r in requests_to_process]
             t_loop_start = time.time()
             try:
-                inputs_batch = self.model.prepare_inputs_batch(obs_list)
+                
+                inputs_batch = self.model.prepare_inputs_batch(inputs_list)
                 with torch.inference_mode():
+                    # 1. 前向传播获取 logits 和 value
                     action_logits, value = self.model(inputs_batch)
-                    _, action_tokens, discrete_actions = self.model.post_process(
-                        action_logits,
-                        deterministic=deterministic_flags,
-                    )
 
-                    action_tokens = action_tokens.cpu().numpy()
-                    logits = action_logits.float().cpu().numpy()
+                    # 2. 后处理以采样动作 tokens 和对应的归一化连续动作
+                    _, action_tokens_all, normalized_actions_all = self.model.post_process(action_logits, deterministic=deterministic_flags)
+                    
+                    # action_tokens_all 的形状是 (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
+                    action_tokens = action_tokens_all.view(
+                        -1, NUM_ACTIONS_CHUNK, ACTION_DIM
+                    ).cpu().numpy()
+
+                    # action_logits 的形状是 (B, NUM_ACTIONS_CHUNK * ACTION_DIM, VocabSize)
+                    logits = action_logits.view(
+                        -1, NUM_ACTIONS_CHUNK, ACTION_DIM, action_logits.shape[-1]
+                    ).float().cpu().numpy()
+                    
                     values = value.to(torch.float32).cpu().numpy()
-                    actions_env = (
-                        -1.0 + 2.0 * discrete_actions / float(N_ACTION_BINS - 1)
-                    ).astype(np.float32)
+
+                # 将标准化动作转换为环境动作
+                actions_env = []
+                for i in range(normalized_actions_all.shape[0]):
+                    a_env = self.model.vla._unnormalize_actions(normalized_actions_all[i], self.cfg.unnorm_key)
+                    actions_env.append(a_env.astype(np.float32))
 
                 for i in range(len(promises_to_process)):
                     promises_to_process[i].set_result((
-                        actions_env[i],           # 连续环境动作
+                        actions_env[i],           # 反归一化的环境动作
                         action_tokens[i],         # 离散动作 token
                         logits[i],                # 对应的 logits
                         values[i],                # 价值估计
@@ -834,13 +847,25 @@ class InferenceActor(InferenceActorCom):
                     if not p.done():
                         p.set_exception(e)
                 raise
+    
+    def forward_test(self):
+        return  # TODO 测试用，后续删除 
+        import pickle
+        with open("experiments/robot/libero/sample_libero_spatial_observation.pkl", "rb") as file:
+            observation = pickle.load(file)
+        inputs_t = prepare_one_obs(self.cfg, self.processor, observation, observation['task_description'], TORCH_DTYPE)
+        inputs_batch = self.model.prepare_inputs_batch([inputs_t])
+        with torch.no_grad():
+            action_logits, value = self.model(inputs_batch)
+        return action_logits, value
+    
 
 # ================================================================
 # 4. 训练器 (TrainerActor)
 # ================================================================
 @ray.remote(num_gpus=1)
 class TrainerActor(TrainerActorCom):
-    def __init__(self, rank, world_size, replay_buffer, train_batch_size, accumulation_steps, 
+    def __init__(self, rank, world_size, replay_buffer, cfg, train_batch_size, accumulation_steps, 
                  use_bf16, torch_dtype, policy_lr, value_lr, gamma, lambda_, clip_eps, vf_coef, 
                  ent_coef, kl_coef, reward_scale, value_warmup_steps, policy_warmup_steps, 
                  policy_train_start_step, train_iters, clip_mode, recompute_value, sigma):
@@ -848,6 +873,7 @@ class TrainerActor(TrainerActorCom):
         self.rank = rank
         self.world_size = world_size
         self.replay_buffer = replay_buffer
+        self.cfg = cfg
         self.model = None
         self.optimizer = None
         self.base_model = None
@@ -896,20 +922,19 @@ class TrainerActor(TrainerActorCom):
         return ray.util.get_node_ip_address()
 
     def setup_deepspeed_group(self, master_addr, master_port):
+        _agent_log("H1", "ds_libero_ppo_discrete.py:TrainerActor.setup_deepspeed_group:start",
+                   "enter setup_deepspeed_group", {"rank": self.rank, "world_size": self.world_size})
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(self.world_size)
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(master_port)
         os.environ["LOCAL_RANK"] = "0"
-        deepspeed.init_distributed(dist_backend="nccl")
+        deepspeed.init_distributed(dist_backend="gloo")
+        _agent_log("H1", "ds_libero_ppo_discrete.py:TrainerActor.setup_deepspeed_group:after_init",
+                   "deepspeed.init_distributed finished", {"rank": self.rank})
 
-        print(f"Trainer {self.rank}: 正在加载 MLPActorCriticDiscrete...")
-        model = MLPActorCriticDiscrete(
-            torch_dtype=self.torch_dtype,
-            state_dim=STATE_DIM,
-            action_dim=ACTION_DIM,
-            n_action_bins=N_ACTION_BINS,
-        )
+        print(f"Trainer {self.rank}: 正在加载 OpenVLA ActorCritic...")
+        model = ActorCritic(self.cfg, torch_dtype=self.torch_dtype)
         self.base_model = model
 
         # 参数分组（与之前代码一致）
@@ -918,7 +943,24 @@ class TrainerActor(TrainerActorCom):
             {"params": pg["params"], "name": pg["name"], "lr": self.policy_lr if pg["name"] == "policy" else self.value_lr}
             for pg in param_groups
         ]
-        
+
+        # world_size==1 时，默认绕开 DeepSpeed.initialize，避免卡死；设置 FORCE_DEEPSPEED=1 可以强制使用 DeepSpeed
+        if int(self.world_size) == 1 and os.environ.get("FORCE_DEEPSPEED", "0") != "1":
+            _agent_log("H2", "ds_libero_ppo_discrete.py:TrainerActor.setup_deepspeed_group:fallback",
+                       "fallback: skip deepspeed.initialize (world_size=1)", {})
+            model.cuda()
+            optimizer = torch.optim.AdamW(optimizer_params)
+            self.model = _SimpleEngine(model, optimizer, grad_accum_steps=self.accumulation_steps)
+            self.optimizer = optimizer
+            self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
+
+            n_total = sum(p.numel() for p in model.parameters())
+            n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
+            _agent_log("H2", "ds_libero_ppo_discrete.py:TrainerActor.setup_deepspeed_group:fallback_done",
+                       "fallback trainer engine ready", {"n_total": int(n_total), "n_trainable": int(n_trainable)})
+            return
+
         ds_config = {
             "train_micro_batch_size_per_gpu": self.train_batch_size,
             "gradient_accumulation_steps": self.accumulation_steps,
@@ -932,10 +974,16 @@ class TrainerActor(TrainerActorCom):
             "gradient_clipping": 1.0,
         }
 
-        if ds_config.get("bf16", {}).get("enabled", False): self.data_dtype = torch.bfloat16
-        else: self.data_dtype = torch.float32
+        if ds_config.get("bf16", {}).get("enabled", False):
+            self.data_dtype = torch.bfloat16
+        else:
+            self.data_dtype = torch.float32
 
+        _agent_log("H2", "ds_libero_ppo_discrete.py:TrainerActor.setup_deepspeed_group:before_ds_init",
+                   "before deepspeed.initialize", {})
         self.model, self.optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config, model_parameters=optimizer_params)
+        _agent_log("H2", "ds_libero_ppo_discrete.py:TrainerActor.setup_deepspeed_group:after_ds_init",
+                   "after deepspeed.initialize", {})
         print(f"TrainerActor Rank {self.rank}: DeepSpeed 训练组 (ZeRO-2) 初始化完成。")
 
         self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
@@ -943,6 +991,8 @@ class TrainerActor(TrainerActorCom):
         n_total = sum(p.numel() for p in model.parameters())
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
+        _agent_log("H1", "ds_libero_ppo_discrete.py:TrainerActor.setup_deepspeed_group:end",
+                   "setup_deepspeed_group finished", {"rank": self.rank, "n_total": int(n_total), "n_trainable": int(n_trainable)})
 
     async def save_agent(self, ckpt_dir: str, step: int):
         """
@@ -1057,7 +1107,7 @@ class TrainerActor(TrainerActorCom):
 
     def _compute_diagnostic_metrics(
         self,
-        ratio: torch.Tensor,  # [B, ACTION_DIM] or [B]
+        ratio: torch.Tensor,  # [B, NUM_ACTIONS_CHUNK, ACTION_DIM] or [B]
         advantage: torch.Tensor,  # [B]
         policy_version: torch.Tensor,  # [B]
         insert_step: torch.Tensor,  # [B]
@@ -1074,12 +1124,12 @@ class TrainerActor(TrainerActorCom):
             metrics = {}
             
             # ==================== 预处理 ====================
-            # ratio 可能是 [B, ACTION_DIM]，需要展平
+            # ratio 可能是 [B, NUM_ACTIONS_CHUNK, ACTION_DIM]，需要展平
             ratio_flat = ratio.reshape(-1)
             
             # advantage 需要扩展到与 ratio_flat 相同的维度
-            if ratio.dim() == 2:  # [B, ACTION_DIM]
-                adv_expanded = advantage.unsqueeze(1).expand_as(ratio).reshape(-1)
+            if ratio.dim() == 3:  # [B, NUM_ACTIONS_CHUNK, ACTION_DIM]
+                adv_expanded = advantage.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
             else:  # [B]
                 adv_expanded = advantage
             
@@ -1102,9 +1152,9 @@ class TrainerActor(TrainerActorCom):
             old_mask_batch = staleness_ver >= OLD_THRESHOLD  # [B]
             
             # 扩展到与 ratio_flat 相同的维度
-            if ratio.dim() == 2:
-                new_mask = new_mask_batch.unsqueeze(1).expand_as(ratio).reshape(-1)
-                old_mask = old_mask_batch.unsqueeze(1).expand_as(ratio).reshape(-1)
+            if ratio.dim() == 3:
+                new_mask = new_mask_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
+                old_mask = old_mask_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
             else:
                 new_mask = new_mask_batch
                 old_mask = old_mask_batch
@@ -1135,9 +1185,9 @@ class TrainerActor(TrainerActorCom):
             old_mask_ratio_batch = staleness_ratio >= OLD_RATIO_THRESHOLD
             
             # 扩展到与 ratio_flat 相同的维度
-            if ratio.dim() == 2:
-                new_mask_ratio = new_mask_ratio_batch.unsqueeze(1).expand_as(ratio).reshape(-1)
-                old_mask_ratio = old_mask_ratio_batch.unsqueeze(1).expand_as(ratio).reshape(-1)
+            if ratio.dim() == 3:
+                new_mask_ratio = new_mask_ratio_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
+                old_mask_ratio = old_mask_ratio_batch.unsqueeze(1).unsqueeze(2).expand_as(ratio).reshape(-1)
             else:
                 new_mask_ratio = new_mask_ratio_batch
                 old_mask_ratio = old_mask_ratio_batch
@@ -1376,9 +1426,9 @@ class TrainerActor(TrainerActorCom):
             
         Returns:
             obs_list: 所有观测列表
-            action_tokens: [N, ACTION_DIM] GPU tensor
+            action_tokens: [N, NUM_ACTIONS_CHUNK, ACTION_DIM] GPU tensor
             advantages: [N,] GPU tensor
-            behaviour_logits: [N, ACTION_DIM, VOCAB_SIZE] GPU tensor
+            behaviour_logits: [N, NUM_ACTIONS_CHUNK, ACTION_DIM, VOCAB_SIZE] GPU tensor
             value_targets: [N,] GPU tensor
             policy_versions: [N,] GPU tensor
             insert_steps: [N,] GPU tensor
@@ -1562,7 +1612,7 @@ class TrainerActor(TrainerActorCom):
         
         for i in range(num_updates_in_epoch):
             start = i * self.train_batch_size; end = start + self.train_batch_size
-            mini_inputs = inputs_batch[start:end]
+            mini_inputs = {k: v[start:end] for k, v in inputs_batch.items()}
             
             mini_act_token = act_token_t[start:end]
             mini_adv = adv_t[start:end]
@@ -1576,6 +1626,10 @@ class TrainerActor(TrainerActorCom):
             # 前向
             action_logits, value = self.model.forward(mini_inputs)
             value = value.to(torch.float32)
+
+            action_logits_reshape = action_logits.view(
+                -1, NUM_ACTIONS_CHUNK, ACTION_DIM, action_logits.shape[-1]
+            )
 
             # 价值损失 (不变)
             value_loss = self.vf_coef * torch.mean((value - mini_v_targ) ** 2)
@@ -1601,7 +1655,7 @@ class TrainerActor(TrainerActorCom):
                 ent = torch.tensor(0.0, device=loss.device)
             else:
                 # 策略与熵损失 (离散版本)
-                dist = torch.distributions.Categorical(logits=action_logits)
+                dist = torch.distributions.Categorical(logits=action_logits_reshape)
                 logp = dist.log_prob(mini_act_token)
 
                 with torch.no_grad():
@@ -1625,7 +1679,7 @@ class TrainerActor(TrainerActorCom):
                         clip_eps=self.clip_eps,
                     )
                 
-                adv_unsqueezed = normalized_adv.unsqueeze(dim=-1)
+                adv_unsqueezed = normalized_adv.unsqueeze(dim=-1).unsqueeze(dim=-1)
                 surr1 = ratio * adv_unsqueezed
                 if self.clip_mode == "gipo":
                     eps = 1e-9
@@ -1718,6 +1772,26 @@ class TrainerActor(TrainerActorCom):
 # ================================================================
 # 5. 主逻辑
 # ================================================================
+def build_openvla_cfg(args) -> GenerateConfig:
+    """
+    构建 OpenVLA 配置（ManiSkill 版本）
+    """
+    cfg = GenerateConfig(
+        pretrained_checkpoint=args.pretrained_checkpoint,
+        use_l1_regression=False,
+        use_diffusion=False,
+        use_film=False,
+        num_images_in_input=args.num_images_in_input,
+        use_proprio=args.use_proprio,
+        load_in_8bit=False,
+        load_in_4bit=False,
+        center_crop=True,
+        num_open_loop_steps=NUM_ACTIONS_CHUNK,
+        unnorm_key=args.unnorm_key,
+        checkpoint2=args.checkpoint2,
+    )
+    return cfg
+
 def main(args):
     """
     主函数，接受命令行参数
@@ -1725,7 +1799,10 @@ def main(args):
         args: 解析后的命令行参数
     """
     torch_dtype = torch.bfloat16 if args.use_bf16 else torch.float32
-    print(f"torch_dtype: {torch_dtype}")
+    
+    if not os.path.exists(args.pretrained_checkpoint):
+        print(f"错误: OpenVLA checkpoint 路径 '{args.pretrained_checkpoint}' 不存在。请更新 PRETRAINED_CHECKPOINT。")
+        return
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
     object_store_memory_bytes = int(args.object_store_memory_gb * 1024 * 1024 * 1024)
@@ -1733,13 +1810,12 @@ def main(args):
     ray.init(
         ignore_reinit_error=True, 
         _temp_dir='/dev/shm',
-        object_store_memory=object_store_memory_bytes
+        object_store_memory=object_store_memory_bytes,
+        dashboard_host="0.0.0.0",  # 允许任何外部 IP 访问 Dashboard
+        dashboard_port=8266        # 可选：指定端口，默认就是 8265
     )
 
-    log_dir = (
-        f"runs/MetaWorld/{args.task_name}/"
-        f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}_{args.clip_mode}"
-    )
+    log_dir = f"runs/ManiSkill/{args.maniskill_task}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}"
     writer = SummaryWriter(log_dir)
 
     # 保存命令行参数到log_dir中的json文件
@@ -1750,11 +1826,13 @@ def main(args):
     stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
+    cfg = build_openvla_cfg(args)
+
     print("--- 步骤 1: 创建 Actors ---")
     replay_buffers = [ReplayBufferActor.remote(capacity=args.replay_capacity) for _ in range(args.num_trainer_gpus)]
     trainer_group = [
         TrainerActor.remote(
-            rank=i, world_size=args.num_trainer_gpus, replay_buffer=replay_buffers[i],
+            rank=i, world_size=args.num_trainer_gpus, replay_buffer=replay_buffers[i], cfg=cfg,
             train_batch_size=args.train_batch_size, accumulation_steps=args.accumulation_steps,
             use_bf16=args.use_bf16, torch_dtype=torch_dtype, policy_lr=args.policy_lr, value_lr=args.value_lr,
             gamma=args.gamma, lambda_=args.lambda_, clip_eps=args.clip_eps, vf_coef=args.vf_coef,
@@ -1765,40 +1843,30 @@ def main(args):
         )
         for i in range(args.num_trainer_gpus)
     ]
-    # 解析 task_ids
-    task_ids = [int(tid.strip()) for tid in args.task_ids.split(',')]
-    print(f"\n当前 MetaWorld 任务: {args.task_name}")
-    print(f"使用 task IDs: {task_ids}\n")
+    # ManiSkill 环境参数字典，传给 Worker
+    env_args = {
+        "maniskill_task": args.maniskill_task,
+        "camera_name": args.camera_name,
+        "camera_res": args.camera_res,
+        "max_episode_steps": args.max_episode_steps,
+        "language_instruction": args.language_instruction,
+        "sim_backend": args.sim_backend,
+        "wrist_camera_name": args.wrist_camera_name if args.num_images_in_input > 1 else None,
+        "robot_uids": args.robot_uids if args.num_images_in_input > 1 else None,
+    }
+    print(f"\nManiSkill task: {args.maniskill_task}, rollout workers: {args.num_rollout_workers}, eval workers: {args.num_eval_workers}\n")
     
-    inference_pool = [
-        InferenceActor.remote(
-            actor_id=i,
-            stats_actor=stats_actor,
-            torch_dtype=torch_dtype,
-            inference_batch=args.inference_batch,
-            inference_timeout_ms=args.inference_timeout_ms,
-        ) for i in range(args.num_inference_actors)
-    ]
+    inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg, stats_actor=stats_actor, torch_dtype=torch_dtype, inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms) for i in range(args.num_inference_actors)]
     rollout_workers = [
         RolloutWorkerActor.remote(
             inference_pool[i % args.num_inference_actors],
-            replay_buffers[i % args.num_trainer_gpus],
-            i,
-            stats_actor,
-            args.task_name,
-            args.reward_scale,
-            args.rollout_local_buf,
-            task_ids,
+            replay_buffers[i % args.num_trainer_gpus], i, stats_actor, cfg, env_args,
+            args.reward_scale, torch_dtype, args.rollout_local_buf
         ) for i in range(args.num_rollout_workers)
     ]
     eval_workers = [
         EvaluationWorkerActor.remote(
-            inference_pool[i % args.num_inference_actors],
-            f"eval_{i}",
-            stats_actor,
-            args.task_name,
-            task_ids,
-            args.eval_deterministic,
+            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, env_args, torch_dtype
         ) for i in range(args.num_eval_workers)
     ]
     print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")
@@ -1812,7 +1880,16 @@ def main(args):
         broadcast_group_port = find_free_port()
     trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
     train_setup_tasks = [actor.setup_deepspeed_group.remote(trainer_master_addr, train_group_port) for actor in trainer_group]
-    ray.get(train_setup_tasks)
+    _agent_log("H1", "ds_libero_ppo_discrete.py:main:before_ray_get_train_setup",
+               "before ray.get(train_setup_tasks)", {"num_trainers": len(trainer_group)})
+    try:
+        ray.get(train_setup_tasks)
+        _agent_log("H1", "ds_libero_ppo_discrete.py:main:after_ray_get_train_setup",
+                   "after ray.get(train_setup_tasks)", {})
+    except Exception as e:
+        _agent_log("H2", "ds_libero_ppo_discrete.py:main:ray_get_train_setup_exception",
+                   "ray.get(train_setup_tasks) raised exception", {"error": str(e)})
+        raise
     print("DeepSpeed 训练组建立完成。")
 
     print(f"\n--- 步骤 3: 建立共享广播组 ({args.broadcast_group_name}) ---")
@@ -1844,11 +1921,18 @@ def main(args):
     for i, (a, b) in enumerate(zip(train_sig, infer_sig)):
         if a != b:
             raise RuntimeError(f"First mismatch at idx: {i}, trainer: {a}, inference: {b}")
+    forward_test_tasks = [inf.forward_test.remote() for inf in inference_pool]
+    ray.get(forward_test_tasks)
+    print("推理器前向测试完成 (广播前)。")
     
     broadcast_task = trainer_group[0].broadcast_weights.remote(args.broadcast_group_name)
     receive_tasks = [inf.receive_and_update_weights.remote(args.broadcast_group_name) for inf in inference_pool]
     ray.get([broadcast_task] + receive_tasks)
     print("初始权重已广播到所有推理器。")
+
+    forward_test_tasks = [inf.forward_test.remote() for inf in inference_pool]
+    ray.get(forward_test_tasks)
+    print("推理器前向测试完成 (广播后)。")
 
     print("\n--- 步骤 4: 启动 Rollout Workers 进行数据收集 ---")
     for w in rollout_workers: w.run.remote()
