@@ -2,91 +2,54 @@ import os
 import time
 import argparse
 import subprocess
+from types import SimpleNamespace
 
-parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser(
+    description="Probe which physical GPUs BaseWorkerActor / ManiSkill touches under Ray."
+)
 parser.add_argument("--cuda-visible-devices", default="5,6,7")
-parser.add_argument("--vulkan-visible-devices", default=None)
-parser.add_argument("--render-backend", default="sapien_cuda:0")
 parser.add_argument("--num-workers", type=int, default=6)
 parser.add_argument("--sim-backend", default="cpu")
+parser.add_argument("--pretrained-checkpoint", required=True)
+parser.add_argument(
+    "--vulkan-visible-devices",
+    type=str,
+    default=None,
+    help="Set VULKAN_VISIBLE_DEVICES on driver and in Ray worker runtime_env (e.g. 4 or 4,5).",
+)
+parser.add_argument(
+    "--sapien-vulkan-device",
+    type=str,
+    default=None,
+    help="Set SAPIEN_VULKAN_DEVICE on driver and in worker runtime_env (physical index string).",
+)
+parser.add_argument(
+    "--egl-device-id",
+    type=str,
+    default=None,
+    help="Set EGL_DEVICE_ID on driver and in worker runtime_env.",
+)
+
 args = parser.parse_args()
 
 os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-
 os.environ["VK_ICD_FILENAMES"] = "/etc/vulkan/icd.d/nvidia_icd.json"
-# os.environ["VK_DRIVER_FILES"] = "/etc/vulkan/icd.d/nvidia_icd.json"
-
-if args.vulkan_visible_devices is not None:
+if args.vulkan_visible_devices:
     os.environ["VULKAN_VISIBLE_DEVICES"] = args.vulkan_visible_devices
-    os.environ["SAPIEN_VULKAN_DEVICE"] = args.vulkan_visible_devices
-    os.environ["EGL_DEVICE_ID"] = args.vulkan_visible_devices
+if args.sapien_vulkan_device:
+    os.environ["SAPIEN_VULKAN_DEVICE"] = args.sapien_vulkan_device
+if args.egl_device_id:
+    os.environ["EGL_DEVICE_ID"] = args.egl_device_id
 
 import ray
 import numpy as np
 
+from rl.ds_maniskill_ppo_discrete import BaseWorkerActor, build_openvla_cfg
 
-# def query_pid_gpus(pid: int):
-#     try:
-#         import pynvml
-
-#         pynvml.nvmlInit()
-#         hits = []
-#         for i in range(pynvml.nvmlDeviceGetCount()):
-#             h = pynvml.nvmlDeviceGetHandleByIndex(i)
-#             name = pynvml.nvmlDeviceGetName(h)
-#             if isinstance(name, bytes):
-#                 name = name.decode()
-
-#             procs = []
-#             for getter in (
-#                 pynvml.nvmlDeviceGetComputeRunningProcesses,
-#                 getattr(pynvml, "nvmlDeviceGetGraphicsRunningProcesses", None),
-#             ):
-#                 if getter is None:
-#                     continue
-#                 try:
-#                     procs.extend(getter(h))
-#                 except Exception:
-#                     pass
-
-#             for p in procs:
-#                 if int(p.pid) == int(pid):
-#                     used = getattr(p, "usedGpuMemory", 0)
-#                     hits.append({"gpu_index": i, "name": name, "used_mb": used / 1024 / 1024})
-#                     break
-#         return hits
-#     except Exception as e:
-#         return [{"error": repr(e)}]
-
-def dump_gpu_mapping():
-    import subprocess
-    import os
-
-    print("=== env ===", flush=True)
-    for k in [
-        "CUDA_VISIBLE_DEVICES",
-        "CUDA_DEVICE_ORDER",
-        "VULKAN_VISIBLE_DEVICES",
-        "SAPIEN_VULKAN_DEVICE",
-        "EGL_DEVICE_ID",
-        "VK_ICD_FILENAMES",
-        "VK_DRIVER_FILES",
-        "DISPLAY",
-        "__GLX_VENDOR_LIBRARY_NAME",
-        "__NV_PRIME_RENDER_OFFLOAD",
-    ]:
-        print(f"{k}={os.environ.get(k)}", flush=True)
-
-    print("=== nvidia-smi topo ===", flush=True)
-    subprocess.run("nvidia-smi topo -m", shell=True, check=False)
-
-    print("=== vulkaninfo summary ===", flush=True)
-    subprocess.run("vulkaninfo --summary | sed -n '/Devices:/,$p'", shell=True, check=False)
-
-def print_gpu_hits(tag, pid):
-    print(f"\n=== GPU hits: {tag} ===", flush=True)
-    print(query_pid_gpus(pid), flush=True)
+# import ds_maniskill_ppo_discrete 后会被顶层 CUDA_VISIBLE_DEVICES 覆盖，
+# 所以这里再设一次，保证 ray.init 前 driver 环境是你传的值。
+os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
 
 
 def query_pid_gpus(pid: int):
@@ -95,96 +58,77 @@ def query_pid_gpus(pid: int):
 
         pynvml.nvmlInit()
         hits = []
-
-        getters = [
-            ("compute", pynvml.nvmlDeviceGetComputeRunningProcesses),
-            ("graphics", getattr(pynvml, "nvmlDeviceGetGraphicsRunningProcesses", None)),
-        ]
-
         for i in range(pynvml.nvmlDeviceGetCount()):
             h = pynvml.nvmlDeviceGetHandleByIndex(i)
             name = pynvml.nvmlDeviceGetName(h)
             if isinstance(name, bytes):
                 name = name.decode()
 
-            for proc_type, getter in getters:
+            procs = []
+            for getter in (
+                pynvml.nvmlDeviceGetComputeRunningProcesses,
+                getattr(pynvml, "nvmlDeviceGetGraphicsRunningProcesses", None),
+            ):
                 if getter is None:
                     continue
-
                 try:
-                    procs = getter(h)
+                    procs.extend(getter(h))
                 except Exception:
-                    continue
+                    pass
 
-                for p in procs:
-                    if int(p.pid) == int(pid):
-                        used = getattr(p, "usedGpuMemory", 0)
-                        hits.append({
-                            "gpu_index": i,
-                            "name": name,
-                            "type": proc_type,
-                            "used_mb": used / 1024 / 1024,
-                        })
+            for p in procs:
+                if int(p.pid) == int(pid):
+                    used = getattr(p, "usedGpuMemory", 0)
+                    hits.append({"gpu_index": i, "name": name, "used_mb": used / 1024 / 1024})
+                    break
 
         return hits
     except Exception as e:
         return [{"error": repr(e)}]
 
 
-
 @ray.remote(num_gpus=0.01)
-class RenderProbeWorker:
-    def __init__(self, wid, render_backend, sim_backend):
-        self.wid = wid
+class DebugRolloutWorker(BaseWorkerActor):
+    def __init__(self, wid, cfg, env_args):
         self.pid = os.getpid()
 
         print(
-            f"[worker {wid}] pid={self.pid} "
-            f"ray_gpu_ids={ray.get_gpu_ids()} "
-            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
-            f"VULKAN_VISIBLE_DEVICES={os.environ.get('VULKAN_VISIBLE_DEVICES')} "
-            f"SAPIEN_VULKAN_DEVICE={os.environ.get('SAPIEN_VULKAN_DEVICE')} "
-            f"render_backend={render_backend}",
+            f"[debug rollout {wid}] before BaseWorkerActor init: "
+            f"pid={self.pid}, "
+            f"ray_gpu_ids={ray.get_gpu_ids()}, "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}, "
+            f"VULKAN_VISIBLE_DEVICES={os.environ.get('VULKAN_VISIBLE_DEVICES')}, "
+            f"SAPIEN_VULKAN_DEVICE={os.environ.get('SAPIEN_VULKAN_DEVICE')}",
             flush=True,
         )
 
-
-        from rl.maniskill_env import ManiSkillSingleEnv
-
-
-        self.env = ManiSkillSingleEnv(
-            task_id="PickCube-v1",
-            camera_name="base_camera",
-            camera_res=224,
-            max_episode_steps=20,
-            use_proprio=False,
-            sim_backend=sim_backend,
-            render_backend=render_backend,
-            wrist_camera_name="hand_camera",
-            robot_uids="panda_wristcam",
+        super().__init__(
+            infer=None,
+            replay=None,
+            wid=wid,
+            stats_actor=None,
+            cfg=cfg,
+            env_args=env_args,
         )
-        print_gpu_hits("after ManiSkillSingleEnv construction", self.pid)
 
-    def probe(self):
+    def probe(self, warmup_steps=3):
+        obs, info = self.env.reset(seed=100000 + int(self.wid))
 
-        obs, info = self.env.reset(seed=1000 + self.wid)
-
-
-        for i in range(3):
-            action = np.random.uniform(-1, 1, size=(7,)).astype(np.float32)
+        for _ in range(warmup_steps):
+            action = self.env.env.action_space.sample()
             self.env.step(action)
-            time.sleep(0.2)
-
-        gpu_hits = query_pid_gpus(self.pid)
+            time.sleep(0.3)
 
         return {
             "wid": self.wid,
             "pid": self.pid,
             "ray_gpu_ids": ray.get_gpu_ids(),
-            "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES"),
-            "vulkan_visible": os.environ.get("VULKAN_VISIBLE_DEVICES"),
-            "sapien_vulkan_device": os.environ.get("SAPIEN_VULKAN_DEVICE"),
-            "gpu_hits": gpu_hits,
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "VULKAN_VISIBLE_DEVICES": os.environ.get("VULKAN_VISIBLE_DEVICES"),
+            "SAPIEN_VULKAN_DEVICE": os.environ.get("SAPIEN_VULKAN_DEVICE"),
+            "EGL_DEVICE_ID": os.environ.get("EGL_DEVICE_ID"),
+            "VK_ICD_FILENAMES": os.environ.get("VK_ICD_FILENAMES"),
+            "gpu_hits": query_pid_gpus(self.pid),
         }
 
     def close(self):
@@ -192,26 +136,63 @@ class RenderProbeWorker:
 
 
 if __name__ == "__main__":
-    # print("nvidia-smi:")
-    # subprocess.run(
-    #     [
-    #         "nvidia-smi",
-    #         "--query-gpu=index,uuid,pci.bus_id,name",
-    #         "--format=csv,noheader",
-    #     ],
-    #     check=False,
-    # )
+    subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,pci.bus_id,name",
+            "--format=csv,noheader",
+        ],
+        check=False,
+    )
 
-    ray.init(ignore_reinit_error=True, _temp_dir="/dev/shm")
+    cfg_args = SimpleNamespace(
+        pretrained_checkpoint=args.pretrained_checkpoint,
+        num_images_in_input=2,
+        use_proprio=False,
+        unnorm_key="maniskill_pickcube",
+        checkpoint2="",
+    )
+    cfg = build_openvla_cfg(cfg_args)
+
+    env_args = {
+        "maniskill_task": "PickCube-v1",
+        "camera_name": "base_camera",
+        "camera_res": 224,
+        "max_episode_steps": 20,
+        "language_instruction": "pick up the red cube and place it at the green target",
+        "sim_backend": args.sim_backend,
+        "wrist_camera_name": "hand_camera",
+        "robot_uids": "panda_wristcam",
+    }
+
+    # Vulkan/SAPIEN/EGL: inject at worker process start via runtime_env (before worker imports).
+    # Do not set CUDA_VISIBLE_DEVICES here — Ray assigns it per GPU actor.
+    worker_env = {
+        "VK_ICD_FILENAMES": os.environ.get(
+            "VK_ICD_FILENAMES", "/etc/vulkan/icd.d/nvidia_icd.json"
+        ),
+    }
+    if args.vulkan_visible_devices:
+        worker_env["VULKAN_VISIBLE_DEVICES"] = args.vulkan_visible_devices
+    if args.sapien_vulkan_device:
+        worker_env["SAPIEN_VULKAN_DEVICE"] = args.sapien_vulkan_device
+    if args.egl_device_id:
+        worker_env["EGL_DEVICE_ID"] = args.egl_device_id
+
+    ray.init(
+        ignore_reinit_error=True,
+        _temp_dir="/dev/shm",
+        runtime_env={"env_vars": worker_env},
+    )
 
     workers = [
-        RenderProbeWorker.remote(i, args.render_backend, args.sim_backend)
+        DebugRolloutWorker.remote(i, cfg, env_args)
         for i in range(args.num_workers)
     ]
 
     results = ray.get([w.probe.remote() for w in workers])
 
-    print("\n=== Worker render GPU probe ===")
+    print("\n=== Debug workers using training BaseWorkerActor init ===")
     for r in results:
         print(r)
 
