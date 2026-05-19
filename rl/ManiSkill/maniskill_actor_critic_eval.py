@@ -6,6 +6,8 @@ Replaces the Libero simulation in new_actor_critic.py with ManiSkill envs.
 import time
 import random
 import os
+import sys
+from pathlib import Path
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 # os.environ["VULKAN_VISIBLE_DEVICES"] = "6" 
@@ -30,14 +32,22 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
+_MANISKILL_DIR = Path(__file__).resolve().parent
+_RL_DIR = _MANISKILL_DIR.parent
+_REPO_ROOT = _RL_DIR.parent
+for _p in (_REPO_ROOT, _RL_DIR, _MANISKILL_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 
 # Import ActorCritic — no need to redefine
 from rl.new_actor_critic import ActorCritic
+#from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs, check_unnorm_key
 
 # ManiSkill helpers
-from experiments.robot.maniskill.maniskill_utils import (
+from rl.ManiSkill.maniskill.maniskill_utils import (
     build_maniskill_env,
     extract_maniskill_observation,
     clip_maniskill_action,

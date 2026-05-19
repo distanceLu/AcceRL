@@ -45,7 +45,7 @@ if args.egl_device_id:
 import ray
 import numpy as np
 
-from rl.ds_maniskill_ppo_discrete import BaseWorkerActor, build_openvla_cfg
+from rl.ManiSkill.ds_maniskill_ppo_discrete import BaseWorkerActor, build_openvla_cfg
 
 # import ds_maniskill_ppo_discrete 后会被顶层 CUDA_VISIBLE_DEVICES 覆盖，
 # 所以这里再设一次，保证 ray.init 前 driver 环境是你传的值。

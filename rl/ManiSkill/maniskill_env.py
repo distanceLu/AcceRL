@@ -17,14 +17,23 @@ import os
 import numpy as np
 from typing import Any, Dict, Optional
 
-from experiments.robot.maniskill.maniskill_utils import (
+from rl.ManiSkill.maniskill.maniskill_utils import (
     build_maniskill_env,
     extract_maniskill_observation,
     clip_maniskill_action,
     extract_success_mask,
     convert_torch_to_numpy,
-    LANGUAGE_INSTRUCTION,
+    LANGUAGE_INSTRUCTION, 
 )
+
+# from experiments.robot.maniskill.maniskill_utils import (
+#     build_maniskill_env,
+#     extract_maniskill_observation,
+#     clip_maniskill_action,
+#     extract_success_mask,
+#     convert_torch_to_numpy,
+#     LANGUAGE_INSTRUCTION,
+# )
 
 
 class ManiSkillSingleEnv:

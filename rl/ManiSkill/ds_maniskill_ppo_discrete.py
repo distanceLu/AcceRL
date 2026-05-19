@@ -32,6 +32,15 @@ import deepspeed
 import torch.distributed as distributed 
 from torch.utils.tensorboard import SummaryWriter
 
+import sys
+from pathlib import Path
+_MANISKILL_DIR = Path(__file__).resolve().parent      # .../rl/ManiSkill
+_RL_DIR = _MANISKILL_DIR.parent                        # .../rl
+_REPO_ROOT = _RL_DIR.parent                           # .../openvla_oft_rl
+for _p in (_REPO_ROOT, _RL_DIR, _MANISKILL_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 # OpenVLA 组件与常量
 # zzq1120 单独从openvla_utils取出这两个方法
 from experiments.robot.sole_utils import (
@@ -42,9 +51,11 @@ from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 from experiments.robot.libero.libero_utils import GenerateConfig
 from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs
-from rl.maniskill_env import ManiSkillSingleEnv
+from maniskill_env import ManiSkillSingleEnv
+# from rl.maniskill_env import ManiSkillSingleEnv
 # 训练/推理通信（保持接口不变）
-from ds_com import TrainerActorCom, InferenceActorCom
+from rl.ds_com import TrainerActorCom, InferenceActorCom
+# from ds_com import TrainerActorCom, InferenceActorCom
 from rl.com_utils import find_free_port
 
 #region agent log
@@ -1811,10 +1822,12 @@ def main(args):
         ignore_reinit_error=True, 
         _temp_dir='/dev/shm',
         object_store_memory=object_store_memory_bytes,
-        dashboard_host="0.0.0.0",  # 允许任何外部 IP 访问 Dashboard
-        dashboard_port=8266        # 可选：指定端口，默认就是 8265
+        num_cpus=args.num_rollout_workers + args.num_eval_workers + args.num_trainer_gpus + args.num_inference_actors + 8,
+        # dashboard_host="0.0.0.0",  # 允许任何外部 IP 访问 Dashboard
+        # dashboard_port=8266        # 可选：指定端口，默认就是 8265
     )
 
+    print(f"Ray 初始化完成。对象存储内存: {args.object_store_memory_gb} GB。")
     log_dir = f"runs/ManiSkill/{args.maniskill_task}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}"
     writer = SummaryWriter(log_dir)
 

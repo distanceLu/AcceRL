@@ -1401,7 +1401,7 @@ def run_maniskill_real_eval(
     """
     import numpy as np
 
-    from experiments.robot.maniskill.maniskill_utils import (
+    from rl.ManiSkill.maniskill.maniskill_utils import (
         build_maniskill_env,
         clip_maniskill_action,
         extract_done_mask,
@@ -1409,6 +1409,15 @@ def run_maniskill_real_eval(
         extract_success_mask,
         seeds_for_batch,
     )
+
+    # from experiments.robot.maniskill.maniskill_utils import (
+    #     build_maniskill_env,
+    #     clip_maniskill_action,
+    #     extract_done_mask,
+    #     extract_maniskill_observation,
+    #     extract_success_mask,
+    #     seeds_for_batch,
+    # )
     from experiments.robot.robot_utils import set_seed_everywhere
 
     module_modes = []
