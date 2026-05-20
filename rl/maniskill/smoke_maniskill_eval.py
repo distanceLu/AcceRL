@@ -3,7 +3,7 @@ import numpy as np
 import os
 import numpy as np
 
-from experiments.robot.maniskill.maniskill_utils import (
+from rl.maniskill.maniskill_utils import (
     build_maniskill_env,
     extract_maniskill_observation,
     clip_maniskill_action,

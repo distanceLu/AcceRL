@@ -26,6 +26,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Optional, Tuple, Type
 from contextlib import nullcontext
 
@@ -1401,7 +1402,7 @@ def run_maniskill_real_eval(
     """
     import numpy as np
 
-    from rl.ManiSkill.maniskill.maniskill_utils import (
+    from rl.maniskill.maniskill_utils import (
         build_maniskill_env,
         clip_maniskill_action,
         extract_done_mask,

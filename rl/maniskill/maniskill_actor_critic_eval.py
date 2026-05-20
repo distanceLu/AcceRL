@@ -42,12 +42,12 @@ for _p in (_REPO_ROOT, _RL_DIR, _MANISKILL_DIR):
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 
 # Import ActorCritic — no need to redefine
-from rl.new_actor_critic import ActorCritic
+from new_actor_critic import ActorCritic
 #from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs, check_unnorm_key
 
 # ManiSkill helpers
-from rl.ManiSkill.maniskill.maniskill_utils import (
+from rl.maniskill.maniskill_utils import (
     build_maniskill_env,
     extract_maniskill_observation,
     clip_maniskill_action,

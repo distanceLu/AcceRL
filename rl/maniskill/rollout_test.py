@@ -58,7 +58,7 @@ import time
 import numpy as np
 import ray
 
-from rl.maniskill_env import ManiSkillSingleEnv
+from rl.maniskill.maniskill_env import ManiSkillSingleEnv
 
 
 @ray.remote(num_gpus=0.1)

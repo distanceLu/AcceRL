@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-/cpfs01/lcx_stu4_workspace/envs/why_maniskill/bin/python rl/ManiSkill/ds_maniskill_ppo_discrete.py \
+/cpfs01/lcx_stu4_workspace/envs/why_maniskill/bin/python rl/maniskill/ds_maniskill_ppo_discrete.py \
   --cuda-visible-devices "4,5,6,7" \
   --maniskill-task PickCube-v1 \
   --camera-name base_camera \
