@@ -21,14 +21,20 @@ print("TF logical GPUs:", tf.config.list_logical_devices("GPU"))
 
 
 os.environ["WANDB_MODE"] = "disabled"
+os.environ.setdefault("MUJOCO_GL", "osmesa")
+os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+os.environ.setdefault("PYOPENGL_IGNORE_ACCELERATE", "1")
+import hashlib
+import json
+import multiprocessing as mp
 import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Dict, Optional, Tuple, Type
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import draccus
 import torch
@@ -44,6 +50,7 @@ from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq,
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
+
 
 from experiments.robot.openvla_utils import (
     check_model_logic_mismatch,
@@ -72,11 +79,18 @@ from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
+    IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
     PROPRIO_DIM,
+    STOP_INDEX,
 )
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
+
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+from preprocessed_dataset import PreprocessedVLADataset
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -85,8 +99,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 @dataclass
 class FinetuneConfig:
     # fmt: off
-    vla_path: str = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
-
+    # vla_path: str = "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
+    vla_path: str = "/cpfs01/lcx_workspace/models/openvla-7b"
     # Dataset
     # ManiSkill PickCube-v1 (Panda, pd_ee_delta_pose) RLDS build produced by
     # rlds_dataset_builder/maniskill_pickcube.  The directory layout is
@@ -101,6 +115,11 @@ class FinetuneConfig:
     run_root_dir: Path = Path("runs/imitation")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
+    # Preprocessed data (fast loading, bypasses RLDS/TFDS pipeline)
+    use_preprocessed_data: bool = False               # If True, load from preprocessed .pt shards instead of RLDS
+    preprocessed_data_dir: Path = Path("/data/disk1/lcx_stu4/PickCube-v1/preprocessed_pt")
+    dataloader_num_workers: int = 4                   # num_workers for DataLoader (only used with preprocessed data)
+
     # Algorithm and architecture
     use_l1_regression: bool = False                   # If True, trains continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, trains continuous action head with diffusion modeling objective (DDIM)
@@ -110,16 +129,16 @@ class FinetuneConfig:
     use_proprio: bool = False                        # If True, includes robot proprioceptive state in input
 
     # Training configuration
-    batch_size: int = 2                              # Batch size per device
+    batch_size: int = 8                              # Batch size per device
     learning_rate: float = 5e-4                      # Learning rate
-    lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 10% to 100%)
+    lr_warmup_steps: int = 2000                         # Number of steps to warm up learning rate (from 10% to 100%)
     num_steps_before_decay: int = 100_000            # Number of steps before LR decays by 10x
     grad_accumulation_steps: int = 8                 # Number of gradient accumulation steps
     max_steps: int = 200_000                         # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
     val_freq: int = 10_000                           # (When `use_val_set==True`) Validation set logging frequency in steps
     val_time_limit: int = 180                        # (When `use_val_set==True`) Time limit for computing validation metrics
-    save_freq: int = 10                          # Checkpoint saving frequency in steps
+    save_freq: int = 2000                           # Periodic checkpoint saving frequency in optimizer steps; <=0 disables periodic saves
     save_latest_checkpoint_only: bool = True        # If True, saves only 1 checkpoint, overwriting latest checkpoint
                                                      #   (If False, saves all checkpoints)
     enable_success_rate_checkpoints: bool = True    # If True, save milestone checkpoints when success rate crosses thresholds
@@ -196,6 +215,17 @@ def remove_ddp_in_checkpoint(state_dict) -> dict:
     return new_state_dict
 
 
+def shorten_run_id(run_id: str, max_length: int = 120) -> str:
+    if len(run_id) <= max_length:
+        return run_id
+
+    digest = hashlib.sha1(run_id.encode("utf-8")).hexdigest()[:10]
+    keep_length = max_length - len("--") - len(digest)
+    keep_length = max(keep_length, 16)
+    shortened_prefix = run_id[:keep_length].rstrip("-+_")
+    return f"{shortened_prefix}--{digest}"
+
+
 def get_run_id(cfg) -> str:
     if cfg.run_id_override is not None:
         run_id = cfg.run_id_override
@@ -215,7 +245,7 @@ def get_run_id(cfg) -> str:
             run_id += "--image_aug"
         if cfg.run_id_note is not None:
             run_id += f"--{cfg.run_id_note}"
-    return run_id
+    return shorten_run_id(run_id)
 
 
 def load_checkpoint(module_name: str, path: str, step: int, device: str = "cpu") -> dict:
@@ -1402,7 +1432,7 @@ def run_maniskill_real_eval(
     """
     import numpy as np
 
-    from rl.maniskill.maniskill_utils import (
+    from experiments.robot.maniskill.maniskill_utils import (
         build_maniskill_env,
         clip_maniskill_action,
         extract_done_mask,
@@ -1410,15 +1440,6 @@ def run_maniskill_real_eval(
         extract_success_mask,
         seeds_for_batch,
     )
-
-    # from experiments.robot.maniskill.maniskill_utils import (
-    #     build_maniskill_env,
-    #     clip_maniskill_action,
-    #     extract_done_mask,
-    #     extract_maniskill_observation,
-    #     extract_success_mask,
-    #     seeds_for_batch,
-    # )
     from experiments.robot.robot_utils import set_seed_everywhere
 
     module_modes = []
@@ -1670,11 +1691,17 @@ def save_training_checkpoint(
     action_head,
     train_dataset,
     is_main_process: bool,
+    checkpoint_tag: Optional[Path] = None,
+    checkpoint_reason: Optional[str] = None,
 ) -> None:
     """
     Save all training checkpoints including model components, LoRA adapter, and dataset statistics.
+    Each component is saved independently so that one failure does not prevent others.
     """
-    if cfg.save_latest_checkpoint_only:
+    if checkpoint_tag is not None:
+        checkpoint_dir = run_dir / checkpoint_tag
+        checkpoint_name_suffix = "milestone_checkpoint.pt"
+    elif cfg.save_latest_checkpoint_only:
         checkpoint_dir = run_dir
         checkpoint_name_suffix = "latest_checkpoint.pt"
     else:
@@ -1682,48 +1709,194 @@ def save_training_checkpoint(
         checkpoint_name_suffix = f"{log_step}_checkpoint.pt"
 
     adapter_dir = checkpoint_dir / "lora_adapter"
+    save_errors = []
 
     if is_main_process:
         os.makedirs(checkpoint_dir, exist_ok=True)
         os.makedirs(adapter_dir, exist_ok=True)
         save_dataset_statistics(train_dataset.dataset_statistics, checkpoint_dir)
-        print(f"Saving Model Checkpoint for Step {log_step}")
+        if checkpoint_reason is not None:
+            print(f"Saving Model Checkpoint for Step {log_step} ({checkpoint_reason})")
+            (checkpoint_dir / "checkpoint_reason.txt").write_text(checkpoint_reason + "\n")
+        else:
+            print(f"Saving Model Checkpoint for Step {log_step}")
 
-        # Save processor and LoRA adapter
-        processor.save_pretrained(checkpoint_dir)
-        # Save LoRA adapter weights
-        vla.save_pretrained(adapter_dir)
+        # Save processor (tokenizer + image processor)
+        try:
+            _ensure_cached_module_files_writable(processor)
+            processor.save_pretrained(checkpoint_dir)
+        except Exception as e:
+            save_errors.append(f"processor.save_pretrained: {e}")
+            print(f"Warning: failed to save processor for step {log_step}: {e}")
+
+        # Save Model Weights
+        try:
+            _ensure_cached_module_files_writable(vla)
+            if cfg.use_lora:
+                vla.save_pretrained(adapter_dir)
+                # Fallback to ensure safetensors are saved
+                try:
+                    from peft import get_peft_model_state_dict
+                    from safetensors.torch import save_file
+                    sd = get_peft_model_state_dict(vla)
+                    save_file(sd, adapter_dir / "adapter_model.safetensors")
+                    if hasattr(vla, "peft_config"):
+                        vla.peft_config['default'].save_pretrained(adapter_dir)
+                except Exception as e3:
+                    print(f"Error in manual adapter save fallback: {e3}")
+            else:
+                vla.save_pretrained(checkpoint_dir)
+        except Exception as e:
+            save_errors.append(f"vla.save_pretrained (safetensors): {e}")
+            print(f"Warning: safetensors save failed, retrying with torch format: {e}")
+            try:
+                if cfg.use_lora:
+                    vla.save_pretrained(adapter_dir, safe_serialization=False)
+                else:
+                    vla.save_pretrained(checkpoint_dir, safe_serialization=False)
+            except Exception as e2:
+                save_errors.append(f"vla.save_pretrained (torch): {e2}")
+                print(f"Error: failed to save model weights for step {log_step}: {e2}")
 
         # Save other components
         if cfg.use_proprio and proprio_projector is not None:
-            torch.save(proprio_projector.state_dict(), checkpoint_dir / f"proprio_projector--{checkpoint_name_suffix}")
+            try:
+                torch.save(proprio_projector.state_dict(), checkpoint_dir / f"proprio_projector--{checkpoint_name_suffix}")
+            except Exception as e:
+                save_errors.append(f"proprio_projector: {e}")
+                print(f"Error: failed to save proprio_projector for step {log_step}: {e}")
 
         if cfg.use_diffusion and noisy_action_projector is not None:
-            torch.save(
-                noisy_action_projector.state_dict(), checkpoint_dir / f"noisy_action_projector--{checkpoint_name_suffix}"
-            )
+            try:
+                torch.save(
+                    noisy_action_projector.state_dict(), checkpoint_dir / f"noisy_action_projector--{checkpoint_name_suffix}"
+                )
+            except Exception as e:
+                save_errors.append(f"noisy_action_projector: {e}")
+                print(f"Error: failed to save noisy_action_projector for step {log_step}: {e}")
 
         if (cfg.use_l1_regression or cfg.use_diffusion) and action_head is not None:
-            torch.save(action_head.state_dict(), checkpoint_dir / f"action_head--{checkpoint_name_suffix}")
+            try:
+                torch.save(action_head.state_dict(), checkpoint_dir / f"action_head--{checkpoint_name_suffix}")
+            except Exception as e:
+                save_errors.append(f"action_head: {e}")
+                print(f"Error: failed to save action_head for step {log_step}: {e}")
 
         if cfg.use_film:
-            # Save the entire vision backbone (not just FiLM components)
-            base_model = vla.model if hasattr(vla, "model") else vla
-            torch.save(
-                base_model.vision_backbone.state_dict(), checkpoint_dir / f"vision_backbone--{checkpoint_name_suffix}"
-            )
+            try:
+                base_model = vla.model if hasattr(vla, "model") else vla
+                torch.save(
+                    base_model.vision_backbone.state_dict(), checkpoint_dir / f"vision_backbone--{checkpoint_name_suffix}"
+                )
+            except Exception as e:
+                save_errors.append(f"vision_backbone: {e}")
+                print(f"Error: failed to save vision_backbone for step {log_step}: {e}")
 
-    # Merge LoRA weights into base model and save resulting model checkpoint
-    if cfg.use_lora and cfg.merge_lora_during_training and is_main_process:
-        base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+        if save_errors:
+            print(f"Checkpoint for step {log_step} completed with {len(save_errors)} error(s): {save_errors}")
+        else:
+            print(f"Checkpoint for step {log_step} saved successfully to {checkpoint_dir}")
+
+    # Merge LoRA weights into base model and save resulting 15GB model checkpoint directly
+    if cfg.use_lora and is_main_process:
+        print(f"Merging LoRA weights and saving 15GB complete model to {checkpoint_dir} ...")
+        try:
+            base_vla = AutoModelForVision2Seq.from_pretrained(
+                cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+            )
+            merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+            merged_vla = merged_vla.merge_and_unload()
+            
+            _ensure_cached_module_files_writable(merged_vla)
+            merged_vla.save_pretrained(checkpoint_dir)
+            
+            if cfg.merge_lora_during_training:
+                merged_path = checkpoint_dir / "merged_model"
+                os.makedirs(merged_path, exist_ok=True, mode=0o755)
+                merged_vla.save_pretrained(merged_path)
+            print(f"Saved 15GB complete model for Step {log_step} at: {checkpoint_dir}")
+        except Exception as e:
+            print(f"Failed to merge and save 15GB model: {e}")
+
+
+def should_save_periodic_checkpoint(cfg, log_step: int) -> bool:
+    return cfg.save_freq is not None and cfg.save_freq > 0 and log_step > 0 and log_step % cfg.save_freq == 0
+
+
+def maybe_save_success_rate_checkpoints(
+    cfg,
+    run_dir,
+    log_step,
+    val_metrics: Dict[str, float],
+    triggered_thresholds,
+    vla,
+    processor,
+    proprio_projector,
+    noisy_action_projector,
+    action_head,
+    train_dataset,
+    is_main_process: bool,
+    missing_metric_warning_emitted: bool,
+) -> bool:
+    if not cfg.enable_success_rate_checkpoints:
+        return missing_metric_warning_emitted
+
+    metric_name, metric_value = resolve_metric_value(
+        val_metrics,
+        cfg.success_rate_metric_name,
+        cfg.success_rate_metric_aliases,
+    )
+    if metric_name is None or metric_value is None:
+        if is_main_process and not missing_metric_warning_emitted:
+            print(
+                "Success-rate milestone saving is enabled, but no success-rate metric was found in validation metrics. "
+                f"Checked `{cfg.success_rate_metric_name}` and aliases `{cfg.success_rate_metric_aliases}`."
+            )
+            return True
+        return missing_metric_warning_emitted
+
+    safe_metric_name = metric_name.replace("/", "_").replace(" ", "_")
+    checkpoint_root = cfg.success_rate_checkpoint_root_dir
+    run_milestone_dir = checkpoint_root / run_dir.name
+
+    for threshold in parse_success_rate_thresholds(cfg.success_rate_save_thresholds):
+        if threshold in triggered_thresholds or metric_value < threshold:
+            continue
+
+        # Check if a milestone checkpoint for this threshold already exists on disk
+        # (e.g. from a previous run that crashed). Each milestone saves to its own
+        # uniquely-named directory, so we never overwrite an existing milestone checkpoint.
+        existing = list(run_milestone_dir.glob(f"{safe_metric_name}-gte-{threshold:.3f}-step-*")) if run_milestone_dir.exists() else []
+        if existing:
+            if is_main_process:
+                print(
+                    f"Milestone checkpoint for threshold {threshold:.3f} already exists at "
+                    f"{existing[0]}, skipping save."
+                )
+            triggered_thresholds.add(threshold)
+            continue
+
+        checkpoint_tag = Path(run_dir.name) / f"{safe_metric_name}-gte-{threshold:.3f}-step-{log_step}"
+        checkpoint_reason = (
+            f"{metric_name} reached {metric_value:.4f} at step {log_step}, crossing milestone {threshold:.4f}"
         )
-        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-        merged_vla = merged_vla.merge_and_unload()
-        merged_path = checkpoint_dir / "merged_model"
-        os.makedirs(merged_path, exist_ok=True, mode=0o755)
-        merged_vla.save_pretrained(merged_path)
-        print(f"Saved merged model for Step {log_step} at: {merged_path}")
+        save_training_checkpoint(
+            cfg=cfg,
+            run_dir=checkpoint_root,
+            log_step=log_step,
+            vla=vla,
+            processor=processor,
+            proprio_projector=proprio_projector,
+            noisy_action_projector=noisy_action_projector,
+            action_head=action_head,
+            train_dataset=train_dataset,
+            is_main_process=is_main_process,
+            checkpoint_tag=checkpoint_tag,
+            checkpoint_reason=checkpoint_reason,
+        )
+        triggered_thresholds.add(threshold)
+
+    return missing_metric_warning_emitted
 
 
 def run_validation(
@@ -1740,40 +1913,56 @@ def run_validation(
     is_main_process: bool,
     val_time_limit: int,
     writer: Optional[SummaryWriter] = None,
-) -> None:
+) -> Dict[str, float]:
     """
-    Compute validation set metrics for logging.
+    Compute validation-set metrics for logging.
+
+    Important semantics:
+      - Validation is a blocking phase inside the training loop.
+      - No optimizer/model updates happen while validation is running.
+      - All modules participating in the forward pass are temporarily switched
+        to eval() mode and restored to their original training flags afterwards,
+        so the metrics correspond to a single, fixed parameter snapshot.
     """
     val_start_time = time.time()
-    vla.eval()
     val_batches_count = 0
     all_val_metrics = []
 
-    with torch.no_grad():
-        for batch in val_dataloader:
-            _, metrics = run_forward_pass(
-                vla=vla,
-                action_head=action_head,
-                noisy_action_projector=noisy_action_projector,
-                proprio_projector=proprio_projector,
-                batch=batch,
-                action_tokenizer=action_tokenizer,
-                device=device,
-                use_l1_regression=cfg.use_l1_regression,
-                use_diffusion=cfg.use_diffusion,
-                use_proprio=cfg.use_proprio,
-                use_film=cfg.use_film,
-                num_patches=num_patches,
-                compute_diffusion_l1=True,
-                num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
-            )
+    module_modes = []
+    for module in (vla, action_head, proprio_projector, noisy_action_projector):
+        if module is not None:
+            module_modes.append((module, module.training))
+            module.eval()
 
-            metrics["loss"] = metrics["loss_value"]
-            all_val_metrics.append(metrics)
-            val_batches_count += 1
+    try:
+        with torch.no_grad():
+            for batch in val_dataloader:
+                _, metrics = run_forward_pass(
+                    vla=vla,
+                    action_head=action_head,
+                    noisy_action_projector=noisy_action_projector,
+                    proprio_projector=proprio_projector,
+                    batch=batch,
+                    action_tokenizer=action_tokenizer,
+                    device=device,
+                    use_l1_regression=cfg.use_l1_regression,
+                    use_diffusion=cfg.use_diffusion,
+                    use_proprio=cfg.use_proprio,
+                    use_film=cfg.use_film,
+                    num_patches=num_patches,
+                    compute_diffusion_l1=True,
+                    num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
+                )
 
-            if time.time() - val_start_time > val_time_limit:
-                break
+                metrics["loss"] = metrics["loss_value"]
+                all_val_metrics.append(metrics)
+                val_batches_count += 1
+
+                if time.time() - val_start_time > val_time_limit:
+                    break
+    finally:
+        for module, was_training in module_modes:
+            module.train(was_training)
 
     avg_val_metrics = {}
     if all_val_metrics:
@@ -1790,6 +1979,8 @@ def run_validation(
         if writer is not None:
             for metric_name, value in avg_val_metrics.items():
                 writer.add_scalar(f"val/{metric_name}", value, log_step)
+
+    return avg_val_metrics
 
 
 @draccus.wrap()
@@ -1814,8 +2005,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Device setup
     if torch.cuda.is_available():
-        device = torch.device("cuda:0")
-        torch.cuda.set_device(0)
+        device = torch.device("cuda:1")
+        torch.cuda.set_device(1)
         torch.cuda.empty_cache()
     else:
         device = torch.device("cpu")
@@ -1848,16 +2039,16 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Update config.json and sync model files (single process)
     # if is_main_process:
-        # update_auto_map(cfg.vla_path)
-        # check_model_logic_mismatch(cfg.vla_path)
+    #     update_auto_map(cfg.vla_path)
+    #     check_model_logic_mismatch(cfg.vla_path)
 
     # Load processor & model
-    processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=False)
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
         torch_dtype=torch.bfloat16 if device.type == "cuda" else None,
         low_cpu_mem_usage=True,
-        trust_remote_code=True,
+        trust_remote_code=False,
     ).to(device)
 
     # Set number of images in VLA input (before LoRA wrapping)
@@ -1903,6 +2094,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             cfg,
             device,
             {"llm_dim": base_model.llm_dim, "proprio_dim": PROPRIO_DIM},
+            to_bf16=(device.type == "cuda"),
         )
 
     if cfg.use_l1_regression:
@@ -1965,22 +2157,30 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Dataset(s)
     use_wrist_image = cfg.num_images_in_input > 1
-    batch_transform = RLDSBatchTransform(
-        action_tokenizer,
-        processor.tokenizer,
-        image_transform=processor.image_processor.apply_transform,
-        prompt_builder_fn=PurePromptBuilder,
-        use_wrist_image=use_wrist_image,
-        use_proprio=cfg.use_proprio,
-    )
-    train_dataset = RLDSDataset(
-        cfg.data_root_dir,
-        cfg.dataset_name,
-        batch_transform,
-        resize_resolution=tuple(base_model.config.image_sizes),
-        shuffle_buffer_size=cfg.shuffle_buffer_size,
-        image_aug=cfg.image_aug,
-    )
+    if cfg.use_preprocessed_data:
+        print(f"Using preprocessed data from {cfg.preprocessed_data_dir}")
+        train_dataset = PreprocessedVLADataset(
+            preprocessed_dir=str(cfg.preprocessed_data_dir),
+            image_transform=processor.image_processor.apply_transform,
+        )
+    else:
+        batch_transform = RLDSBatchTransform(
+            action_tokenizer,
+            processor.tokenizer,
+            image_transform=processor.image_processor.apply_transform,
+            prompt_builder_fn=PurePromptBuilder,
+            use_wrist_image=use_wrist_image,
+            use_proprio=cfg.use_proprio,
+        )
+        # 构造的RLDS数据集
+        train_dataset = RLDSDataset(
+            cfg.data_root_dir,
+            cfg.dataset_name,
+            batch_transform,
+            resize_resolution=tuple(base_model.config.image_sizes),
+            shuffle_buffer_size=cfg.shuffle_buffer_size,
+            image_aug=cfg.image_aug,
+        )
     if cfg.use_val_set:
         val_dataset = RLDSDataset(
             cfg.data_root_dir,
@@ -1999,14 +2199,26 @@ def finetune(cfg: FinetuneConfig) -> None:
     collator = PaddedCollatorForActionPrediction(
         processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
     )
-    dataloader = DataLoader(
-        train_dataset,
-        batch_size=cfg.batch_size,
-        sampler=None,
-        collate_fn=collator,
-        num_workers=0,  # RLDS 自带并行，调试时 0 更好断点
-        pin_memory=(device.type == "cuda"),
-    )
+    if cfg.use_preprocessed_data:
+        dataloader = DataLoader(
+            train_dataset,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            collate_fn=collator,
+            num_workers=cfg.dataloader_num_workers,
+            pin_memory=(device.type == "cuda"),
+            persistent_workers=(cfg.dataloader_num_workers > 0),
+            drop_last=True,
+        )
+    else:
+        dataloader = DataLoader(
+            train_dataset,
+            batch_size=cfg.batch_size,
+            sampler=None,
+            collate_fn=collator,
+            num_workers=0,  # RLDS 自带并行，调试时 0 更好断点
+            pin_memory=(device.type == "cuda"),
+        )
     if cfg.use_val_set:
         val_batch_size = cfg.batch_size
         val_dataloader = DataLoader(
@@ -2026,16 +2238,30 @@ def finetune(cfg: FinetuneConfig) -> None:
         "next_actions_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
         "next_actions_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
     }
+    triggered_success_rate_thresholds = set()
+    missing_success_rate_metric_warning_emitted = False
+
+    if is_main_process and cfg.enable_success_rate_checkpoints:
+        print(
+            "Success-rate milestone checkpoints enabled for thresholds: "
+            f"{parse_success_rate_thresholds(cfg.success_rate_save_thresholds)}"
+        )
+        if not cfg.use_val_set and not cfg.use_libero_env_eval:
+            print("Warning: success-rate milestone checkpoints require either validation metrics or LIBERO env evaluation, but both are disabled.")
 
     # Training loop
-    with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
+    completed_optimizer_steps = cfg.resume_step if (cfg.resume and cfg.resume_step is not None) else 0
+    with tqdm.tqdm(total=cfg.max_steps, initial=completed_optimizer_steps, leave=False) as progress:
         vla.train()
         optimizer.zero_grad()
-        for batch_idx, batch in enumerate(dataloader):
+        batch_idx = 0
+        stop_training = False
+        while not stop_training:
+          for batch in dataloader:
             compute_diffusion_l1 = cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0
             for k, v in batch.items():
                 if isinstance(v, torch.Tensor):
-                    batch[k] = v.to(vla.device)
+                    batch[k] = v.to(vla.device, non_blocking=True)
             loss, metrics = run_forward_pass(
                 vla=vla,
                 action_head=action_head,
@@ -2060,38 +2286,35 @@ def finetune(cfg: FinetuneConfig) -> None:
                 if metric_name in recent_metrics:
                     recent_metrics[metric_name].append(value)
 
-            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
-            smoothened_metrics = compute_smoothened_metrics(recent_metrics)
-            log_step = gradient_step_idx if not cfg.resume else cfg.resume_step + gradient_step_idx
+            did_optimizer_step = (batch_idx + 1) % cfg.grad_accumulation_steps == 0
+            batch_idx += 1
+            if not did_optimizer_step:
+                continue
 
-            if is_main_process and log_step % cfg.wandb_log_freq == 0:
-                log_metrics_to_wandb(smoothened_metrics, "VLA Train", log_step, wandb)
-                # Log to TensorBoard
-                if writer is not None:
-                    for metric_name, value in smoothened_metrics.items():
-                        writer.add_scalar(f"train/{metric_name}", value, log_step)
-
-            # LR warmup (optional)
-            if cfg.lr_warmup_steps > 0:
-                lr_progress = min((gradient_step_idx + 1) / cfg.lr_warmup_steps, 1.0)
-                current_lr = original_lr * (0.1 + 0.9 * lr_progress)
+            if cfg.lr_warmup_steps > 0 and completed_optimizer_steps < cfg.lr_warmup_steps:
+                warmup_progress = min((completed_optimizer_steps + 1) / cfg.lr_warmup_steps, 1.0)
+                current_lr = original_lr * (0.1 + 0.9 * warmup_progress)
                 for pg in optimizer.param_groups:
                     pg["lr"] = current_lr
 
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+
+            completed_optimizer_steps += 1
+            log_step = completed_optimizer_steps
+            progress.update()
+
+            smoothened_metrics = compute_smoothened_metrics(recent_metrics)
             if is_main_process and log_step % cfg.wandb_log_freq == 0:
-                wandb.log({"VLA Train/Learning Rate": scheduler.get_last_lr()[0]}, step=log_step)
-                # Log learning rate to TensorBoard
+                log_metrics_to_wandb(smoothened_metrics, "VLA Train", log_step, wandb)
+                wandb.log({"VLA Train/Learning Rate": optimizer.param_groups[0]["lr"]}, step=log_step)
                 if writer is not None:
-                    writer.add_scalar("train/learning_rate", scheduler.get_last_lr()[0], log_step)
+                    for metric_name, value in smoothened_metrics.items():
+                        writer.add_scalar(f"train/{metric_name}", value, log_step)
+                    writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], log_step)
 
-            if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                progress.update()
-
-            # Save checkpoint
-            if gradient_step_idx > 0 and log_step % cfg.save_freq == 0:
+            if should_save_periodic_checkpoint(cfg, log_step):
                 save_training_checkpoint(
                     cfg=cfg,
                     run_dir=run_dir,
@@ -2105,27 +2328,87 @@ def finetune(cfg: FinetuneConfig) -> None:
                     is_main_process=is_main_process,
                 )
 
-            # Validation
-            if cfg.use_val_set and log_step > 0 and log_step % cfg.val_freq == 0:
-                run_validation(
-                    vla=vla,
-                    action_head=action_head,
-                    noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
-                    proprio_projector=proprio_projector if cfg.use_proprio else None,
-                    val_dataloader=val_dataloader,
-                    action_tokenizer=action_tokenizer,
-                    device=device,
+            eval_metrics = {}
+            ran_eval = False
+
+            if cfg.use_val_set and log_step % cfg.val_freq == 0:
+                eval_metrics.update(
+                    run_validation(
+                        vla=vla,
+                        action_head=action_head,
+                        noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
+                        proprio_projector=proprio_projector if cfg.use_proprio else None,
+                        val_dataloader=val_dataloader,
+                        action_tokenizer=action_tokenizer,
+                        device=device,
+                        cfg=cfg,
+                        num_patches=NUM_PATCHES,
+                        log_step=log_step,
+                        is_main_process=is_main_process,
+                        val_time_limit=cfg.val_time_limit,
+                        writer=writer,
+                    )
+                )
+                ran_eval = True
+
+            if cfg.use_libero_env_eval and log_step % cfg.libero_eval_freq == 0:
+                eval_metrics.update(
+                    run_libero_real_eval(
+                        cfg=cfg,
+                        vla=vla,
+                        processor=processor,
+                        action_head=action_head if (cfg.use_l1_regression or cfg.use_diffusion) else None,
+                        proprio_projector=proprio_projector if cfg.use_proprio else None,
+                        noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
+                        train_dataset_statistics=train_dataset.dataset_statistics,
+                        log_step=log_step,
+                        run_dir=run_dir,
+                        writer=writer,
+                    )
+                )
+                ran_eval = True
+
+            if cfg.use_maniskill_env_eval and log_step % cfg.maniskill_eval_freq == 0:
+                eval_metrics.update(
+                    run_maniskill_real_eval(
+                        cfg=cfg,
+                        vla=vla,
+                        processor=processor,
+                        action_head=action_head if (cfg.use_l1_regression or cfg.use_diffusion) else None,
+                        proprio_projector=proprio_projector if cfg.use_proprio else None,
+                        noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
+                        train_dataset_statistics=train_dataset.dataset_statistics,
+                        log_step=log_step,
+                        run_dir=run_dir,
+                        writer=writer,
+                    )
+                )
+                ran_eval = True
+
+            if ran_eval:
+                # Milestone checkpoints are only considered after the full evaluation phase has completed.
+                # Since evaluation is blocking inside the training loop, the saved weights are the same
+                # parameter snapshot that was just evaluated.
+                missing_success_rate_metric_warning_emitted = maybe_save_success_rate_checkpoints(
                     cfg=cfg,
-                    num_patches=NUM_PATCHES,
+                    run_dir=run_dir,
                     log_step=log_step,
+                    val_metrics=eval_metrics,
+                    triggered_thresholds=triggered_success_rate_thresholds,
+                    vla=vla,
+                    processor=processor,
+                    proprio_projector=proprio_projector if cfg.use_proprio else None,
+                    noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
+                    action_head=action_head if (cfg.use_l1_regression or cfg.use_diffusion) else None,
+                    train_dataset=train_dataset,
                     is_main_process=is_main_process,
-                    val_time_limit=cfg.val_time_limit,
-                    writer=writer,
+                    missing_metric_warning_emitted=missing_success_rate_metric_warning_emitted,
                 )
                 vla.train()
 
-            if log_step == cfg.max_steps:
+            if log_step >= cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                stop_training = True
                 break
     
     # Close TensorBoard writer
