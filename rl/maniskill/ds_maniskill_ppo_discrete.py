@@ -1822,7 +1822,8 @@ def main(args):
         ignore_reinit_error=True, 
         _temp_dir='/dev/shm',
         object_store_memory=object_store_memory_bytes,
-        num_cpus=args.num_rollout_workers + args.num_eval_workers + args.num_trainer_gpus + args.num_inference_actors + 8,
+        num_cpus=96,
+        # num_cpus=args.num_rollout_workers + args.num_eval_workers + args.num_trainer_gpus + args.num_inference_actors + 8,
         # dashboard_host="0.0.0.0",  # 允许任何外部 IP 访问 Dashboard
         # dashboard_port=8266        # 可选：指定端口，默认就是 8265
     )

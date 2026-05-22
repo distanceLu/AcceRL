@@ -31,5 +31,5 @@
   --use-bf16 \
   --pretrained-checkpoint "/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/20260511_203047_openvla-7b+maniskill_pickcube+b64+lr-0.0005+lora-r32+dropout-0.0--image_aug_2images" \
   --clip-mode gipo \
-  --exp-name "ManiSkill_PickCube_dual_cam_gipo_60k" \
+  --exp-name "ManiSkill_PickCube_dual_cam_gipo_60k_potential_reward_cpu_96" \
   --sigma 0.5
