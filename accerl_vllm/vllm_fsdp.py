@@ -29,6 +29,7 @@ Assumes a single-node cluster with 8 GPUs.
 
 import asyncio
 import os
+import time
 import uuid
 from dataclasses import asdict
 
@@ -54,11 +55,12 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
-MODEL_NAME = "/mnt/data/lcx4/why_workspace/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
+MODEL_NAME = "/mnt/data/lcx4/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
 
 FSDP_WORLD_SIZE = 4
 INFERENCE_TP_SIZE = 1
 INFERENCE_DP_SIZE = 4
+TRANSFER_BENCH_ITERS = 20
 
 
 def iter_vllm_loadable_weights(name: str, tensor: torch.Tensor):
@@ -94,6 +96,35 @@ def get_vllm_weight_metadata(named_parameters):
             dtype_names.append(str(load_tensor.dtype).split(".")[-1])
             shapes.append(list(load_tensor.shape))
     return names, dtype_names, shapes
+
+
+def dtype_nbytes(dtype_name: str) -> int:
+    """Return bytes per element for dtype names emitted by get_vllm_weight_metadata."""
+    return {
+        "float64": 8,
+        "double": 8,
+        "float32": 4,
+        "float": 4,
+        "bfloat16": 2,
+        "float16": 2,
+        "half": 2,
+        "int64": 8,
+        "long": 8,
+        "int32": 4,
+        "int": 4,
+        "int16": 2,
+        "short": 2,
+        "int8": 1,
+        "uint8": 1,
+        "bool": 1,
+    }[dtype_name]
+
+
+def numel_from_shape(shape):
+    numel = 1
+    for dim in shape:
+        numel *= dim
+    return numel
 
 
 @ray.remote(num_gpus=1)
@@ -337,26 +368,58 @@ async def main():
     names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
     print(f"[sync] Got metadata for {len(names)} parameters.")
 
-    await engine.start_weight_update()
-    print("[sync] Broadcasting weights from FSDP → vLLM...")
-    broadcast_handles = [
-        w.gather_and_broadcast_weights.remote(packed=True) for w in fsdp_workers
-    ]
-    await engine.update_weights(
-        WeightTransferUpdateRequest(
-            update_info=asdict(
-                NCCLWeightTransferUpdateInfo(
-                    names=names,
-                    dtype_names=dtype_names,
-                    shapes=shapes,
-                    packed=True,
+    total_weight_bytes = sum(
+        numel_from_shape(shape) * dtype_nbytes(dtype_name)
+        for dtype_name, shape in zip(dtype_names, shapes)
+    )
+    model_gib = total_weight_bytes / 1024**3
+    infer_payload_gib = model_gib * (transfer_world_size - 1)
+    print(
+        f"[bench] One logical model payload: {model_gib:.3f} GiB; "
+        f"aggregate infer payload: {infer_payload_gib:.3f} GiB "
+        f"across {transfer_world_size - 1} infer ranks."
+    )
+
+    bench_times = []
+    for i in range(TRANSFER_BENCH_ITERS):
+        await engine.start_weight_update()
+        print(
+            f"[bench] Iteration {i + 1}/{TRANSFER_BENCH_ITERS}: "
+            "broadcasting weights from FSDP → vLLM..."
+        )
+        t0 = time.perf_counter()
+        broadcast_handles = [
+            w.gather_and_broadcast_weights.remote(packed=True) for w in fsdp_workers
+        ]
+        await engine.update_weights(
+            WeightTransferUpdateRequest(
+                update_info=asdict(
+                    NCCLWeightTransferUpdateInfo(
+                        names=names,
+                        dtype_names=dtype_names,
+                        shapes=shapes,
+                        packed=True,
+                    )
                 )
             )
         )
+        ray.get(broadcast_handles)
+        await engine.finish_weight_update()
+        elapsed = time.perf_counter() - t0
+        bench_times.append(elapsed)
+        print(
+            f"[bench] Iteration {i + 1}/{TRANSFER_BENCH_ITERS}: "
+            f"{elapsed:.3f}s, model-sync throughput={model_gib / elapsed:.3f} GiB/s, "
+            f"aggregate-infer throughput={infer_payload_gib / elapsed:.3f} GiB/s"
+        )
+
+    avg_time = sum(bench_times) / len(bench_times)
+    print("[sync] Weight broadcast benchmark complete.")
+    print(
+        f"[bench] Average over {TRANSFER_BENCH_ITERS} iterations: "
+        f"{avg_time:.3f}s, model-sync throughput={model_gib / avg_time:.3f} GiB/s, "
+        f"aggregate-infer throughput={infer_payload_gib / avg_time:.3f} GiB/s"
     )
-    ray.get(broadcast_handles)
-    await engine.finish_weight_update()
-    print("[sync] Weight broadcast complete.")
 
     print("[sync] Resuming generation...")
     await engine.resume_generation()
