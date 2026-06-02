@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run local vLLM inference with a mid-generation weight-update pause.
 
-This demo intentionally restarts unfinished requests after a weight update
-instead of resuming their old KV cache.  The restart prompt is built from the
-original prompt plus the tokens already generated before the pause, so the
-post-update continuation is prefilling from the updated weights.
+This demo intentionally aborts unfinished requests before a weight update and
+resubmits them afterwards instead of resuming their old KV cache.  The restart
+input is built from the original prompt token IDs plus the tokens already
+generated before the pause, so the post-update continuation is prefilling from
+the updated weights without relying on string re-tokenization.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from vllm import AsyncLLMEngine, RequestOutput, SamplingParams
 from vllm.v1.executor import Executor
 
 MODEL_NAME = "/mnt/data/lcx4/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
-PAUSE_TOKEN_THRESHOLD = 10
+PAUSE_TOKEN_THRESHOLD = 100
 DEFAULT_MAX_TOKENS = 64
+MAX_RESUBMIT_RETRIES = 20
 
 # vLLM worker processes inherit PATH from this parent process.  Some shells run
 # the env's python directly without fully activating the conda env, leaving
@@ -39,26 +41,38 @@ class GenerationState:
 
     index: int
     original_prompt: str
+    original_prompt_token_ids: list[int]
     requested_max_tokens: int
     latest_output: Optional[RequestOutput] = None
+    latest_prompt_token_ids: list[int] = field(default_factory=list)
     generated_text: str = ""
     generated_token_ids: list[int] = field(default_factory=list)
+    generated_versions: list[int] = field(default_factory=list)
     post_update_text: str = ""
     post_update_token_ids: list[int] = field(default_factory=list)
+    post_update_versions: list[int] = field(default_factory=list)
     completed_before_update: bool = False
     restarted: bool = False
 
     @property
     def remaining_max_tokens(self) -> int:
-        return max(0, self.requested_max_tokens - len(self.generated_token_ids))
+        generated_tokens = len(self.generated_token_ids) + len(
+            self.post_update_token_ids
+        )
+        return max(0, self.requested_max_tokens - generated_tokens)
 
     @property
-    def restart_prompt(self) -> str:
-        return self.original_prompt + self.generated_text
+    def restart_prompt_token_ids(self) -> list[int]:
+        prompt_token_ids = self.latest_prompt_token_ids or self.original_prompt_token_ids
+        return prompt_token_ids + self.generated_token_ids + self.post_update_token_ids
 
     @property
     def full_generated_text(self) -> str:
         return self.generated_text + self.post_update_text
+
+    @property
+    def output_versions(self) -> list[int]:
+        return self.generated_versions + self.post_update_versions
 
 
 def create_async_engine() -> AsyncLLMEngine:
@@ -121,16 +135,48 @@ async def reload_model_weights_from_disk(engine: AsyncLLMEngine) -> None:
     print("[sync] Model weights reloaded.")
 
 
-def _copy_generation_from_output(state: GenerationState, output: RequestOutput) -> int:
+async def pause_generation_for_weight_update(engine: AsyncLLMEngine) -> None:
+    """Pause vLLM itself, aborting in-flight requests and clearing KV cache."""
+    await engine.pause_generation(mode="abort", clear_cache=True)
+
+
+def _copy_generation_from_output(
+    state: GenerationState,
+    output: RequestOutput,
+    version: int,
+) -> int:
     """Refresh pre-update text/token state from the latest streamed output."""
     state.latest_output = output
+    if output.prompt_token_ids is not None:
+        state.latest_prompt_token_ids = list(output.prompt_token_ids)
     if not output.outputs:
         return 0
 
     completion = output.outputs[0]
     state.generated_text = completion.text
     state.generated_token_ids = list(completion.token_ids)
+    state.generated_versions = [version] * len(state.generated_token_ids)
     return len(state.generated_token_ids)
+
+
+def _copy_post_update_from_output(
+    state: GenerationState,
+    output: RequestOutput,
+    version: int,
+    base_text: str,
+    base_token_ids: list[int],
+) -> str | None:
+    """Merge one resubmitted request's partial output into post-update state."""
+    state.latest_output = output
+    if not output.outputs:
+        return None
+
+    completion = output.outputs[0]
+    attempt_token_ids = list(completion.token_ids)
+    state.post_update_text = base_text + completion.text
+    state.post_update_token_ids = base_token_ids + attempt_token_ids
+    state.post_update_versions = [version] * len(state.post_update_token_ids)
+    return getattr(completion, "finish_reason", None)
 
 
 async def stream_until_pause(
@@ -139,6 +185,7 @@ async def stream_until_pause(
     sampling_params: SamplingParams,
     pause_requested: asyncio.Event, # 由主协程设置以触发权重更新
     pause_after_tokens: int,
+    version: int,
 ) -> None:
     """Stream one request until it finishes or a global pause is requested."""
     request_id = f"pre-update-{state.index}-{uuid.uuid4()}"
@@ -147,7 +194,11 @@ async def stream_until_pause(
         sampling_params,
         request_id=request_id,
     ):
-        generated_tokens = _copy_generation_from_output(state, request_output)
+        generated_tokens = _copy_generation_from_output(
+            state,
+            request_output,
+            version,
+        )
 
         if request_output.finished:
             state.completed_before_update = True
@@ -169,48 +220,80 @@ async def stream_until_pause(
 async def stream_after_update(
     engine: AsyncLLMEngine,
     state: GenerationState,
+    version: int,
 ) -> None:
-    """Restart one unfinished request using the partial result as prompt."""
+    """Restart an unfinished request, resubmitting on abort until it finishes."""
     if state.completed_before_update:
         return
 
-    remaining_max_tokens = state.remaining_max_tokens
-    if remaining_max_tokens <= 0:
-        return
-
     state.restarted = True
-    restart_sampling_params = SamplingParams(
-        temperature=0,
-        max_tokens=remaining_max_tokens,
-    )
-    request_id = f"post-update-{state.index}-{uuid.uuid4()}"
-    async for request_output in engine.generate(
-        {"prompt": state.restart_prompt},
-        restart_sampling_params,
-        request_id=request_id,
-    ):
-        state.latest_output = request_output
-        if not request_output.outputs:
+    for attempt in range(1, MAX_RESUBMIT_RETRIES + 1):
+        remaining_max_tokens = state.remaining_max_tokens
+        if remaining_max_tokens <= 0:
+            return
+
+        base_text = state.post_update_text
+        base_token_ids = list(state.post_update_token_ids)
+        restart_sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=remaining_max_tokens,
+        )
+        request_id = f"post-update-{state.index}-try{attempt}-{uuid.uuid4()}"
+        finish_reason = None
+        request_finished = False
+
+        async for request_output in engine.generate(
+            {"prompt_token_ids": state.restart_prompt_token_ids},
+            restart_sampling_params,
+            request_id=request_id,
+        ):
+            finish_reason = _copy_post_update_from_output(
+                state,
+                request_output,
+                version,
+                base_text,
+                base_token_ids,
+            )
+            request_finished = request_output.finished
+
+        if finish_reason in {"stop", "length"} or state.remaining_max_tokens <= 0:
+            return
+
+        if not request_finished or finish_reason == "abort":
+            print(
+                "[generate] Request "
+                f"{state.index} post-update attempt {attempt} ended with "
+                f"finish_reason={finish_reason!r}; resubmitting with "
+                f"{state.remaining_max_tokens} tokens remaining."
+            )
+            await asyncio.sleep(0)
             continue
 
-        completion = request_output.outputs[0]
-        state.post_update_text = completion.text
-        state.post_update_token_ids = list(completion.token_ids)
+        # Unknown terminal reason: keep the partial result but avoid spinning.
+        return
+
+    print(
+        "[generate] Request "
+        f"{state.index} reached MAX_RESUBMIT_RETRIES={MAX_RESUBMIT_RETRIES}; "
+        "keeping the partial post-update result."
+    )
 
 
 async def pause_update_and_restart(
     engine: AsyncLLMEngine,
     states: list[GenerationState],
+    current_version: int,
 ) -> None:
     """Reload weights, then restart unfinished requests."""
     await reload_model_weights_from_disk(engine)
+    next_version = current_version + 1
 
     print("[sync] Resuming generation for fresh restarted requests...")
     await engine.resume_generation()
-    print("[sync] Generation resumed.")
+    print(f"[sync] Generation resumed with weight version {next_version}.")
 
     restart_tasks = [
-        asyncio.create_task(stream_after_update(engine, state))
+        asyncio.create_task(stream_after_update(engine, state, version=next_version))
         for state in states
         if not state.completed_before_update and state.remaining_max_tokens > 0
     ]
@@ -223,9 +306,15 @@ def print_results(states: list[GenerationState]) -> None:
     for state in states:
         print(f"Prompt: {state.original_prompt!r}")
         print(
+            "Prompt token IDs "
+            f"({len(state.original_prompt_token_ids)}): "
+            f"{state.original_prompt_token_ids!r}"
+        )
+        print(
             "Pre-update generated "
             f"({len(state.generated_token_ids)} tokens): {state.generated_text!r}"
         )
+        print(f"Pre-update token IDs: {state.generated_token_ids!r}")
 
         if state.completed_before_update:
             print("Post-update generated: <not restarted; request finished early>")
@@ -235,9 +324,11 @@ def print_results(states: list[GenerationState]) -> None:
                 f"({len(state.post_update_token_ids)} tokens): "
                 f"{state.post_update_text!r}"
             )
+            print(f"Post-update token IDs: {state.post_update_token_ids!r}")
         else:
             print("Post-update generated: <not restarted; no remaining token budget>")
 
+        print(f"Output versions: {state.output_versions!r}")
         print(f"Full generated: {state.full_generated_text!r}")
         print("-" * 60)
 
@@ -250,19 +341,22 @@ async def main() -> None:
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0, max_tokens=DEFAULT_MAX_TOKENS)
-    states = [
-        GenerationState(
-            index=index,
-            original_prompt=prompt,
-            requested_max_tokens=DEFAULT_MAX_TOKENS,
-        )
-        for index, prompt in enumerate(prompts)
-    ]
     # 把这个中断事件改成加载模型
     pause_requested = asyncio.Event()
 
     print(f"[init] Loading local model from {MODEL_NAME}")
     engine = create_async_engine()
+    tokenizer = engine.get_tokenizer()
+    current_version = 0
+    states = [
+        GenerationState(
+            index=index,
+            original_prompt=prompt,
+            original_prompt_token_ids=tokenizer.encode(prompt),
+            requested_max_tokens=DEFAULT_MAX_TOKENS,
+        )
+        for index, prompt in enumerate(prompts)
+    ]
 
     print("[generate] Starting streaming generation...")
     generation_tasks = [
@@ -273,6 +367,7 @@ async def main() -> None:
                 sampling_params=sampling_params,
                 pause_requested=pause_requested,
                 pause_after_tokens=PAUSE_TOKEN_THRESHOLD,
+                version=current_version,
             )
         )
         for state in states
@@ -287,14 +382,23 @@ async def main() -> None:
         )
 
         if pause_wait_task in done:
-            print("[sync] Pausing generation with mode='abort'...")
-            # aboret 模式会让正在生成的请求立即停止并抛出异常，未完成的请求会被标记为 finished=True 以触发后续重启逻辑，KV cache 不会被保留
-            await engine.pause_generation(mode="abort")
+            print(
+                "[sync] Pausing vLLM generation with mode='abort' "
+                "and clear_cache=True..."
+            )
+            # abort 模式会让正在生成的请求立即停止；clear_cache=True 避免旧权重
+            # 生成的 KV cache 在权重更新后被复用。
+            await pause_generation_for_weight_update(engine)
             print("[sync] Generation paused.")
             # 等待所有生成任务完成（无论是正常完成还是被 pause 中断），再进行权重更新和重启
             await asyncio.gather(*pending_generation_tasks, return_exceptions=True)
             # 进行权重更新并重启未完成的请求
-            await pause_update_and_restart(engine, states)
+            await pause_update_and_restart(
+                engine,
+                states,
+                current_version=current_version,
+            )
+            current_version += 1
             break
 
         for task in done:
