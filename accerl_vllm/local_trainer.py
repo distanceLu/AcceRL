@@ -1,22 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Local single-process trainer smoke-test for a local chat model.
+"""Local trainer smoke-test for a local chat model.
 
-This script intentionally avoids Ray, torch.distributed, FSDP, vLLM, and NCCL.
-It loads a local Hugging Face CausalLM model, builds a tiny in-memory dummy
-dataset, and runs a few optimizer steps to validate the trainer path.
+By default this script runs the original single-process smoke test.  With
+``--use-fsdp`` it launches Ray actors that form a NCCL process group and run
+the same dummy SFT loop under PyTorch FSDP2.
 
 Default behavior is conservative: only ``lm_head`` is trainable.  That makes it
 useful for validating the local training lifecycle before moving to full SFT.
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import random
+import socket
 from typing import Dict, Iterable, List, Tuple
 
 
-DEFAULT_MODEL_PATH = "/mnt/data/lcx4/why_workspace/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
-DEFAULT_OUTPUT_DIR = "/mnt/data/lcx4/why_workspace/outputs/local_trainer_smoke"
+DEFAULT_MODEL_PATH = "/mnt/data/lcx4/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
+DEFAULT_OUTPUT_DIR = "/mnt/data/lcx4/outputs/local_trainer_smoke"
 
 
 DUMMY_CHAT_EXAMPLES = [
@@ -243,9 +246,350 @@ def move_batch_to_device(batch: Dict, device) -> Dict:
     return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
 
+def ensure_training_imports(import_distributed: bool = False) -> None:
+    global torch, DataLoader, AutoModelForCausalLM, AutoTokenizer
+
+    import torch
+    from torch.utils.data import DataLoader
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    if import_distributed:
+        global DistributedSampler
+
+        from torch.utils.data.distributed import DistributedSampler
+
+
+def get_local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+def find_open_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
+
+
+def build_tokenizer(args: argparse.Namespace, log: bool = True):
+    if log:
+        print(f"[init] Loading tokenizer from {args.model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_path,
+        local_files_only=True,
+        trust_remote_code=args.trust_remote_code,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        raise ValueError("Tokenizer must define either pad_token or eos_token.")
+    return tokenizer
+
+
+def build_model(args: argparse.Namespace, device, torch_dtype, log: bool = True):
+    if log:
+        print(
+            f"[init] Loading model from {args.model_path} "
+            f"(device={device}, dtype={torch_dtype})"
+        )
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path,
+        torch_dtype=torch_dtype,
+        local_files_only=True,
+        trust_remote_code=args.trust_remote_code,
+    )
+    model.to(device)
+    model.train()
+    model.config.use_cache = False
+
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+
+    return model
+
+
+def build_dataset(args: argparse.Namespace, tokenizer) -> DummyChatDataset:
+    return DummyChatDataset(
+        tokenizer=tokenizer,
+        max_length=args.max_length,
+        repeat=args.dataset_repeat,
+    )
+
+
+def build_dataloader(
+    args: argparse.Namespace,
+    tokenizer,
+    dataset,
+    sampler=None,
+    shuffle: bool = True,
+):
+    return DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
+        collate_fn=make_collate_fn(tokenizer),
+    )
+
+
+def log_parameter_count(model, train_mode: str, rank: int = 0):
+    total_params, trainable_params = count_parameters(model)
+    trainable_parameter_list = list(iter_trainable_parameters(model))
+    if not trainable_parameter_list:
+        raise RuntimeError(f"No trainable parameters found for mode: {train_mode}")
+
+    if rank == 0:
+        print(
+            "[train] Parameter count: "
+            f"trainable={trainable_params:,} / total={total_params:,} "
+            f"({trainable_params / total_params:.4%})"
+        )
+    return trainable_parameter_list
+
+
+def run_training_loop(
+    model,
+    dataloader,
+    optimizer,
+    trainable_parameter_list,
+    device,
+    args: argparse.Namespace,
+    rank: int = 0,
+    sampler=None,
+) -> Dict[str, float]:
+    if rank == 0:
+        print(
+            f"[train] Starting training: max_steps={args.max_steps}, "
+            f"batch_size={args.batch_size}, grad_accum_steps={args.grad_accum_steps}"
+        )
+
+    step = 0
+    epoch = 0
+    last_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
+    while step < args.max_steps:
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+
+        for batch in dataloader:
+            batch = move_batch_to_device(batch, device)
+            outputs = model(**batch)
+            loss = outputs.loss / args.grad_accum_steps
+            loss.backward()
+
+            should_step = (step + 1) % args.grad_accum_steps == 0
+            if should_step:
+                torch.nn.utils.clip_grad_norm_(
+                    trainable_parameter_list,
+                    max_norm=1.0,
+                )
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            step += 1
+            last_loss = loss.item() * args.grad_accum_steps
+            if rank == 0 and step % args.log_every == 0:
+                print(f"[train] step={step} loss={last_loss:.6f}")
+
+            if step >= args.max_steps:
+                break
+
+        epoch += 1
+
+    return {"rank": rank, "steps": step, "last_loss": last_loss}
+
+
+class FSDPTrainWorker:
+    """
+    One Ray actor per GPU. Actors form one FSDP2 process group and run training.
+    """
+
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        rank: int,
+        fsdp_world_size: int,
+        fsdp_master_addr: str,
+        fsdp_master_port: int,
+    ):
+        ensure_training_imports(import_distributed=True)
+
+        import torch.distributed as dist
+        from torch.distributed.fsdp import fully_shard
+
+        self.args = args
+        self.rank = rank
+        self.fsdp_world_size = fsdp_world_size
+        self.dist = dist
+
+        os.environ["MASTER_ADDR"] = fsdp_master_addr
+        os.environ["MASTER_PORT"] = str(fsdp_master_port)
+
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=fsdp_world_size,
+        )
+        if hasattr(torch, "accelerator"):
+            torch.accelerator.set_device_index(0)
+        else:
+            torch.cuda.set_device(0)
+        self.device = torch.device("cuda:0")
+
+        set_seed(args.seed + rank)
+
+        self.tokenizer = build_tokenizer(args, log=rank == 0)
+        torch_dtype = pick_dtype(args.dtype)
+        model = build_model(args, self.device, torch_dtype, log=rank == 0)
+
+        configure_trainable_parameters(model, args.train_mode)
+        log_parameter_count(model, args.train_mode, rank=rank)
+
+        for layer in model.model.layers:
+            fully_shard(layer)
+        fully_shard(model)
+        self.model = model
+
+        self.trainable_parameter_list = list(iter_trainable_parameters(self.model))
+        if not self.trainable_parameter_list:
+            raise RuntimeError(f"No trainable parameters found for mode: {args.train_mode}")
+
+        dataset = build_dataset(args, self.tokenizer)
+        self.sampler = DistributedSampler(
+            dataset,
+            num_replicas=fsdp_world_size,
+            rank=rank,
+            shuffle=True,
+            seed=args.seed,
+            drop_last=False,
+        )
+        self.dataloader = build_dataloader(
+            args,
+            self.tokenizer,
+            dataset,
+            sampler=self.sampler,
+            shuffle=False,
+        )
+        self.optimizer = torch.optim.AdamW(
+            self.trainable_parameter_list,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+
+        print(f"[rank {rank}] FSDP worker ready.")
+
+    def get_rank(self) -> int:
+        return self.rank
+
+    def train(self) -> Dict[str, float]:
+        try:
+            summary = run_training_loop(
+                model=self.model,
+                dataloader=self.dataloader,
+                optimizer=self.optimizer,
+                trainable_parameter_list=self.trainable_parameter_list,
+                device=self.device,
+                args=self.args,
+                rank=self.rank,
+                sampler=self.sampler,
+            )
+            self.dist.barrier()
+            if self.rank == 0:
+                print("[done] Ray FSDP trainer smoke test finished.")
+            return summary
+        finally:
+            if self.dist.is_initialized():
+                self.dist.destroy_process_group()
+
+
+def run_single_process(args: argparse.Namespace) -> None:
+    ensure_training_imports()
+
+    set_seed(args.seed)
+
+    device = pick_device(args.device)
+    torch_dtype = pick_dtype(args.dtype)
+
+    tokenizer = build_tokenizer(args)
+    model = build_model(args, device, torch_dtype)
+
+    configure_trainable_parameters(model, args.train_mode)
+    trainable_parameter_list = log_parameter_count(model, args.train_mode)
+
+    dataset = build_dataset(args, tokenizer)
+    dataloader = build_dataloader(args, tokenizer, dataset, shuffle=True)
+
+    optimizer = torch.optim.AdamW(
+        trainable_parameter_list,
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
+    )
+
+    run_training_loop(
+        model=model,
+        dataloader=dataloader,
+        optimizer=optimizer,
+        trainable_parameter_list=trainable_parameter_list,
+        device=device,
+        args=args,
+    )
+
+    if args.save_checkpoint:
+        os.makedirs(args.output_dir, exist_ok=True)
+        print(f"[save] Saving checkpoint to {args.output_dir}")
+        model.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+    else:
+        print("[save] Skipped checkpoint save; trainer path validation only.")
+
+    print("[done] Local trainer smoke test finished.")
+
+
+def run_fsdp(args: argparse.Namespace) -> None:
+    if args.save_checkpoint:
+        print("[save] Ray FSDP mode does not support --save-checkpoint yet; skipping.")
+
+    import ray
+
+    fsdp_master_addr = args.fsdp_master_addr or get_local_ip()
+    fsdp_master_port = args.fsdp_master_port or find_open_port()
+
+    if args.ray_address:
+        ray.init(address=args.ray_address)
+    else:
+        ray.init()
+
+    try:
+        remote_worker = ray.remote(num_gpus=1)(FSDPTrainWorker)
+        workers = [
+            remote_worker.remote(
+                args,
+                rank,
+                args.fsdp_world_size,
+                fsdp_master_addr,
+                fsdp_master_port,
+            )
+            for rank in range(args.fsdp_world_size)
+        ]
+        ray.get([worker.get_rank.remote() for worker in workers])
+        print(f"[init] {args.fsdp_world_size} Ray FSDP training workers ready.")
+
+        summaries = ray.get([worker.train.remote() for worker in workers])
+        rank0_summary = next(item for item in summaries if item["rank"] == 0)
+        print(
+            "[done] rank0 summary: "
+            f"steps={rank0_summary['steps']} last_loss={rank0_summary['last_loss']:.6f}"
+        )
+    finally:
+        ray.shutdown()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a local single-process training smoke test."
+        description="Run a local training smoke test, optionally with Ray FSDP."
     )
     parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
     parser.add_argument(
@@ -266,16 +610,25 @@ def parse_args() -> argparse.Namespace:
         help="Default lm_head mode is intended to validate the training loop.",
     )
     parser.add_argument("--max-length", type=int, default=128)
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--max-steps", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--grad-accum-steps", type=int, default=2)
     parser.add_argument("--dataset-repeat", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--use-fsdp", action="store_true")
+    parser.add_argument("--fsdp-world-size", type=int, default=4)
+    parser.add_argument("--fsdp-master-addr", default=None)
+    parser.add_argument("--fsdp-master-port", type=int, default=None)
+    parser.add_argument(
+        "--ray-address",
+        default=None,
+        help="Optional Ray cluster address. Defaults to local ray.init().",
+    )
     parser.add_argument(
         "--save-checkpoint",
         action="store_true",
@@ -288,113 +641,17 @@ def main() -> None:
     args = parse_args()
     if args.grad_accum_steps < 1:
         raise ValueError("--grad-accum-steps must be >= 1")
+    if args.max_steps < 1:
+        raise ValueError("--max-steps must be >= 1")
+    if args.batch_size < 1:
+        raise ValueError("--batch-size must be >= 1")
+    if args.fsdp_world_size < 1:
+        raise ValueError("--fsdp-world-size must be >= 1")
 
-    global torch, DataLoader, AutoModelForCausalLM, AutoTokenizer
-    import torch
-    from torch.utils.data import DataLoader
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    set_seed(args.seed)
-
-    device = pick_device(args.device)
-    torch_dtype = pick_dtype(args.dtype)
-
-    print(f"[init] Loading tokenizer from {args.model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path,
-        local_files_only=True,
-        trust_remote_code=args.trust_remote_code,
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    if tokenizer.pad_token_id is None:
-        raise ValueError("Tokenizer must define either pad_token or eos_token.")
-
-    print(
-        f"[init] Loading model from {args.model_path} "
-        f"(device={device}, dtype={torch_dtype})"
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=torch_dtype,
-        local_files_only=True,
-        trust_remote_code=args.trust_remote_code,
-    )
-    model.to(device)
-    model.train()
-    model.config.use_cache = False
-
-    if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
-
-    configure_trainable_parameters(model, args.train_mode)
-    total_params, trainable_params = count_parameters(model)
-    trainable_parameter_list = list(iter_trainable_parameters(model))
-    if not trainable_parameter_list:
-        raise RuntimeError(f"No trainable parameters found for mode: {args.train_mode}")
-    print(
-        "[train] Parameter count: "
-        f"trainable={trainable_params:,} / total={total_params:,} "
-        f"({trainable_params / total_params:.4%})"
-    )
-
-    dataset = DummyChatDataset(
-        tokenizer=tokenizer,
-        max_length=args.max_length,
-        repeat=args.dataset_repeat,
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=make_collate_fn(tokenizer),
-    )
-
-    optimizer = torch.optim.AdamW(
-        trainable_parameter_list,
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-
-    print(
-        f"[train] Starting local training: max_steps={args.max_steps}, "
-        f"batch_size={args.batch_size}, grad_accum_steps={args.grad_accum_steps}"
-    )
-
-    step = 0
-    optimizer.zero_grad(set_to_none=True)
-    while step < args.max_steps:
-        for batch in dataloader:
-            batch = move_batch_to_device(batch, device)
-            outputs = model(**batch)
-            loss = outputs.loss / args.grad_accum_steps
-            loss.backward()
-
-            should_step = (step + 1) % args.grad_accum_steps == 0
-            if should_step:
-                torch.nn.utils.clip_grad_norm_(
-                    trainable_parameter_list,
-                    max_norm=1.0,
-                )
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            step += 1
-            if step % args.log_every == 0:
-                print(f"[train] step={step} loss={loss.item() * args.grad_accum_steps:.6f}")
-
-            if step >= args.max_steps:
-                break
-
-    if args.save_checkpoint:
-        os.makedirs(args.output_dir, exist_ok=True)
-        print(f"[save] Saving checkpoint to {args.output_dir}")
-        model.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
+    if args.use_fsdp:
+        run_fsdp(args)
     else:
-        print("[save] Skipped checkpoint save; trainer path validation only.")
-
-    print("[done] Local trainer smoke test finished.")
+        run_single_process(args)
 
 
 if __name__ == "__main__":
