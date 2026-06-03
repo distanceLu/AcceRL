@@ -23,7 +23,7 @@ from vllm import AsyncLLMEngine, RequestOutput, SamplingParams
 from vllm.v1.executor import Executor
 
 MODEL_NAME = "/mnt/data/lcx4/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
-PAUSE_TOKEN_THRESHOLD = 100
+PAUSE_TOKEN_THRESHOLD = 20
 DEFAULT_MAX_TOKENS = 64
 MAX_RESUBMIT_RETRIES = 20
 
@@ -137,8 +137,12 @@ async def reload_model_weights_from_disk(engine: AsyncLLMEngine) -> None:
 
 async def pause_generation_for_weight_update(engine: AsyncLLMEngine) -> None:
     """Pause vLLM itself, aborting in-flight requests and clearing KV cache."""
+    # start_time = asyncio.get_event_loop().time()
     await engine.pause_generation(mode="abort", clear_cache=True)
-
+    # end_time = asyncio.get_event_loop().time()
+    # print(
+    #     f"!!!!!!!!!!!!!!!!!!![sync] pause_generation_for_weight_update took {end_time - start_time:.2f} seconds."
+    # )
 
 def _copy_generation_from_output(
     state: GenerationState,
@@ -285,12 +289,24 @@ async def pause_update_and_restart(
     current_version: int,
 ) -> None:
     """Reload weights, then restart unfinished requests."""
+    # start_time = asyncio.get_event_loop().time()
     await reload_model_weights_from_disk(engine)
+    # end_time = asyncio.get_event_loop().time()
+    # print(
+    #     f"!!!!!!!!!!!!!!!![sync] pause_update_and_restart's weight reload step took "
+    #     f"{end_time - start_time:.2f} seconds."
+    # )
     next_version = current_version + 1
 
     print("[sync] Resuming generation for fresh restarted requests...")
+    # start_time = asyncio.get_event_loop().time()
     await engine.resume_generation()
-    print(f"[sync] Generation resumed with weight version {next_version}.")
+    # end_time = asyncio.get_event_loop().time()
+    # print(f"!!!!!!!!!!!!!!![sync] Generation resumed with weight version {next_version}.")
+    # print(
+    #     f"[sync] pause_update_and_restart's generation resume step took "
+    #     f"{end_time - start_time:.2f} seconds."
+    # )
 
     restart_tasks = [
         asyncio.create_task(stream_after_update(engine, state, version=next_version))

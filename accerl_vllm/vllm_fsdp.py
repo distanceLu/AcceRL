@@ -303,7 +303,7 @@ async def main():
         data_parallel_backend="ray",
         weight_transfer_config=WeightTransferConfig(backend="nccl"),
         load_format="dummy",
-        gpu_memory_utilization=0.7,
+        gpu_memory_utilization=0.3,
     )
     print("[engine] AsyncLLMEngine created.")
 
