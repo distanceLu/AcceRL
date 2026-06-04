@@ -978,7 +978,7 @@ async def run_repeating_inference(
     next_request_index = 0
     next_prompt_index = 0
     stats_lock = asyncio.Lock()
-    recent_state_limit = 4
+    recent_state_limit = max(len(prompts), infer_concurrency)
     stats.in_flight_concurrency = infer_concurrency
 
     print(
@@ -1184,7 +1184,7 @@ async def run_weight_sync_demo(args: argparse.Namespace):
             enforce_eager=True,
             tensor_parallel_size=INFERENCE_TP_SIZE,
             data_parallel_size=INFERENCE_DP_SIZE,
-            enable_expert_parallel=True,
+            enable_expert_parallel=False,
             distributed_executor_backend="ray",
             data_parallel_backend="ray",
             weight_transfer_config=WeightTransferConfig(backend="nccl"),

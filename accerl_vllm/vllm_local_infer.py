@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -23,9 +24,12 @@ from vllm import AsyncLLMEngine, RequestOutput, SamplingParams
 from vllm.v1.executor import Executor
 
 MODEL_NAME = "/mnt/data/lcx4/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
-PAUSE_TOKEN_THRESHOLD = 20
-DEFAULT_MAX_TOKENS = 64
+PAUSE_TOKEN_THRESHOLD = 20000
+DEFAULT_MAX_TOKENS = 2560
 MAX_RESUBMIT_RETRIES = 20
+INFER_BATCH_SIZE = 1024
+VLLM_MAX_NUM_BATCHED_TOKENS = 4096
+VLLM_MAX_NUM_SEQS = 1024
 
 # vLLM worker processes inherit PATH from this parent process.  Some shells run
 # the env's python directly without fully activating the conda env, leaving
@@ -75,6 +79,84 @@ class GenerationState:
         return self.generated_versions + self.post_update_versions
 
 
+class InferTokenStats:
+    """Aggregate generated-token throughput across concurrent infer streams."""
+
+    def __init__(self) -> None:
+        self.total_tokens = 0
+        self._start_time = time.monotonic()
+        self._interval_tokens = 0
+        self._last_snapshot_time = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def add(self, token_count: int) -> None:
+        if token_count <= 0:
+            return
+        async with self._lock:
+            self.total_tokens += token_count
+            self._interval_tokens += token_count
+
+    async def snapshot_and_reset_interval(self) -> tuple[int, int, float]:
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_snapshot_time
+            self._last_snapshot_time = now
+            interval_tokens = self._interval_tokens
+            self._interval_tokens = 0
+            return interval_tokens, self.total_tokens, elapsed
+
+    async def final_summary(self) -> tuple[int, float, float]:
+        async with self._lock:
+            elapsed = time.monotonic() - self._start_time
+            tokens_per_s = self.total_tokens / elapsed if elapsed > 0 else 0.0
+            return self.total_tokens, elapsed, tokens_per_s
+
+
+async def report_infer_token_stats(
+    stats: InferTokenStats,
+    interval_seconds: float = 1.0,
+) -> None:
+    """Print aggregate generated tokens once per interval."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        interval_tokens, total_tokens, elapsed = (
+            await stats.snapshot_and_reset_interval()
+        )
+        tokens_per_s = interval_tokens / elapsed if elapsed > 0 else 0.0
+        print(
+            "[infer-stats] "
+            f"interval={elapsed:.2f}s "
+            f"tokens={interval_tokens} "
+            f"tokens_per_s={tokens_per_s:.2f} "
+            f"total_tokens={total_tokens}"
+        )
+
+
+async def flush_infer_token_stats(stats: InferTokenStats) -> None:
+    """Print the final partial interval, if it contains generated tokens."""
+    interval_tokens, total_tokens, elapsed = await stats.snapshot_and_reset_interval()
+    if interval_tokens <= 0:
+        return
+    tokens_per_s = interval_tokens / elapsed if elapsed > 0 else 0.0
+    print(
+        "[infer-stats] "
+        f"interval={elapsed:.2f}s "
+        f"tokens={interval_tokens} "
+        f"tokens_per_s={tokens_per_s:.2f} "
+        f"total_tokens={total_tokens}"
+    )
+
+
+async def print_final_infer_token_stats(stats: InferTokenStats) -> None:
+    total_tokens, elapsed, tokens_per_s = await stats.final_summary()
+    print(
+        "[infer-summary] "
+        f"elapsed={elapsed:.2f}s "
+        f"total_tokens={total_tokens} "
+        f"tokens_per_s={tokens_per_s:.2f}"
+    )
+
+
 def create_async_engine() -> AsyncLLMEngine:
     """Create an AsyncLLMEngine for 4-GPU local inference.
 
@@ -89,12 +171,12 @@ def create_async_engine() -> AsyncLLMEngine:
         enforce_eager=True,
         tensor_parallel_size=4,
         distributed_executor_backend="mp",
-        enable_expert_parallel=True,
+        enable_expert_parallel=False,
         gpu_memory_utilization=0.7,
         # Keep vLLM's initialization/profile dummy batch small for this demo.
         # The default can be 16K tokens, which is very slow for single-GPU MoE.
-        max_num_batched_tokens=1024,
-        max_num_seqs=4,
+        max_num_batched_tokens=VLLM_MAX_NUM_BATCHED_TOKENS,
+        max_num_seqs=VLLM_MAX_NUM_SEQS,
         disable_custom_all_reduce=True,
         max_model_len=2048,
     )
@@ -190,6 +272,7 @@ async def stream_until_pause(
     pause_requested: asyncio.Event, # 由主协程设置以触发权重更新
     pause_after_tokens: int,
     version: int,
+    token_stats: InferTokenStats,
 ) -> None:
     """Stream one request until it finishes or a global pause is requested."""
     request_id = f"pre-update-{state.index}-{uuid.uuid4()}"
@@ -198,11 +281,13 @@ async def stream_until_pause(
         sampling_params,
         request_id=request_id,
     ):
+        previous_generated_tokens = len(state.generated_token_ids)
         generated_tokens = _copy_generation_from_output(
             state,
             request_output,
             version,
         )
+        await token_stats.add(generated_tokens - previous_generated_tokens)
 
         if request_output.finished:
             state.completed_before_update = True
@@ -225,6 +310,7 @@ async def stream_after_update(
     engine: AsyncLLMEngine,
     state: GenerationState,
     version: int,
+    token_stats: InferTokenStats,
 ) -> None:
     """Restart an unfinished request, resubmitting on abort until it finishes."""
     if state.completed_before_update:
@@ -251,12 +337,16 @@ async def stream_after_update(
             restart_sampling_params,
             request_id=request_id,
         ):
+            previous_post_update_tokens = len(state.post_update_token_ids)
             finish_reason = _copy_post_update_from_output(
                 state,
                 request_output,
                 version,
                 base_text,
                 base_token_ids,
+            )
+            await token_stats.add(
+                len(state.post_update_token_ids) - previous_post_update_tokens
             )
             request_finished = request_output.finished
 
@@ -287,6 +377,7 @@ async def pause_update_and_restart(
     engine: AsyncLLMEngine,
     states: list[GenerationState],
     current_version: int,
+    token_stats: InferTokenStats,
 ) -> None:
     """Reload weights, then restart unfinished requests."""
     # start_time = asyncio.get_event_loop().time()
@@ -309,7 +400,14 @@ async def pause_update_and_restart(
     # )
 
     restart_tasks = [
-        asyncio.create_task(stream_after_update(engine, state, version=next_version))
+        asyncio.create_task(
+            stream_after_update(
+                engine,
+                state,
+                version=next_version,
+                token_stats=token_stats,
+            )
+        )
         for state in states
         if not state.completed_before_update and state.remaining_max_tokens > 0
     ]
@@ -350,12 +448,17 @@ def print_results(states: list[GenerationState]) -> None:
 
 
 async def main() -> None:
-    prompts = [
+    base_prompts = [
         "The president of the United States is",
         "Hello, my name is",
         "The capital of France is",
         "The future of AI is",
     ]
+    prompts = [
+        base_prompts[index % len(base_prompts)]
+        for index in range(INFER_BATCH_SIZE)
+    ]
+
     sampling_params = SamplingParams(temperature=0, max_tokens=DEFAULT_MAX_TOKENS)
     # 把这个中断事件改成加载模型
     pause_requested = asyncio.Event()
@@ -374,7 +477,14 @@ async def main() -> None:
         for index, prompt in enumerate(prompts)
     ]
 
-    print("[generate] Starting streaming generation...")
+    print(
+        "[generate] Starting streaming generation... "
+        f"batch_size={len(prompts)} "
+        f"max_num_seqs={VLLM_MAX_NUM_SEQS} "
+        f"max_num_batched_tokens={VLLM_MAX_NUM_BATCHED_TOKENS}"
+    )
+    token_stats = InferTokenStats()
+    stats_reporter_task = asyncio.create_task(report_infer_token_stats(token_stats))
     generation_tasks = [
         asyncio.create_task(
             stream_until_pause(
@@ -384,6 +494,7 @@ async def main() -> None:
                 pause_requested=pause_requested,
                 pause_after_tokens=PAUSE_TOKEN_THRESHOLD,
                 version=current_version,
+                token_stats=token_stats,
             )
         )
         for state in states
@@ -413,6 +524,7 @@ async def main() -> None:
                 engine,
                 states,
                 current_version=current_version,
+                token_stats=token_stats,
             )
             current_version += 1
             break
@@ -431,7 +543,13 @@ async def main() -> None:
         print("[generate] All requests completed before any weight update trigger.")
 
     print("[generate] Generation complete.")
-    print_results(states)
+    stats_reporter_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await stats_reporter_task
+    await flush_infer_token_stats(token_stats)
+    await print_final_infer_token_stats(token_stats)
+    # Detailed final generations are noisy for large batch throughput runs.
+    # print_results(states)
 
 
 if __name__ == "__main__":
