@@ -23,8 +23,8 @@ import random
 import socket
 import time
 import uuid
-from dataclasses import asdict
-from typing import Dict, Iterable, List, Tuple
+from dataclasses import asdict, dataclass, field
+from typing import Dict, Iterable, List, Literal, Tuple
 
 import ray
 import torch
@@ -452,6 +452,11 @@ def get_vllm_weight_metadata(named_parameters):
     return names, dtype_names, shapes
 
 
+def validate_weight_scope(scope: str) -> None:
+    if scope not in {"all", "trainable"}:
+        raise ValueError(f"Unsupported weight scope: {scope!r}")
+
+
 def dtype_nbytes(dtype_name: str) -> int:
     """Return bytes per element for dtype names emitted by get_vllm_weight_metadata."""
     return {
@@ -518,12 +523,24 @@ class FSDPTrainWorker:
         log_parameter_count(model, args.train_mode, rank=rank)
 
         named_parameters = list(model.named_parameters())
-        self.train_param_names = [n for n, _ in named_parameters]
-        (
-            self.weight_names,
-            self.weight_dtype_names,
-            self.weight_shapes,
-        ) = get_vllm_weight_metadata(named_parameters)
+        self.all_param_names = [name for name, _ in named_parameters]
+        self.trainable_param_names = [
+            name for name, param in named_parameters if param.requires_grad
+        ]
+        self.param_names_by_scope = {
+            "all": self.all_param_names,
+            "trainable": self.trainable_param_names,
+        }
+        self.weight_metadata_by_scope = {
+            "all": get_vllm_weight_metadata(named_parameters),
+            "trainable": get_vllm_weight_metadata(
+                [
+                    (name, param)
+                    for name, param in named_parameters
+                    if param.requires_grad
+                ]
+            ),
+        }
 
         for layer in model.model.layers:
             fully_shard(layer)
@@ -555,6 +572,13 @@ class FSDPTrainWorker:
             lr=args.learning_rate,
             weight_decay=args.weight_decay,
         )
+        self.optimizer.zero_grad(set_to_none=True)
+
+        self.train_epoch = 0
+        self.train_micro_step = 0
+        self.optimizer_step = 0
+        self.last_loss = 0.0
+        self._dataloader_iter = None
 
         self.transfer_port = None
         self.transfer_master_address = None
@@ -584,6 +608,77 @@ class FSDPTrainWorker:
             if dist.is_initialized():
                 dist.destroy_process_group()
 
+    def close(self):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    def _next_training_batch(self):
+        while True:
+            if self._dataloader_iter is None:
+                self.sampler.set_epoch(self.train_epoch)
+                self._dataloader_iter = iter(self.dataloader)
+            try:
+                return next(self._dataloader_iter)
+            except StopIteration:
+                self.train_epoch += 1
+                self._dataloader_iter = None
+
+    def train_until_next_sync(self, num_optimizer_steps: int = 100) -> Dict[str, float]:
+        """
+        Continue the persistent training loop until this worker finishes the
+        requested number of optimizer steps, or reaches args.max_steps.
+
+        In the online sync demo, args.max_steps is interpreted as optimizer
+        steps. The standalone train() smoke path keeps its original semantics.
+        """
+        if num_optimizer_steps < 1:
+            raise ValueError("num_optimizer_steps must be >= 1")
+
+        start_optimizer_step = self.optimizer_step
+        target_optimizer_step = min(
+            self.optimizer_step + num_optimizer_steps,
+            self.args.max_steps,
+        )
+
+        while self.optimizer_step < target_optimizer_step:
+            batch = move_batch_to_device(self._next_training_batch(), self.device)
+            outputs = self.model(**batch)
+            loss = outputs.loss / self.args.grad_accum_steps
+            loss.backward()
+
+            self.train_micro_step += 1
+            self.last_loss = loss.item() * self.args.grad_accum_steps
+            should_step = self.train_micro_step % self.args.grad_accum_steps == 0
+            if not should_step:
+                continue
+
+            torch.nn.utils.clip_grad_norm_(
+                self.trainable_parameter_list,
+                max_norm=1.0,
+            )
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+            self.optimizer_step += 1
+
+            if self.rank == 0 and self.optimizer_step % self.args.log_every == 0:
+                print(
+                    "[train] "
+                    f"optimizer_step={self.optimizer_step} "
+                    f"micro_step={self.train_micro_step} "
+                    f"loss={self.last_loss:.6f}"
+                )
+
+        dist.barrier()
+        optimizer_steps_run = self.optimizer_step - start_optimizer_step
+        return {
+            "rank": self.rank,
+            "optimizer_steps_run": optimizer_steps_run,
+            "optimizer_step": self.optimizer_step,
+            "micro_step": self.train_micro_step,
+            "reached_max_steps": self.optimizer_step >= self.args.max_steps,
+            "last_loss": self.last_loss,
+        }
+
     # ---- weight-transfer setup (rank 0 only) ----
 
     def setup_transfer_endpoint(self):
@@ -604,15 +699,16 @@ class FSDPTrainWorker:
             ),
         )
 
-    def get_weight_metadata(self):
-        """Return weight names, dtypes, and shapes captured before FSDP wrapping."""
-        return self.weight_names, self.weight_dtype_names, self.weight_shapes
+    def get_weight_metadata(self, scope: str = "all"):
+        """Return scoped weight names, dtypes, and shapes from pre-FSDP params."""
+        validate_weight_scope(scope)
+        return self.weight_metadata_by_scope[scope]
 
     # ---- collective ops (ALL FSDP ranks must call concurrently) ----
 
-    def gather_and_broadcast_weights(self, packed: bool = True):
+    def gather_and_broadcast_weights(self, scope: str = "all", packed: bool = True):
         """
-        All-gather full parameters and broadcast them to vLLM.
+        All-gather scoped full parameters and broadcast them to vLLM.
         Only rank 0 performs the actual NCCL broadcast; others just
         participate in the FSDP all-gather.
 
@@ -620,10 +716,12 @@ class FSDPTrainWorker:
         for each parameter in the same order.  Rank 0 additionally
         feeds each gathered tensor to the weight-transfer engine.
         """
+        validate_weight_scope(scope)
+        param_names = self.param_names_by_scope[scope]
         if self.rank == 0:
             def _full_param_iter():
                 params_by_name = dict(self.model.named_parameters())
-                for name in self.train_param_names:
+                for name in param_names:
                     full_param = params_by_name[name].full_tensor().detach()
                     yield from iter_vllm_loadable_weights(name, full_param)
 
@@ -637,7 +735,7 @@ class FSDPTrainWorker:
             )
         else:
             params_by_name = dict(self.model.named_parameters())
-            for name in self.train_param_names:
+            for name in param_names:
                 params_by_name[name].full_tensor()
 
 
@@ -670,185 +768,517 @@ async def generate_batch(engine, prompts, sampling_params):
     return await asyncio.gather(*[gen_one(p) for p in prompts])
 
 
+@dataclass
+class OnlineGenerationState:
+    """Token-level state for one request across weight-update interruptions."""
+
+    index: int
+    prompt: str
+    input_ids: List[int]
+    requested_max_tokens: int
+    output_tokens: List[int] = field(default_factory=list)
+    output_versions: List[int] = field(default_factory=list)
+    stop_reason: Literal["length", "stop", "tool_calls", "abort"] | None = None
+    completed: bool = False
+    attempts: int = 0
+
+    @property
+    def remaining_max_tokens(self) -> int:
+        return max(0, self.requested_max_tokens - len(self.output_tokens))
+
+    @property
+    def restart_prompt_token_ids(self) -> List[int]:
+        return self.input_ids + self.output_tokens
+
+
+@dataclass
+class RepeatingInferenceStats:
+    total_cycles: int = 0
+    total_requests: int = 0
+    total_tokens: int = 0
+    last_completed_states: List[OnlineGenerationState] = field(default_factory=list)
+
+
+def _tokens_from_output(request_output) -> List[int]:
+    if not getattr(request_output, "outputs", None):
+        return []
+    return list(getattr(request_output.outputs[0], "token_ids", []) or [])
+
+
+def _finish_reason_from_output(request_output):
+    if not getattr(request_output, "outputs", None):
+        return None
+    return getattr(request_output.outputs[0], "finish_reason", None)
+
+
+def _normalize_stop_reason(stop_reason) -> Literal["length", "stop", "tool_calls", "abort"]:
+    if stop_reason in ("length", "stop", "tool_calls", "abort"):
+        return stop_reason
+    if stop_reason in ("eos", "stop_token", "stop_sequence"):
+        return "stop"
+    return "abort"
+
+
+class InterruptibleGenerationRunner:
+    """Run vLLM requests that survive abort-based weight-update pauses."""
+
+    def __init__(
+        self,
+        engine,
+        temperature: float = 0.0,
+        max_resubmit_retries: int = 20,
+    ):
+        self.engine = engine
+        self.temperature = temperature
+        self.max_resubmit_retries = max_resubmit_retries
+        self.version = 0
+        self.paused = asyncio.Event()
+        self.paused.clear()
+        self._active_attempts = 0
+        self._active_changed = asyncio.Condition()
+
+    async def _increment_active_attempts(self) -> None:
+        async with self._active_changed:
+            self._active_attempts += 1
+            self._active_changed.notify_all()
+
+    async def _decrement_active_attempts(self) -> None:
+        async with self._active_changed:
+            self._active_attempts -= 1
+            self._active_changed.notify_all()
+
+    async def wait_for_idle(self) -> None:
+        async with self._active_changed:
+            await self._active_changed.wait_for(lambda: self._active_attempts == 0)
+
+    async def generate(self, state: OnlineGenerationState) -> OnlineGenerationState:
+        for attempt in range(1, self.max_resubmit_retries + 1):
+            while self.paused.is_set():
+                await asyncio.sleep(0)
+
+            remaining = state.remaining_max_tokens
+            if remaining <= 0:
+                state.stop_reason = "length"
+                state.completed = True
+                return state
+
+            state.attempts = attempt
+            attempt_version = self.version
+            sampling_params = SamplingParams(
+                temperature=self.temperature,
+                max_tokens=remaining,
+            )
+            request_id = (
+                f"online-sync-{state.index}-v{attempt_version}-"
+                f"try{attempt}-{uuid.uuid4()}"
+            )
+            final_output = None
+            request_finished = False
+
+            await self._increment_active_attempts()
+            try:
+                async for request_output in self.engine.generate(
+                    {"prompt_token_ids": state.restart_prompt_token_ids},
+                    sampling_params,
+                    request_id=request_id,
+                ):
+                    final_output = request_output
+                    request_finished = bool(
+                        getattr(request_output, "finished", False)
+                    )
+            finally:
+                await self._decrement_active_attempts()
+
+            if final_output is None:
+                state.stop_reason = "abort"
+                continue
+
+            attempt_tokens = _tokens_from_output(final_output)[:remaining]
+            if attempt_tokens:
+                state.output_tokens.extend(attempt_tokens)
+                state.output_versions.extend(
+                    [attempt_version] * len(attempt_tokens)
+                )
+
+            stop_reason = _normalize_stop_reason(
+                _finish_reason_from_output(final_output)
+            )
+            if len(state.output_tokens) >= state.requested_max_tokens:
+                stop_reason = "length"
+
+            state.stop_reason = stop_reason
+            if stop_reason in ("stop", "tool_calls", "length"):
+                state.completed = True
+                return state
+
+            if not request_finished or stop_reason == "abort":
+                await asyncio.sleep(0)
+                continue
+
+            state.completed = True
+            return state
+
+        state.stop_reason = (
+            "length" if state.remaining_max_tokens <= 0 else "abort"
+        )
+        state.completed = state.stop_reason == "length"
+        print(
+            "[generate] Request "
+            f"{state.index} reached max_resubmit_retries="
+            f"{self.max_resubmit_retries}; keeping partial output."
+        )
+        return state
+
+
+async def run_repeating_inference(
+    runner: InterruptibleGenerationRunner,
+    tokenizer,
+    prompts: List[str],
+    infer_max_tokens: int,
+    stop_after_current_cycle: asyncio.Event,
+    stats: RepeatingInferenceStats,
+) -> RepeatingInferenceStats:
+    """Continuously submit prompt batches until the trainer asks inference to drain."""
+    cycle = 0
+    next_request_index = 0
+
+    while not stop_after_current_cycle.is_set():
+        cycle += 1
+        states = []
+        for prompt in prompts:
+            states.append(
+                OnlineGenerationState(
+                    index=next_request_index,
+                    prompt=prompt,
+                    input_ids=tokenizer.encode(prompt),
+                    requested_max_tokens=infer_max_tokens,
+                )
+            )
+            next_request_index += 1
+
+        print(
+            f"[infer] Starting cycle={cycle} requests={len(states)} "
+            f"weight_version={runner.version}"
+        )
+        completed_states = await asyncio.gather(
+            *[runner.generate(state) for state in states]
+        )
+
+        cycle_tokens = sum(len(state.output_tokens) for state in completed_states)
+        version_ranges = []
+        for state in completed_states:
+            if state.output_versions:
+                version_ranges.append(
+                    f"{min(state.output_versions)}-{max(state.output_versions)}"
+                )
+            else:
+                version_ranges.append("none")
+
+        stats.total_cycles = cycle
+        stats.total_requests += len(completed_states)
+        stats.total_tokens += cycle_tokens
+        stats.last_completed_states = list(completed_states)
+        print(
+            f"[infer] Completed cycle={cycle} tokens={cycle_tokens} "
+            f"version_ranges={version_ranges}"
+        )
+
+    print("[infer] Stop requested; no new inference cycles will be launched.")
+    return stats
+
+
+def summarize_weight_payload(dtype_names: List[str], shapes: List[List[int]]) -> float:
+    total_weight_bytes = sum(
+        numel_from_shape(shape) * dtype_nbytes(dtype_name)
+        for dtype_name, shape in zip(dtype_names, shapes)
+    )
+    return total_weight_bytes / 1024**3
+
+
+async def sync_weights_to_vllm(
+    engine,
+    fsdp_workers,
+    scope: str,
+    transfer_world_size: int,
+    packed: bool = True,
+):
+    validate_weight_scope(scope)
+    names, dtype_names, shapes = ray.get(
+        fsdp_workers[0].get_weight_metadata.remote(scope)
+    )
+    model_gib = summarize_weight_payload(dtype_names, shapes)
+    infer_payload_gib = model_gib * (transfer_world_size - 1)
+    print(
+        f"[sync] {scope} metadata: tensors={len(names)}, "
+        f"logical_payload={model_gib:.3f} GiB, "
+        f"aggregate_infer_payload={infer_payload_gib:.3f} GiB"
+    )
+
+    await engine.start_weight_update()
+    t0 = time.perf_counter()
+    broadcast_handles = [
+        worker.gather_and_broadcast_weights.remote(scope=scope, packed=packed)
+        for worker in fsdp_workers
+    ]
+    await engine.update_weights(
+        WeightTransferUpdateRequest(
+            update_info=asdict(
+                NCCLWeightTransferUpdateInfo(
+                    names=names,
+                    dtype_names=dtype_names,
+                    shapes=shapes,
+                    packed=packed,
+                )
+            )
+        )
+    )
+    ray.get(broadcast_handles)
+    await engine.finish_weight_update()
+    elapsed = time.perf_counter() - t0
+    print(
+        f"[sync] {scope} weight update complete: {elapsed:.3f}s, "
+        f"model-sync throughput={model_gib / elapsed:.3f} GiB/s, "
+        f"aggregate-infer throughput={infer_payload_gib / elapsed:.3f} GiB/s"
+    )
+    return elapsed
+
+
 async def run_weight_sync_demo(args: argparse.Namespace):
     if args.ray_address:
         ray.init(address=args.ray_address)
     else:
         ray.init()
 
-    # Use local/shared model weights directly.
-    local_model_path = args.model_path
-    print(f"[init] Loading local model from {local_model_path}")
+    fsdp_workers = []
+    inference_loop_task = None
+    engine = None
+    try:
+        # Use local/shared model weights directly.
+        local_model_path = args.model_path
+        print(f"[init] Loading local model from {local_model_path}")
 
-    # FSDP rendezvous address (single-node)
-    fsdp_master_addr = args.fsdp_master_addr or get_local_ip()
-    fsdp_master_port = args.fsdp_master_port or find_open_port()
+        # FSDP rendezvous address (single-node)
+        fsdp_master_addr = args.fsdp_master_addr or get_local_ip()
+        fsdp_master_port = args.fsdp_master_port or find_open_port()
 
-    # Launch 4 FSDP training workers.
-    # Ray allocates 1 GPU per worker; AsyncLLMEngine's internal DP
-    # placement groups will land on the remaining 4 GPUs.
-    remote_worker = ray.remote(num_gpus=1)(FSDPTrainWorker)
-    fsdp_workers = [
-        remote_worker.remote(
-            args,
-            rank,
-            args.fsdp_world_size,
-            fsdp_master_addr,
-            fsdp_master_port,
-        )
-        for rank in range(args.fsdp_world_size)
-    ]
-    ray.get([w.get_rank.remote() for w in fsdp_workers])
-    print(f"[init] {args.fsdp_world_size} FSDP training workers ready.")
-
-    # Launch vLLM with expert parallelism + data parallelism.
-    # AsyncLLMEngine with data_parallel_backend="ray" creates its own
-    # placement groups internally — no manual placement group needed.
-    print("[engine] Creating AsyncLLMEngine...")
-    engine = create_async_engine(
-        model=local_model_path,
-        enforce_eager=True,
-        tensor_parallel_size=INFERENCE_TP_SIZE,
-        data_parallel_size=INFERENCE_DP_SIZE,
-        enable_expert_parallel=True,
-        distributed_executor_backend="ray",
-        data_parallel_backend="ray",
-        weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        load_format="dummy",
-        gpu_memory_utilization=0.3,
-    )
-    print("[engine] AsyncLLMEngine created.")
-
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(temperature=0)
-
-    # Generate with dummy weights — expect gibberish.
-    print("[generate] Starting generation with dummy weights...")
-    outputs = await generate_batch(engine, prompts, sampling_params)
-    print("[generate] Generation complete.")
-
-    print("-" * 60)
-    print("BEFORE weight sync (dummy weights):")
-    print("-" * 60)
-    for output in outputs:
-        print(f"Prompt: {output.prompt!r}")
-        print(f"Generated: {output.outputs[0].text!r}")
-        print("-" * 60)
-
-    # --- Weight-transfer setup ---
-    print("[transfer] Setting up weight-transfer endpoint...")
-    transfer_addr, transfer_port = ray.get(
-        fsdp_workers[0].setup_transfer_endpoint.remote()
-    )
-    print(f"[transfer] Endpoint ready at {transfer_addr}:{transfer_port}")
-
-    transfer_world_size = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE + 1
-    print(
-        f"[transfer] World size: {transfer_world_size} "
-        f"(1 trainer + {INFERENCE_TP_SIZE * INFERENCE_DP_SIZE} vLLM workers)"
-    )
-
-    print("[transfer] Initializing NCCL groups...")
-    train_handle = fsdp_workers[0].init_weight_transfer_group.remote(
-        transfer_world_size
-    )
-    await engine.init_weight_transfer_engine(
-        WeightTransferInitRequest(
-            init_info=asdict(
-                NCCLWeightTransferInitInfo(
-                    master_address=transfer_addr,
-                    master_port=transfer_port,
-                    rank_offset=1,
-                    world_size=transfer_world_size,
-                )
+        # Launch FSDP training workers. Ray allocates 1 GPU per worker; vLLM's
+        # internal DP placement groups will land on the remaining GPUs.
+        remote_worker = ray.remote(num_gpus=1)(FSDPTrainWorker)
+        fsdp_workers = [
+            remote_worker.remote(
+                args,
+                rank,
+                args.fsdp_world_size,
+                fsdp_master_addr,
+                fsdp_master_port,
             )
-        )
-    )
-    ray.get(train_handle)
-    print("[transfer] NCCL groups initialized.")
-
-    # --- Pause, transfer weights, resume ---
-    print("[sync] Pausing generation...")
-    await engine.pause_generation(mode="abort")
-    print("[sync] Generation paused.")
-
-    names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
-    print(f"[sync] Got metadata for {len(names)} parameters.")
-
-    total_weight_bytes = sum(
-        numel_from_shape(shape) * dtype_nbytes(dtype_name)
-        for dtype_name, shape in zip(dtype_names, shapes)
-    )
-    model_gib = total_weight_bytes / 1024**3
-    infer_payload_gib = model_gib * (transfer_world_size - 1)
-    print(
-        f"[bench] One logical model payload: {model_gib:.3f} GiB; "
-        f"aggregate infer payload: {infer_payload_gib:.3f} GiB "
-        f"across {transfer_world_size - 1} infer ranks."
-    )
-
-    bench_times = []
-    for i in range(TRANSFER_BENCH_ITERS):
-        await engine.start_weight_update()
-        print(
-            f"[bench] Iteration {i + 1}/{TRANSFER_BENCH_ITERS}: "
-            "broadcasting weights from FSDP → vLLM..."
-        )
-        t0 = time.perf_counter()
-        broadcast_handles = [
-            w.gather_and_broadcast_weights.remote(packed=True) for w in fsdp_workers
+            for rank in range(args.fsdp_world_size)
         ]
-        await engine.update_weights(
-            WeightTransferUpdateRequest(
-                update_info=asdict(
-                    NCCLWeightTransferUpdateInfo(
-                        names=names,
-                        dtype_names=dtype_names,
-                        shapes=shapes,
-                        packed=True,
+        ray.get([w.get_rank.remote() for w in fsdp_workers])
+        print(f"[init] {args.fsdp_world_size} FSDP training workers ready.")
+
+        print("[engine] Creating AsyncLLMEngine with dummy weights...")
+        engine = create_async_engine(
+            model=local_model_path,
+            enforce_eager=True,
+            tensor_parallel_size=INFERENCE_TP_SIZE,
+            data_parallel_size=INFERENCE_DP_SIZE,
+            enable_expert_parallel=True,
+            distributed_executor_backend="ray",
+            data_parallel_backend="ray",
+            weight_transfer_config=WeightTransferConfig(backend="nccl"),
+            load_format="dummy",
+            gpu_memory_utilization=0.3,
+        )
+        print("[engine] AsyncLLMEngine created.")
+
+        # --- Weight-transfer setup ---
+        print("[transfer] Setting up weight-transfer endpoint...")
+        transfer_addr, transfer_port = ray.get(
+            fsdp_workers[0].setup_transfer_endpoint.remote()
+        )
+        print(f"[transfer] Endpoint ready at {transfer_addr}:{transfer_port}")
+
+        transfer_world_size = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE + 1
+        print(
+            f"[transfer] World size: {transfer_world_size} "
+            f"(1 trainer + {INFERENCE_TP_SIZE * INFERENCE_DP_SIZE} vLLM workers)"
+        )
+
+        print("[transfer] Initializing NCCL groups...")
+        train_handle = fsdp_workers[0].init_weight_transfer_group.remote(
+            transfer_world_size
+        )
+        await engine.init_weight_transfer_engine(
+            WeightTransferInitRequest(
+                init_info=asdict(
+                    NCCLWeightTransferInitInfo(
+                        master_address=transfer_addr,
+                        master_port=transfer_port,
+                        rank_offset=1,
+                        world_size=transfer_world_size,
                     )
                 )
             )
         )
-        ray.get(broadcast_handles)
-        await engine.finish_weight_update()
-        elapsed = time.perf_counter() - t0
-        bench_times.append(elapsed)
+        ray.get(train_handle)
+        print("[transfer] NCCL groups initialized.")
+
+        print("[sync] Initial full sync from FSDP to vLLM...")
+        await engine.pause_generation(mode="abort", clear_cache=True)
+        await sync_weights_to_vllm(
+            engine=engine,
+            fsdp_workers=fsdp_workers,
+            scope="all",
+            transfer_world_size=transfer_world_size,
+            packed=True,
+        )
+        await engine.resume_generation()
+        print("[sync] Initial full sync complete; generation can start.")
+
+        prompts = [
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
+        tokenizer = engine.get_tokenizer()
+        runner = InterruptibleGenerationRunner(engine, temperature=0.0)
+        stop_inference = asyncio.Event()
+        inference_stats = RepeatingInferenceStats()
+        inference_loop_task = asyncio.create_task(
+            run_repeating_inference(
+                runner=runner,
+                tokenizer=tokenizer,
+                prompts=prompts,
+                infer_max_tokens=args.infer_max_tokens,
+                stop_after_current_cycle=stop_inference,
+                stats=inference_stats,
+            )
+        )
         print(
-            f"[bench] Iteration {i + 1}/{TRANSFER_BENCH_ITERS}: "
-            f"{elapsed:.3f}s, model-sync throughput={model_gib / elapsed:.3f} GiB/s, "
-            f"aggregate-infer throughput={infer_payload_gib / elapsed:.3f} GiB/s"
+            "[infer] Started repeating inference while trainer runs; "
+            f"infer_max_tokens={args.infer_max_tokens}."
         )
 
-    avg_time = sum(bench_times) / len(bench_times)
-    print("[sync] Weight broadcast benchmark complete.")
-    print(
-        f"[bench] Average over {TRANSFER_BENCH_ITERS} iterations: "
-        f"{avg_time:.3f}s, model-sync throughput={model_gib / avg_time:.3f} GiB/s, "
-        f"aggregate-infer throughput={infer_payload_gib / avg_time:.3f} GiB/s"
-    )
+        sync_rounds = 0
+        training_reached_max = False
+        while not training_reached_max:
+            print(
+                "[train] Launching trainer segment: "
+                f"sync_every_optimizer_steps={args.sync_every_optimizer_steps}"
+            )
+            train_handles = [
+                worker.train_until_next_sync.remote(
+                    args.sync_every_optimizer_steps
+                )
+                for worker in fsdp_workers
+            ]
+            train_future = asyncio.create_task(
+                asyncio.to_thread(ray.get, train_handles)
+            )
 
-    print("[sync] Resuming generation...")
-    await engine.resume_generation()
-    print("[sync] Generation resumed.")
+            done, pending = await asyncio.wait(
+                {inference_loop_task, train_future},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if inference_loop_task in done and not stop_inference.is_set():
+                train_future.cancel()
+                for task in pending:
+                    task.cancel()
+                raise RuntimeError(
+                    "Repeating inference loop exited before trainer finished."
+                )
 
-    # Generate with synced weights — expect sensible output.
-    print("[generate] Starting generation with synced weights...")
-    outputs_updated = await generate_batch(engine, prompts, sampling_params)
-    print("[generate] Generation complete.")
+            summaries = train_future.result()
+            rank0_summary = next(item for item in summaries if item["rank"] == 0)
+            training_reached_max = bool(rank0_summary["reached_max_steps"])
+            if rank0_summary["optimizer_steps_run"] <= 0:
+                print("[train] No optimizer steps left; stopping sync loop.")
+                break
 
-    print("-" * 60)
-    print("AFTER weight sync (real weights):")
-    print("-" * 60)
-    for output in outputs_updated:
-        print(f"Prompt: {output.prompt!r}")
-        print(f"Generated: {output.outputs[0].text!r}")
+            print(
+                "[train] Trainer segment complete: "
+                f"optimizer_step={rank0_summary['optimizer_step']} "
+                f"steps_run={rank0_summary['optimizer_steps_run']} "
+                f"last_loss={rank0_summary['last_loss']:.6f}"
+            )
+
+            if (
+                args.max_sync_rounds is not None
+                and sync_rounds >= args.max_sync_rounds
+            ):
+                print(
+                    "[sync] max_sync_rounds reached; letting inference finish "
+                    "without more trainable updates."
+                )
+                break
+
+            sync_rounds += 1
+            print(
+                f"[sync] Round {sync_rounds}: pausing generation for "
+                "trainable-only weight update..."
+            )
+            runner.paused.set()
+            await engine.pause_generation(mode="abort", clear_cache=True)
+            await runner.wait_for_idle()
+            print("[sync] Generation paused and in-flight attempts drained.")
+
+            await sync_weights_to_vllm(
+                engine=engine,
+                fsdp_workers=fsdp_workers,
+                scope="trainable",
+                transfer_world_size=transfer_world_size,
+                packed=True,
+            )
+            runner.version += 1
+            await engine.resume_generation()
+            runner.paused.clear()
+            print(
+                f"[sync] Round {sync_rounds}: resumed generation with "
+                f"weight version {runner.version}."
+            )
+
+        print(
+            "[infer] Trainer finished or sync loop stopped; requesting "
+            "inference drain after the last completed communication."
+        )
+        stop_inference.set()
+        if runner.paused.is_set():
+            await engine.resume_generation()
+            runner.paused.clear()
+        inference_stats = await inference_loop_task
+
+        print("[infer] Repeating inference complete.")
+        print(
+            "[infer] Summary: "
+            f"cycles={inference_stats.total_cycles} "
+            f"requests={inference_stats.total_requests} "
+            f"tokens={inference_stats.total_tokens} "
+            f"final_weight_version={runner.version}"
+        )
         print("-" * 60)
+        for state in inference_stats.last_completed_states:
+            print(f"Prompt: {state.prompt!r}")
+            print(f"Prompt token IDs ({len(state.input_ids)}): {state.input_ids!r}")
+            print(
+                f"Output token IDs ({len(state.output_tokens)}): "
+                f"{state.output_tokens!r}"
+            )
+            print(f"Output versions: {state.output_versions!r}")
+            print(f"Stop reason: {state.stop_reason}")
+            print(f"Generated: {tokenizer.decode(state.output_tokens)!r}")
+            print("-" * 60)
+    finally:
+        if inference_loop_task is not None and not inference_loop_task.done():
+            inference_loop_task.cancel()
+            await asyncio.gather(inference_loop_task, return_exceptions=True)
+        if fsdp_workers:
+            try:
+                ray.get([worker.close.remote() for worker in fsdp_workers])
+            except Exception as exc:
+                print(f"[cleanup] Ignoring FSDP worker close error: {exc!r}")
+        ray.shutdown()
 
 
 def run_fsdp_training(args: argparse.Namespace) -> None:
@@ -907,7 +1337,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-accum-steps", type=int, default=8)
@@ -932,7 +1362,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--run-weight-sync-demo",
         action="store_true",
-        help="Run the original FSDP-to-vLLM NCCL weight-transfer demo instead.",
+        help=(
+            "Run online trainer-driven FSDP-to-vLLM NCCL weight sync demo "
+            "with interruptible inference."
+        ),
+    )
+    parser.add_argument(
+        "--sync-every-optimizer-steps",
+        type=int,
+        default=10,
+        help="In the weight-sync demo, sync trainable weights after this many optimizer steps.",
+    )
+    parser.add_argument(
+        "--infer-max-tokens",
+        type=int,
+        default=256,
+        help="Maximum generated tokens per prompt in the weight-sync demo.",
+    )
+    parser.add_argument(
+        "--max-sync-rounds",
+        type=int,
+        default=None,
+        help="Optional maximum number of trainable-only sync rounds in the demo.",
     )
     return parser.parse_args()
 
@@ -952,6 +1403,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--log-every must be >= 1")
     if args.fsdp_world_size < 1:
         raise ValueError("--fsdp-world-size must be >= 1")
+    if args.sync_every_optimizer_steps < 1:
+        raise ValueError("--sync-every-optimizer-steps must be >= 1")
+    if args.infer_max_tokens < 1:
+        raise ValueError("--infer-max-tokens must be >= 1")
+    if args.max_sync_rounds is not None and args.max_sync_rounds < 0:
+        raise ValueError("--max-sync-rounds must be >= 0 when set")
 
 
 def main() -> None:
