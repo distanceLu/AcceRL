@@ -797,6 +797,7 @@ class RepeatingInferenceStats:
     total_requests: int = 0
     total_tokens: int = 0
     last_completed_states: List[OnlineGenerationState] = field(default_factory=list)
+    printed_first_result_versions: set[int] = field(default_factory=set)
 
 
 def _tokens_from_output(request_output) -> List[int]:
@@ -817,6 +818,29 @@ def _normalize_stop_reason(stop_reason) -> Literal["length", "stop", "tool_calls
     if stop_reason in ("eos", "stop_token", "stop_sequence"):
         return "stop"
     return "abort"
+
+
+def print_first_infer_result_for_version(
+    tokenizer,
+    state: OnlineGenerationState,
+    version: int,
+) -> None:
+    version_token_count = sum(
+        1 for token_version in state.output_versions if token_version == version
+    )
+    print("=" * 60)
+    print(
+        "[infer-first-after-update] "
+        f"weight_version={version} request_index={state.index} "
+        f"version_tokens={version_token_count} total_tokens={len(state.output_tokens)} "
+        f"stop_reason={state.stop_reason}"
+    )
+    print(f"Prompt: {state.prompt!r}")
+    print(f"Prompt token IDs ({len(state.input_ids)}): {state.input_ids!r}")
+    print(f"Output versions: {state.output_versions!r}")
+    print(f"Output token IDs ({len(state.output_tokens)}): {state.output_tokens!r}")
+    print(f"Generated: {tokenizer.decode(state.output_tokens)!r}")
+    print("=" * 60)
 
 
 class InterruptibleGenerationRunner:
@@ -971,6 +995,14 @@ async def run_repeating_inference(
                 version_ranges.append(
                     f"{min(state.output_versions)}-{max(state.output_versions)}"
                 )
+                for version in sorted(set(state.output_versions)):
+                    if version not in stats.printed_first_result_versions:
+                        stats.printed_first_result_versions.add(version)
+                        print_first_infer_result_for_version(
+                            tokenizer=tokenizer,
+                            state=state,
+                            version=version,
+                        )
             else:
                 version_ranges.append("none")
 
