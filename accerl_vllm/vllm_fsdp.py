@@ -796,6 +796,7 @@ class RepeatingInferenceStats:
     total_cycles: int = 0
     total_requests: int = 0
     total_tokens: int = 0
+    in_flight_concurrency: int = 0
     last_completed_states: List[OnlineGenerationState] = field(default_factory=list)
     printed_first_result_versions: set[int] = field(default_factory=set)
 
@@ -850,7 +851,7 @@ class InterruptibleGenerationRunner:
         self,
         engine,
         temperature: float = 0.0,
-        max_resubmit_retries: int = 2,
+        max_resubmit_retries: int = 200,
     ):
         self.engine = engine
         self.temperature = temperature
@@ -964,40 +965,59 @@ async def run_repeating_inference(
     tokenizer,
     prompts: List[str],
     infer_max_tokens: int,
+    infer_concurrency: int,
     stop_after_current_cycle: asyncio.Event,
     stats: RepeatingInferenceStats,
 ) -> RepeatingInferenceStats:
-    """Continuously submit prompt batches until the trainer asks inference to drain."""
-    cycle = 0
-    next_request_index = 0
+    """Continuously keep a fixed number of inference requests in flight."""
+    if not prompts:
+        raise ValueError("prompts must not be empty")
+    if infer_concurrency < 1:
+        raise ValueError("infer_concurrency must be >= 1")
 
-    while not stop_after_current_cycle.is_set():
-        cycle += 1
-        states = []
-        for prompt in prompts:
-            states.append(
-                OnlineGenerationState(
-                    index=next_request_index,
-                    prompt=prompt,
-                    input_ids=tokenizer.encode(prompt),
-                    requested_max_tokens=infer_max_tokens,
-                )
+    next_request_index = 0
+    next_prompt_index = 0
+    stats_lock = asyncio.Lock()
+    recent_state_limit = 4
+    stats.in_flight_concurrency = infer_concurrency
+
+    print(
+        f"[infer] Queue started: concurrency={infer_concurrency} "
+        f"prompt_count={len(prompts)} infer_max_tokens={infer_max_tokens} "
+        f"weight_version={runner.version}"
+    )
+
+    async def make_next_state() -> OnlineGenerationState | None:
+        nonlocal next_request_index, next_prompt_index
+        async with stats_lock:
+            if stop_after_current_cycle.is_set():
+                return None
+            prompt = prompts[next_prompt_index]
+            state = OnlineGenerationState(
+                index=next_request_index,
+                prompt=prompt,
+                input_ids=tokenizer.encode(prompt),
+                requested_max_tokens=infer_max_tokens,
             )
             next_request_index += 1
+            next_prompt_index = (next_prompt_index + 1) % len(prompts)
+            return state
 
-        print(
-            f"[infer] Starting cycle={cycle} requests={len(states)} "
-            f"weight_version={runner.version}"
-        )
-        completed_states = await asyncio.gather(
-            *[runner.generate(state) for state in states]
-        )
+    async def record_completed_state(
+        worker_id: int,
+        state: OnlineGenerationState,
+    ) -> None:
+        async with stats_lock:
+            stats.total_requests += 1
+            stats.total_tokens += len(state.output_tokens)
+            stats.last_completed_states.append(state)
+            if len(stats.last_completed_states) > recent_state_limit:
+                stats.last_completed_states = stats.last_completed_states[
+                    -recent_state_limit:
+                ]
 
-        cycle_tokens = sum(len(state.output_tokens) for state in completed_states)
-        version_ranges = []
-        for state in completed_states:
             if state.output_versions:
-                version_ranges.append(
+                version_range = (
                     f"{min(state.output_versions)}-{max(state.output_versions)}"
                 )
                 for version in sorted(set(state.output_versions)):
@@ -1009,18 +1029,40 @@ async def run_repeating_inference(
                             version=version,
                         )
             else:
-                version_ranges.append("none")
+                version_range = "none"
 
-        stats.total_cycles = cycle
-        stats.total_requests += len(completed_states)
-        stats.total_tokens += cycle_tokens
-        stats.last_completed_states = list(completed_states)
-        print(
-            f"[infer] Completed cycle={cycle} tokens={cycle_tokens} "
-            f"version_ranges={version_ranges}"
-        )
+            if stats.total_requests % infer_concurrency == 0:
+                print(
+                    "[infer] Queue progress: "
+                    f"completed_requests={stats.total_requests} "
+                    f"total_tokens={stats.total_tokens} "
+                    f"latest_worker={worker_id} "
+                    f"latest_request={state.index} "
+                    f"latest_tokens={len(state.output_tokens)} "
+                    f"latest_versions={version_range}"
+                )
 
-    print("[infer] Stop requested; no new inference cycles will be launched.")
+    async def infer_worker(worker_id: int) -> None:
+        while True:
+            state = await make_next_state()
+            if state is None:
+                return
+            completed_state = await runner.generate(state)
+            await record_completed_state(worker_id, completed_state)
+
+    worker_tasks = [
+        asyncio.create_task(infer_worker(worker_id))
+        for worker_id in range(infer_concurrency)
+    ]
+    try:
+        await asyncio.gather(*worker_tasks)
+    finally:
+        for task in worker_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+    print("[infer] Stop requested; no new inference requests will be launched.")
     return stats
 
 
@@ -1132,7 +1174,11 @@ async def run_weight_sync_demo(args: argparse.Namespace):
         ray.get([w.get_rank.remote() for w in fsdp_workers])
         print(f"[init] {args.fsdp_world_size} FSDP training workers ready.")
 
-        print("[engine] Creating AsyncLLMEngine with dummy weights...")
+        print(
+            "[engine] Creating AsyncLLMEngine with dummy weights "
+            f"(max_num_seqs={args.vllm_max_num_seqs}, "
+            f"max_num_batched_tokens={args.vllm_max_num_batched_tokens})..."
+        )
         engine = create_async_engine(
             model=local_model_path,
             enforce_eager=True,
@@ -1144,6 +1190,8 @@ async def run_weight_sync_demo(args: argparse.Namespace):
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
             load_format="dummy",
             gpu_memory_utilization=0.3,
+            max_num_seqs=args.vllm_max_num_seqs,
+            max_num_batched_tokens=args.vllm_max_num_batched_tokens,
         )
         print("[engine] AsyncLLMEngine created.")
 
@@ -1207,13 +1255,15 @@ async def run_weight_sync_demo(args: argparse.Namespace):
                 tokenizer=tokenizer,
                 prompts=prompts,
                 infer_max_tokens=args.infer_max_tokens,
+                infer_concurrency=args.infer_concurrency,
                 stop_after_current_cycle=stop_inference,
                 stats=inference_stats,
             )
         )
         print(
             "[infer] Started repeating inference while trainer runs; "
-            f"infer_max_tokens={args.infer_max_tokens}."
+            f"infer_max_tokens={args.infer_max_tokens} "
+            f"infer_concurrency={args.infer_concurrency}."
         )
 
         sync_rounds = 0
@@ -1307,7 +1357,7 @@ async def run_weight_sync_demo(args: argparse.Namespace):
         print("[infer] Repeating inference complete.")
         print(
             "[infer] Summary: "
-            f"cycles={inference_stats.total_cycles} "
+            f"concurrency={inference_stats.in_flight_concurrency} "
             f"requests={inference_stats.total_requests} "
             f"tokens={inference_stats.total_tokens} "
             f"final_weight_version={runner.version}"
@@ -1436,6 +1486,26 @@ def parse_args() -> argparse.Namespace:
         help="Maximum generated tokens per prompt in the weight-sync demo.",
     )
     parser.add_argument(
+        "--infer-concurrency",
+        type=int,
+        default=2048,
+        help="Number of concurrent user-level inference requests in the demo.",
+    )
+    # vllm 最多同时调度多少条sequence，也就是最多256个active请求
+    parser.add_argument(
+        "--vllm-max-num-seqs",
+        type=int,
+        default=256,
+        help="Maximum number of sequences vLLM may schedule concurrently.",
+    )
+    # vllm 最多同时调度多少个batched tokens，也就是最多16384个batched tokens
+    parser.add_argument(
+        "--vllm-max-num-batched-tokens",
+        type=int,
+        default=16384,
+        help="Maximum number of batched tokens vLLM may schedule.",
+    )
+    parser.add_argument(
         "--max-sync-rounds",
         type=int,
         default=None,
@@ -1463,6 +1533,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--sync-every-optimizer-steps must be >= 1")
     if args.infer_max_tokens < 1:
         raise ValueError("--infer-max-tokens must be >= 1")
+    if args.infer_concurrency < 1:
+        raise ValueError("--infer-concurrency must be >= 1")
+    if args.vllm_max_num_seqs < 1:
+        raise ValueError("--vllm-max-num-seqs must be >= 1")
+    if args.vllm_max_num_batched_tokens < 1:
+        raise ValueError("--vllm-max-num-batched-tokens must be >= 1")
     if args.max_sync_rounds is not None and args.max_sync_rounds < 0:
         raise ValueError("--max-sync-rounds must be >= 0 when set")
 
