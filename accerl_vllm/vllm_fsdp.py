@@ -850,7 +850,7 @@ class InterruptibleGenerationRunner:
         self,
         engine,
         temperature: float = 0.0,
-        max_resubmit_retries: int = 20,
+        max_resubmit_retries: int = 2,
     ):
         self.engine = engine
         self.temperature = temperature
@@ -861,22 +861,26 @@ class InterruptibleGenerationRunner:
         self._active_attempts = 0
         self._active_changed = asyncio.Condition()
 
+    # 新的engine.generate() attempt开始 +1
     async def _increment_active_attempts(self) -> None:
         async with self._active_changed:
             self._active_attempts += 1
             self._active_changed.notify_all()
 
+    # 一个engine.generate() attempt 结束 -1
     async def _decrement_active_attempts(self) -> None:
         async with self._active_changed:
             self._active_attempts -= 1
             self._active_changed.notify_all()
 
+    # 等待正在跑的 generate attempt 都结束,可能是正常结束，也可能是被abort打断
     async def wait_for_idle(self) -> None:
         async with self._active_changed:
             await self._active_changed.wait_for(lambda: self._active_attempts == 0)
-
+    
     async def generate(self, state: OnlineGenerationState) -> OnlineGenerationState:
         for attempt in range(1, self.max_resubmit_retries + 1):
+            # 如果当前正在weight update的attempt还没结束，就等着，不要开始新的generate attempt
             while self.paused.is_set():
                 await asyncio.sleep(0)
 
@@ -901,6 +905,7 @@ class InterruptibleGenerationRunner:
 
             await self._increment_active_attempts()
             try:
+                # 调用vllm生成接口，拿到输出后更新state，如果生成过程中被weight update打断了，engine.generate()会抛出异常，直接进入finally块结束这个attempt
                 async for request_output in self.engine.generate(
                     {"prompt_token_ids": state.restart_prompt_token_ids},
                     sampling_params,
@@ -1073,6 +1078,24 @@ async def sync_weights_to_vllm(
         f"aggregate-infer throughput={infer_payload_gib / elapsed:.3f} GiB/s"
     )
     return elapsed
+
+
+async def shutdown_vllm_engine(engine) -> None:
+    """Shut down vLLM workers before Ray is torn down."""
+    if engine is None:
+        return
+
+    shutdown = getattr(engine, "shutdown", None)
+    if shutdown is None:
+        return
+
+    try:
+        result = shutdown()
+        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+            await result
+        print("[cleanup] vLLM engine shut down.")
+    except Exception as exc:
+        print(f"[cleanup] Ignoring vLLM engine shutdown error: {exc!r}")
 
 
 async def run_weight_sync_demo(args: argparse.Namespace):
@@ -1305,6 +1328,7 @@ async def run_weight_sync_demo(args: argparse.Namespace):
         if inference_loop_task is not None and not inference_loop_task.done():
             inference_loop_task.cancel()
             await asyncio.gather(inference_loop_task, return_exceptions=True)
+        await shutdown_vllm_engine(engine)
         if fsdp_workers:
             try:
                 ray.get([worker.close.remote() for worker in fsdp_workers])
