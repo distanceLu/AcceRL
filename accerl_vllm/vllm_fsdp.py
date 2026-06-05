@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FSDP2 training smoke pipeline with optional vLLM weight-transfer demo.
+"""Minimal FSDP trainer + vLLM interruptible inference sync demo.
 
 8-GPU layout:
   Training  - 4 GPUs, PyTorch FSDP2 (fully_shard)
-  Optional inference demo - 4 GPUs, vLLM AsyncLLMEngine with EP+DP
+  Inference - 4 GPUs, vLLM AsyncLLMEngine with EP+DP
 
-By default this script launches Ray actors that form a NCCL process group and
-run a dummy response-only SFT loop, matching the local_trainer.py FSDP path.
-The existing FSDP -> vLLM NCCL weight-transfer helpers are kept for follow-up
-integration but are not called by the default training entrypoint.
+This script launches Ray FSDP trainer workers and a vLLM inference engine.
+The trainer runs in short optimizer-step segments; at each sync boundary,
+generation is paused/aborted, in-flight requests are drained, FSDP weights are
+sent to vLLM over NCCL, and interruptible inference resumes with resubmitted
+requests.
 
 Assumes a single-node cluster with 8 GPUs.
 """
@@ -54,7 +55,7 @@ MODEL_NAME = "/mnt/data/lcx4/hf_cache/Qwen1.5-MoE-A2.7B-Chat"
 FSDP_WORLD_SIZE = 4
 INFERENCE_TP_SIZE = 1
 INFERENCE_DP_SIZE = 4
-TRANSFER_BENCH_ITERS = 20
+
 
 def get_local_ip() -> str:
     try:
@@ -365,58 +366,6 @@ def build_dataloader(
     )
 
 
-def run_training_loop(
-    model,
-    dataloader,
-    optimizer,
-    trainable_parameter_list,
-    device,
-    args: argparse.Namespace,
-    rank: int = 0,
-    sampler=None,
-) -> Dict[str, float]:
-    if rank == 0:
-        print(
-            f"[train] Starting training: max_steps={args.max_steps}, "
-            f"batch_size={args.batch_size}, grad_accum_steps={args.grad_accum_steps}"
-        )
-
-    step = 0
-    epoch = 0
-    last_loss = 0.0
-    optimizer.zero_grad(set_to_none=True)
-    while step < args.max_steps:
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-
-        for batch in dataloader:
-            batch = move_batch_to_device(batch, device)
-            outputs = model(**batch)
-            loss = outputs.loss / args.grad_accum_steps
-            loss.backward()
-
-            should_step = (step + 1) % args.grad_accum_steps == 0
-            if should_step:
-                torch.nn.utils.clip_grad_norm_(
-                    trainable_parameter_list,
-                    max_norm=1.0,
-                )
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            step += 1
-            last_loss = loss.item() * args.grad_accum_steps
-            if rank == 0 and step % args.log_every == 0:
-                print(f"[train] step={step} loss={last_loss:.6f}")
-
-            if step >= args.max_steps:
-                break
-
-        epoch += 1
-
-    return {"rank": rank, "steps": step, "last_loss": last_loss}
-
-
 def iter_vllm_loadable_weights(name: str, tensor: torch.Tensor):
     """Yield checkpoint-style weights accepted by vLLM's Qwen2-MoE loader.
 
@@ -588,26 +537,6 @@ class FSDPTrainWorker:
     def get_rank(self):
         return self.rank
 
-    def train(self) -> Dict[str, float]:
-        try:
-            summary = run_training_loop(
-                model=self.model,
-                dataloader=self.dataloader,
-                optimizer=self.optimizer,
-                trainable_parameter_list=self.trainable_parameter_list,
-                device=self.device,
-                args=self.args,
-                rank=self.rank,
-                sampler=self.sampler,
-            )
-            dist.barrier()
-            if self.rank == 0:
-                print("[done] Ray FSDP trainer smoke test finished.")
-            return summary
-        finally:
-            if dist.is_initialized():
-                dist.destroy_process_group()
-
     def close(self):
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -628,8 +557,7 @@ class FSDPTrainWorker:
         Continue the persistent training loop until this worker finishes the
         requested number of optimizer steps, or reaches args.max_steps.
 
-        In the online sync demo, args.max_steps is interpreted as optimizer
-        steps. The standalone train() smoke path keeps its original semantics.
+        args.max_steps is interpreted as optimizer steps.
         """
         if num_optimizer_steps < 1:
             raise ValueError("num_optimizer_steps must be >= 1")
@@ -752,22 +680,6 @@ def create_async_engine(**kwargs):
     )
 
 
-async def generate_batch(engine, prompts, sampling_params):
-    """Generate completions for a batch of prompts."""
-
-    async def gen_one(prompt):
-        output = None
-        async for request_output in engine.generate(
-            {"prompt": prompt},
-            sampling_params,
-            request_id=str(uuid.uuid4()),
-        ):
-            output = request_output
-        return output
-
-    return await asyncio.gather(*[gen_one(p) for p in prompts])
-
-
 @dataclass
 class OnlineGenerationState:
     """Token-level state for one request across weight-update interruptions."""
@@ -793,12 +705,10 @@ class OnlineGenerationState:
 
 @dataclass
 class RepeatingInferenceStats:
-    total_cycles: int = 0
     total_requests: int = 0
     total_tokens: int = 0
     in_flight_concurrency: int = 0
     last_completed_states: List[OnlineGenerationState] = field(default_factory=list)
-    printed_first_result_versions: set[int] = field(default_factory=set)
 
 
 def _tokens_from_output(request_output) -> List[int]:
@@ -819,29 +729,6 @@ def _normalize_stop_reason(stop_reason) -> Literal["length", "stop", "tool_calls
     if stop_reason in ("eos", "stop_token", "stop_sequence"):
         return "stop"
     return "abort"
-
-
-def print_first_infer_result_for_version(
-    tokenizer,
-    state: OnlineGenerationState,
-    version: int,
-) -> None:
-    version_token_count = sum(
-        1 for token_version in state.output_versions if token_version == version
-    )
-    print("=" * 60)
-    print(
-        "[infer-first-after-update] "
-        f"weight_version={version} request_index={state.index} "
-        f"version_tokens={version_token_count} total_tokens={len(state.output_tokens)} "
-        f"stop_reason={state.stop_reason}"
-    )
-    print(f"Prompt: {state.prompt!r}")
-    print(f"Prompt token IDs ({len(state.input_ids)}): {state.input_ids!r}")
-    print(f"Output versions: {state.output_versions!r}")
-    print(f"Output token IDs ({len(state.output_tokens)}): {state.output_tokens!r}")
-    print(f"Generated: {tokenizer.decode(state.output_tokens)!r}")
-    print("=" * 60)
 
 
 class InterruptibleGenerationRunner:
@@ -878,7 +765,7 @@ class InterruptibleGenerationRunner:
     async def wait_for_idle(self) -> None:
         async with self._active_changed:
             await self._active_changed.wait_for(lambda: self._active_attempts == 0)
-    
+
     async def generate(self, state: OnlineGenerationState) -> OnlineGenerationState:
         for attempt in range(1, self.max_resubmit_retries + 1):
             # 如果当前正在weight update的attempt还没结束，就等着，不要开始新的generate attempt
@@ -1020,14 +907,6 @@ async def run_repeating_inference(
                 version_range = (
                     f"{min(state.output_versions)}-{max(state.output_versions)}"
                 )
-                for version in sorted(set(state.output_versions)):
-                    if version not in stats.printed_first_result_versions:
-                        stats.printed_first_result_versions.add(version)
-                        print_first_infer_result_for_version(
-                            tokenizer=tokenizer,
-                            state=state,
-                            version=version,
-                        )
             else:
                 version_range = "none"
 
@@ -1176,7 +1055,9 @@ async def run_weight_sync_demo(args: argparse.Namespace):
 
         print(
             "[engine] Creating AsyncLLMEngine with dummy weights "
+            # 调度器同一时刻最多允许多少条 sequence 处于 active/running 状态。
             f"(max_num_seqs={args.vllm_max_num_seqs}, "
+            # 一次调度最大的toekn总量
             f"max_num_batched_tokens={args.vllm_max_num_batched_tokens})..."
         )
         engine = create_async_engine(
@@ -1184,7 +1065,7 @@ async def run_weight_sync_demo(args: argparse.Namespace):
             enforce_eager=True,
             tensor_parallel_size=INFERENCE_TP_SIZE,
             data_parallel_size=INFERENCE_DP_SIZE,
-            enable_expert_parallel=False,
+            enable_expert_parallel=True,
             distributed_executor_backend="ray",
             data_parallel_backend="ray",
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
@@ -1353,27 +1234,6 @@ async def run_weight_sync_demo(args: argparse.Namespace):
             await engine.resume_generation()
             runner.paused.clear()
         inference_stats = await inference_loop_task
-
-        print("[infer] Repeating inference complete.")
-        print(
-            "[infer] Summary: "
-            f"concurrency={inference_stats.in_flight_concurrency} "
-            f"requests={inference_stats.total_requests} "
-            f"tokens={inference_stats.total_tokens} "
-            f"final_weight_version={runner.version}"
-        )
-        print("-" * 60)
-        for state in inference_stats.last_completed_states:
-            print(f"Prompt: {state.prompt!r}")
-            print(f"Prompt token IDs ({len(state.input_ids)}): {state.input_ids!r}")
-            print(
-                f"Output token IDs ({len(state.output_tokens)}): "
-                f"{state.output_tokens!r}"
-            )
-            print(f"Output versions: {state.output_versions!r}")
-            print(f"Stop reason: {state.stop_reason}")
-            print(f"Generated: {tokenizer.decode(state.output_tokens)!r}")
-            print("-" * 60)
     finally:
         if inference_loop_task is not None and not inference_loop_task.done():
             inference_loop_task.cancel()
@@ -1387,47 +1247,12 @@ async def run_weight_sync_demo(args: argparse.Namespace):
         ray.shutdown()
 
 
-def run_fsdp_training(args: argparse.Namespace) -> None:
-    if args.save_checkpoint:
-        print("[save] Ray FSDP mode does not support --save-checkpoint yet; skipping.")
-
-    fsdp_master_addr = args.fsdp_master_addr or get_local_ip()
-    fsdp_master_port = args.fsdp_master_port or find_open_port()
-
-    if args.ray_address:
-        ray.init(address=args.ray_address)
-    else:
-        ray.init()
-
-    try:
-        remote_worker = ray.remote(num_gpus=1)(FSDPTrainWorker)
-        workers = [
-            remote_worker.remote(
-                args,
-                rank,
-                args.fsdp_world_size,
-                fsdp_master_addr,
-                fsdp_master_port,
-            )
-            for rank in range(args.fsdp_world_size)
-        ]
-        ray.get([worker.get_rank.remote() for worker in workers])
-        print(f"[init] {args.fsdp_world_size} Ray FSDP training workers ready.")
-
-        summaries = ray.get([worker.train.remote() for worker in workers])
-        rank0_summary = next(item for item in summaries if item["rank"] == 0)
-        print(
-            "[done] rank0 summary: "
-            f"steps={rank0_summary['steps']} "
-            f"last_loss={rank0_summary['last_loss']:.6f}"
-        )
-    finally:
-        ray.shutdown()
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a Ray FSDP2 local training smoke test."
+        description=(
+            "Run a minimal Ray FSDP trainer + vLLM interruptible inference "
+            "NCCL weight-sync demo."
+        )
     )
     parser.add_argument("--model-path", default=MODEL_NAME)
     parser.add_argument(
@@ -1443,7 +1268,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--max-steps", type=int, default=100)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=100,
+        help="Maximum optimizer steps to run before stopping the demo.",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-accum-steps", type=int, default=8)
@@ -1461,23 +1291,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional Ray cluster address. Defaults to local ray.init().",
     )
     parser.add_argument(
-        "--save-checkpoint",
-        action="store_true",
-        help="Accepted for CLI compatibility; FSDP checkpoint save is skipped.",
-    )
-    parser.add_argument(
-        "--run-weight-sync-demo",
-        action="store_true",
-        help=(
-            "Run online trainer-driven FSDP-to-vLLM NCCL weight sync demo "
-            "with interruptible inference."
-        ),
-    )
-    parser.add_argument(
         "--sync-every-optimizer-steps",
         type=int,
         default=10,
-        help="In the weight-sync demo, sync trainable weights after this many optimizer steps.",
+        help="Sync trainable weights after this many optimizer steps.",
     )
     parser.add_argument(
         "--infer-max-tokens",
@@ -1485,6 +1302,7 @@ def parse_args() -> argparse.Namespace:
         default=256,
         help="Maximum generated tokens per prompt in the weight-sync demo.",
     )
+    # 并发用户级别的推理请求数量，vLLM会在这个基础上根据max_num_seqs和max_num_batched_tokens来调度实际的生成请求
     parser.add_argument(
         "--infer-concurrency",
         type=int,
@@ -1505,6 +1323,7 @@ def parse_args() -> argparse.Namespace:
         default=16384,
         help="Maximum number of batched tokens vLLM may schedule.",
     )
+    # 可选的最大同步轮数，超过这个轮数后即使训练还没结束也停止同步，让推理继续跑下去，适合验证推理在不同版本权重下的表现差异
     parser.add_argument(
         "--max-sync-rounds",
         type=int,
@@ -1546,10 +1365,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     validate_args(args)
-    if args.run_weight_sync_demo:
-        asyncio.run(run_weight_sync_demo(args))
-    else:
-        run_fsdp_training(args)
+    asyncio.run(run_weight_sync_demo(args))
 
 
 if __name__ == "__main__":
