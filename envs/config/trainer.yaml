@@ -1,0 +1,51 @@
+world_model_env:
+  _target_: envs.world_model_env.WorldModelEnvConfig
+  horizon: 220
+  num_batches_to_preload: 1
+  diffusion_sampler:
+    _target_: envs.diffusion.diffusion_sampler.DiffusionSamplerConfig
+    num_steps_denoising: 3
+    sigma_min: 2e-3
+    sigma_max: 5.0
+    rho: 7
+    order: 1  # 1: Euler, 2: Heun
+    s_churn: 0.0  # Amount of stochasticity
+    s_tmin: 0.0
+    s_tmax: ${eval:'float("inf")'}
+    s_noise: 1.0
+
+denoiser:
+  training:
+    num_autoregressive_steps: 1
+    sample_weights: [0.1, 0.1, 0.1, 0.7]
+    lr_warmup_steps: 100
+    max_grad_norm: 1.0
+
+  optimizer:
+    lr: 1e-5
+    weight_decay: 1e-2
+    eps: 1e-8
+  
+  sigma_distribution: # log normal distribution for sigma during training
+    _target_: envs.diffusion.SigmaDistributionConfig
+    loc: -0.4
+    scale: 1.2
+    sigma_min: 2e-3
+    sigma_max: 20
+
+reward_model:
+  training:
+    clip_grad_norm: 1.0
+    focal_alpha: 0.99
+
+  optimizer:
+    lr: 1e-5
+    min_lr: 1e-7
+    T_max: 300
+
+trainer:
+  steps_per_epoch: 1
+  batch_size: 8
+  grad_accum: 128
+  eval_interval: 10
+  num_to_keep: 1
