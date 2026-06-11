@@ -4,15 +4,15 @@
 
 python rl/ds_libero_ppo_discrete.py \
   --cuda-visible-devices "6,7" \
-  --benchmark libero_spatial \
+  --benchmark libero_object \
   --num-trainer-gpus 1 \
   --num-inference-actors 1 \
-  --num-rollout-workers 2 \
-  --num-eval-workers 20 \
+  --num-rollout-workers 10 \
+  --num-eval-workers 1 \
   --rollout-local-buf 64 \
   --inference-batch 8 \
   --inference-timeout-ms 300 \
-  --replay-capacity 10000 \
+  --replay-capacity 3000 \
   --train-batch-size 12 \
   --accumulation-steps 21 \
   --train-iters 30000 \
@@ -36,8 +36,9 @@ python rl/ds_libero_ppo_discrete.py \
   --broadcast-group-name "trainer_to_inference_broadcast" \
   --use-bf16 \
   --use-proprio \
-  --pretrained-checkpoint "/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt" \
-  --checkpoint2 "runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt" \
+  --num-images-in-input 2 \
+  --pretrained-checkpoint "/mnt/data/lcx2/yanjieworkspace/models/finetune_im/openvla-7b+libero_object_no_noops+b40+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt" \
+  --checkpoint2 '' \
   --clip-mode sapo \
   --exp-name "OpenVLA_DS_sapo_DISCRETE_task0_10k_buffer"
 

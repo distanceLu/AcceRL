@@ -918,11 +918,16 @@ class TrainerActor(TrainerActorCom):
         self.model, self.optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config, model_parameters=optimizer_params)
         print(f"TrainerActor Rank {self.rank}: DeepSpeed 训练组 (ZeRO-2) 初始化完成。")
 
-        self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
-
         n_total = sum(p.numel() for p in model.parameters())
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
+
+    def start_data_fetching_loop(self):
+        if self.data_fetching_task is not None and not self.data_fetching_task.done():
+            print(f"Trainer {self.rank}: 后台数据准备循环已在运行。")
+            return False
+        self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
+        return True
 
     async def save_agent(self, ckpt_dir: str, step: int):
         """
@@ -1794,19 +1799,14 @@ def main(args):
     ]
     print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")
 
-    print("\n--- 步骤 2: 建立独立的 DeepSpeed 训练组 ---")
     # zzq 1125 通信组，使用find_free_port
     train_group_port = find_free_port()
 
     broadcast_group_port = find_free_port()
     while broadcast_group_port == train_group_port:
         broadcast_group_port = find_free_port()
-    trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
-    train_setup_tasks = [actor.setup_deepspeed_group.remote(trainer_master_addr, train_group_port) for actor in trainer_group]
-    ray.get(train_setup_tasks)
-    print("DeepSpeed 训练组建立完成。")
 
-    print(f"\n--- 步骤 3: 建立共享广播组 ({args.broadcast_group_name}) ---")
+    print(f"\n--- 步骤 2: 预先建立共享广播组 ({args.broadcast_group_name}) ---")
     broadcast_participants = [trainer_group[0]] + inference_pool
     broadcast_group_world_size = len(broadcast_participants)
     broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
@@ -1818,6 +1818,21 @@ def main(args):
     ]
     ray.get(broadcast_setup_tasks)
     print("共享广播组建立完成。")
+
+    print("\n--- 步骤 3: 建立独立的 DeepSpeed 训练组 ---")
+    trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
+    train_setup_tasks = [actor.setup_deepspeed_group.remote(trainer_master_addr, train_group_port) for actor in trainer_group]
+    ray.get(train_setup_tasks)
+    print("DeepSpeed 训练组建立完成。")
+
+    print("\n--- 步骤 3.1: NCCL 广播组小张量通信测试 ---")
+    for dtype_name in ("float32", "bfloat16", "int64"):
+        sanity_tasks = [
+            actor.broadcast_sanity_check.remote(args.broadcast_group_name, dtype_name, 8)
+            for actor in broadcast_participants
+        ]
+        sanity_results = ray.get(sanity_tasks)
+        print(f"广播组 sanity check 通过: dtype={dtype_name}, results={sanity_results}")
 
     inf_keys = ray.get(inference_pool[0].get_model_keys.remote())
     trainer_keys = ray.get(trainer_group[0].get_model_keys.remote())
@@ -1892,11 +1907,13 @@ def main(args):
         print("✓ 统计信息恢复完成\n")
         
         start_global_step = args.resume_step
+        ray.get([trainer.start_data_fetching_loop.remote() for trainer in trainer_group])
         print(f"{'='*80}")
         print(f"Resume 完成！将从步数 {start_global_step} 继续训练到 {args.train_iters}")
         print(f"{'='*80}\n")
     else:
         print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
+        ray.get([trainer.start_data_fetching_loop.remote() for trainer in trainer_group])
         min_buffer_steps_for_start = args.train_batch_size * args.accumulation_steps
         while not all(steps >= min_buffer_steps_for_start for steps in ray.get([rb.total_steps.remote() for rb in replay_buffers])):
             total_steps_list = ray.get([rb.total_steps.remote() for rb in replay_buffers])
