@@ -168,7 +168,7 @@ saved_images/
 diamond_world_model/
 agibot/
 docs/
-models/
-scripts/
+# models/
+# scripts/
 tmp_checkpoint/
-zzq_vla/
+# zzq_vla/
