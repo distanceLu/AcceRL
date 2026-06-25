@@ -163,7 +163,7 @@ runtime_vis_results/
 
 ae_debug/
 data/
-datasets/
+# datasets/
 saved_images/
 diamond_world_model/
 agibot/
