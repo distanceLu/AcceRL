@@ -1,26 +1,7 @@
+## 第一步：克隆代码并配置 LIBERO
 
-## 第一步：配环境
-
-`yiqinworkspace` 是当前的工作目录。
-
-在工作目录创建 clone 的目标文件夹：
 ```bash
-mkdir -p /mnt/data/lcx1/yiqinworkspace/clone_env_smoke_test
-cd /mnt/data/lcx1/yiqinworkspace/clone_env_smoke_test
-```
-
-克隆环境：
-```bash
-conda create \
-  --prefix /mnt/data/lcx1/yiqinworkspace/clone_env_smoke_test/rlinf_env \  ##需要克隆的目标目录
-  --clone /mnt/data/lcx2/conda/envs/rlinf_env  ##克隆的环境所在目录
-```
-
-## 第二步：克隆代码并配置 LIBERO
-
-从 `https://github.com/distanceLu/AcceRL/tree/lcx-26-6-9` git clone 代码到 yiqinworkspace：
-```bash
-git clone -b lcx-26-6-9 https://github.com/distanceLu/AcceRL.git
+git clone https://github.com/distanceLu/AcceRL.git
 ```
 
 配置 LIBERO：
@@ -38,7 +19,7 @@ pip list  # 看 LIBERO 是否指向自己的工作目录
 
 验证导入链路：
 ```bash
-python -c "from libero.libero import benchmark; import ds_com; import rl.ds_libero_ppo_discrete as m; print('OK')"
+python -c "from libero.libero import benchmark; import rl.ds_com; import rl.ds_libero_ppo_discrete as m; print('OK')"
 ```
 成功输出 `OK` 就说明 `libero`、`ds_com`、主训练脚本导入链路都通了。
 
@@ -49,12 +30,20 @@ cd $PROJECT_DIR/rl
 python libero_env.py
 ```
 
+## 第二步：配环境
+
+克隆环境：
+```bash
+conda create -n xxxx --clone /mnt/data/lcx2/conda/envs/rlinf_env  ##克隆的环境所在目录
+pip install -e . --no-deps
+```
+
 ## 第三步：跑通actor_model_discrete.py脚本
 
 执行 `yiqinworkspace/AcceRL/rl/actor_critic_model_discrete.py`：
 ```bash
 cd $PROJECT_DIR/rl
-python actor_critic_model_discrete.py
+python rl/actor_critic_model_discrete.py
 ```
 
 > **注意**：脚本内默认 checkpoint 指向 lcx2 路径时，需改为本机路径（见 `actor_critic_model_discrete.py` 中 `object_checkpoint`）。
