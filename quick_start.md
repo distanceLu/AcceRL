@@ -61,7 +61,7 @@ python ds_libero_ppo_discrete.py
 
 ```text
 Weights only load failed. Unsupported global: numpy.core.multiarray._reconstruct was not an allowed global by default.
-
+```
 **原因：** PyTorch 2.6+ 将 torch.load 的 weights_only 默认值由 False 改为 True，LIBERO 旧 checkpoint 含 numpy 对象，无法以默认安全模式加载。
 
 - 在调用 torch.load 处显式传入 weights_only=False：torch.load(path, weights_only=False)
