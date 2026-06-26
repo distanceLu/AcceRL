@@ -41,7 +41,7 @@ from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
 from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs
 # 训练/推理通信（保持接口不变）
-from ds_com import TrainerActorCom, InferenceActorCom
+from rl.ds_com import TrainerActorCom, InferenceActorCom
 from rl.com_utils import find_free_port
 
 # ================================================================
