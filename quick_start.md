@@ -39,7 +39,7 @@ python libero_env.py
 执行 `/AcceRL/rl/actor_critic_model_discrete.py`：
 ```bash
 cd /AcceRL/rl
-python rl/actor_critic_model_discrete.py
+python actor_critic_model_discrete.py
 ```
 
 > **注意**：脚本内默认 checkpoint 指向 lcx2 路径时，需改为本机路径（见 `actor_critic_model_discrete.py` 中 `object_checkpoint`）。

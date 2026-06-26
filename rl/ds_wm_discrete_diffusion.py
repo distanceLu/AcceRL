@@ -157,7 +157,7 @@ def parse_args():
     parser.add_argument('--num-images-in-input', type=int, default=1,
                         help='Number of images in input (default: 1)')
     parser.add_argument('--pretrained-checkpoint', type=str,
-                        default='/cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt',
+                        default='/mnt/data/lcx2/yanjieworkspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt',
                         help='Pretrained checkpoint path')
     parser.add_argument('--checkpoint2', type=str,
                         default='runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt',
