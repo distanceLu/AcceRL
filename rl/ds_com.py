@@ -42,7 +42,7 @@ def _named_tensors_in_order(module, prefix=None):
     )
     return params, buffers
 
-
+'''
 def init_custom_process_group(
     backend=None, init_method=None, timeout=None, world_size=-1, rank=-1,
     store=None, group_name=None, pg_options=None,):
@@ -72,6 +72,66 @@ def init_custom_process_group(
     pg, _ = _new_process_group_helper(
         world_size, rank, [], backend, store, group_name=group_name,
         **{pg_options_param_name: pg_options}, timeout=timeout)
+    if _world:
+        _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
+    return pg
+'''
+
+def init_custom_process_group(
+    backend=None, init_method=None, timeout=None, world_size=-1, rank=-1,
+    store=None, group_name=None, pg_options=None,):
+    from datetime import timedelta
+    import torch.distributed as dist
+    from torch.distributed.distributed_c10d import (
+        Backend, PrefixStore, _world, default_pg_timeout)
+    from torch.distributed.distributed_c10d import ProcessGroupNCCL
+    TCPStore = dist.TCPStore
+
+    assert (store is None) or (init_method is None), "Cannot specify both init_method and store."
+    if store is not None:
+        assert world_size > 0, "world_size must be positive if using store"
+        assert rank >= 0, "rank must be non-negative if using store"
+    elif init_method is None:
+        init_method = "env://"
+    if backend:
+        backend = Backend(backend)
+    else:
+        backend = Backend("nccl")
+    if timeout is None:
+        timeout = timedelta(minutes=30)
+
+    if store is None:
+        # 解析 tcp://host:port 格式
+        if init_method and init_method.startswith("tcp://"):
+            addr = init_method[6:]
+            host, port_str = addr.rsplit(":", 1)
+            port = int(port_str)
+        else:
+            raise ValueError(f"不支持的 init_method: {init_method}，需要 tcp://host:port 格式")
+
+        # 直接创建 TCPStore，绕过 _new_process_group_helper
+        # 这确保两端都使用 ncclCommInitRank 而非 ncclCommSplit
+        store = TCPStore(
+            host_name=host,
+            port=port,
+            world_size=world_size,
+            is_master=(rank == 0),
+            timeout=timeout,
+        )
+        store = PrefixStore(group_name, store)
+
+    # 直接创建 ProcessGroupNCCL，强制使用 ncclCommInitRank
+    if str(backend) == "nccl":
+        pg = ProcessGroupNCCL(store, rank, world_size, timeout)
+    else:
+        # 非 NCCL 后端回退到原逻辑
+        from torch.distributed.distributed_c10d import _new_process_group_helper
+        helper_params = inspect.signature(_new_process_group_helper).parameters
+        pg_options_param_name = "backend_options" if "backend_options" in helper_params else "pg_options"
+        pg, _ = _new_process_group_helper(
+            world_size, rank, [], backend, store, group_name=group_name,
+            **{pg_options_param_name: pg_options}, timeout=timeout)
+
     if _world:
         _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
     return pg
