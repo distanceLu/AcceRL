@@ -88,7 +88,7 @@ def parse_args():
                         help='Total training iterations (default: 30000)')
     
     # Checkpoint
-    parser.add_argument('--ckpt-dir', type=str, default='/cpfs01/liuwei_workspace/models/finetune_rl',
+    parser.add_argument('--ckpt-dir', type=str, default='/mnt/data/lcx2/yanjieworkspace/models/finetune_rl/',
                         help='Checkpoint directory (default: /cpfs01/liuwei_workspace/models/finetune_rl)')
     parser.add_argument('--ckpt-every-steps', type=int, default=2000000,
                         help='Save checkpoint every N steps (default: 2000000)')
@@ -160,7 +160,8 @@ def parse_args():
                         default='/mnt/data/lcx2/yanjieworkspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt',
                         help='Pretrained checkpoint path')
     parser.add_argument('--checkpoint2', type=str,
-                        default='runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt',
+                        default="/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/distill_object_teacher_2img_proprio_student_1img_no_proprio/checkpoint_step_100.pt",
+                        #default='runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt',
                         help='Second checkpoint path')
     
     parser.add_argument('--clip-mode', type=str, default='sapo',
@@ -971,7 +972,7 @@ class DenoiserInferenceActor(InferenceActorCom):
         # 创建 Denoiser 模型
         denoiser_cfg = instantiate(agent_cfg.denoiser)
         if denoiser_cfg.inner_model.num_actions is None:
-            denoiser_cfg.inner_model.num_actions = 6
+            denoiser_cfg.inner_model.num_actions = 256
         
         denoiser = Denoiser(denoiser_cfg).cuda()
         
@@ -1227,7 +1228,7 @@ class TrainerActor(TrainerActorCom):
         # 创建 Denoiser 模型 (模仿 load_denoiser_from_checkpoint)
         denoiser_cfg = instantiate(agent_cfg.denoiser)
         if denoiser_cfg.inner_model.num_actions is None:
-            denoiser_cfg.inner_model.num_actions = 6
+            denoiser_cfg.inner_model.num_actions = 256
         self.denoiser_model = Denoiser(denoiser_cfg).cuda()
         
         # 设置训练模式

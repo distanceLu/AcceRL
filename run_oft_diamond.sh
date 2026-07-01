@@ -48,12 +48,12 @@
 
 
 python rl/ds_wm_discrete_diffusion.py \
-    --cuda-visible-devices 1,4,6,7 \
+    --cuda-visible-devices 4,5,6,7 \
     --use-bf16 \
     --benchmark libero_spatial \
     --num-images-in-input 1 \
-    --pretrained-checkpoint /cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt \
-    --checkpoint2 runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt \
+    --pretrained-checkpoint /mnt/data/lcx2/yanjieworkspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt \
+    --checkpoint2 /mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/distill_object_teacher_2img_proprio_student_1img_no_proprio/checkpoint_step_100.pt \
     --agent-config-path envs/config/agent.yaml \
     --trainer-config-path envs/config/trainer.yaml \
     --num-trainer-gpus 1 \

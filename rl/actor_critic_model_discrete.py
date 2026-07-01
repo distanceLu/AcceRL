@@ -335,7 +335,7 @@ class ActorCritic(nn.Module):
         """
         加载 checkpoint2
         """
-        state = torch.load(checkpoint_dir, map_location=self.device)['student_state_dict']
+        state = torch.load(checkpoint_dir, map_location=self.device, weights_only=False)['student_state_dict']
         self.load_state_dict(state, strict=True)
         print(f"✓ Agent checkpoint2 已加载")
 
