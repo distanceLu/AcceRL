@@ -172,3 +172,5 @@ docs/
 # scripts/
 tmp_checkpoint/
 # zzq_vla/
+
+debug_obs/

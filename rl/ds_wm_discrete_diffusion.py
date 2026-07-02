@@ -160,7 +160,8 @@ def parse_args():
                         default='/mnt/data/lcx2/yanjieworkspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt',
                         help='Pretrained checkpoint path')
     parser.add_argument('--checkpoint2', type=str,
-                        default="/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/distill_object_teacher_2img_proprio_student_1img_no_proprio/checkpoint_step_100.pt",
+                        default=None,
+                        #default="/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/distill_object_teacher_2img_proprio_student_1img_no_proprio/checkpoint_step_100.pt",
                         #default='runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt',
                         help='Second checkpoint path')
     
