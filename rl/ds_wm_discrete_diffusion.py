@@ -23,6 +23,7 @@ import numpy as np
 from envs.world_model_env_batch import WorldModelEnvConfig
 import ray
 import torch
+import torch.nn as nn
 import torch.distributions
 from torch.distributions import kl
 import deepspeed
@@ -170,6 +171,12 @@ def parse_args():
                         help='Clipping mode for PPO (default: sapo)')
     parser.add_argument('--exp-name', type=str, default=None,
                         help='Experiment name (default: auto-generated based on clip-mode)')
+
+    # 预训练 Denoiser / Reward Model checkpoint 路径覆盖（优先级高于 agent.yaml）
+    parser.add_argument('--denoiser-checkpoint', type=str, default=None,
+                        help='Denoiser checkpoint path (overrides agent.yaml denoiser_path)')
+    parser.add_argument('--reward-checkpoint', type=str, default=None,
+                        help='Reward model checkpoint path (overrides agent.yaml reward_model_path)')
     
     # ============ World Model 训练参数 ============
     # Denoiser 参数
@@ -886,13 +893,16 @@ class InferenceActor(InferenceActorCom):
 
 @ray.remote(num_gpus=1)
 class RewardInferenceActor(InferenceActorCom):
-    def __init__(self, actor_id, stats_actor, agent_config_path, inference_batch, inference_timeout_ms):
+    def __init__(self, actor_id, stats_actor, agent_config_path, inference_batch, inference_timeout_ms, reward_checkpoint=None):
         super().__init__()
         self.actor_id = actor_id
         self.stats_actor = stats_actor
         agent_cfg = OmegaConf.load(agent_config_path)
+        # 优先使用命令行参数覆盖 agent.yaml
+        reward_ckpt_path = reward_checkpoint if reward_checkpoint else agent_cfg.reward_model_path
+        print(f"RewardInferenceActor {actor_id}: 加载 Reward Model checkpoint from {reward_ckpt_path}")
         self.reward_model, self.rew_cfg = load_reward_model(
-            model_path=agent_cfg.reward_model_path,
+            model_path=reward_ckpt_path,
             device="cuda",
             pretrained_checkpoint=agent_cfg.openvla_path,
             focal_alpha=agent_cfg.reward_model.focal_alpha,
@@ -961,7 +971,7 @@ class RewardInferenceActor(InferenceActorCom):
 
 @ray.remote(num_gpus=1)
 class DenoiserInferenceActor(InferenceActorCom):
-    def __init__(self, actor_id, stats_actor, agent_config_path, trainer_config_path, inference_batch, inference_timeout_ms):
+    def __init__(self, actor_id, stats_actor, agent_config_path, trainer_config_path, inference_batch, inference_timeout_ms, denoiser_checkpoint=None):
         super().__init__()
         self.actor_id = actor_id
         self.stats_actor = stats_actor
@@ -969,6 +979,10 @@ class DenoiserInferenceActor(InferenceActorCom):
         # 加载配置
         agent_cfg = OmegaConf.load(agent_config_path)
         trainer_cfg = OmegaConf.load(trainer_config_path)
+        
+        # 优先使用命令行参数覆盖 agent.yaml
+        denoiser_ckpt_path = denoiser_checkpoint if denoiser_checkpoint else agent_cfg.denoiser_path
+        print(f"DenoiserInferenceActor {actor_id}: 加载 Denoiser checkpoint from {denoiser_ckpt_path}")
         
         # 创建 Denoiser 模型
         denoiser_cfg = instantiate(agent_cfg.denoiser)
@@ -981,8 +995,8 @@ class DenoiserInferenceActor(InferenceActorCom):
         sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
         denoiser.setup_training(sigma_distribution_cfg)
         
-        # 加载预训练权重
-        checkpoint = torch.load(agent_cfg.denoiser_path, map_location="cuda", weights_only=False)
+        # 加载预训练权重（使用已解析的覆盖路径）
+        checkpoint = torch.load(denoiser_ckpt_path, map_location="cuda", weights_only=False)
         state_dict = checkpoint["denoiser_state_dict"]
         
         # 处理动态 action embedding
@@ -991,6 +1005,20 @@ class DenoiserInferenceActor(InferenceActorCom):
             act_emb_float_weight = state_dict[act_emb_float_key]
             act_dim = act_emb_float_weight.shape[1]
             _ = denoiser.inner_model._get_act_emb_float(act_dim)
+        
+        # 处理动态 act_emb_long（num_actions 可能与默认 256 不同）
+        act_emb_long_key = "inner_model.act_emb_long.0.weight"
+        if act_emb_long_key in state_dict:
+            act_emb_long_weight = state_dict[act_emb_long_key]
+            ckpt_num_actions, ckpt_emb_dim = act_emb_long_weight.shape
+            current_embedding = denoiser.inner_model.act_emb_long[0]
+            if (ckpt_num_actions != current_embedding.num_embeddings or
+                ckpt_emb_dim != current_embedding.embedding_dim):
+                print(f"DenoiserInferenceActor {actor_id}: 调整 act_emb_long ({current_embedding.num_embeddings}, {current_embedding.embedding_dim}) -> ({ckpt_num_actions}, {ckpt_emb_dim})")
+                device = current_embedding.weight.device
+                denoiser.inner_model.act_emb_long[0] = nn.Embedding(ckpt_num_actions, ckpt_emb_dim).to(device)
+                denoiser.inner_model.cfg.num_actions = ckpt_num_actions
+                denoiser_cfg.inner_model.num_actions = ckpt_num_actions
         
         denoiser.load_state_dict(state_dict, strict=False)
         
@@ -1084,7 +1112,8 @@ class TrainerActor(TrainerActorCom):
                  wm_replay_buffer, agent_config_path, trainer_config_path,
                  denoiser_batch_size, denoiser_accumulation_steps, denoiser_lr, denoiser_warmup_steps,
                  reward_batch_size, reward_accumulation_steps, reward_lr, reward_warmup_steps,
-                 denoiser_train_interval, reward_train_interval):
+                 denoiser_train_interval, reward_train_interval,
+                 denoiser_checkpoint=None, reward_checkpoint=None):
         super().__init__()
         self.rank = rank
         self.world_size = world_size
@@ -1096,6 +1125,10 @@ class TrainerActor(TrainerActorCom):
         self.data_dtype = None
         self.next_ready_batch: Optional[Tuple] = None
         self.data_fetching_task = None
+        
+        # Denoiser / Reward checkpoint 路径覆盖
+        self.denoiser_checkpoint = denoiser_checkpoint
+        self.reward_checkpoint = reward_checkpoint
         
         # 存储训练参数
         self.train_batch_size = train_batch_size
@@ -1236,8 +1269,10 @@ class TrainerActor(TrainerActorCom):
         sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
         self.denoiser_model.setup_training(sigma_distribution_cfg)
         
-        # 加载预训练权重
-        checkpoint = torch.load(agent_cfg.denoiser_path, map_location="cuda", weights_only=False)
+        # 加载预训练权重（优先使用命令行参数覆盖 agent.yaml）
+        denoiser_ckpt_path = self.denoiser_checkpoint if self.denoiser_checkpoint else agent_cfg.denoiser_path
+        print(f"Trainer {self.rank}: 加载 Denoiser checkpoint from {denoiser_ckpt_path}")
+        checkpoint = torch.load(denoiser_ckpt_path, map_location="cuda", weights_only=False)
         state_dict = checkpoint["denoiser_state_dict"]
         
         # 处理动态 action embedding
@@ -1247,8 +1282,23 @@ class TrainerActor(TrainerActorCom):
             act_dim = act_emb_float_weight.shape[1]
             _ = self.denoiser_model.inner_model._get_act_emb_float(act_dim)
         
+        # 处理动态 act_emb_long（num_actions 可能与默认 256 不同）
+        act_emb_long_key = "inner_model.act_emb_long.0.weight"
+        if act_emb_long_key in state_dict:
+            act_emb_long_weight = state_dict[act_emb_long_key]
+            ckpt_num_actions, ckpt_emb_dim = act_emb_long_weight.shape
+            current_embedding = self.denoiser_model.inner_model.act_emb_long[0]
+            if (ckpt_num_actions != current_embedding.num_embeddings or
+                ckpt_emb_dim != current_embedding.embedding_dim):
+                print(f"Trainer {self.rank}: 调整 act_emb_long ({current_embedding.num_embeddings}, {current_embedding.embedding_dim}) -> ({ckpt_num_actions}, {ckpt_emb_dim})")
+                device = current_embedding.weight.device
+                self.denoiser_model.inner_model.act_emb_long[0] = nn.Embedding(ckpt_num_actions, ckpt_emb_dim).to(device)
+                # 同步更新配置，便于后续训练/保存一致性
+                self.denoiser_model.inner_model.cfg.num_actions = ckpt_num_actions
+                denoiser_cfg.inner_model.num_actions = ckpt_num_actions
+        
         self.denoiser_model.load_state_dict(state_dict, strict=False)
-        print(f"Trainer {self.rank}: 加载 Denoiser checkpoint from {agent_cfg.denoiser_path}")
+        print(f"Trainer {self.rank}: Denoiser 权重加载完成 (effective_step={checkpoint.get('effective_step', 'N/A')})")
         
         denoiser_ds_config = {
             "train_micro_batch_size_per_gpu": self.denoiser_batch_size,
@@ -1273,8 +1323,11 @@ class TrainerActor(TrainerActorCom):
         print(f"Trainer {self.rank}: 正在加载 Reward Model...")
         from envs.utils import load_reward_model
         
+        # 优先使用命令行参数覆盖 agent.yaml
+        reward_ckpt_path = self.reward_checkpoint if self.reward_checkpoint else agent_cfg.reward_model_path
+        print(f"Trainer {self.rank}: 加载 Reward Model checkpoint from {reward_ckpt_path}")
         self.reward_model, self.reward_cfg = load_reward_model(
-            model_path=agent_cfg.reward_model_path,
+            model_path=reward_ckpt_path,
             device="cuda",
             pretrained_checkpoint=agent_cfg.openvla_path,
             focal_alpha=agent_cfg.reward_model.focal_alpha,
@@ -1880,6 +1933,8 @@ def main(args):
             reward_warmup_steps=args.reward_warmup_steps,
             denoiser_train_interval=args.denoiser_train_interval,
             reward_train_interval=args.reward_train_interval,
+            denoiser_checkpoint=args.denoiser_checkpoint,
+            reward_checkpoint=args.reward_checkpoint,
         )
         for i in range(args.num_trainer_gpus)
     ]
@@ -1890,7 +1945,8 @@ def main(args):
             stats_actor=stats_actor, 
             agent_config_path=agent_config_path,
             inference_batch=args.inference_batch,
-            inference_timeout_ms=args.inference_timeout_ms
+            inference_timeout_ms=args.inference_timeout_ms,
+            reward_checkpoint=args.reward_checkpoint,
         ) for i in range(args.num_reward_inference_actors)
     ]
     denoiser_inference_pool = [
@@ -1900,7 +1956,8 @@ def main(args):
             agent_config_path=agent_config_path,
             trainer_config_path=trainer_config_path,
             inference_batch=args.inference_batch,
-            inference_timeout_ms=args.inference_timeout_ms
+            inference_timeout_ms=args.inference_timeout_ms,
+            denoiser_checkpoint=args.denoiser_checkpoint,
         ) for i in range(args.num_denoiser_inference_actors)
     ]
     rollout_workers = [

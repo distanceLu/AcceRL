@@ -99,6 +99,8 @@ python rl/ds_wm_discrete_diffusion.py \
     --ckpt-every-steps 2000000 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
-    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_train_wm
+    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_train_wm \
+    --denoiser-checkpoint /mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/denoiser_smoke_test/denoiser_smoke_test.pt \
+    --reward-checkpoint /mnt/data/lcx3/checkpoint/reward/reward.pt
 
 
