@@ -1,0 +1,86 @@
+{
+  "benchmark": "libero_spatial",
+  "task_id": 0,
+  "task_name": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+  "instruction": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+  "action_source": "demo",
+  "demo_hdf5": "/mnt/data/lcx3/dataset/libero_spatial/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_demo.hdf5",
+  "demo_id": "demo_0",
+  "checkpoint": "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-03T16-55-44_libero_spatial/checkpoint-100000.pt",
+  "output_dir": "/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_libero_eval/20260714_173433",
+  "num_history": 6,
+  "num_frames": 5,
+  "num_cams": 2,
+  "height": 192,
+  "width": 320,
+  "metrics": {
+    "per_camera": [
+      {
+        "camera_id": 0,
+        "mse_mean": 0.001062676776200533,
+        "mae_mean": 0.012732332572340965,
+        "psnr_mean": 29.89154052734375,
+        "mse_per_frame": [
+          0.0006708803703077137,
+          0.000873550190590322,
+          0.0010739254066720605,
+          0.0012226869584992528,
+          0.0014723410131409764
+        ],
+        "mae_per_frame": [
+          0.010935798287391663,
+          0.012023655697703362,
+          0.01291679497808218,
+          0.013376264832913876,
+          0.014409147202968597
+        ],
+        "psnr_per_frame": [
+          31.733551025390625,
+          30.587121963500977,
+          29.690261840820312,
+          29.126850128173828,
+          28.319915771484375
+        ]
+      },
+      {
+        "camera_id": 1,
+        "mse_mean": 0.004972584545612335,
+        "mae_mean": 0.02910245582461357,
+        "psnr_mean": 24.401060104370117,
+        "mse_per_frame": [
+          0.0007439071778208017,
+          0.002524544717743993,
+          0.004849790595471859,
+          0.007420629262924194,
+          0.00932405050843954
+        ],
+        "mae_per_frame": [
+          0.01145684439688921,
+          0.024565735831856728,
+          0.03050655499100685,
+          0.03703518584370613,
+          0.04194795712828636
+        ],
+        "psnr_per_frame": [
+          31.284812927246094,
+          25.978168487548828,
+          23.142772674560547,
+          21.295595169067383,
+          20.303955078125
+        ]
+      }
+    ],
+    "overall": {
+      "mse_mean": 0.0030176306201610712,
+      "mae_mean": 0.020917393919080495,
+      "psnr_mean_from_mean_mse": 25.203339220964246
+    }
+  },
+  "videos": {
+    "comparison": "/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_libero_eval/20260714_173433/comparison_gt_pred_diff.mp4",
+    "cam0_gt": "/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_libero_eval/20260714_173433/cam0_gt.mp4",
+    "cam0_pred": "/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_libero_eval/20260714_173433/cam0_pred.mp4",
+    "cam1_gt": "/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_libero_eval/20260714_173433/cam1_gt.mp4",
+    "cam1_pred": "/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_libero_eval/20260714_173433/cam1_pred.mp4"
+  }
+}

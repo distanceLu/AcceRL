@@ -48,7 +48,7 @@
 
 
 python rl/ds_wm_discrete_diffusion.py \
-    --cuda-visible-devices 4,5,6,7 \
+    --cuda-visible-devices 1,2,3,4 \
     --use-bf16 \
     --benchmark libero_spatial \
     --num-images-in-input 1 \
