@@ -240,7 +240,7 @@ def load_denoiser_from_checkpoint(
     """加载 Denoiser 模型"""
     denoiser_cfg = instantiate(agent_cfg.denoiser)
     if denoiser_cfg.inner_model.num_actions is None:
-        denoiser_cfg.inner_model.num_actions = 6
+        denoiser_cfg.inner_model.num_actions = 256
 
     denoiser = Denoiser(denoiser_cfg).to(device)
     sigma_distribution_cfg = instantiate(trainer_cfg.denoiser.sigma_distribution)
@@ -265,7 +265,10 @@ def load_denoiser_from_checkpoint(
         _ = denoiser.inner_model._get_act_emb_float(act_dim)
     
     denoiser.load_state_dict(state_dict, strict=False)
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    try:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    except (ValueError, KeyError) as e:
+        print(f"load_denoiser_from_checkpoint: 跳过 optimizer state 加载 ({e})")
     start_step = checkpoint["effective_step"]
     lr_scheduler.last_epoch = -1
     # start_step = load_checkpoint_denoiser(agent_cfg.denoiser_path, denoiser, optimizer, lr_scheduler, device)

@@ -591,7 +591,7 @@ if __name__ == "__main__":
         center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=unnorm_key,
-        device=torch.device("cuda:2"),
+        device=torch.device("cuda:0"),
         # checkpoint2='runs/distill/20251219_094153_distill/checkpoints/checkpoint_latest.pt',
     )
 

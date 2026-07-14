@@ -1337,7 +1337,7 @@ def ppo_update(
 
 def main():
     """主函数：执行PPO强化学习训练"""
-    device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # 配置路径
     current_dir = Path.cwd()
