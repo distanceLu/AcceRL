@@ -174,3 +174,5 @@ tmp_checkpoint/
 # zzq_vla/
 
 debug_obs/
+tests_dsj/ctrl_world_libero_autoregressive_eval/
+tests_dsj/ctrl_world_libero_eval/
