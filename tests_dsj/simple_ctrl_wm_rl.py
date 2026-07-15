@@ -38,18 +38,15 @@ from rl.utils import prepare_one_obs
 from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 
-# ---- Ctrl-World imports (需要把 Ctrl-World 加入 sys.path) ----
+# ---- AcceRL sys.path 设置 ----
 ACCE_RL_ROOT = Path(__file__).resolve().parent.parent
-CTRL_WORLD_ROOT = ACCE_RL_ROOT.parent / "Ctrl-World"
-if str(CTRL_WORLD_ROOT) not in sys.path:
-    sys.path.insert(0, str(CTRL_WORLD_ROOT))
 if str(ACCE_RL_ROOT) not in sys.path:
     sys.path.insert(0, str(ACCE_RL_ROOT))
 
-from envs.ctrl_world_env_batch import CtrlWorldEnvBatch
+from ctrl_world_env_batch import CtrlWorldEnvBatch
 from envs.utils import image_to_tensor, load_reward_model_from_checkpoint, tensor_to_image
-from config import wm_args
-from models.ctrl_world import CrtlWorld
+from ctrl_world.config import wm_args
+from ctrl_world.models.ctrl_world import CrtlWorld
 
 
 # ================================================================

@@ -11,7 +11,7 @@ from torch import Tensor
 
 from rl.utils import prepare_one_obs_batch, prepare_inputs_batch
 from envs.utils import tensor_to_image_batch
-from models.pipeline_ctrl_world import CtrlWorldDiffusionPipeline
+from ctrl_world.models.pipeline_ctrl_world import CtrlWorldDiffusionPipeline
 
 
 class CtrlWorldEnvBatch:

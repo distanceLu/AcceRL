@@ -8,17 +8,16 @@
 """
 import sys, os
 ACCE_RL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CTRL_WORLD_ROOT = os.path.join(os.path.dirname(ACCE_RL_ROOT), "Ctrl-World")
-sys.path.extend([ACCE_RL_ROOT, CTRL_WORLD_ROOT])
+sys.path.insert(0, ACCE_RL_ROOT)
 
 import argparse
 from dataclasses import dataclass
 import torch
 import numpy as np
 
-from envs.ctrl_world_env_batch import CtrlWorldEnvBatch
-from config import wm_args
-from models.ctrl_world import CrtlWorld
+from ctrl_world_env_batch import CtrlWorldEnvBatch
+from ctrl_world.config import wm_args
+from ctrl_world.models.ctrl_world import CrtlWorld
 
 
 @dataclass

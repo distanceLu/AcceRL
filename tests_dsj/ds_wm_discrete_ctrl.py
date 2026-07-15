@@ -25,11 +25,8 @@ import deepspeed
 import torch.distributed as distributed
 from torch.utils.tensorboard import SummaryWriter
 
-# ---- Ctrl-World sys.path 设置 ----
+# ---- AcceRL sys.path 设置 ----
 ACCE_RL_ROOT = Path(__file__).resolve().parent.parent
-CTRL_WORLD_ROOT = ACCE_RL_ROOT.parent / "Ctrl-World"
-if str(CTRL_WORLD_ROOT) not in sys.path:
-    sys.path.insert(0, str(CTRL_WORLD_ROOT))
 if str(ACCE_RL_ROOT) not in sys.path:
     sys.path.insert(0, str(ACCE_RL_ROOT))
 
@@ -44,37 +41,10 @@ from ds_com import TrainerActorCom, InferenceActorCom
 from rl.com_utils import find_free_port
 from envs.utils import tensor_to_image, image_to_tensor, load_reward_model
 
-# ---- Ctrl-World 相关导入 ----
-# 调试: 打印 sys.path 和 models 模块状态
-print(f"[DEBUG] sys.path[:5]: {sys.path[:5]}", flush=True)
-print(f"[DEBUG] CTRL_WORLD_ROOT: {CTRL_WORLD_ROOT}", flush=True)
-print(f"[DEBUG] CTRL_WORLD_ROOT exists: {CTRL_WORLD_ROOT.exists()}", flush=True)
-print(f"[DEBUG] models in sys.modules: {'models' in sys.modules}", flush=True)
-if 'models' in sys.modules:
-    _m = sys.modules['models']
-    print(f"[DEBUG] models.__path__: {getattr(_m, '__path__', 'N/A')}", flush=True)
-    print(f"[DEBUG] models.__file__: {getattr(_m, '__file__', 'N/A')}", flush=True)
-print(f"[DEBUG] ctrl_world.py exists: {(CTRL_WORLD_ROOT / 'models' / 'ctrl_world.py').exists()}", flush=True)
-
-from envs.ctrl_world_env_batch import CtrlWorldEnvBatch
-
-# 直接按文件路径加载 Ctrl-World 的 config.py，避免与 envs/config/ 命名空间包冲突
-import importlib.util
-_spec = importlib.util.spec_from_file_location(
-    "ctrl_world_config", str(CTRL_WORLD_ROOT / "config.py")
-)
-_ctrl_world_config = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_ctrl_world_config)
-wm_args = _ctrl_world_config.wm_args
-
-# 确保 CTRL_WORLD_ROOT 在 sys.path 最前面
-_cw_root = str(CTRL_WORLD_ROOT)
-while _cw_root in sys.path:
-    sys.path.remove(_cw_root)
-sys.path.insert(0, _cw_root)
-
-# models 包已通过 envs.ctrl_world_env_batch 的导入链正确加载
-from models.ctrl_world import CrtlWorld
+# ---- Ctrl-World 相关导入（ctrl_world 已作为包安装在 merged-env 中）----
+from ctrl_world_env_batch import CtrlWorldEnvBatch
+from ctrl_world.config import wm_args
+from ctrl_world.models.ctrl_world import CrtlWorld
 from rl.ray_debug_utils import setup_debugger
 
 
@@ -1682,12 +1652,6 @@ def main(args):
         return
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
-    # 确保 Ray worker 进程能找到 Ctrl-World 和 AcceRL 模块
-    _pythonpath_parts = [str(CTRL_WORLD_ROOT), str(ACCE_RL_ROOT)]
-    _existing_pp = os.environ.get("PYTHONPATH", "")
-    if _existing_pp:
-        _pythonpath_parts.append(_existing_pp)
-    os.environ["PYTHONPATH"] = ":".join(_pythonpath_parts)
     object_store_size_gb = 256
     object_store_memory_bytes = int(object_store_size_gb * 1024 * 1024 * 1024)
     print(f"正在初始化 Ray，并为对象存储分配 {object_store_size_gb} GB 内存...")
