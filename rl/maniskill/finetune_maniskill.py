@@ -5,7 +5,7 @@ Fine-tunes OpenVLA via LoRA (No DDP version for easier debugging).
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2" 
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1,2" 
 os.environ["VULKAN_VISIBLE_DEVICES"] = "1" 
 
 # 必须在任何 TFDS/RLDS 相关东西之前
@@ -107,17 +107,14 @@ class FinetuneConfig:
     #   <data_root_dir>/<dataset_name>/<version>/...
     # so data_root_dir is the TFDS root, not the <dataset>/<version> subdir.
     
-    # 160文件位置
-    data_root_dir: Path = Path("/data/disk1/lcx_stu4/rlds")
-    # 149文件位置
-    #data_root_dir: Path = Path("/mnt/data2/lcx_stu4/maniskill/demos/rlds")      # Directory containing RLDS datasets
-    dataset_name: str = "maniskill_pickcube"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    data_root_dir: Path = Path("/mnt/data2/lcx_stu4/maniskill/demos/rlds")      # Directory containing RLDS datasets
+    dataset_name: str = "maniskill_three_tasks"    # OXE mixture: PickCube + StackCube + PegInsertionSide
     run_root_dir: Path = Path("runs/imitation")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
     # Preprocessed data (fast loading, bypasses RLDS/TFDS pipeline)
     use_preprocessed_data: bool = False               # If True, load from preprocessed .pt shards instead of RLDS
-    preprocessed_data_dir: Path = Path("/data/disk1/lcx_stu4/PickCube-v1/preprocessed_pt")
+    preprocessed_data_dir: Path = Path("/mnt/data2/lcx_stu4/maniskill/demos/preprocessed_pt/maniskill_three_tasks")
     dataloader_num_workers: int = 4                   # num_workers for DataLoader (only used with preprocessed data)
 
     # Algorithm and architecture
@@ -178,7 +175,7 @@ class FinetuneConfig:
     maniskill_eval_num_open_loop_steps: int = NUM_ACTIONS_CHUNK  # Actions executed before re-querying the policy
     maniskill_eval_seed: int = 0                     # Base seed; per-env seed = base + ep_idx + i
     maniskill_eval_unnorm_key: Optional[str] = None  # Optional override for action un-normalization stats key
-    maniskill_eval_language_instruction: str = "pick up the red cube and place it at the green target"  # Must match the RLDS builder
+    maniskill_eval_language_instruction: Optional[str] = None  # Defaults from task ID; must match the RLDS builder
     maniskill_eval_sim_backend: str = "auto"         # ManiSkill sim backend: "auto" / "gpu" / "cpu"
 
     resume: bool = False                             # If True, resumes from checkpoint
@@ -600,7 +597,16 @@ def resolve_maniskill_eval_unnorm_key(
     if norm_stats is None:
         norm_stats = get_vla_norm_stats(vla, preferred_norm_stats=preferred_norm_stats)
 
-    candidate_keys = [cfg.dataset_name, "maniskill_pickcube"]
+    task_to_dataset = {
+        "PickCube-v1": "maniskill_pickcube",
+        "StackCube-v1": "maniskill_stackcube",
+        "PegInsertionSide-v1": "maniskill_peginsertionside",
+    }
+    candidate_keys = [
+        task_to_dataset.get(cfg.maniskill_eval_task_id),
+        cfg.dataset_name,
+        "maniskill_pickcube",
+    ]
     for candidate_key in candidate_keys:
         if candidate_key and candidate_key in norm_stats:
             return candidate_key
@@ -608,6 +614,24 @@ def resolve_maniskill_eval_unnorm_key(
     raise ValueError(
         f"Could not resolve a ManiSkill eval unnorm key (tried `{cfg.dataset_name}`, `maniskill_pickcube`). "
         f"Available keys: {sorted(norm_stats.keys())}"
+    )
+
+
+def resolve_maniskill_eval_language_instruction(cfg) -> str:
+    if cfg.maniskill_eval_language_instruction is not None:
+        return cfg.maniskill_eval_language_instruction
+
+    task_to_instruction = {
+        "PickCube-v1": "pick up the red cube and place it at the green target",
+        "StackCube-v1": "pick up the red cube and stack it on top of the green cube",
+        "PegInsertionSide-v1": "pick up the orange-white peg and insert the orange end into the box with a hole in it",
+    }
+    if cfg.maniskill_eval_task_id in task_to_instruction:
+        return task_to_instruction[cfg.maniskill_eval_task_id]
+
+    raise ValueError(
+        f"No default ManiSkill language instruction for task `{cfg.maniskill_eval_task_id}`. "
+        "Please set `maniskill_eval_language_instruction` explicitly."
     )
 
 
@@ -1533,7 +1557,7 @@ def run_maniskill_real_eval(
                             )
                             for i in range(num_envs)
                         ]
-                        task_descs = [cfg.maniskill_eval_language_instruction] * num_envs
+                        task_descs = [resolve_maniskill_eval_language_instruction(cfg)] * num_envs
                         batch_actions = get_vla_action_batch(
                             eval_cfg=eval_cfg,
                             vla=vla,

@@ -58,6 +58,93 @@ from rl.ds_com import TrainerActorCom, InferenceActorCom
 # from ds_com import TrainerActorCom, InferenceActorCom
 from rl.com_utils import find_free_port
 
+MANISKILL_TASK_PRESETS = {
+    "PickCube-v1": {
+        "language_instruction": "pick up the red cube and place it at the green target",
+        "unnorm_key": "maniskill_pickcube",
+    },
+    "StackCube-v1": {
+        "language_instruction": "pick up the red cube and stack it on top of the green cube",
+        "unnorm_key": "maniskill_stackcube",
+    },
+    "PegInsertionSide-v1": {
+        "language_instruction": "pick up the orange-white peg and insert the orange end into the box with a hole in it",
+        "unnorm_key": "maniskill_peginsertionside",
+    },
+}
+
+
+def _split_csv_arg(value: Optional[str]) -> List[str]:
+    if value is None:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _split_task_text_arg(value: Optional[str]) -> List[str]:
+    if value is None:
+        return []
+    return [item.strip() for item in value.split("||") if item.strip()]
+
+
+def get_maniskill_task_ids(args) -> List[str]:
+    task_ids = _split_csv_arg(getattr(args, "maniskill_tasks", None))
+    if not task_ids:
+        task_ids = [getattr(args, "maniskill_task", "PickCube-v1")]
+    return task_ids
+
+
+def resolve_maniskill_task_configs(args) -> List[Dict[str, str]]:
+    task_ids = get_maniskill_task_ids(args)
+    unnorm_keys = _split_csv_arg(getattr(args, "task_unnorm_keys", None))
+    language_instructions = _split_task_text_arg(getattr(args, "task_language_instructions", None))
+
+    if unnorm_keys and len(unnorm_keys) != len(task_ids):
+        raise ValueError(
+            f"--task-unnorm-keys 数量 ({len(unnorm_keys)}) 必须与任务数量 ({len(task_ids)}) 一致"
+        )
+    if language_instructions and len(language_instructions) != len(task_ids):
+        raise ValueError(
+            f"--task-language-instructions 数量 ({len(language_instructions)}) 必须与任务数量 ({len(task_ids)}) 一致"
+        )
+    if len(task_ids) > 1 and getattr(args, "language_instruction", None) and not language_instructions:
+        raise ValueError(
+            "多任务训练请使用 --task-language-instructions 为每个任务分别指定语言，"
+            "或者省略该参数以使用内置 ManiSkill 默认语言。"
+        )
+
+    task_configs = []
+    for idx, task_id in enumerate(task_ids):
+        preset = MANISKILL_TASK_PRESETS.get(task_id, {})
+        if unnorm_keys:
+            unnorm_key = unnorm_keys[idx]
+        else:
+            unnorm_key = preset.get("unnorm_key")
+            if unnorm_key is None:
+                if len(task_ids) == 1:
+                    unnorm_key = getattr(args, "unnorm_key", None)
+                if not unnorm_key:
+                    raise ValueError(f"未知任务 {task_id}，请通过 --task-unnorm-keys 指定 action norm key")
+
+        if language_instructions:
+            language_instruction = language_instructions[idx]
+        elif len(task_ids) == 1 and getattr(args, "language_instruction", None):
+            language_instruction = args.language_instruction
+        else:
+            language_instruction = preset.get("language_instruction")
+            if language_instruction is None:
+                raise ValueError(f"未知任务 {task_id}，请通过 --task-language-instructions 指定语言指令")
+
+        task_configs.append({
+            "maniskill_task": task_id,
+            "language_instruction": language_instruction,
+            "unnorm_key": unnorm_key,
+        })
+    return task_configs
+
+
+def build_task_slug(task_ids: List[str]) -> str:
+    return "_".join(task_id.replace("-v1", "").replace("-", "_") for task_id in task_ids)
+
 #region agent log
 def _agent_log(hypothesis_id: str, location: str, message: str, data: Dict = None, run_id: str = "pre-fix"):
     """调试日志：写入 .cursor/debug.log（NDJSON）。"""
@@ -121,6 +208,8 @@ def parse_args():
     # ManiSkill 环境参数
     parser.add_argument('--maniskill-task', type=str, default='PickCube-v1',
                         help='ManiSkill task ID (default: PickCube-v1)')
+    parser.add_argument('--maniskill-tasks', type=str, default=None,
+                        help='Comma-separated ManiSkill task IDs for multi-task RL, e.g. PickCube-v1,StackCube-v1')
     parser.add_argument('--camera-name', type=str, default='base_camera',
                         help='ManiSkill camera name (default: base_camera)')
     parser.add_argument('--camera-res', type=int, default=224,
@@ -132,10 +221,14 @@ def parse_args():
     parser.add_argument('--max-episode-steps', type=int, default=200,
                         help='Max steps per episode (default: 100)')
     parser.add_argument('--language-instruction', type=str,
-                        default='pick up the red cube and place it at the green target',
-                        help='Language instruction for the task')
+                        default=None,
+                        help='Language instruction for single-task training; multi-task uses built-in defaults or --task-language-instructions')
+    parser.add_argument('--task-language-instructions', type=str, default=None,
+                        help='Per-task language instructions separated by "||"; order must match --maniskill-tasks')
     parser.add_argument('--unnorm-key', type=str, default='maniskill_pickcube',
                         help='Action un-normalization key (default: maniskill_pickcube)')
+    parser.add_argument('--task-unnorm-keys', type=str, default=None,
+                        help='Comma-separated per-task action un-normalization keys; order must match --maniskill-tasks')
     parser.add_argument('--sim-backend', type=str, default='cpu',
                         choices=['gpu', 'cpu', 'auto'],
                         help='ManiSkill sim backend (default: cpu)')
@@ -297,7 +390,8 @@ def parse_args():
     
     # 如果没有提供 exp_name，自动生成
     if args.exp_name is None:
-        args.exp_name = f"ManiSkill_{args.maniskill_task}_{args.clip_mode}_DISCRETE"
+        task_slug = build_task_slug(get_maniskill_task_ids(args))
+        args.exp_name = f"ManiSkill_{task_slug}_{args.clip_mode}_DISCRETE"
     
     return args
 
@@ -618,6 +712,7 @@ class BaseWorkerActor:
 
         self.task_description = self.env.task_description
         self.current_env_name = self.env.get_name()
+        self.unnorm_key = env_args["unnorm_key"]
 
 @ray.remote(num_gpus=0.01)
 class RolloutWorkerActor(BaseWorkerActor):
@@ -637,7 +732,7 @@ class RolloutWorkerActor(BaseWorkerActor):
             while True:
                 inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
                 action_env, action_token, logits, value, policy_version = ray.get(
-                    self.infer.request.remote(inputs_t, deterministic=False)
+                    self.infer.request.remote(inputs_t, deterministic=False, unnorm_key=self.unnorm_key)
                 )
                 chunk_reward, done = 0.0, False
                 for i in range(len(action_env)):
@@ -711,7 +806,9 @@ class EvaluationWorkerActor(BaseWorkerActor):
                 step_count = 0
                 while not done:
                     inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
-                    action_env, _, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
+                    action_env, _, _, _, _ = ray.get(
+                        self.infer.request.remote(inputs_t, deterministic=True, unnorm_key=self.unnorm_key)
+                    )
                     step_count += 1
                     for i in range(len(action_env)):
                         single_action = action_env[i]
@@ -787,10 +884,15 @@ class InferenceActor(InferenceActorCom):
             print(f"[ERROR] InferenceActor {self.actor_id} 后台任务异常: {e}", flush=True)
             traceback.print_exc()
 
-    async def request(self, inputs_t: Dict[str, torch.Tensor], deterministic: bool = False):
+    async def request(
+        self,
+        inputs_t: Dict[str, torch.Tensor],
+        deterministic: bool = False,
+        unnorm_key: Optional[str] = None,
+    ):
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
-        self.requests.append((inputs_t, deterministic))
+        self.requests.append((inputs_t, deterministic, unnorm_key or self.cfg.unnorm_key))
         self.promises.append(fut)
         return await fut
 
@@ -811,6 +913,7 @@ class InferenceActor(InferenceActorCom):
             
             inputs_list = [r[0] for r in requests_to_process]
             deterministic_flags = [r[1] for r in requests_to_process]
+            unnorm_keys = [r[2] for r in requests_to_process]
             t_loop_start = time.time()
             try:
                 
@@ -837,7 +940,7 @@ class InferenceActor(InferenceActorCom):
                 # 将标准化动作转换为环境动作
                 actions_env = []
                 for i in range(normalized_actions_all.shape[0]):
-                    a_env = self.model.vla._unnormalize_actions(normalized_actions_all[i], self.cfg.unnorm_key)
+                    a_env = self.model.vla._unnormalize_actions(normalized_actions_all[i], unnorm_keys[i])
                     actions_env.append(a_env.astype(np.float32))
 
                 for i in range(len(promises_to_process)):
@@ -1810,6 +1913,18 @@ def main(args):
         args: 解析后的命令行参数
     """
     torch_dtype = torch.bfloat16 if args.use_bf16 else torch.float32
+    task_configs = resolve_maniskill_task_configs(args)
+    task_ids = [task_cfg["maniskill_task"] for task_cfg in task_configs]
+    if args.num_rollout_workers < len(task_configs):
+        raise ValueError(
+            f"num_rollout_workers ({args.num_rollout_workers}) 必须 >= 任务数 ({len(task_configs)})，"
+            "否则有任务不会产生 RL 数据。"
+        )
+    if args.num_eval_workers > 0 and args.num_eval_workers < len(task_configs):
+        raise ValueError(
+            f"num_eval_workers ({args.num_eval_workers}) 必须为 0 或 >= 任务数 ({len(task_configs)})，"
+            "否则有任务不会被评估。"
+        )
     
     if not os.path.exists(args.pretrained_checkpoint):
         print(f"错误: OpenVLA checkpoint 路径 '{args.pretrained_checkpoint}' 不存在。请更新 PRETRAINED_CHECKPOINT。")
@@ -1829,13 +1944,16 @@ def main(args):
     )
 
     print(f"Ray 初始化完成。对象存储内存: {args.object_store_memory_gb} GB。")
-    log_dir = f"runs/ManiSkill/{args.maniskill_task}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}"
+    task_slug = build_task_slug(task_ids)
+    log_dir = f"runs/ManiSkill/{task_slug}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}"
     writer = SummaryWriter(log_dir)
 
     # 保存命令行参数到log_dir中的json文件
     args_file = os.path.join(log_dir, "args.json")
+    args_to_save = vars(args).copy()
+    args_to_save["resolved_maniskill_task_configs"] = task_configs
     with open(args_file, 'w', encoding='utf-8') as f:
-        json.dump(vars(args), f, indent=2, ensure_ascii=False)
+        json.dump(args_to_save, f, indent=2, ensure_ascii=False)
     print(f"命令行参数已保存到: {args_file}")
     stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
     print(f"TensorBoard 日志将保存在: {log_dir}")
@@ -1857,30 +1975,40 @@ def main(args):
         )
         for i in range(args.num_trainer_gpus)
     ]
-    # ManiSkill 环境参数字典，传给 Worker
-    env_args = {
-        "maniskill_task": args.maniskill_task,
-        "camera_name": args.camera_name,
-        "camera_res": args.camera_res,
-        "max_episode_steps": args.max_episode_steps,
-        "language_instruction": args.language_instruction,
-        "sim_backend": args.sim_backend,
-        "wrist_camera_name": args.wrist_camera_name if args.num_images_in_input > 1 else None,
-        "robot_uids": args.robot_uids if args.num_images_in_input > 1 else None,
-    }
-    print(f"\nManiSkill task: {args.maniskill_task}, rollout workers: {args.num_rollout_workers}, eval workers: {args.num_eval_workers}\n")
+    # ManiSkill 环境参数字典，按 worker 轮转分配任务
+    env_args_list = []
+    for task_cfg in task_configs:
+        env_args_list.append({
+            "maniskill_task": task_cfg["maniskill_task"],
+            "camera_name": args.camera_name,
+            "camera_res": args.camera_res,
+            "max_episode_steps": args.max_episode_steps,
+            "language_instruction": task_cfg["language_instruction"],
+            "unnorm_key": task_cfg["unnorm_key"],
+            "sim_backend": args.sim_backend,
+            "wrist_camera_name": args.wrist_camera_name if args.num_images_in_input > 1 else None,
+            "robot_uids": args.robot_uids if args.num_images_in_input > 1 else None,
+        })
+    print(f"\nManiSkill tasks: {task_ids}, rollout workers: {args.num_rollout_workers}, eval workers: {args.num_eval_workers}")
+    for task_cfg in task_configs:
+        print(
+            f"  - {task_cfg['maniskill_task']}: unnorm_key={task_cfg['unnorm_key']}, "
+            f"language={task_cfg['language_instruction']!r}"
+        )
+    print()
     
     inference_pool = [InferenceActor.remote(actor_id=i, cfg=cfg, stats_actor=stats_actor, torch_dtype=torch_dtype, inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms) for i in range(args.num_inference_actors)]
     rollout_workers = [
         RolloutWorkerActor.remote(
             inference_pool[i % args.num_inference_actors],
-            replay_buffers[i % args.num_trainer_gpus], i, stats_actor, cfg, env_args,
+            replay_buffers[i % args.num_trainer_gpus], i, stats_actor, cfg, env_args_list[i % len(env_args_list)],
             args.reward_scale, torch_dtype, args.rollout_local_buf
         ) for i in range(args.num_rollout_workers)
     ]
     eval_workers = [
         EvaluationWorkerActor.remote(
-            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, env_args, torch_dtype
+            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg,
+            env_args_list[i % len(env_args_list)], torch_dtype
         ) for i in range(args.num_eval_workers)
     ]
     print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")

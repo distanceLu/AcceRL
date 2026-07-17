@@ -15,6 +15,16 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("bridge_orig", 1.0),                                   # Original Version of Bridge V2 from Project Website
     ],
 
+    "maniskill_pick_stack": [
+        ("maniskill_pickcube", 1.0),
+        ("maniskill_stackcube", 1.0),
+    ],
+
+    "maniskill_three_tasks": [
+        ("maniskill_pickcube", 1.0),
+        ("maniskill_stackcube", 1.0),
+        ("maniskill_peginsertionside", 1.0),
+    ],
 
     # === [Moderate-Scale] Bridge++ Mixtures ===
     "bridge_rt_1": [

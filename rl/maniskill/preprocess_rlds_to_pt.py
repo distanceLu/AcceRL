@@ -25,6 +25,7 @@ import time
 import shutil
 import numpy as np
 import torch
+from collections import Counter
 from pathlib import Path
 from PIL import Image
 from dataclasses import dataclass
@@ -51,13 +52,25 @@ from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 @dataclass
 class PreprocessConfig:
     vla_path: str = "/cpfs01/lcx_workspace/models/openvla-7b"
-    data_root_dir: Path = Path("/data/disk1/lcx_stu4/rlds")
-    dataset_name: str = "maniskill_pickcube"
-    output_dir: Path = Path("/data/disk1/lcx_stu4/PickCube-v1/preprocessed_pt")
+    data_root_dir: Path = Path("/mnt/data2/lcx_stu4/maniskill/demos/rlds")
+    dataset_name: str = "maniskill_three_tasks"
+    output_dir: Path = Path("/mnt/data2/lcx_stu4/maniskill/demos/preprocessed_pt/maniskill_three_tasks")
     shuffle_buffer_size: int = 1000
-    num_images_in_input: int = 1
+    num_images_in_input: int = 2
     use_proprio: bool = False
     image_aug: bool = False
+    shard_size: int = 500
+    max_samples: Optional[int] = None
+
+
+def decode_dataset_name(dataset_name) -> str:
+    if isinstance(dataset_name, bytes):
+        return dataset_name.decode("utf-8", errors="ignore")
+    if isinstance(dataset_name, np.ndarray):
+        if dataset_name.shape == ():
+            return decode_dataset_name(dataset_name.item())
+        return str(dataset_name)
+    return str(dataset_name)
 
 
 @draccus.wrap()
@@ -105,12 +118,6 @@ def preprocess(cfg: PreprocessConfig) -> None:
     print(f"  RLDS dataset built in {time.perf_counter() - t0:.1f}s")
     print(f"  dataset_length = {len(train_dataset)}")
 
-    stats_src = cfg.data_root_dir / cfg.dataset_name / "1.0.0"
-    stats_files = list(stats_src.glob("dataset_statistics_*.json"))
-    if stats_files:
-        stats_data = json.loads(stats_files[0].read_text())
-    else:
-        stats_data = {}
     dataset_statistics = train_dataset.dataset_statistics
 
     # Save dataset_statistics so the training script can load them
@@ -132,10 +139,13 @@ def preprocess(cfg: PreprocessConfig) -> None:
     # Iterate through the RLDS dataset and save each sample
     # The RLDS tf.data pipeline repeats infinitely, so we cap at dataset_length
     max_samples = len(train_dataset)
+    if cfg.max_samples is not None:
+        max_samples = min(max_samples, cfg.max_samples)
     print(f"\nIterating RLDS dataset and saving .pt files (max {max_samples} samples)...")
     t0 = time.perf_counter()
     count = 0
-    shard_size = 500
+    dataset_counts = Counter()
+    shard_size = cfg.shard_size
     current_shard = []
     shard_idx = 0
 
@@ -152,6 +162,8 @@ def preprocess(cfg: PreprocessConfig) -> None:
                 if "wrist" in k:
                     wrist_images_np.append(rlds_batch["observation"][k][0])
         dataset_name = rlds_batch["dataset_name"]
+        dataset_name_str = decode_dataset_name(dataset_name)
+        dataset_counts[dataset_name_str] += 1
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
         actions = rlds_batch["action"]  # (chunk_size, action_dim)
         current_action = actions[0]
@@ -220,6 +232,7 @@ def preprocess(cfg: PreprocessConfig) -> None:
     elapsed = time.perf_counter() - t0
     print(f"\nDone! Saved {count} samples in {shard_idx} shards to {output_dir}")
     print(f"  Total time: {elapsed:.1f}s ({count/elapsed:.0f} samples/s)")
+    print(f"  Dataset counts: {dict(sorted(dataset_counts.items()))}")
 
     # Save metadata
     meta = {
@@ -231,6 +244,7 @@ def preprocess(cfg: PreprocessConfig) -> None:
         "resize_resolution": list(resize_resolution),
         "use_proprio": cfg.use_proprio,
         "num_images_in_input": cfg.num_images_in_input,
+        "dataset_counts": dict(sorted(dataset_counts.items())),
     }
     with open(output_dir / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)

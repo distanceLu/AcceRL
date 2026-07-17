@@ -15,10 +15,12 @@ Usage:
     python scripts/check_replay_dataset.py \
         --h5 /data/disk1/lcx_stu4/PickCube-v1/motionplanning/trajectory.rgbd.pd_ee_delta_pose.physx_cpu.h5
 
+        /cpfs01/lcx_stu4_workspace/envs/why_maniskill/bin/python   rl/maniskill/check_replay_dataset.py   --h5 /mnt/data2/lcx_stu4/maniskill/demos/StackCube-v1/motionplanning_rgbd_224_two_cam/trajectory.rgbd.pd_ee_delta_pose.physx_cpu.h5   --expect-h 224   --expect-w 224   --expect-action-dim 7   --dump-keys
 Optional:
     python scripts/check_replay_dataset.py \
         --h5 /path/to/replayed/trajectory.h5 \
         --json /path/to/replayed/trajectory.json \
+    
         --dump-keys
 """
 

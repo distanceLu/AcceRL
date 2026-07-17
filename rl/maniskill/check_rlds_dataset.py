@@ -24,11 +24,11 @@ Usage example:
 
 If your dataset has a version:
 
-    python scripts/check_rlds_dataset.py \
-        --data-dir /mnt/data2/lcx_stu4/maniskill/rlds \
-        --dataset-name pick_cube_two_cam/1.0.0 \
-        --split train \
-        --num-episodes 20
+    python rl/maniskill/check_rlds_dataset.py \
+        --data-dir /mnt/data2/lcx_stu4/maniskill/demos/PegInsertionSide-v1 \
+        --dataset-name maniskill_peginsertionside \
+        # --split train \
+        # --num-episodes 20
 
 Optional:
     --dump-samples /tmp/rlds_check_samples

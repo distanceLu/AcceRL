@@ -1,6 +1,11 @@
 """
 ManiSkill evaluation script using ActorCritic (imported).
 Replaces the Libero simulation in new_actor_critic.py with ManiSkill envs.
+
+runs:
+    MANISKILL_EXEC_ACTIONS_PER_INFERENCE=1 \
+/cpfs01/lcx_stu4_workspace/envs/why_maniskill/bin/python \
+rl/maniskill/maniskill_actor_critic_eval.py
 """
 
 import time
@@ -13,12 +18,12 @@ from pathlib import Path
 # os.environ["VULKAN_VISIBLE_DEVICES"] = "6" 
 # os.environ["SAPIEN_VULKAN_DEVICE"] = "6"
 
-GPU_ID = "6"
+GPU_ID = "7"
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU_ID
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # Prevent TensorFlow from grabbing other GPUs on import
 os.environ["TF_CUDA_VISIBLE_DEVICES"] = GPU_ID
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "7"
 
 # Vulkan / SAPIEN device pinning
 os.environ["VULKAN_VISIBLE_DEVICES"] = GPU_ID
@@ -99,19 +104,39 @@ def main():
 
     # ── ManiSkill env config ──
     NUM_ENVS = 1
-    TASK_ID = "PickCube-v1"
+    TASKS = [
+        # {
+        #     "task_id": "PickCube-v1",
+        #     "unnorm_key": "maniskill_pickcube",
+        #     "language_instruction": "pick up the red cube and place it at the green target",
+        #     "max_steps": 200,
+        # },
+        # {
+        #     "task_id": "StackCube-v1",
+        #     "unnorm_key": "maniskill_stackcube",
+        #     "language_instruction": "pick up the red cube and stack it on top of the green cube",
+        #     "max_steps": 500,
+        # },
+        {
+            "task_id": "PegInsertionSide-v1",
+            "unnorm_key": "maniskill_peginsertionside",
+            "language_instruction": "pick up the orange-white peg and insert the orange end into the box with a hole in it",
+            "max_steps": 500,
+        },
+    ]
     CAMERA_NAME = "base_camera"
     WRIST_CAMERA_NAME = "hand_camera"
     ROBOT_UIDS = "panda_wristcam"
     CAMERA_RES = 224
-    MAX_STEPS = 200
     NUM_EVAL_EPISODES = 50
-    LANGUAGE_INSTRUCTION = "pick up the red cube and place it at the green target"
+    RECORD_EVAL_VIDEO = True
+    RECORD_VIDEO_TASK_IDS = {"PegInsertionSide-v1"}
+    RECORD_VIDEO_NUM_EPISODES = 5
+    EXEC_ACTIONS_PER_INFERENCE = int(os.environ.get("MANISKILL_EXEC_ACTIONS_PER_INFERENCE", "1"))
 
     maniskill_checkpoint = (
-        #"/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/20260428_181954_openvla-7b+maniskill_pickcube+b64+lr-0.0005+lora-r32+dropout-0.0--image_aug"
-        "/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/20260511_203047_openvla-7b+maniskill_pickcube+b64+lr-0.0005+lora-r32+dropout-0.0--image_aug_2images"
-        #"/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/20260429_182819_openvla-7b+maniskill_pickcube+b64+lr-0.0005+lora-r32+dropout-0.0--image_aug"
+        "/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/"
+        "20260523_152554_openvla-7b+maniskill_three_tasks+b128+lr-0.0005+lora-r32+dropout-0.0--image_aug--three_tasks_2cam_preprocessed"
     )
 
     cfg = SimpleNamespace(
@@ -123,9 +148,9 @@ def main():
         use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,
-        center_crop=True,
+        center_crop=False,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
-        unnorm_key="maniskill_pickcube",
+        unnorm_key=TASKS[0]["unnorm_key"],
         device=torch.device("cuda"),
         use_lora=True,
         lora_rank=32,
@@ -140,140 +165,182 @@ def main():
     actor.eval()
     print("策略初始化完成。")
 
-    # ── Build ManiSkill env (GPU sim+render, pinned to cuda:0 = physical GPU_ID) ──
     import gymnasium as gym
     import mani_skill.envs  # noqa: F401
-    env = gym.make(
-        TASK_ID,
-        obs_mode="rgbd",
-        reward_mode="sparse",
-        control_mode="pd_ee_delta_pose",
-        robot_uids=ROBOT_UIDS,
-        num_envs=NUM_ENVS,
-        sim_backend="gpu",
-        render_mode="rgb_array",
-        sensor_configs={
-            CAMERA_NAME: {"width": CAMERA_RES, "height": CAMERA_RES},
-            WRIST_CAMERA_NAME: {"width": CAMERA_RES, "height": CAMERA_RES},
-        },
-        max_episode_steps=MAX_STEPS,
-    )
-
-    obs, _ = env.reset()
-    available_cameras = list(obs["sensor_data"].keys())
-    expected_cameras = [CAMERA_NAME, WRIST_CAMERA_NAME]
-    missing_cameras = [name for name in expected_cameras if name not in available_cameras]
-    if missing_cameras:
-        raise RuntimeError(
-            f"Missing ManiSkill sensor camera(s): {missing_cameras}; "
-            f"available cameras: {available_cameras}"
-        )
-
-    VIDEO_DIR = os.path.join(maniskill_checkpoint, "eval_videos")
-    os.makedirs(VIDEO_DIR, exist_ok=True)
     from mani_skill.utils.wrappers import RecordEpisode
-    # env = RecordEpisode(
-    #     env,
-    #     output_dir=VIDEO_DIR,
-    #     save_video=True,
-    #     info_on_video=True,
-    #     max_steps_per_video=MAX_STEPS,
-    # )
-    print(
-        f"ManiSkill 环境已创建: {TASK_ID}, robot={ROBOT_UIDS}, "
-        f"num_envs={NUM_ENVS}, cameras={available_cameras}"
-    )
-    # ── Eval loop ──
-    total_successes = 0
-    total_episodes = 0
-    ep_idx = 0
-    times = deque(maxlen=200)
 
-    while ep_idx < NUM_EVAL_EPISODES:
-        this_batch = min(NUM_ENVS, NUM_EVAL_EPISODES - ep_idx)
-        seeds = [ep_idx + i for i in range(NUM_ENVS)]
-        obs, _ = env.reset(seed=seeds)
+    def evaluate_task(task_cfg):
+        task_id = task_cfg["task_id"]
+        cfg.unnorm_key = task_cfg["unnorm_key"]
+        language_instruction = task_cfg["language_instruction"]
+        max_steps = task_cfg["max_steps"]
+        check_unnorm_key(cfg, actor.vla)
 
-        succeeded = np.zeros(NUM_ENVS, dtype=bool)
-        finished = np.zeros(NUM_ENVS, dtype=bool)
-        action_queues = [deque() for _ in range(NUM_ENVS)]
-
-        for step in range(MAX_STEPS):
-            need_inference = [
-                i for i in range(NUM_ENVS)
-                if not finished[i] and len(action_queues[i]) == 0
-            ]
-
-            if need_inference:
-                obs_list = [
-                    extract_two_image_maniskill_observation(
-                        obs, env_idx=i,
-                        camera_name=CAMERA_NAME,
-                        wrist_camera_name=WRIST_CAMERA_NAME,
-                        use_proprio=cfg.use_proprio,
-                    )
-                    for i in need_inference
-                ]
-                task_labels = [LANGUAGE_INSTRUCTION] * len(need_inference)
-                inputs_list = [
-                    prepare_one_obs(cfg, actor.processor, o, t, TORCH_DTYPE)
-                    for o, t in zip(obs_list, task_labels)
-                ]
-
-                inputs_batch = actor.prepare_inputs_batch(inputs_list)
-
-                # 验证输入图片数量
-                # pv = inputs_batch["pixel_values"]
-                # num_images = pv.shape[1] // 3  # 每张图片3个channel
-                # print(f"[DEBUG] pixel_values shape: {pv.shape}, 输入图片数量: {num_images}")
-
-                with torch.inference_mode():
-                    action_logits, _ = actor.forward(inputs_batch)
-                _, _, normalized_actions = actor.post_process(
-                    action_logits, [True] * len(need_inference)
-                )
-                for idx, env_i in enumerate(need_inference):
-                    action_queues[env_i].extend(normalized_actions[idx])
-
-            # Execute one action per env
-            step_actions = []
-            for i in range(NUM_ENVS):
-                if len(action_queues[i]) > 0:
-                    a = action_queues[i].popleft()
-                    a_env = actor.vla._unnormalize_actions(a, cfg.unnorm_key)
-                    step_actions.append(a_env)
-                else:
-                    step_actions.append(np.zeros(ACTION_DIM, dtype=np.float32))
-
-            action_array = clip_maniskill_action(np.stack(step_actions, axis=0))
-            t0 = time.time()
-            obs, _, terminated, truncated, info = env.step(action_array)
-            times.append(time.time() - t0)
-
-            succ = extract_success_mask(info, NUM_ENVS)
-            done = extract_done_mask(terminated, truncated, NUM_ENVS)
-            succeeded |= (succ & ~finished)
-            finished |= (succ | done)
-            if finished.all():
-                break
-
-        batch_succ = int(succeeded[:this_batch].sum())
-        total_successes += batch_succ
-        total_episodes += this_batch
-        ep_idx += this_batch
-
-        avg_step_ms = np.mean(times) * 1000 if times else 0
-        print(
-            f"Episodes {ep_idx}/{NUM_EVAL_EPISODES}, "
-            f"success_rate={total_successes / total_episodes:.3f}, "
-            f"avg_step={avg_step_ms:.1f}ms"
+        # ── Build ManiSkill env (GPU sim+render, pinned to cuda:0 = physical GPU_ID) ──
+        env = gym.make(
+            task_id,
+            obs_mode="rgbd",
+            reward_mode="sparse",
+            control_mode="pd_ee_delta_pose",
+            robot_uids=ROBOT_UIDS,
+            num_envs=NUM_ENVS,
+            sim_backend="gpu",
+            render_mode="rgb_array",
+            sensor_configs={
+                CAMERA_NAME: {"width": CAMERA_RES, "height": CAMERA_RES},
+                WRIST_CAMERA_NAME: {"width": CAMERA_RES, "height": CAMERA_RES},
+            },
+            max_episode_steps=max_steps,
         )
 
-    env.close()
-    print(
-        f"\nFinal: {total_successes}/{total_episodes} = "
-        f"{total_successes / total_episodes:.3f}"
-    )
+        video_task_dir = task_id
+        if EXEC_ACTIONS_PER_INFERENCE != NUM_ACTIONS_CHUNK:
+            video_task_dir = f"{task_id}_exec{EXEC_ACTIONS_PER_INFERENCE}"
+        video_dir = os.path.join(maniskill_checkpoint, "eval_videos", video_task_dir)
+        should_record_video = RECORD_EVAL_VIDEO and task_id in RECORD_VIDEO_TASK_IDS
+        if should_record_video:
+            os.makedirs(video_dir, exist_ok=True)
+            record_step_limit = RECORD_VIDEO_NUM_EPISODES * max_steps * NUM_ENVS
+            env = RecordEpisode(
+                env,
+                output_dir=video_dir,
+                save_trajectory=False,
+                save_video=True,
+                info_on_video=True,
+                save_video_trigger=lambda elapsed_steps: elapsed_steps < record_step_limit,
+                max_steps_per_video=max_steps,
+                avoid_overwriting_video=True,
+            )
+            print(
+                f"Eval video recording enabled for {task_id}: "
+                f"{video_dir} (up to first {RECORD_VIDEO_NUM_EPISODES} episodes)"
+            )
+
+        try:
+            obs, _ = env.reset()
+            available_cameras = list(obs["sensor_data"].keys())
+            expected_cameras = [CAMERA_NAME, WRIST_CAMERA_NAME]
+            missing_cameras = [name for name in expected_cameras if name not in available_cameras]
+            if missing_cameras:
+                raise RuntimeError(
+                    f"Missing ManiSkill sensor camera(s): {missing_cameras}; "
+                    f"available cameras: {available_cameras}"
+                )
+            print(
+                f"\nManiSkill 环境已创建: {task_id}, robot={ROBOT_UIDS}, "
+                f"num_envs={NUM_ENVS}, cameras={available_cameras}, "
+                f"unnorm_key={cfg.unnorm_key}, max_steps={max_steps}, "
+                f"exec_actions_per_inference={EXEC_ACTIONS_PER_INFERENCE}"
+            )
+
+            total_successes = 0
+            total_episodes = 0
+            ep_idx = 0
+            times = deque(maxlen=200)
+
+            while ep_idx < NUM_EVAL_EPISODES:
+                this_batch = min(NUM_ENVS, NUM_EVAL_EPISODES - ep_idx)
+                seeds = [ep_idx + i for i in range(NUM_ENVS)]
+                obs, _ = env.reset(seed=seeds)
+
+                succeeded = np.zeros(NUM_ENVS, dtype=bool)
+                finished = np.zeros(NUM_ENVS, dtype=bool)
+                action_queues = [deque() for _ in range(NUM_ENVS)]
+
+                for step in range(max_steps):
+                    need_inference = [
+                        i for i in range(NUM_ENVS)
+                        if not finished[i] and len(action_queues[i]) == 0
+                    ]
+
+                    if need_inference:
+                        obs_list = [
+                            extract_two_image_maniskill_observation(
+                                obs, env_idx=i,
+                                camera_name=CAMERA_NAME,
+                                wrist_camera_name=WRIST_CAMERA_NAME,
+                                use_proprio=cfg.use_proprio,
+                            )
+                            for i in need_inference
+                        ]
+                        task_labels = [language_instruction] * len(need_inference)
+                        inputs_list = [
+                            prepare_one_obs(cfg, actor.processor, o, t, TORCH_DTYPE)
+                            for o, t in zip(obs_list, task_labels)
+                        ]
+
+                        inputs_batch = actor.prepare_inputs_batch(inputs_list)
+
+                        with torch.inference_mode():
+                            action_logits, _ = actor.forward(inputs_batch)
+                        _, _, normalized_actions = actor.post_process(
+                            action_logits, [True] * len(need_inference)
+                        )
+                        for idx, env_i in enumerate(need_inference):
+                            action_chunk = np.asarray(normalized_actions[idx])
+                            if EXEC_ACTIONS_PER_INFERENCE > 0:
+                                action_chunk = action_chunk[:EXEC_ACTIONS_PER_INFERENCE]
+                            action_queues[env_i].extend(action_chunk)
+
+                    step_actions = []
+                    for i in range(NUM_ENVS):
+                        if len(action_queues[i]) > 0:
+                            a = action_queues[i].popleft()
+                            a_env = actor.vla._unnormalize_actions(a, cfg.unnorm_key)
+                            step_actions.append(a_env)
+                        else:
+                            step_actions.append(np.zeros(ACTION_DIM, dtype=np.float32))
+
+                    action_array = clip_maniskill_action(np.stack(step_actions, axis=0))
+                    t0 = time.time()
+                    obs, _, terminated, truncated, info = env.step(action_array)
+                    times.append(time.time() - t0)
+
+                    succ = extract_success_mask(info, NUM_ENVS)
+                    done = extract_done_mask(terminated, truncated, NUM_ENVS)
+                    succeeded |= (succ & ~finished)
+                    finished |= (succ | done)
+                    if finished.all():
+                        break
+
+                batch_succ = int(succeeded[:this_batch].sum())
+                total_successes += batch_succ
+                total_episodes += this_batch
+                ep_idx += this_batch
+
+                avg_step_ms = np.mean(times) * 1000 if times else 0
+                print(
+                    f"{task_id}: Episodes {ep_idx}/{NUM_EVAL_EPISODES}, "
+                    f"success_rate={total_successes / total_episodes:.3f}, "
+                    f"avg_step={avg_step_ms:.1f}ms"
+                )
+
+            success_rate = total_successes / total_episodes if total_episodes else 0.0
+            print(f"{task_id} Final: {total_successes}/{total_episodes} = {success_rate:.3f}")
+            return {
+                "task_id": task_id,
+                "successes": total_successes,
+                "episodes": total_episodes,
+                "success_rate": success_rate,
+                "max_steps": max_steps,
+            }
+        finally:
+            env.close()
+
+    results = [evaluate_task(task_cfg) for task_cfg in TASKS]
+    total_successes = sum(item["successes"] for item in results)
+    total_episodes = sum(item["episodes"] for item in results)
+    avg_success_rate = float(np.mean([item["success_rate"] for item in results]))
+    global_success_rate = total_successes / total_episodes if total_episodes else 0.0
+
+    print("\n========== Three-task evaluation summary ==========")
+    for item in results:
+        print(
+            f"{item['task_id']}: {item['successes']}/{item['episodes']} = "
+            f"{item['success_rate']:.3f} (max_steps={item['max_steps']})"
+        )
+    print(f"Average success rate: {avg_success_rate:.3f}")
+    print(f"Global success rate: {total_successes}/{total_episodes} = {global_success_rate:.3f}")
 
 
 if __name__ == "__main__":
