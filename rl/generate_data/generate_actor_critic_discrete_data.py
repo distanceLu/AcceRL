@@ -1,3 +1,6 @@
+'''
+example
+'''
 import os
 import json
 import time
@@ -41,8 +44,10 @@ def generate_data(
 ):
     """Generate windowed (video, action) samples using ActorCritic discrete policy.
 
-    Output format intentionally matches `rl/generate_data/generate_random_data.py`:
-      - per-sample `.pt` with keys: video, actions, mask, instruction
+    Output format keeps compatibility with `rl/generate_data/generate_random_data.py`
+    and adds the extra observation channels needed by Ctrl-World:
+      - per-sample `.pt` with keys: video, wrist_video, proprio,
+        actions, actions_continuous, mask, instruction
       - `metadata.json` containing path/task_id/instruction/valid_frames (+ extra fields)
 
     Notes:
@@ -106,7 +111,10 @@ def generate_data(
     task_descriptions: List[str] = ["" for _ in envs]
 
     buffer_obs: List[List[np.ndarray]] = [[] for _ in envs]
+    buffer_wrist_obs: List[List[np.ndarray]] = [[] for _ in envs]
+    buffer_proprio: List[List[np.ndarray]] = [[] for _ in envs]
     buffer_actions: List[List[np.ndarray]] = [[] for _ in envs]
+    buffer_actions_continuous: List[List[np.ndarray]] = [[] for _ in envs]
     step_counts = [0 for _ in envs]
 
     metadata: List[Dict[str, Any]] = []
@@ -123,9 +131,12 @@ def generate_data(
             obs, info = envs[i].reset(seed=int(time.time()) + i)
         observations[i] = obs
         task_descriptions[i] = info.get("task_description", envs[i].task_description)
-        # start buffers with initial image (same as random script)
+        # start buffers with initial observation (same alignment as random script)
         buffer_obs[i] = [obs["full_image"]]
+        buffer_wrist_obs[i] = [obs["wrist_image"]]
+        buffer_proprio[i] = [obs["state"]]
         buffer_actions[i] = []
+        buffer_actions_continuous[i] = []
         step_counts[i] = 0
         env_queues[i].clear()
 
@@ -179,27 +190,42 @@ def generate_data(
 
                 # Update buffers
                 buffer_obs[i].append(obs["full_image"])
+                buffer_wrist_obs[i].append(obs["wrist_image"])
+                buffer_proprio[i].append(obs["state"])
                 disc_action = discretize_action(action_env)  # (7,)
                 buffer_actions[i].append(disc_action)
+                buffer_actions_continuous[i].append(np.asarray(action_env, dtype=np.float32))
 
                 step_counts[i] += 1
 
                 # Save window (same alignment as random script)
                 current_obs_seq = buffer_obs[i][-max_frames:]
+                current_wrist_obs_seq = buffer_wrist_obs[i][-max_frames:]
+                current_proprio_seq = buffer_proprio[i][-max_frames:]
                 current_action_seq = buffer_actions[i][-max_frames:]
+                current_action_continuous_seq = buffer_actions_continuous[i][-max_frames:]
                 valid_frames = len(current_obs_seq)
 
                 if (not require_full_window) or (valid_frames >= max_frames):
                     video_tensor_seq = np.zeros((max_frames, image_size, image_size, 3), dtype=np.uint8)
+                    wrist_video_tensor_seq = np.zeros((max_frames, image_size, image_size, 3), dtype=np.uint8)
+                    proprio_seq_final = np.zeros((max_frames, 8), dtype=np.float32)
                     action_seq_final = np.zeros((max_frames, 7), dtype=int)
+                    action_continuous_seq_final = np.zeros((max_frames, 7), dtype=np.float32)
                     mask_seq = np.zeros((max_frames,), dtype=bool)
 
                     video_tensor_seq[-valid_frames:] = np.asarray(current_obs_seq)
+                    wrist_video_tensor_seq[-valid_frames:] = np.asarray(current_wrist_obs_seq)
+                    proprio_seq_final[-valid_frames:] = np.asarray(current_proprio_seq, dtype=np.float32)
                     mask_seq[-valid_frames:] = True
 
                     valid_actions = len(current_action_seq)
                     if valid_actions > 0:
                         action_seq_final[-valid_actions:] = np.asarray(current_action_seq)
+                        action_continuous_seq_final[-valid_actions:] = np.asarray(
+                            current_action_continuous_seq,
+                            dtype=np.float32,
+                        )
 
                     task_id = envs[i].task_id
                     ep = episodes_done[i]
@@ -211,7 +237,11 @@ def generate_data(
                     torch.save(
                         {
                             "video": video_tensor_seq,
+                            "wrist_video": wrist_video_tensor_seq,
+                            "view_names": ["agentview_image", "robot0_eye_in_hand_image"],
+                            "proprio": proprio_seq_final,
                             "actions": action_seq_final,
+                            "actions_continuous": action_continuous_seq_final,
                             "mask": mask_seq,
                             "instruction": task_descriptions[i],
                             "reward": float(reward),
@@ -225,6 +255,13 @@ def generate_data(
                             "task_id": int(task_id),
                             "instruction": task_descriptions[i],
                             "valid_frames": int(valid_frames),
+                            "views": ["agentview_image", "robot0_eye_in_hand_image"],
+                            "proprio_dim": 8,
+                            "action_dim": 7,
+                            "action_format": {
+                                "actions": "discrete_0_255",
+                                "actions_continuous": "unnormalized_env_delta",
+                            },
                             "episode": int(ep),
                             "step": int(step),
                             "reward": float(reward),
@@ -286,6 +323,17 @@ def generate_data(
                         "unnorm_key": cfg.unnorm_key,
                         "num_open_loop_steps": int(cfg.num_open_loop_steps),
                         "torch_dtype": str(torch_dtype),
+                        "saved_observation_keys": [
+                            "video",
+                            "wrist_video",
+                            "proprio",
+                        ],
+                        "view_names": ["agentview_image", "robot0_eye_in_hand_image"],
+                        "proprio_dim": 8,
+                        "action_keys": {
+                            "actions": "discrete_0_255",
+                            "actions_continuous": "unnormalized_env_delta",
+                        },
                     },
                 },
                 f,
