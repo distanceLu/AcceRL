@@ -65,3 +65,9 @@ Weights only load failed. Unsupported global: numpy.core.multiarray._reconstruct
 **原因：** PyTorch 2.6+ 将 torch.load 的 weights_only 默认值由 False 改为 True，LIBERO 旧 checkpoint 含 numpy 对象，无法以默认安全模式加载。
 
 - 在调用 torch.load 处显式传入 weights_only=False：torch.load(path, weights_only=False)
+
+## 收集训练世界模型数据集
+
+```bash
+python rl/generate_data/generate_actor_critic_discrete_data.py --output_dir /mnt/data/lcx3/AcceRL/tests_dsj/dataset --benchmark_name libero_spatial --num_tasks 5 --episodes_per_task 10 --max_frames 16 --pretrained_checkpoint /mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt --checkpoint2 /mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt --device cuda:0 --use_bf16 --use_proprio
+```

@@ -178,3 +178,4 @@ tests_dsj/ctrl_world_libero_replay_style_eval
 tests_dsj/ctrl_world_libero_vla_replay_style_eval
 tests_dsj/ctrl_world_wm_closed_loop_eval
 tests_dsj/ctrl_world_vla_imagine_eval
+tests_dsj/dataset_episode/
