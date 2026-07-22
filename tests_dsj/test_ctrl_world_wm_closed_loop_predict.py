@@ -4,15 +4,18 @@
 This script tests the Ctrl-World world model in a **closed-loop** setting,
 matching the imagination rollout in ds_wm_discrete_diffusion.py:
 
-1. Run VLA on real LIBERO observations only to build the initial WM history.
-2. Keep the LIBERO environment alive at the history endpoint.
-3. At each prediction chunk:
+Default trajectory-imagination mode:
+
+1. Collect a complete real trajectory with VLA observing LIBERO.
+2. Select start_index and use only the real prefix as WM history.
+3. At each imagination chunk:
    a. Decode the current predicted latent to camera images.
    b. Query VLA from those WM images.
-   c. Apply exactly the same unnormalised actions to Ctrl-World and LIBERO.
-   d. Compare the WM prediction with the action-matched LIBERO frames.
+   c. Feed the queried unnormalised actions to Ctrl-World.
+4. Compare the imagined trajectory with the original real trajectory.
 
 No pre-collected future action trajectory is fed to the WM.
+The optional action-matched-live mode also applies imagined actions to LIBERO.
 """
 from __future__ import annotations
 '''
@@ -76,6 +79,7 @@ from test_ctrl_world_libero_vla_replay_style_autoregressive import (  # noqa: E4
 
 @dataclass
 class ClosedLoopSummary:
+    evaluation_mode: str
     benchmark: str
     task_id: int
     task_name: str
@@ -117,6 +121,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-id", type=int, default=0)
     parser.add_argument("--initial-state-id", type=int, default=0)
     parser.add_argument("--num-steps-wait", type=int, default=10)
+    parser.add_argument(
+        "--evaluation-mode",
+        choices=["trajectory-imagination", "action-matched-live"],
+        default="trajectory-imagination",
+        help=(
+            "trajectory-imagination first records a real VLA/LIBERO trajectory, then "
+            "imagines from start-index using VLA actions queried from WM images. "
+            "action-matched-live applies each imagined action to LIBERO as well."
+        ),
+    )
 
     # --- VLA policy ---
     parser.add_argument(
@@ -388,7 +402,7 @@ def frame_aligned_reference_actions(
 ) -> np.ndarray:
     """Build reference actions used only to seed the real-history prefix."""
     aligned = np.zeros((num_frames, ACTION_DIM), dtype=np.float32)
-    if not step_unnormalized:
+    if len(step_unnormalized) == 0:
         return aligned
     for frame_idx in range(1, num_frames):
         src = min(frame_idx - 1, len(step_unnormalized) - 1)
@@ -603,6 +617,84 @@ def closed_loop_autoregressive_predict(
         torch.cat(pred_segments, dim=0),
         output_frame_indices,
         np.concatenate(interactive_action_chunks, axis=0),
+    )
+
+
+@torch.no_grad()
+def collect_real_vla_trajectory(
+    actor: ActorCritic,
+    vla_cfg: GenerateConfig,
+    vla_dtype: torch.dtype,
+    task: Any,
+    task_suite: Any,
+    instruction: str,
+    total_frames: int,
+    args: argparse.Namespace,
+) -> Tuple[List[List[np.ndarray]], np.ndarray, np.ndarray, bool, bool]:
+    """Collect an independent real trajectory with VLA observing LIBERO."""
+    env, _ = get_libero_env(task, vla_cfg.model_family, resolution=256)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    raw_obs = env.reset()
+    initial_state = get_initial_state(task_suite, args.task_id, args.initial_state_id)
+    if initial_state is not None:
+        raw_obs = env.set_init_state(initial_state)
+    for _ in range(args.num_steps_wait):
+        raw_obs, _, _, _ = env.step(get_libero_dummy_action(vla_cfg.model_family))
+
+    frames: List[List[np.ndarray]] = [
+        camera_frames_from_raw_obs(raw_obs, rotate=args.rotate_libero_images)
+    ]
+    raw_actions: List[np.ndarray] = []
+    env_actions: List[np.ndarray] = []
+    action_queue = deque()
+    done = False
+    success = False
+
+    try:
+        while len(frames) < total_frames:
+            if done:
+                frames.append([image.copy() for image in frames[-1]])
+                raw_actions.append(
+                    raw_actions[-1].copy()
+                    if raw_actions
+                    else np.zeros(ACTION_DIM, dtype=np.float32)
+                )
+                continue
+            if not action_queue:
+                env_batch, raw_batch = query_vla_on_raw_observation(
+                    actor=actor,
+                    cfg=vla_cfg,
+                    raw_obs=raw_obs,
+                    instruction=instruction,
+                    vla_dtype=vla_dtype,
+                    deterministic=args.vla_deterministic,
+                )
+                action_queue.extend(zip(env_batch, raw_batch))
+
+            env_action, raw_action = action_queue.popleft()
+            raw_obs, _, done, info = env.step(env_action.tolist())
+            success = bool(info.get("is_success", done))
+            env_actions.append(np.asarray(env_action, dtype=np.float32))
+            raw_actions.append(np.asarray(raw_action, dtype=np.float32))
+            frames.append(
+                camera_frames_from_raw_obs(
+                    raw_obs,
+                    rotate=args.rotate_libero_images,
+                )
+            )
+    finally:
+        env.close()
+
+    return (
+        frames,
+        np.stack(raw_actions, axis=0),
+        np.stack(env_actions, axis=0)
+        if env_actions
+        else np.zeros((0, ACTION_DIM), dtype=np.float32),
+        done,
+        success,
     )
 
 
@@ -861,31 +953,84 @@ def main() -> None:
         args.ckpt_path,
     )
 
-    # ---- Synchronized live interaction ----
     args.history_stride = history_stride
-    print(
-        "[live] real warmup, then repeat: "
-        "WM image -> VLA action -> both WM and LIBERO"
-    )
-    (
-        pred_latents,
-        gt_frames,
-        interactive_actions,
-        executed_actions,
-        rollout_done,
-        rollout_success,
-    ) = run_live_closed_loop(
-        model=ctrl_world,
-        actor=actor,
-        vla_cfg=vla_cfg,
-        vla_dtype=vla_dtype,
-        task=task,
-        task_suite=task_suite,
-        instruction=instruction,
-        action_01=action_01,
-        action_99=action_99,
-        args=args,
-    )
+    if args.evaluation_mode == "trajectory-imagination":
+        print(
+            "[trajectory] collecting real VLA/LIBERO trajectory, then imagining "
+            "from start-index with VLA conditioned only on WM images"
+        )
+        (
+            real_frames,
+            real_raw_actions,
+            executed_actions,
+            rollout_done,
+            rollout_success,
+        ) = collect_real_vla_trajectory(
+            actor=actor,
+            vla_cfg=vla_cfg,
+            vla_dtype=vla_dtype,
+            task=task,
+            task_suite=task_suite,
+            instruction=instruction,
+            total_frames=total_rollout_frames,
+            args=args,
+        )
+        warmup_latents = encode_views_to_stacked_latents(
+            ctrl_world,
+            real_frames[: args.start_index + 1],
+            height=args.height,
+            width=args.width,
+            dtype=torch_dtype(args.dtype),
+            device=args.device,
+        )
+        reference_actions = frame_aligned_reference_actions(
+            real_raw_actions,
+            len(real_frames),
+        )
+        (
+            pred_latents,
+            relative_gt_indices,
+            interactive_actions,
+        ) = closed_loop_history_stride_predict(
+            model=ctrl_world,
+            actor=actor,
+            vla_cfg=vla_cfg,
+            vla_dtype=vla_dtype,
+            stacked_gt_latents=warmup_latents,
+            reference_actions=reference_actions,
+            action_01=action_01,
+            action_99=action_99,
+            instruction=instruction,
+            args=args,
+        )
+        gt_frames = [
+            real_frames[args.start_index + relative_idx]
+            for relative_idx in relative_gt_indices
+        ]
+    else:
+        print(
+            "[live] real warmup, then repeat: "
+            "WM image -> VLA action -> both WM and LIBERO"
+        )
+        (
+            pred_latents,
+            gt_frames,
+            interactive_actions,
+            executed_actions,
+            rollout_done,
+            rollout_success,
+        ) = run_live_closed_loop(
+            model=ctrl_world,
+            actor=actor,
+            vla_cfg=vla_cfg,
+            vla_dtype=vla_dtype,
+            task=task,
+            task_suite=task_suite,
+            instruction=instruction,
+            action_01=action_01,
+            action_99=action_99,
+            args=args,
+        )
 
     actions_path = out_dir / "vla_executed_env_actions.npy"
     np.save(actions_path, executed_actions)
@@ -902,7 +1047,7 @@ def main() -> None:
         chunk_size=args.chunk_frames,
     )
 
-    # ---- Build action-matched LIBERO videos for comparison ----
+    # ---- Build LIBERO reference videos for comparison ----
     gt_videos = [
         resize_uint8_video(
             [frames[cam_id] for frames in gt_frames], (args.height, args.width)
@@ -930,6 +1075,7 @@ def main() -> None:
 
     # ---- Summary ----
     summary = ClosedLoopSummary(
+        evaluation_mode=args.evaluation_mode,
         benchmark=args.benchmark,
         task_id=args.task_id,
         task_name=task.name,
