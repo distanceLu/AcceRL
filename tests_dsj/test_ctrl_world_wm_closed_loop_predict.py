@@ -4,24 +4,20 @@
 This script tests the Ctrl-World world model in a **closed-loop** setting,
 matching the imagination rollout in ds_wm_discrete_diffusion.py:
 
-1. Collect a real episode using VLA in LIBERO (ground truth trajectory).
-2. Use the beginning of the trajectory as initial context for the WM.
-3. At each prediction step:
+1. Run VLA on real LIBERO observations only to build the initial WM history.
+2. Keep the LIBERO environment alive at the history endpoint.
+3. At each prediction chunk:
    a. Decode the current predicted latent to camera images.
-   b. Query the VLA policy for actions based on the predicted images
-      (same action acquisition as training code's infer.request()).
-   c. Convert VLA delta actions to predicted robot states.
-   d. Use the predicted robot states as conditioning for Ctrl-World WM.
-   e. Predict the next chunk of frames.
-4. Compare the predicted trajectory against the GT trajectory.
+   b. Query VLA from those WM images.
+   c. Apply exactly the same unnormalised actions to Ctrl-World and LIBERO.
+   d. Compare the WM prediction with the action-matched LIBERO frames.
 
-This is fundamentally different from the replay-style test which feeds GT
-robot states as conditioning (open-loop). Here, the WM prediction is driven
-by VLA policy actions in a closed loop, exactly as in RL training.
+No pre-collected future action trajectory is fed to the WM.
 """
-
 from __future__ import annotations
-
+'''
+example: CUDA_VISIBLE_DEVICES=0 python tests_dsj/test_ctrl_world_wm_closed_loop_predict.py --ckpt-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-20000.pt --condition-stat-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json --svd-model-path /mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model --clip-model-path /mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model --num-cams 2 --height 192 --width 320 --num-history 6 --chunk-frames 5 --num-chunks 8 --stride 4 --history-stride 1 --start-index 28 --device cuda --dtype bf16
+'''
 import argparse
 import json
 import os
@@ -30,11 +26,10 @@ from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation as Rot
 
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
@@ -45,47 +40,33 @@ from experiments.robot.libero.libero_utils import (  # noqa: E402
     GenerateConfig,
     get_libero_dummy_action,
     get_libero_env,
-    get_libero_image,
-    get_libero_wrist_image,
-    quat2axisangle,
 )
 from experiments.robot.openvla_utils import resize_image_for_policy  # noqa: E402
-from experiments.robot.robot_utils import invert_gripper_action, normalize_gripper_action  # noqa: E402
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK  # noqa: E402
 from rl.actor_critic_model_discrete import ActorCritic  # noqa: E402
 from rl.utils import prepare_one_obs  # noqa: E402
 
-from ctrl_world.models.pipeline_ctrl_world import CtrlWorldDiffusionPipeline  # noqa: E402
-from ctrl_world.models.utils import get_fk_solution  # noqa: E402
-
 from test_ctrl_world_libero_prediction import (  # noqa: E402
-    camera_frames_from_raw_obs,
     compute_metrics,
     decode_stacked_latents,
     encode_views_to_stacked_latents,
     get_task,
     load_ctrl_world_model,
     make_comparison_video,
-    normalize_bound,
     resize_uint8_video,
-    state7_from_raw_obs,
     torch_dtype,
     write_video,
 )
 from test_ctrl_world_libero_replay_style_autoregressive import (  # noqa: E402
     parse_history_idx,
-    pad_rows,
     predict_chunk_latents,
 )
 from test_ctrl_world_libero_vla_replay_style_autoregressive import (  # noqa: E402
-    build_vla_cfg,
-    collect_vla_libero_rollout,
+    camera_frames_from_raw_obs,
     get_initial_state,
     load_vla_actor,
     prepare_vla_observation,
     process_vla_action_for_env,
-    query_vla_actions,
-    resolve_vla_unnorm_key,
 )
 
 
@@ -109,7 +90,8 @@ class ClosedLoopSummary:
     chunk_frames: int
     num_chunks: int
     stride: int
-    history_idx: List[int]
+    history_stride: Optional[int]
+    history_idx: Optional[List[int]]
     total_pred_frames: int
     rollout_steps: int
     rollout_done: bool
@@ -163,7 +145,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--svd-model-path", type=str, default="/mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model")
     parser.add_argument("--clip-model-path", type=str, default="/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model")
-    parser.add_argument("--stat-path", type=str, default="/mnt/data/lcx3/dataset/dateset_meta_info/spatial/stat.json")
+    parser.add_argument(
+        "--stat-path",
+        type=str,
+        default="/mnt/data/lcx3/dataset/dateset_meta_info/spatial/stat.json",
+        help="Legacy state-stat path kept for CLI compatibility; raw-action inference uses --condition-stat-path.",
+    )
+    parser.add_argument(
+        "--condition-stat-path",
+        type=str,
+        default=None,
+        help="Action condition statistics. Defaults to condition_stat.json next to --ckpt-path.",
+    )
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -179,11 +172,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-frames", type=int, default=5)
     parser.add_argument("--num-chunks", type=int, default=8)
     parser.add_argument("--stride", type=int, default=4)
-    parser.add_argument("--history-idx", type=str, default="0,0,-8,-6,-4,-2")
-    parser.add_argument("--start-index", type=int, default=0)
+    parser.add_argument(
+        "--history-stride",
+        type=int,
+        default=1,
+        help=(
+            "Training-aligned contiguous history stride (matches rollout_replay_traj_accerl_pt.py). "
+            "When set, --history-idx is ignored."
+        ),
+    )
+    parser.add_argument(
+        "--no-history-stride",
+        action="store_true",
+        help="Use legacy sparse --history-idx buffering instead of --history-stride.",
+    )
+    parser.add_argument(
+        "--history-idx",
+        type=str,
+        default="0,0,-8,-6,-4,-2",
+        help="Legacy sparse history buffer indices; only used with --no-history-stride.",
+    )
+    parser.add_argument("--start-index", type=int, default=28)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--fps", type=int, default=5)
-    parser.add_argument("--rotate-libero-images", action="store_true")
+    parser.add_argument(
+        "--rotate-libero-images",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Rotate LIBERO images by 180 degrees, matching the WM training dataset.",
+    )
     parser.add_argument("--keep-model-loaded-only", action="store_true")
     return parser.parse_args()
 
@@ -264,123 +281,259 @@ def query_vla_on_predicted_images(
     actions_unnorm = actor.vla._unnormalize_actions(
         normalized_actions[0], cfg.unnorm_key
     )
-    return actions_unnorm            # [N, 7]
+    if hasattr(actions_unnorm, "detach"):
+        actions_unnorm = actions_unnorm.detach().cpu().numpy()
+    return np.asarray(actions_unnorm, dtype=np.float32)  # [N, 7]
 
 
-def fk_to_state7(joint_angles: np.ndarray, gripper_pos: float) -> np.ndarray:
-    """Convert 7-DoF joint angles to cartesian state7 via Forward Kinematics.
+@torch.no_grad()
+def query_vla_on_raw_observation(
+    actor: ActorCritic,
+    cfg: GenerateConfig,
+    raw_obs: Dict[str, Any],
+    instruction: str,
+    vla_dtype: torch.dtype,
+    deterministic: bool,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    observation = prepare_vla_observation(raw_obs, resize_size=224)
+    inputs_t = prepare_one_obs(cfg, actor.processor, observation, instruction, vla_dtype)
+    inputs_batch = actor.prepare_inputs_batch([inputs_t])
+    action_logits, _ = actor(inputs_batch)
+    _, _, normalized_actions = actor.post_process(
+        action_logits,
+        deterministic=[deterministic],
+    )
+    raw_actions = actor.vla._unnormalize_actions(
+        normalized_actions[0],
+        cfg.unnorm_key,
+    )
+    if hasattr(raw_actions, "detach"):
+        raw_actions = raw_actions.detach().cpu().numpy()
+    raw_actions = np.asarray(raw_actions, dtype=np.float32)[: cfg.num_open_loop_steps]
+    env_actions = [process_vla_action_for_env(action) for action in raw_actions]
+    return env_actions, [action.copy() for action in raw_actions]
 
-    Uses ``get_fk_solution`` from the ctrl_world package — the same FK
-    function used in ``rollout_interact_pi.py`` to convert policy outputs
-    to cartesian poses.
 
-    Args:
-        joint_angles: [7] or [8] joint angles (first 7 used).
-        gripper_pos: scalar gripper position.
+def load_action_condition_stats(
+    condition_stat_path: Optional[str],
+    ckpt_path: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    candidates = []
+    if condition_stat_path:
+        candidates.append(Path(condition_stat_path))
+    candidates.append(Path(ckpt_path).resolve().parent / "condition_stat.json")
+    stat_path = next((path for path in candidates if path.is_file()), None)
+    if stat_path is None:
+        raise FileNotFoundError(
+            "Raw-action WM inference requires action condition statistics. "
+            f"Tried: {[str(path) for path in candidates]}"
+        )
 
-    Returns:
-        state7: [x, y, z, ax, ay, az, gripper] in axis-angle representation.
-    """
-    T_mat = get_fk_solution(joint_angles[:7])
-    xyz = T_mat[:3, 3]
-    rot_matrix = T_mat[:3, :3]
-    r = Rot.from_matrix(rot_matrix)
-    axis_angle = r.as_rotvec()
-    return np.concatenate([xyz, axis_angle, [gripper_pos]]).astype(np.float32)
+    with stat_path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+    if payload.get("condition_mode") != "action":
+        raise ValueError(
+            f"{stat_path} has condition_mode={payload.get('condition_mode')!r}, "
+            "expected 'action'."
+        )
+    if payload.get("compose_interval_actions") is True:
+        raise ValueError(
+            f"{stat_path} is for composed interval actions, but this script uses "
+            "single-step unnormalised VLA actions as WM condition."
+        )
+    if "condition_p01" not in payload or "condition_p99" not in payload:
+        raise KeyError(f"{stat_path} must contain condition_p01 and condition_p99")
+
+    p01 = np.asarray(payload["condition_p01"], dtype=np.float32)[None, :]
+    p99 = np.asarray(payload["condition_p99"], dtype=np.float32)[None, :]
+    if p01.shape != (1, ACTION_DIM) or p99.shape != (1, ACTION_DIM):
+        raise ValueError(
+            f"Expected action condition stats shape {(1, ACTION_DIM)}, "
+            f"got p01={p01.shape}, p99={p99.shape}"
+        )
+    print(f"[ctrl-world] action condition stats: {stat_path}")
+    return p01, p99
 
 
-def vla_actions_to_predicted_states(
-    current_state: np.ndarray,
+def build_frame_aligned_future_actions(
+    current_action: np.ndarray,
     actions_unnorm: np.ndarray,
     num_frames: int,
-    current_joint_angles: Optional[np.ndarray] = None,
-    gripper_open_val: float = 0.04,
-    gripper_close_val: float = 0.0,
-) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Convert unnormalised VLA delta-actions to predicted robot states.
+) -> np.ndarray:
+    """Build actions aligned to predicted frames [current, ..., current+F-1].
 
-    Mirrors the conversion approach in ``rollout_interact_pi.py``:
-    - Position: simple delta addition (correct for cartesian delta).
-    - Orientation: **proper rotation composition** via
-      ``scipy.spatial.transform.Rotation`` — converts delta axis-angle
-      to a rotation matrix, composes with the current rotation, and
-      converts back to axis-angle.  This is the cartesian-space analogue
-      of how ``rollout_interact_pi.py`` uses FK to get exact orientations.
-    - Gripper: command mapped to absolute qpos.
-
-    If ``current_joint_angles`` is provided, also computes predicted joint
-    angles via accumulated delta and uses ``get_fk_solution`` to produce
-    FK-verified cartesian states (same as ``rollout_interact_pi.py``).
-
-    Args:
-        current_state: [7] absolute robot state [x,y,z,ax,ay,az,gripper].
-        actions_unnorm: [N, 7] unnormalised VLA actions.
-        num_frames: how many future states to produce.
-        current_joint_angles: optional [7+] joint angles from LIBERO env.
-            If provided, FK verification is applied to each predicted state.
-        gripper_open_val / gripper_close_val: mapping for the gripper qpos.
-
-    Returns:
-        predicted_states: [num_frames, 7] absolute robot states.
-        predicted_joint_angles: [num_frames, 7] or None.
+    The training data stores action[t] as the action that produced frame[t].
+    Therefore the current frame uses the already-known current_action, while
+    VLA actions queried from the current image condition frames t+1 onward.
     """
-    predicted = []
-    predicted_joints = []
-    state = current_state.copy()
-    joints = current_joint_angles[:7].copy() if current_joint_angles is not None else None
-    n = min(num_frames, len(actions_unnorm))
-    for i in range(n):
-        a = actions_unnorm[i]
-        next_state = state.copy()
+    actions = np.asarray(actions_unnorm, dtype=np.float32)
+    if actions.ndim != 2 or actions.shape[-1] != ACTION_DIM:
+        raise ValueError(f"Expected VLA actions shape [N,{ACTION_DIM}], got {actions.shape}")
+    current = np.asarray(current_action, dtype=np.float32).reshape(1, ACTION_DIM)
+    if num_frames == 1:
+        return current
+    if actions.shape[0] == 0:
+        next_actions = np.repeat(current, num_frames - 1, axis=0)
+    else:
+        next_actions = actions[: num_frames - 1]
+        if next_actions.shape[0] < num_frames - 1:
+            pad = np.repeat(next_actions[-1:], num_frames - 1 - next_actions.shape[0], axis=0)
+            next_actions = np.concatenate([next_actions, pad], axis=0)
+    return np.concatenate([current, next_actions], axis=0).astype(np.float32)
 
-        # --- Position: delta addition (correct for cartesian delta) ---
-        next_state[:3] = state[:3] + a[:3]
 
-        # --- Orientation: proper rotation composition ---
-        # LIBERO OSC controller uses axis-angle delta in world frame.
-        # R_new = R_delta ∘ R_current  (world-frame composition)
-        R_current = Rot.from_rotvec(state[3:6])
-        R_delta = Rot.from_rotvec(a[3:6])
-        R_new = R_delta * R_current
-        next_state[3:6] = R_new.as_rotvec()
+def frame_aligned_reference_actions(
+    step_unnormalized: Sequence[np.ndarray],
+    num_frames: int,
+) -> np.ndarray:
+    """Build reference actions used only to seed the real-history prefix."""
+    aligned = np.zeros((num_frames, ACTION_DIM), dtype=np.float32)
+    if not step_unnormalized:
+        return aligned
+    for frame_idx in range(1, num_frames):
+        src = min(frame_idx - 1, len(step_unnormalized) - 1)
+        aligned[frame_idx] = np.asarray(step_unnormalized[src], dtype=np.float32)
+    return aligned
 
-        # --- Gripper: map command to absolute qpos ---
-        if a[6] > 0:
-            next_state[6] = gripper_open_val
-        else:
-            next_state[6] = gripper_close_val
 
-        # --- Optional: FK verification (if joint angles available) ---
-        if joints is not None:
-            # Approximate joint delta via inverse Jacobian-free approach:
-            # use the cartesian delta to update joints, then FK to verify.
-            # Since we don't have a dynamics model or Jacobian, we apply
-            # a small joint delta proportional to the cartesian delta.
-            # This is a rough approximation — for exact joint updates,
-            # a dynamics model (like in rollout_interact_pi.py) is needed.
-            # Here we use the FK to get a clean cartesian pose from joints.
-            # NOTE: Without a proper IK/Jacobian, we skip joint updates
-            # and use the rotation-composition result directly.
-            # The FK path is available via fk_to_state7() if joint angles
-            # are maintained by an external dynamics model.
-            predicted_joints.append(joints.copy())
+def _init_history_stride_buffers(
+    stacked_gt_latents: torch.Tensor,
+    reference_actions: np.ndarray,
+    start_index: int,
+    num_history: int,
+    history_stride: int,
+) -> Tuple[List[torch.Tensor], List[np.ndarray], int]:
+    history_span = int(num_history) * int(history_stride)
+    if start_index < history_span:
+        raise ValueError(
+            f"--start-index {start_index} must be >= num_history * history_stride "
+            f"({history_span}) when using --history-stride."
+        )
+    latent_buffer = [stacked_gt_latents[i : i + 1] for i in range(start_index + 1)]
+    action_buffer = [reference_actions[i : i + 1] for i in range(start_index + 1)]
+    return latent_buffer, action_buffer, history_span
 
-        predicted.append(next_state)
-        state = next_state
 
-    # Pad if not enough actions
-    while len(predicted) < num_frames:
-        predicted.append(predicted[-1].copy())
-        if predicted_joints:
-            predicted_joints.append(predicted_joints[-1].copy())
+def _history_lags(num_history: int, history_stride: int) -> List[int]:
+    return list(range(int(num_history) * int(history_stride), 0, -int(history_stride)))
 
-    pred_states = np.stack(predicted, axis=0).astype(np.float32)
-    pred_joints = (
-        np.stack(predicted_joints, axis=0).astype(np.float32)
-        if predicted_joints
-        else None
+
+def _predict_and_update_chunk(
+    model,
+    actor: ActorCritic,
+    vla_cfg: GenerateConfig,
+    vla_dtype: torch.dtype,
+    current_latent: torch.Tensor,
+    history: torch.Tensor,
+    history_action: np.ndarray,
+    current_action: np.ndarray,
+    action_01: np.ndarray,
+    action_99: np.ndarray,
+    instruction: str,
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, np.ndarray]:
+    images = decode_latent_to_images(
+        model,
+        current_latent,
+        num_cams=args.num_cams,
+        height=args.height,
+        width=args.width,
     )
-    return pred_states, pred_joints
+    actions_unnorm = query_vla_on_predicted_images(
+        actor=actor,
+        cfg=vla_cfg,
+        images=images,
+        instruction=instruction,
+        vla_dtype=vla_dtype,
+        deterministic=args.vla_deterministic,
+    )
+    frame_actions = build_frame_aligned_future_actions(
+        current_action=current_action,
+        actions_unnorm=actions_unnorm,
+        num_frames=args.chunk_frames,
+    )
+    raw_action_cond = np.concatenate([history_action, frame_actions], axis=0).astype(np.float32)
+    pred_chunk = predict_chunk_latents(
+        model=model,
+        current_latent=current_latent.unsqueeze(0),
+        history=history,
+        raw_action_cond=raw_action_cond,
+        state_01=action_01,
+        state_99=action_99,
+        instruction=instruction,
+        args=args,
+    )
+    return pred_chunk, frame_actions
+
+
+@torch.no_grad()
+def closed_loop_history_stride_predict(
+    model,
+    actor: ActorCritic,
+    vla_cfg: GenerateConfig,
+    vla_dtype: torch.dtype,
+    stacked_gt_latents: torch.Tensor,
+    reference_actions: np.ndarray,
+    action_01: np.ndarray,
+    action_99: np.ndarray,
+    instruction: str,
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, List[int], np.ndarray]:
+    """Closed-loop prediction with training-aligned contiguous history."""
+    history_lags = _history_lags(args.num_history, args.history_stride)
+    latent_buffer, action_buffer, _history_span = _init_history_stride_buffers(
+        stacked_gt_latents=stacked_gt_latents,
+        reference_actions=reference_actions,
+        start_index=args.start_index,
+        num_history=args.num_history,
+        history_stride=args.history_stride,
+    )
+
+    pred_segments: List[torch.Tensor] = []
+    output_frame_indices: List[int] = []
+    interactive_action_chunks: List[np.ndarray] = []
+
+    for chunk_id in range(args.num_chunks):
+        start_id = chunk_id * args.stride
+        history_action = np.concatenate([action_buffer[-1 - lag] for lag in history_lags], axis=0)
+        history = torch.cat([latent_buffer[-1 - lag] for lag in history_lags], dim=0).unsqueeze(0)
+        current_latent = latent_buffer[-1][0]
+        current_action = action_buffer[-1][0]
+
+        print(
+            f"[closed-loop] chunk {chunk_id + 1}/{args.num_chunks}: "
+            f"history_stride={args.history_stride}, history_lags={history_lags}, "
+            f"start_index={args.start_index + start_id}"
+        )
+        pred_chunk, frame_actions = _predict_and_update_chunk(
+            model=model,
+            actor=actor,
+            vla_cfg=vla_cfg,
+            vla_dtype=vla_dtype,
+            current_latent=current_latent,
+            history=history,
+            history_action=history_action,
+            current_action=current_action,
+            action_01=action_01,
+            action_99=action_99,
+            instruction=instruction,
+            args=args,
+        )
+
+        take = args.chunk_frames if chunk_id == args.num_chunks - 1 else args.stride
+        pred_segments.append(pred_chunk[:take])
+        output_frame_indices.extend(range(start_id, start_id + take))
+        interactive_action_chunks.append(frame_actions[1:].copy())
+
+        for rel_idx in range(1, int(args.chunk_frames)):
+            latent_buffer.append(pred_chunk[rel_idx : rel_idx + 1])
+            action_buffer.append(frame_actions[rel_idx : rel_idx + 1])
+
+    return (
+        torch.cat(pred_segments, dim=0),
+        output_frame_indices,
+        np.concatenate(interactive_action_chunks, axis=0),
+    )
 
 
 @torch.no_grad()
@@ -389,128 +542,255 @@ def closed_loop_autoregressive_predict(
     actor: ActorCritic,
     vla_cfg: GenerateConfig,
     vla_dtype: torch.dtype,
-    raw_states: np.ndarray,
     stacked_gt_latents: torch.Tensor,
-    state_01: np.ndarray,
-    state_99: np.ndarray,
+    reference_actions: np.ndarray,
+    action_01: np.ndarray,
+    action_99: np.ndarray,
     instruction: str,
     args: argparse.Namespace,
     history_idx: Sequence[int],
-) -> Tuple[torch.Tensor, List[int]]:
-    """Closed-loop autoregressive WM prediction.
-
-    Unlike ``replay_style_autoregressive_predict`` which feeds GT future
-    robot states as WM conditioning, this function:
-
-    1. Decodes the current latent to images.
-    2. Queries the VLA policy for actions (same as training code).
-    3. Converts VLA actions to predicted robot states.
-    4. Uses those predicted states as Ctrl-World conditioning.
-    5. Predicts the next chunk of latents.
-
-    Returns:
-        pred_latents: [total_pred_frames, 4, latent_h*num_cams, latent_w]
-        output_frame_indices: list of relative frame indices.
-    """
+) -> Tuple[torch.Tensor, List[int], np.ndarray]:
+    """Closed-loop prediction with legacy sparse history_idx buffering."""
     base = args.start_index
-    first_latent = stacked_gt_latents[base : base + 1]      # [1, 4, h, w]
-    first_state = raw_states[base : base + 1]                # [1, 7]
+    first_latent = stacked_gt_latents[base : base + 1]
 
-    # --- initialise history buffers (same as replay-style) ---
     history_buffer_len = args.num_history * 4
     history_latents: List[torch.Tensor] = [first_latent] * history_buffer_len
-    history_states: List[np.ndarray] = [first_state] * history_buffer_len
+    history_actions: List[np.ndarray] = [reference_actions[base : base + 1]] * history_buffer_len
+    current_latent = first_latent[0]
 
     pred_segments: List[torch.Tensor] = []
     output_frame_indices: List[int] = []
-    rollover_idx = args.chunk_frames - 1
-
-    # Current robot state (absolute, 7-dim) — updated after each chunk
-    current_state = raw_states[base].copy()
+    interactive_action_chunks: List[np.ndarray] = []
 
     for chunk_id in range(args.num_chunks):
         start_id = chunk_id * args.stride
 
-        # ---- 1. Decode current latent to images ----
-        current_latent = history_latents[-1][0]   # [4, h, w] (strip batch dim)
-        images = decode_latent_to_images(
-            model, current_latent,
-            num_cams=args.num_cams,
-            height=args.height,
-            width=args.width,
-        )
-
-        # ---- 2. Query VLA on predicted images ----
-        actions_unnorm = query_vla_on_predicted_images(
-            actor=actor,
-            cfg=vla_cfg,
-            images=images,
-            instruction=instruction,
-            vla_dtype=vla_dtype,
-            deterministic=args.vla_deterministic,
-        )
-
-        # ---- 3. Convert VLA actions to predicted future robot states ----
-        # Uses proper rotation composition (matching rollout_interact_pi.py approach)
-        predicted_future_states, _ = vla_actions_to_predicted_states(
-            current_state=current_state,
-            actions_unnorm=actions_unnorm,
-            num_frames=args.chunk_frames,
-        )
-
-        # ---- 4. Build action conditioning (history + predicted future) ----
-        history_part = np.concatenate(
-            [history_states[idx] for idx in history_idx], axis=0
-        )
-        raw_action_cond = np.concatenate(
-            [history_part, predicted_future_states], axis=0
-        ).astype(np.float32)
-
-        expected = len(history_idx) + args.chunk_frames
-        if raw_action_cond.shape != (expected, 7):
-            raise ValueError(
-                f"Expected action_cond shape {(expected, 7)}, "
-                f"got {raw_action_cond.shape}"
-            )
-
-        # ---- 5. Build history latent input ----
-        history = torch.cat(
-            [history_latents[idx] for idx in history_idx], dim=0
-        ).unsqueeze(0)
+        history_part = np.concatenate([history_actions[idx] for idx in history_idx], axis=0)
+        history = torch.cat([history_latents[idx] for idx in history_idx], dim=0).unsqueeze(0)
 
         print(
             f"[closed-loop] chunk {chunk_id + 1}/{args.num_chunks}: "
-            f"VLA queried → {len(actions_unnorm)} actions, "
-            f"predicted {args.chunk_frames} future states, "
-            f"history_idx={list(history_idx)}"
+            f"history_idx={list(history_idx)}, start_index={base + start_id}"
         )
-
-        # ---- 6. Predict next chunk with Ctrl-World ----
-        pred_chunk = predict_chunk_latents(
+        current_action = history_actions[-1][0]
+        pred_chunk, frame_actions = _predict_and_update_chunk(
             model=model,
-            current_latent=current_latent.unsqueeze(0),   # [1, 4, h, w]
+            actor=actor,
+            vla_cfg=vla_cfg,
+            vla_dtype=vla_dtype,
+            current_latent=current_latent,
             history=history,
-            raw_action_cond=raw_action_cond,
-            state_01=state_01,
-            state_99=state_99,
+            history_action=history_part,
+            current_action=current_action,
+            action_01=action_01,
+            action_99=action_99,
             instruction=instruction,
             args=args,
         )
-        # pred_chunk: [chunk_frames, 4, h, w]
 
-        # ---- 7. Collect output ----
         take = args.chunk_frames if chunk_id == args.num_chunks - 1 else args.stride
         pred_segments.append(pred_chunk[:take])
         output_frame_indices.extend(range(start_id, start_id + take))
+        interactive_action_chunks.append(frame_actions[1:].copy())
 
-        # ---- 8. Update history & current state ----
-        history_latents.append(pred_chunk[rollover_idx : rollover_idx + 1])
-        history_states.append(
-            predicted_future_states[rollover_idx : rollover_idx + 1]
+        for rel_idx in range(1, int(args.chunk_frames)):
+            history_latents.append(pred_chunk[rel_idx : rel_idx + 1])
+            history_actions.append(frame_actions[rel_idx : rel_idx + 1])
+        current_latent = pred_chunk[int(args.chunk_frames) - 1]
+
+    return (
+        torch.cat(pred_segments, dim=0),
+        output_frame_indices,
+        np.concatenate(interactive_action_chunks, axis=0),
+    )
+
+
+@torch.no_grad()
+def run_live_closed_loop(
+    model,
+    actor: ActorCritic,
+    vla_cfg: GenerateConfig,
+    vla_dtype: torch.dtype,
+    task: Any,
+    task_suite: Any,
+    instruction: str,
+    action_01: np.ndarray,
+    action_99: np.ndarray,
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, List[List[np.ndarray]], np.ndarray, np.ndarray, bool, bool]:
+    """Run one synchronized WM/VLA/LIBERO closed loop.
+
+    Before start_index, VLA acts on real LIBERO observations to build real WM
+    history. After start_index, VLA sees only the current WM-decoded image.
+    Each online VLA action is then supplied to both WM and LIBERO, so the
+    resulting simulator frames are a valid action-matched reference.
+    """
+    env, _ = get_libero_env(task, vla_cfg.model_family, resolution=256)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    raw_obs = env.reset()
+    initial_state = get_initial_state(task_suite, args.task_id, args.initial_state_id)
+    if initial_state is not None:
+        raw_obs = env.set_init_state(initial_state)
+    for _ in range(args.num_steps_wait):
+        raw_obs, _, _, _ = env.step(get_libero_dummy_action(vla_cfg.model_family))
+
+    warmup_frames: List[List[np.ndarray]] = [
+        camera_frames_from_raw_obs(raw_obs, rotate=args.rotate_libero_images)
+    ]
+    warmup_raw_actions: List[np.ndarray] = []
+    executed_env_actions: List[np.ndarray] = []
+    warmup_queue = deque()
+    done = False
+    success = False
+
+    try:
+        while len(warmup_frames) <= args.start_index:
+            if not warmup_queue:
+                env_batch, wm_batch = query_vla_on_raw_observation(
+                    actor=actor,
+                    cfg=vla_cfg,
+                    raw_obs=raw_obs,
+                    instruction=instruction,
+                    vla_dtype=vla_dtype,
+                    deterministic=args.vla_deterministic,
+                )
+                warmup_queue.extend(zip(env_batch, wm_batch))
+
+            env_action, raw_action = warmup_queue.popleft()
+            if not done:
+                raw_obs, _, done, info = env.step(env_action.tolist())
+                success = bool(info.get("is_success", done))
+            executed_env_actions.append(np.asarray(env_action, dtype=np.float32))
+            warmup_raw_actions.append(np.asarray(raw_action, dtype=np.float32))
+            warmup_frames.append(
+                camera_frames_from_raw_obs(raw_obs, rotate=args.rotate_libero_images)
+            )
+
+        stacked_warmup_latents = encode_views_to_stacked_latents(
+            model,
+            warmup_frames,
+            height=args.height,
+            width=args.width,
+            dtype=torch_dtype(args.dtype),
+            device=args.device,
         )
-        current_state = predicted_future_states[rollover_idx].copy()
+        reference_actions = frame_aligned_reference_actions(
+            warmup_raw_actions,
+            len(warmup_frames),
+        )
+        history_lags = _history_lags(args.num_history, args.history_stride)
+        latent_buffer, action_buffer, _ = _init_history_stride_buffers(
+            stacked_gt_latents=stacked_warmup_latents,
+            reference_actions=reference_actions,
+            start_index=args.start_index,
+            num_history=args.num_history,
+            history_stride=args.history_stride,
+        )
 
-    return torch.cat(pred_segments, dim=0), output_frame_indices
+        pred_segments: List[torch.Tensor] = []
+        interactive_action_chunks: List[np.ndarray] = []
+        live_gt_frames: List[List[np.ndarray]] = [warmup_frames[-1]]
+
+        for chunk_id in range(args.num_chunks):
+            history_action = np.concatenate(
+                [action_buffer[-1 - lag] for lag in history_lags],
+                axis=0,
+            )
+            history = torch.cat(
+                [latent_buffer[-1 - lag] for lag in history_lags],
+                dim=0,
+            ).unsqueeze(0)
+            current_latent = latent_buffer[-1][0]
+            current_action = action_buffer[-1][0]
+
+            # This is the online interaction point: VLA sees the current WM image.
+            predicted_images = decode_latent_to_images(
+                model,
+                current_latent,
+                num_cams=args.num_cams,
+                height=args.height,
+                width=args.width,
+            )
+            queried_actions = query_vla_on_predicted_images(
+                actor=actor,
+                cfg=vla_cfg,
+                images=predicted_images,
+                instruction=instruction,
+                vla_dtype=vla_dtype,
+                deterministic=args.vla_deterministic,
+            )
+            frame_actions = build_frame_aligned_future_actions(
+                current_action=current_action,
+                actions_unnorm=queried_actions,
+                num_frames=args.chunk_frames,
+            )
+
+            # Apply exactly the same future actions to the real simulator.
+            for raw_action in frame_actions[1:]:
+                env_action = process_vla_action_for_env(raw_action)
+                if not done:
+                    raw_obs, _, done, info = env.step(env_action.tolist())
+                    success = bool(info.get("is_success", done))
+                executed_env_actions.append(env_action)
+                live_gt_frames.append(
+                    camera_frames_from_raw_obs(
+                        raw_obs,
+                        rotate=args.rotate_libero_images,
+                    )
+                )
+
+            raw_action_cond = np.concatenate(
+                [history_action, frame_actions],
+                axis=0,
+            ).astype(np.float32)
+            out_of_stat = np.logical_or(
+                raw_action_cond < action_01,
+                raw_action_cond > action_99,
+            )
+            clipped_fraction = float(out_of_stat.mean())
+            pred_chunk = predict_chunk_latents(
+                model=model,
+                current_latent=current_latent.unsqueeze(0),
+                history=history,
+                raw_action_cond=raw_action_cond,
+                state_01=action_01,
+                state_99=action_99,
+                instruction=instruction,
+                args=args,
+            )
+
+            take = args.chunk_frames if chunk_id == args.num_chunks - 1 else args.stride
+            pred_segments.append(pred_chunk[:take])
+            interactive_action_chunks.append(frame_actions[1:].copy())
+            for rel_idx in range(1, args.chunk_frames):
+                latent_buffer.append(pred_chunk[rel_idx : rel_idx + 1])
+                action_buffer.append(frame_actions[rel_idx : rel_idx + 1])
+
+            print(
+                f"[live closed-loop] chunk {chunk_id + 1}/{args.num_chunks}: "
+                f"WM image -> VLA -> {args.chunk_frames - 1} shared WM/LIBERO actions; "
+                f"condition clip fraction={clipped_fraction:.3f}"
+            )
+
+        pred_latents = torch.cat(pred_segments, dim=0)
+        if len(live_gt_frames) != int(pred_latents.shape[0]):
+            raise RuntimeError(
+                f"Action-matched GT/pred length mismatch: "
+                f"gt={len(live_gt_frames)}, pred={pred_latents.shape[0]}"
+            )
+        return (
+            pred_latents,
+            live_gt_frames,
+            np.concatenate(interactive_action_chunks, axis=0),
+            np.stack(executed_env_actions, axis=0),
+            done,
+            success,
+        )
+    finally:
+        env.close()
 
 
 # ================================================================
@@ -519,11 +799,15 @@ def closed_loop_autoregressive_predict(
 
 def main() -> None:
     args = parse_args()
-    history_idx = parse_history_idx(args.history_idx)
-    if len(history_idx) != args.num_history:
+    history_stride: Optional[int] = None if args.no_history_stride else int(args.history_stride)
+    history_idx: Optional[List[int]] = None
+    if history_stride is not None:
+        if history_stride <= 0:
+            raise ValueError("--history-stride must be positive")
+    else:
         raise ValueError(
-            f"--history-idx length {len(history_idx)} must equal "
-            f"--num-history {args.num_history}"
+            "The synchronized live closed-loop requires --history-stride; "
+            "--no-history-stride is only supported by the legacy offline path."
         )
     if args.chunk_frames <= 0:
         raise ValueError("--chunk-frames must be positive")
@@ -545,11 +829,16 @@ def main() -> None:
     instruction = task.language
     print(f"[task] {args.benchmark} task_id={args.task_id}: {task.name}")
     print(f"[task] instruction: {instruction}")
+    history_desc = (
+        f"history_stride={history_stride}"
+        if history_stride is not None
+        else f"history_idx={history_idx}"
+    )
     print(
         f"[eval] closed-loop prediction: "
         f"rollout_frames={total_rollout_frames}, pred_frames={total_pred_frames}, "
         f"chunk_frames={args.chunk_frames}, stride={args.stride}, "
-        f"history_idx={history_idx}"
+        f"start_index={args.start_index}, {history_desc}"
     )
 
     # ---- Load VLA policy ----
@@ -566,69 +855,42 @@ def main() -> None:
     if args.keep_model_loaded_only:
         return
 
-    # ---- Collect real episode (ground truth) ----
-    print("[libero] rolling out with VLA actions (collecting GT)...")
-    frames_by_t, raw_states, executed_actions, rollout_done, rollout_success = (
-        collect_vla_libero_rollout(
-            args=args,
-            task=task,
-            task_suite=task_suite,
-            instruction=instruction,
-            actor=actor,
-            vla_cfg=vla_cfg,
-            vla_dtype=vla_dtype,
-            total_frames=total_rollout_frames,
-        )
-    )
-    print(
-        f"[libero] collected {len(frames_by_t)} frames, "
-        f"states={raw_states.shape}, "
-        f"executed_actions={len(executed_actions)}, "
-        f"done={rollout_done}, success={rollout_success}"
-    )
-
-    # Save executed VLA actions for reference
-    actions_path = out_dir / "vla_executed_env_actions.npy"
-    np.save(
-        actions_path,
-        np.stack(executed_actions, axis=0)
-        if executed_actions
-        else np.zeros((0, ACTION_DIM), dtype=np.float32),
-    )
-
     # ---- Load normalisation stats ----
-    with open(args.stat_path, "r", encoding="utf-8") as f:
-        stat = json.load(f)
-    state_01 = np.asarray(stat["state_01"], dtype=np.float32)[None, :]
-    state_99 = np.asarray(stat["state_99"], dtype=np.float32)[None, :]
-
-    # ---- Encode GT frames to latents ----
-    dtype = torch_dtype(args.dtype)
-    print("[ctrl-world] encoding GT frames to latents...")
-    stacked_gt_latents = encode_views_to_stacked_latents(
-        ctrl_world,
-        frames_by_t,
-        height=args.height,
-        width=args.width,
-        dtype=dtype,
-        device=args.device,
+    action_01, action_99 = load_action_condition_stats(
+        args.condition_stat_path,
+        args.ckpt_path,
     )
 
-    # ---- Closed-loop prediction ----
-    print("[ctrl-world] closed-loop prediction (VLA → WM → VLA → WM → ...)...")
-    pred_latents, relative_gt_indices = closed_loop_autoregressive_predict(
+    # ---- Synchronized live interaction ----
+    args.history_stride = history_stride
+    print(
+        "[live] real warmup, then repeat: "
+        "WM image -> VLA action -> both WM and LIBERO"
+    )
+    (
+        pred_latents,
+        gt_frames,
+        interactive_actions,
+        executed_actions,
+        rollout_done,
+        rollout_success,
+    ) = run_live_closed_loop(
         model=ctrl_world,
         actor=actor,
         vla_cfg=vla_cfg,
         vla_dtype=vla_dtype,
-        raw_states=raw_states,
-        stacked_gt_latents=stacked_gt_latents,
-        state_01=state_01,
-        state_99=state_99,
+        task=task,
+        task_suite=task_suite,
         instruction=instruction,
+        action_01=action_01,
+        action_99=action_99,
         args=args,
-        history_idx=history_idx,
     )
+
+    actions_path = out_dir / "vla_executed_env_actions.npy"
+    np.save(actions_path, executed_actions)
+    interactive_actions_path = out_dir / "vla_wm_closed_loop_actions.npy"
+    np.save(interactive_actions_path, interactive_actions)
 
     # ---- Decode predicted latents to videos ----
     pred_videos = decode_stacked_latents(
@@ -640,9 +902,7 @@ def main() -> None:
         chunk_size=args.chunk_frames,
     )
 
-    # ---- Build GT videos for comparison ----
-    gt_indices = [args.start_index + idx for idx in relative_gt_indices]
-    gt_frames = [frames_by_t[min(idx, len(frames_by_t) - 1)] for idx in gt_indices]
+    # ---- Build action-matched LIBERO videos for comparison ----
     gt_videos = [
         resize_uint8_video(
             [frames[cam_id] for frames in gt_frames], (args.height, args.width)
@@ -666,6 +926,7 @@ def main() -> None:
         video_paths[f"cam{cam_id}_gt"] = str(gt_path)
         video_paths[f"cam{cam_id}_pred"] = str(pred_path)
     video_paths["vla_env_actions_npy"] = str(actions_path)
+    video_paths["vla_wm_closed_loop_actions_npy"] = str(interactive_actions_path)
 
     # ---- Summary ----
     summary = ClosedLoopSummary(
@@ -683,6 +944,7 @@ def main() -> None:
         chunk_frames=args.chunk_frames,
         num_chunks=args.num_chunks,
         stride=args.stride,
+        history_stride=history_stride,
         history_idx=history_idx,
         total_pred_frames=int(pred_latents.shape[0]),
         rollout_steps=len(executed_actions),

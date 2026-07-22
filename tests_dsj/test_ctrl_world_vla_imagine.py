@@ -7,17 +7,17 @@ Pipeline:
 3. From that frame, run closed-loop imagination with Ctrl-World:
    a. Decode current predicted latent → camera images.
    b. Feed images + instruction to VLA → output delta actions.
-   c. Convert delta actions to absolute robot states (state7) via rotation composition.
-   d. Build action conditioning: history_states[history_idx] + predicted_future_states.
+   c. Build action conditioning directly from unnormalised VLA delta actions.
+   d. Use checkpoint action statistics to normalise the action conditioning.
    e. Build visual conditioning: history_latents[history_idx] + current_latent.
    f. Call CtrlWorldDiffusionPipeline to predict next chunk of frames.
-   g. Push last predicted frame & state back into history buffers.
+   g. Push last predicted frame & action back into history buffers.
 4. Compare imagined trajectory against the GT trajectory tail.
 
 Key references:
 - rollout_interact_pi.py: history buffer management, history_idx pattern.
 - test_ctrl_world_wm_closed_loop_predict.py: VLA query on predicted images,
-  delta→state conversion via rotation composition.
+  raw VLA action conditioning.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation as Rot
 
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
@@ -44,8 +43,6 @@ from experiments.robot.openvla_utils import resize_image_for_policy  # noqa: E40
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK  # noqa: E402
 from rl.actor_critic_model_discrete import ActorCritic  # noqa: E402
 from rl.utils import prepare_one_obs  # noqa: E402
-
-from ctrl_world.models.pipeline_ctrl_world import CtrlWorldDiffusionPipeline  # noqa: E402
 
 # Reuse helpers from existing test files
 from test_ctrl_world_libero_prediction import (  # noqa: E402
@@ -60,16 +57,12 @@ from test_ctrl_world_libero_prediction import (  # noqa: E402
     write_video,
 )
 from test_ctrl_world_libero_replay_style_autoregressive import (  # noqa: E402
-    pad_rows,
     parse_history_idx,
     predict_chunk_latents,
 )
 from test_ctrl_world_libero_vla_replay_style_autoregressive import (  # noqa: E402
-    build_vla_cfg,
     collect_vla_libero_rollout,
-    get_initial_state,
     load_vla_actor,
-    resolve_vla_unnorm_key,
 )
 
 
@@ -94,7 +87,6 @@ class ImagineSummary:
     chunk_frames: int
     num_chunks: int
     stride: int
-    action_skip: int
     history_idx: List[int]
     total_pred_frames: int
     rollout_steps: int
@@ -148,7 +140,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--svd-model-path", type=str, default="/mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model")
     parser.add_argument("--clip-model-path", type=str, default="/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model")
-    parser.add_argument("--stat-path", type=str, default="/mnt/data/lcx3/dataset/dateset_meta_info/spatial/stat.json")
+    parser.add_argument(
+        "--stat-path",
+        type=str,
+        default="/mnt/data/lcx3/dataset/dateset_meta_info/spatial/stat.json",
+        help="Legacy state-stat path kept for CLI compatibility; raw-action inference uses --condition-stat-path.",
+    )
+    parser.add_argument(
+        "--condition-stat-path",
+        type=str,
+        default=None,
+        help="Action condition statistics. Defaults to condition_stat.json next to --ckpt-path.",
+    )
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -165,12 +168,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-chunks", type=int, default=8)
     parser.add_argument("--stride", type=int, default=4)
     parser.add_argument("--history-idx", type=str, default="0,0,-8,-6,-4,-2")
-    parser.add_argument(
-        "--action-skip", type=int, default=2,
-        help="Env-step stride for subsampling VLA actions to future states. "
-             "Training uses skip=1-2 latent frames (3-6 env steps with down_sample=3). "
-             "action_skip=2 with 8 VLA actions -> states at env steps [1,3,5,7,8] (span=7).",
-    )
 
     # --- Imagine start point ---
     parser.add_argument(
@@ -185,75 +182,62 @@ def parse_args() -> argparse.Namespace:
 
 
 # ================================================================
-# Core: VLA action → predicted robot state
+# Core: action condition helpers
 # ================================================================
 
-def vla_actions_to_predicted_states(
-    current_state: np.ndarray,
-    actions_unnorm: np.ndarray,
-    num_frames: int,
-    action_skip: int = 1,
-    gripper_open_val: float = 0.04,
-    gripper_close_val: float = 0.0,
-) -> np.ndarray:
-    """Convert unnormalised VLA delta-actions to predicted absolute robot states.
+def load_action_condition_stats(
+    condition_stat_path: Optional[str],
+    ckpt_path: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    candidates = []
+    if condition_stat_path:
+        candidates.append(Path(condition_stat_path))
+    candidates.append(Path(ckpt_path).resolve().parent / "condition_stat.json")
+    stat_path = next((path for path in candidates if path.is_file()), None)
+    if stat_path is None:
+        raise FileNotFoundError(
+            "Raw-action WM inference requires action condition statistics. "
+            f"Tried: {[str(path) for path in candidates]}"
+        )
 
-    VLA outputs 7-dim delta actions: [dx, dy, dz, dax, day, daz, gripper_cmd].
-    We convert them to absolute state7 [x, y, z, ax, ay, az, gripper] via:
-    - Position: delta addition.
-    - Orientation: proper rotation composition (R_new = R_delta * R_current).
-    - Gripper: command mapped to absolute qpos.
+    with stat_path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+    if payload.get("condition_mode") != "action":
+        raise ValueError(
+            f"{stat_path} has condition_mode={payload.get('condition_mode')!r}, "
+            "expected 'action'."
+        )
+    if payload.get("compose_interval_actions") is True:
+        raise ValueError(
+            f"{stat_path} is for composed interval actions, but this script uses "
+            "single-step unnormalised VLA actions as WM condition."
+        )
+    if "condition_p01" not in payload or "condition_p99" not in payload:
+        raise KeyError(f"{stat_path} must contain condition_p01 and condition_p99")
 
-    Training uses skip in {1,2} latent frames (3-6 env steps with down_sample=3)
-    between future conditioning states. To match, we first compute ALL available
-    states from the VLA actions, then subsample with action_skip to approximate
-    the training-time temporal spacing.
+    p01 = np.asarray(payload["condition_p01"], dtype=np.float32)[None, :]
+    p99 = np.asarray(payload["condition_p99"], dtype=np.float32)[None, :]
+    if p01.shape != (1, ACTION_DIM) or p99.shape != (1, ACTION_DIM):
+        raise ValueError(
+            f"Expected action condition stats shape {(1, ACTION_DIM)}, "
+            f"got p01={p01.shape}, p99={p99.shape}"
+        )
+    print(f"[ctrl-world] action condition stats: {stat_path}")
+    return p01, p99
 
-    Args:
-        action_skip: env-step stride for subsampling. E.g. action_skip=2 with
-            8 VLA actions -> states at env steps [1,3,5,7,8] (span=7) instead of
-            consecutive [1,2,3,4,5] (span=4).
-    """
-    # Step 1: Compute all available states from VLA actions
-    all_states = []
-    state = current_state.copy()
-    for i in range(len(actions_unnorm)):
-        a = actions_unnorm[i]
-        next_state = state.copy()
 
-        # Position: delta addition
-        next_state[:3] = state[:3] + a[:3]
+def select_future_actions(actions_unnorm: np.ndarray, num_frames: int) -> np.ndarray:
+    actions = np.asarray(actions_unnorm, dtype=np.float32)
+    if actions.ndim != 2 or actions.shape[-1] != ACTION_DIM:
+        raise ValueError(f"Expected VLA actions shape [N,{ACTION_DIM}], got {actions.shape}")
+    if actions.shape[0] == 0:
+        return np.zeros((num_frames, ACTION_DIM), dtype=np.float32)
 
-        # Orientation: rotation composition
-        R_current = Rot.from_rotvec(state[3:6])
-        R_delta = Rot.from_rotvec(a[3:6])
-        R_new = R_delta * R_current
-        next_state[3:6] = R_new.as_rotvec()
-
-        # Gripper: map command to absolute qpos
-        next_state[6] = gripper_open_val if a[6] > 0 else gripper_close_val
-
-        all_states.append(next_state)
-        state = next_state
-
-    if not all_states:
-        all_states = [current_state.copy()]
-    all_states = np.stack(all_states, axis=0)  # (N, 7)
-    n_available = len(all_states)
-
-    # Step 2: Subsample to num_frames with action_skip
-    if action_skip <= 1:
-        indices = list(range(min(num_frames, n_available)))
-    else:
-        indices = list(range(0, n_available, action_skip))
-        if len(indices) >= num_frames:
-            indices = indices[:num_frames]
-
-    # Pad if not enough indices
-    while len(indices) < num_frames:
-        indices.append(n_available - 1)
-
-    return all_states[indices].astype(np.float32)
+    selected = actions[:num_frames]
+    if selected.shape[0] < num_frames:
+        pad = np.repeat(selected[-1:], num_frames - selected.shape[0], axis=0)
+        selected = np.concatenate([selected, pad], axis=0)
+    return selected.astype(np.float32)
 
 
 # ================================================================
@@ -344,10 +328,9 @@ def closed_loop_imagine(
     actor: ActorCritic,
     vla_cfg: Any,
     vla_dtype: torch.dtype,
-    raw_states: np.ndarray,
     stacked_gt_latents: torch.Tensor,
-    state_01: np.ndarray,
-    state_99: np.ndarray,
+    action_01: np.ndarray,
+    action_99: np.ndarray,
     instruction: str,
     args: argparse.Namespace,
     history_idx: Sequence[int],
@@ -357,12 +340,12 @@ def closed_loop_imagine(
 
     Flow per chunk:
     1. Decode current latent → images.
-    2. Query VLA on images → delta actions.
-    3. Convert delta actions → absolute robot states (state7).
-    4. Build action_cond: history_states[history_idx] + predicted_future_states.
-    5. Build history latent: history_latents[history_idx].
-    6. Call CtrlWorldDiffusionPipeline → predict next chunk.
-    7. Push last predicted frame & state into history buffers.
+    2. Query VLA on images → unnormalised delta actions.
+    3. Build action_cond: history_actions[history_idx] + future VLA actions.
+    4. Build history latent: history_latents[history_idx].
+    5. Call CtrlWorldDiffusionPipeline → predict next chunk.
+    6. Push predicted frames before the next current frame into history buffers.
+    7. Use the last predicted frame as the next current frame.
 
     Returns:
         pred_latents: [total_pred_frames, 4, latent_h*num_cams, latent_w]
@@ -370,25 +353,21 @@ def closed_loop_imagine(
     """
     base = imagine_start
     first_latent = stacked_gt_latents[base: base + 1]     # [1, 4, h, w]
-    first_state = raw_states[base: base + 1]               # [1, 7]
 
     # Initialize history buffers (same pattern as rollout_interact_pi.py)
     history_buffer_len = args.num_history * 4
     history_latents: List[torch.Tensor] = [first_latent] * history_buffer_len
-    history_states: List[np.ndarray] = [first_state] * history_buffer_len
+    history_actions: Optional[List[np.ndarray]] = None
+    current_latent = first_latent[0]
 
     pred_segments: List[torch.Tensor] = []
     output_frame_indices: List[int] = []
     rollover_idx = args.chunk_frames - 1
 
-    # Current robot state (absolute state7)
-    current_state = raw_states[base].copy()
-
     for chunk_id in range(args.num_chunks):
         start_id = chunk_id * args.stride
 
         # ---- 1. Decode current latent to images ----
-        current_latent = history_latents[-1][0]   # [4, h, w]
         images = decode_latent_to_images(
             model, current_latent,
             num_cams=args.num_cams,
@@ -406,20 +385,21 @@ def closed_loop_imagine(
             deterministic=args.vla_deterministic,
         )
 
-        # ---- 3. Convert VLA actions to predicted future robot states ----
-        predicted_future_states = vla_actions_to_predicted_states(
-            current_state=current_state,
+        # ---- 3. Use raw VLA actions directly as future WM condition ----
+        predicted_future_actions = select_future_actions(
             actions_unnorm=actions_unnorm,
             num_frames=args.chunk_frames,
-            action_skip=args.action_skip,
         )
+        if history_actions is None:
+            history_actions = [predicted_future_actions[:1]] * history_buffer_len
 
         # ---- 4. Build action conditioning (history + predicted future) ----
+        assert history_actions is not None
         history_part = np.concatenate(
-            [history_states[idx] for idx in history_idx], axis=0
+            [history_actions[idx] for idx in history_idx], axis=0
         )
         raw_action_cond = np.concatenate(
-            [history_part, predicted_future_states], axis=0
+            [history_part, predicted_future_actions], axis=0
         ).astype(np.float32)
 
         expected = len(history_idx) + args.chunk_frames
@@ -437,7 +417,7 @@ def closed_loop_imagine(
         print(
             f"[imagine] chunk {chunk_id + 1}/{args.num_chunks}: "
             f"VLA → {len(actions_unnorm)} actions, "
-            f"action_skip={args.action_skip} → {args.chunk_frames} future states, "
+            f"using first {args.chunk_frames} raw actions as condition, "
             f"history_idx={list(history_idx)}"
         )
 
@@ -447,8 +427,8 @@ def closed_loop_imagine(
             current_latent=current_latent.unsqueeze(0),   # [1, 4, h, w]
             history=history,
             raw_action_cond=raw_action_cond,
-            state_01=state_01,
-            state_99=state_99,
+            state_01=action_01,
+            state_99=action_99,
             instruction=instruction,
             args=args,
         )
@@ -459,13 +439,11 @@ def closed_loop_imagine(
         pred_segments.append(pred_chunk[:take])
         output_frame_indices.extend(range(start_id, start_id + take))
 
-        # ---- 8. Update history & current state ----
-        # Push last predicted frame into history (like rollout_interact_pi.py)
-        history_latents.append(pred_chunk[rollover_idx: rollover_idx + 1])
-        history_states.append(
-            predicted_future_states[rollover_idx: rollover_idx + 1]
-        )
-        current_state = predicted_future_states[rollover_idx].copy()
+        # ---- 8. Update history buffers and next current latent ----
+        for rel_idx in range(rollover_idx):
+            history_latents.append(pred_chunk[rel_idx: rel_idx + 1])
+            history_actions.append(predicted_future_actions[rel_idx: rel_idx + 1])
+        current_latent = pred_chunk[rollover_idx]
 
     return torch.cat(pred_segments, dim=0), output_frame_indices
 
@@ -523,7 +501,7 @@ def main() -> None:
 
     # ---- Collect real episode using VLA ----
     print("[libero] rolling out with VLA actions (collecting GT trajectory)...")
-    frames_by_t, raw_states, executed_actions, rollout_done, rollout_success = (
+    frames_by_t, _raw_states, executed_actions, rollout_done, rollout_success = (
         collect_vla_libero_rollout(
             args=args,
             task=task,
@@ -537,7 +515,6 @@ def main() -> None:
     )
     print(
         f"[libero] collected {len(frames_by_t)} frames, "
-        f"states={raw_states.shape}, "
         f"executed_actions={len(executed_actions)}, "
         f"done={rollout_done}, success={rollout_success}"
     )
@@ -565,10 +542,10 @@ def main() -> None:
     )
 
     # ---- Load normalization stats ----
-    with open(args.stat_path, "r", encoding="utf-8") as f:
-        stat = json.load(f)
-    state_01 = np.asarray(stat["state_01"], dtype=np.float32)[None, :]
-    state_99 = np.asarray(stat["state_99"], dtype=np.float32)[None, :]
+    action_01, action_99 = load_action_condition_stats(
+        args.condition_stat_path,
+        args.ckpt_path,
+    )
 
     # ---- Encode GT frames to latents ----
     dtype = torch_dtype(args.dtype)
@@ -585,17 +562,16 @@ def main() -> None:
     # ---- Closed-loop imagination ----
     print(
         "[imagine] closed-loop imagination: "
-        "VLA(predicted image) → action → state → Ctrl-World → next frame → ..."
+        "VLA(predicted image) → raw action condition → Ctrl-World → next frame → ..."
     )
     pred_latents, relative_gt_indices = closed_loop_imagine(
         model=ctrl_world,
         actor=actor,
         vla_cfg=vla_cfg,
         vla_dtype=vla_dtype,
-        raw_states=raw_states,
         stacked_gt_latents=stacked_gt_latents,
-        state_01=state_01,
-        state_99=state_99,
+        action_01=action_01,
+        action_99=action_99,
         instruction=instruction,
         args=args,
         history_idx=history_idx,
@@ -656,7 +632,6 @@ def main() -> None:
         chunk_frames=args.chunk_frames,
         num_chunks=args.num_chunks,
         stride=args.stride,
-        action_skip=args.action_skip,
         history_idx=history_idx,
         total_pred_frames=int(pred_latents.shape[0]),
         rollout_steps=len(executed_actions),
