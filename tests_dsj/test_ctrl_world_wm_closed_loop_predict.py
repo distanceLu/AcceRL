@@ -1,657 +1,241 @@
 #!/usr/bin/env python3
-"""Closed-loop Ctrl-World WM prediction test with VLA policy actions.
+"""Collect a real VLA/LIBERO trajectory and imagine from one point with Ctrl-World.
 
-This script tests the Ctrl-World world model in a **closed-loop** setting,
-matching the imagination rollout in ds_wm_discrete_diffusion.py:
+The real trajectory is collected first.  Before ``start_index`` the world model
+uses real image/action history.  Afterwards each predicted WM image is sent to
+VLA, and the resulting raw VLA actions condition the next WM prediction.
 
-Default trajectory-imagination mode:
-
-1. Collect a complete real trajectory with VLA observing LIBERO.
-2. Select start_index and use only the real prefix as WM history.
-3. At each imagination chunk:
-   a. Decode the current predicted latent to camera images.
-   b. Query VLA from those WM images.
-   c. Feed the queried unnormalised actions to Ctrl-World.
-4. Compare the imagined trajectory with the original real trajectory.
-
-No pre-collected future action trajectory is fed to the WM.
-The optional action-matched-live mode also applies imagined actions to LIBERO.
+Default usage:
+    CUDA_VISIBLE_DEVICES=0 python tests_dsj/test_ctrl_world_wm_closed_loop_predict.py
 """
 from __future__ import annotations
-'''
-example: CUDA_VISIBLE_DEVICES=0 python tests_dsj/test_ctrl_world_wm_closed_loop_predict.py --ckpt-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-20000.pt --condition-stat-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json --svd-model-path /mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model --clip-model-path /mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model --num-cams 2 --height 192 --width 320 --num-history 6 --chunk-frames 5 --num-chunks 8 --stride 4 --history-stride 1 --start-index 28 --device cuda --dtype bf16
-'''
+
 import argparse
 import json
 import os
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
+import imageio.v2 as imageio
 import numpy as np
 import torch
+import torch.nn.functional as F
+from PIL import Image, ImageDraw
 
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
+from libero.libero import benchmark  # noqa: E402
+
+from ctrl_world.config import wm_args  # noqa: E402
+from ctrl_world.models.ctrl_world import CrtlWorld  # noqa: E402
+from ctrl_world.models.pipeline_ctrl_world import CtrlWorldDiffusionPipeline  # noqa: E402
 from experiments.robot.libero.libero_utils import (  # noqa: E402
     GenerateConfig,
     get_libero_dummy_action,
     get_libero_env,
+    get_libero_image,
+    get_libero_wrist_image,
+    quat2axisangle,
 )
 from experiments.robot.openvla_utils import resize_image_for_policy  # noqa: E402
+from experiments.robot.robot_utils import (  # noqa: E402
+    invert_gripper_action,
+    normalize_gripper_action,
+)
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK  # noqa: E402
 from rl.actor_critic_model_discrete import ActorCritic  # noqa: E402
 from rl.utils import prepare_one_obs  # noqa: E402
 
-from test_ctrl_world_libero_prediction import (  # noqa: E402
-    compute_metrics,
-    decode_stacked_latents,
-    encode_views_to_stacked_latents,
-    get_task,
-    load_ctrl_world_model,
-    make_comparison_video,
-    resize_uint8_video,
-    torch_dtype,
-    write_video,
+
+BENCHMARK = "libero_spatial"
+VLA_CHECKPOINT = (
+    "/mnt/data/lcx3/checkpoint/dsj/"
+    "openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0"
+    "--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
 )
-from test_ctrl_world_libero_replay_style_autoregressive import (  # noqa: E402
-    parse_history_idx,
-    predict_chunk_latents,
+VLA_CHECKPOINT2 = "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt"
+DEFAULT_WM_CHECKPOINT = (
+    "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/"
+    "2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-20000.pt"
 )
-from test_ctrl_world_libero_vla_replay_style_autoregressive import (  # noqa: E402
-    camera_frames_from_raw_obs,
-    get_initial_state,
-    load_vla_actor,
-    prepare_vla_observation,
-    process_vla_action_for_env,
-)
+SVD_MODEL = "/mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model"
+CLIP_MODEL = "/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model"
+DEFAULT_OUTPUT = "/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_wm_closed_loop_eval"
 
+HEIGHT = 192
+WIDTH = 320
+NUM_CAMS = 2
+NUM_HISTORY = 6
+CHUNK_FRAMES = 5
+STRIDE = CHUNK_FRAMES - 1
+NUM_INFERENCE_STEPS = 50
+DTYPE = torch.bfloat16
 
-# ================================================================
-# Data structure
-# ================================================================
-
-@dataclass
-class ClosedLoopSummary:
-    evaluation_mode: str
-    benchmark: str
-    task_id: int
-    task_name: str
-    instruction: str
-    initial_state_id: int
-    vla_pretrained_checkpoint: str
-    vla_checkpoint2: Optional[str]
-    vla_unnorm_key: str
-    checkpoint: str
-    output_dir: str
-    num_history: int
-    chunk_frames: int
-    num_chunks: int
-    stride: int
-    history_stride: Optional[int]
-    history_idx: Optional[List[int]]
-    total_pred_frames: int
-    rollout_steps: int
-    rollout_done: bool
-    rollout_success: bool
-    num_cams: int
-    height: int
-    width: int
-    metrics: Dict[str, Any]
-    videos: Dict[str, str]
-
-
-# ================================================================
-# Argument parsing
-# ================================================================
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Closed-loop Ctrl-World WM prediction with VLA policy actions."
-    )
-
-    # --- Task / environment ---
-    parser.add_argument("--benchmark", type=str, default="libero_spatial")
-    parser.add_argument("--task-id", type=int, default=0)
-    parser.add_argument("--initial-state-id", type=int, default=0)
-    parser.add_argument("--num-steps-wait", type=int, default=10)
-    parser.add_argument(
-        "--evaluation-mode",
-        choices=["trajectory-imagination", "action-matched-live"],
-        default="trajectory-imagination",
-        help=(
-            "trajectory-imagination first records a real VLA/LIBERO trajectory, then "
-            "imagines from start-index using VLA actions queried from WM images. "
-            "action-matched-live applies each imagined action to LIBERO as well."
-        ),
-    )
-
-    # --- VLA policy ---
-    parser.add_argument(
-        "--vla-pretrained-checkpoint",
-        type=str,
-        default="/mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt",
-        help="OpenVLA/ActorCritic pretrained checkpoint directory.",
-    )
-    parser.add_argument("--vla-checkpoint2", type=str, default="/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt")
-    parser.add_argument("--no-vla-checkpoint2", action="store_true")
-    parser.add_argument("--vla-unnorm-key", type=str, default=None)
-    parser.add_argument("--vla-dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
-    parser.add_argument("--vla-use-proprio", action="store_true", default=False)
-    parser.add_argument("--vla-num-images-in-input", type=int, default=1)
-    parser.add_argument("--vla-center-crop", action="store_true", default=True)
-    parser.add_argument("--no-vla-center-crop", action="store_false", dest="vla_center_crop")
-    parser.add_argument("--vla-deterministic", action="store_true", default=True)
-    parser.add_argument("--vla-stochastic", action="store_false", dest="vla_deterministic")
-    parser.add_argument("--vla-open-loop-steps", type=int, default=NUM_ACTIONS_CHUNK)
-
-    # --- Ctrl-World WM ---
-    parser.add_argument(
-        "--ckpt-path",
-        type=str,
-        default="/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-03T16-55-44_libero_spatial/checkpoint-100000.pt",
-    )
-    parser.add_argument("--svd-model-path", type=str, default="/mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model")
-    parser.add_argument("--clip-model-path", type=str, default="/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model")
-    parser.add_argument(
-        "--stat-path",
-        type=str,
-        default="/mnt/data/lcx3/dataset/dateset_meta_info/spatial/stat.json",
-        help="Legacy state-stat path kept for CLI compatibility; raw-action inference uses --condition-stat-path.",
-    )
-    parser.add_argument(
-        "--condition-stat-path",
-        type=str,
-        default=None,
-        help="Action condition statistics. Defaults to condition_stat.json next to --ckpt-path.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="/mnt/data/lcx3/AcceRL/tests_dsj/ctrl_world_wm_closed_loop_eval",
-    )
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
-    parser.add_argument("--num-inference-steps", type=int, default=50)
-    parser.add_argument("--height", type=int, default=192)
-    parser.add_argument("--width", type=int, default=320)
-    parser.add_argument("--num-cams", type=int, default=2)
-    parser.add_argument("--num-history", type=int, default=6)
-    parser.add_argument("--chunk-frames", type=int, default=5)
-    parser.add_argument("--num-chunks", type=int, default=8)
-    parser.add_argument("--stride", type=int, default=4)
-    parser.add_argument(
-        "--history-stride",
-        type=int,
-        default=1,
-        help=(
-            "Training-aligned contiguous history stride (matches rollout_replay_traj_accerl_pt.py). "
-            "When set, --history-idx is ignored."
-        ),
-    )
-    parser.add_argument(
-        "--no-history-stride",
-        action="store_true",
-        help="Use legacy sparse --history-idx buffering instead of --history-stride.",
-    )
-    parser.add_argument(
-        "--history-idx",
-        type=str,
-        default="0,0,-8,-6,-4,-2",
-        help="Legacy sparse history buffer indices; only used with --no-history-stride.",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task-id", type=int, default=9)
+    parser.add_argument("--initial-state-id", type=int, default=20)
     parser.add_argument("--start-index", type=int, default=28)
+    parser.add_argument("--num-chunks", type=int, default=16)
+    parser.add_argument("--checkpoint", default=DEFAULT_WM_CHECKPOINT)
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--fps", type=int, default=5)
-    parser.add_argument(
-        "--rotate-libero-images",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Rotate LIBERO images by 180 degrees, matching the WM training dataset.",
-    )
-    parser.add_argument("--keep-model-loaded-only", action="store_true")
     return parser.parse_args()
 
 
-# ================================================================
-# Core: closed-loop prediction helpers
-# ================================================================
+def get_task(task_id: int):
+    suite = benchmark.get_benchmark_dict()[BENCHMARK]()
+    if not 0 <= task_id < suite.n_tasks:
+        raise ValueError(f"task-id must be in [0, {suite.n_tasks - 1}]")
+    return suite.get_task(task_id), suite
 
-@torch.no_grad()
-def decode_latent_to_images(
-    model,
-    latent: torch.Tensor,
-    num_cams: int,
-    height: int,
-    width: int,
-) -> List[np.ndarray]:
-    """Decode a single latent frame to per-camera uint8 images.
 
-    Args:
-        latent: [4, latent_h*num_cams, latent_w] — single frame latent.
-        num_cams: number of cameras.
-        height, width: target image resolution.
-
-    Returns:
-        List of ``num_cams`` uint8 arrays, each [H, W, C].
-    """
-    videos = decode_stacked_latents(
-        model,
-        latent.unsqueeze(0),          # [1, 4, h, w]
-        num_cams=num_cams,
-        height=height,
-        width=width,
-        chunk_size=1,
+def load_vla(device: str, seed: int) -> Tuple[ActorCritic, GenerateConfig]:
+    cfg = GenerateConfig(
+        pretrained_checkpoint=VLA_CHECKPOINT,
+        checkpoint2=VLA_CHECKPOINT2,
+        use_l1_regression=False,
+        use_diffusion=False,
+        use_film=False,
+        num_images_in_input=1,
+        use_proprio=False,
+        load_in_8bit=False,
+        load_in_4bit=False,
+        center_crop=True,
+        num_open_loop_steps=NUM_ACTIONS_CHUNK,
+        unnorm_key=f"{BENCHMARK}_no_noops",
+        task_suite_name=BENCHMARK,
+        num_steps_wait=10,
+        use_lora=True,
+        lora_rank=32,
+        lora_dropout=0.0,
+        seed=seed,
     )
-    return [v[0] for v in videos]      # each [H, W, C]
+    actor = ActorCritic(cfg, torch_dtype=DTYPE).to(device).eval()
+    if cfg.unnorm_key not in actor.vla.norm_stats:
+        for key in (BENCHMARK, f"{BENCHMARK}_no_noops"):
+            if key in actor.vla.norm_stats:
+                cfg.unnorm_key = key
+                actor.cfg.unnorm_key = key
+                break
+        else:
+            raise KeyError(f"No VLA normalization key for {BENCHMARK}")
+    return actor, cfg
 
 
-@torch.no_grad()
-def query_vla_on_predicted_images(
-    actor: ActorCritic,
-    cfg: GenerateConfig,
-    images: List[np.ndarray],
-    instruction: str,
-    vla_dtype: torch.dtype,
-    deterministic: bool,
-    resize_size: int = 224,
-) -> np.ndarray:
-    """Query the VLA policy on WM-predicted images.
+def load_world_model(checkpoint: str, device: str) -> CrtlWorld:
+    cfg = wm_args(task_type="replay")
+    cfg.svd_model_path = SVD_MODEL
+    cfg.clip_model_path = CLIP_MODEL
+    cfg.ckpt_path = checkpoint
+    cfg.val_model_path = checkpoint
+    cfg.num_cams = NUM_CAMS
+    cfg.height = HEIGHT
+    cfg.width = WIDTH
+    cfg.num_history = NUM_HISTORY
+    cfg.num_frames = CHUNK_FRAMES
+    cfg.num_inference_steps = NUM_INFERENCE_STEPS
+    cfg.dtype = DTYPE
 
-    This mirrors the training code's ``infer.request(inputs_t)`` call:
-    the VLA sees the predicted observation and outputs actions.
+    model = CrtlWorld(cfg)
+    model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    return model.to(device).to(DTYPE).eval()
 
-    Args:
-        images: list of ``num_cams`` uint8 arrays [H, W, C].
-                images[0] = agentview, images[1] = wrist (if num_cams > 1).
 
-    Returns:
-        actions_unnorm: [NUM_ACTIONS_CHUNK, ACTION_DIM] unnormalised actions.
-    """
-    agentview = images[0]
-    wrist = images[1] if len(images) > 1 else agentview
+def load_action_stats(checkpoint: str) -> Tuple[np.ndarray, np.ndarray]:
+    path = Path(checkpoint).resolve().parent / "condition_stat.json"
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    low = np.asarray(data["condition_p01"], dtype=np.float32)[None]
+    high = np.asarray(data["condition_p99"], dtype=np.float32)[None]
+    if low.shape != (1, ACTION_DIM) or high.shape != (1, ACTION_DIM):
+        raise ValueError(f"Invalid action stats in {path}")
+    print(f"[ctrl-world] action stats: {path}")
+    return low, high
 
-    img = resize_image_for_policy(agentview, resize_size)
-    wrist_img = resize_image_for_policy(wrist, resize_size)
 
-    # use_proprio is False by default, so state is ignored; provide a dummy.
-    observation = {
-        "full_image": img,
-        "wrist_image": wrist_img,
+def real_observation(raw_obs: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    """Build VLA input; get_libero_* performs the required 180-degree rotation."""
+    return {
+        "full_image": resize_image_for_policy(get_libero_image(raw_obs), 224),
+        "wrist_image": resize_image_for_policy(get_libero_wrist_image(raw_obs), 224),
+        "state": np.concatenate(
+            (
+                raw_obs["robot0_eef_pos"],
+                quat2axisangle(raw_obs["robot0_eef_quat"]),
+                raw_obs["robot0_gripper_qpos"],
+            )
+        ),
+    }
+
+
+def predicted_observation(images: Sequence[np.ndarray]) -> Dict[str, np.ndarray]:
+    return {
+        "full_image": resize_image_for_policy(images[0], 224),
+        "wrist_image": resize_image_for_policy(images[1], 224),
         "state": np.zeros(ACTION_DIM, dtype=np.float32),
     }
-    inputs_t = prepare_one_obs(cfg, actor.processor, observation, instruction, vla_dtype)
-    inputs_batch = actor.prepare_inputs_batch([inputs_t])
-    action_logits, _ = actor(inputs_batch)
-    _, _, normalized_actions = actor.post_process(
-        action_logits, deterministic=[deterministic]
-    )
-    actions_unnorm = actor.vla._unnormalize_actions(
-        normalized_actions[0], cfg.unnorm_key
-    )
-    if hasattr(actions_unnorm, "detach"):
-        actions_unnorm = actions_unnorm.detach().cpu().numpy()
-    return np.asarray(actions_unnorm, dtype=np.float32)  # [N, 7]
 
 
 @torch.no_grad()
-def query_vla_on_raw_observation(
+def query_vla(
     actor: ActorCritic,
     cfg: GenerateConfig,
-    raw_obs: Dict[str, Any],
+    observation: Dict[str, np.ndarray],
     instruction: str,
-    vla_dtype: torch.dtype,
-    deterministic: bool,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    observation = prepare_vla_observation(raw_obs, resize_size=224)
-    inputs_t = prepare_one_obs(cfg, actor.processor, observation, instruction, vla_dtype)
-    inputs_batch = actor.prepare_inputs_batch([inputs_t])
-    action_logits, _ = actor(inputs_batch)
-    _, _, normalized_actions = actor.post_process(
-        action_logits,
-        deterministic=[deterministic],
-    )
-    raw_actions = actor.vla._unnormalize_actions(
-        normalized_actions[0],
-        cfg.unnorm_key,
-    )
-    if hasattr(raw_actions, "detach"):
-        raw_actions = raw_actions.detach().cpu().numpy()
-    raw_actions = np.asarray(raw_actions, dtype=np.float32)[: cfg.num_open_loop_steps]
-    env_actions = [process_vla_action_for_env(action) for action in raw_actions]
-    return env_actions, [action.copy() for action in raw_actions]
-
-
-def load_action_condition_stats(
-    condition_stat_path: Optional[str],
-    ckpt_path: str,
-) -> Tuple[np.ndarray, np.ndarray]:
-    candidates = []
-    if condition_stat_path:
-        candidates.append(Path(condition_stat_path))
-    candidates.append(Path(ckpt_path).resolve().parent / "condition_stat.json")
-    stat_path = next((path for path in candidates if path.is_file()), None)
-    if stat_path is None:
-        raise FileNotFoundError(
-            "Raw-action WM inference requires action condition statistics. "
-            f"Tried: {[str(path) for path in candidates]}"
-        )
-
-    with stat_path.open("r", encoding="utf-8") as file:
-        payload = json.load(file)
-    if payload.get("condition_mode") != "action":
-        raise ValueError(
-            f"{stat_path} has condition_mode={payload.get('condition_mode')!r}, "
-            "expected 'action'."
-        )
-    if payload.get("compose_interval_actions") is True:
-        raise ValueError(
-            f"{stat_path} is for composed interval actions, but this script uses "
-            "single-step unnormalised VLA actions as WM condition."
-        )
-    if "condition_p01" not in payload or "condition_p99" not in payload:
-        raise KeyError(f"{stat_path} must contain condition_p01 and condition_p99")
-
-    p01 = np.asarray(payload["condition_p01"], dtype=np.float32)[None, :]
-    p99 = np.asarray(payload["condition_p99"], dtype=np.float32)[None, :]
-    if p01.shape != (1, ACTION_DIM) or p99.shape != (1, ACTION_DIM):
-        raise ValueError(
-            f"Expected action condition stats shape {(1, ACTION_DIM)}, "
-            f"got p01={p01.shape}, p99={p99.shape}"
-        )
-    print(f"[ctrl-world] action condition stats: {stat_path}")
-    return p01, p99
-
-
-def build_frame_aligned_future_actions(
-    current_action: np.ndarray,
-    actions_unnorm: np.ndarray,
-    num_frames: int,
 ) -> np.ndarray:
-    """Build actions aligned to predicted frames [current, ..., current+F-1].
-
-    The training data stores action[t] as the action that produced frame[t].
-    Therefore the current frame uses the already-known current_action, while
-    VLA actions queried from the current image condition frames t+1 onward.
-    """
-    actions = np.asarray(actions_unnorm, dtype=np.float32)
-    if actions.ndim != 2 or actions.shape[-1] != ACTION_DIM:
-        raise ValueError(f"Expected VLA actions shape [N,{ACTION_DIM}], got {actions.shape}")
-    current = np.asarray(current_action, dtype=np.float32).reshape(1, ACTION_DIM)
-    if num_frames == 1:
-        return current
-    if actions.shape[0] == 0:
-        next_actions = np.repeat(current, num_frames - 1, axis=0)
-    else:
-        next_actions = actions[: num_frames - 1]
-        if next_actions.shape[0] < num_frames - 1:
-            pad = np.repeat(next_actions[-1:], num_frames - 1 - next_actions.shape[0], axis=0)
-            next_actions = np.concatenate([next_actions, pad], axis=0)
-    return np.concatenate([current, next_actions], axis=0).astype(np.float32)
+    inputs = prepare_one_obs(cfg, actor.processor, observation, instruction, DTYPE)
+    logits, _ = actor(actor.prepare_inputs_batch([inputs]))
+    _, _, normalized = actor.post_process(logits, deterministic=[True])
+    actions = actor.vla._unnormalize_actions(normalized[0], cfg.unnorm_key)
+    if hasattr(actions, "detach"):
+        actions = actions.detach().cpu().numpy()
+    return np.asarray(actions, dtype=np.float32)
 
 
-def frame_aligned_reference_actions(
-    step_unnormalized: Sequence[np.ndarray],
-    num_frames: int,
-) -> np.ndarray:
-    """Build reference actions used only to seed the real-history prefix."""
-    aligned = np.zeros((num_frames, ACTION_DIM), dtype=np.float32)
-    if len(step_unnormalized) == 0:
-        return aligned
-    for frame_idx in range(1, num_frames):
-        src = min(frame_idx - 1, len(step_unnormalized) - 1)
-        aligned[frame_idx] = np.asarray(step_unnormalized[src], dtype=np.float32)
-    return aligned
+def process_action_for_env(action: np.ndarray) -> np.ndarray:
+    action = normalize_gripper_action(action.astype(np.float32).copy(), binarize=True)
+    return invert_gripper_action(action).astype(np.float32)
 
 
-def _init_history_stride_buffers(
-    stacked_gt_latents: torch.Tensor,
-    reference_actions: np.ndarray,
-    start_index: int,
-    num_history: int,
-    history_stride: int,
-) -> Tuple[List[torch.Tensor], List[np.ndarray], int]:
-    history_span = int(num_history) * int(history_stride)
-    if start_index < history_span:
-        raise ValueError(
-            f"--start-index {start_index} must be >= num_history * history_stride "
-            f"({history_span}) when using --history-stride."
-        )
-    latent_buffer = [stacked_gt_latents[i : i + 1] for i in range(start_index + 1)]
-    action_buffer = [reference_actions[i : i + 1] for i in range(start_index + 1)]
-    return latent_buffer, action_buffer, history_span
-
-
-def _history_lags(num_history: int, history_stride: int) -> List[int]:
-    return list(range(int(num_history) * int(history_stride), 0, -int(history_stride)))
-
-
-def _predict_and_update_chunk(
-    model,
-    actor: ActorCritic,
-    vla_cfg: GenerateConfig,
-    vla_dtype: torch.dtype,
-    current_latent: torch.Tensor,
-    history: torch.Tensor,
-    history_action: np.ndarray,
-    current_action: np.ndarray,
-    action_01: np.ndarray,
-    action_99: np.ndarray,
-    instruction: str,
-    args: argparse.Namespace,
-) -> Tuple[torch.Tensor, np.ndarray]:
-    images = decode_latent_to_images(
-        model,
-        current_latent,
-        num_cams=args.num_cams,
-        height=args.height,
-        width=args.width,
-    )
-    actions_unnorm = query_vla_on_predicted_images(
-        actor=actor,
-        cfg=vla_cfg,
-        images=images,
-        instruction=instruction,
-        vla_dtype=vla_dtype,
-        deterministic=args.vla_deterministic,
-    )
-    frame_actions = build_frame_aligned_future_actions(
-        current_action=current_action,
-        actions_unnorm=actions_unnorm,
-        num_frames=args.chunk_frames,
-    )
-    raw_action_cond = np.concatenate([history_action, frame_actions], axis=0).astype(np.float32)
-    pred_chunk = predict_chunk_latents(
-        model=model,
-        current_latent=current_latent.unsqueeze(0),
-        history=history,
-        raw_action_cond=raw_action_cond,
-        state_01=action_01,
-        state_99=action_99,
-        instruction=instruction,
-        args=args,
-    )
-    return pred_chunk, frame_actions
+def rotated_camera_frames(raw_obs: Dict[str, Any]) -> List[np.ndarray]:
+    return [
+        np.asarray(get_libero_image(raw_obs), dtype=np.uint8).copy(),
+        np.asarray(get_libero_wrist_image(raw_obs), dtype=np.uint8).copy(),
+    ]
 
 
 @torch.no_grad()
-def closed_loop_history_stride_predict(
-    model,
+def collect_real_trajectory(
     actor: ActorCritic,
-    vla_cfg: GenerateConfig,
-    vla_dtype: torch.dtype,
-    stacked_gt_latents: torch.Tensor,
-    reference_actions: np.ndarray,
-    action_01: np.ndarray,
-    action_99: np.ndarray,
-    instruction: str,
-    args: argparse.Namespace,
-) -> Tuple[torch.Tensor, List[int], np.ndarray]:
-    """Closed-loop prediction with training-aligned contiguous history."""
-    history_lags = _history_lags(args.num_history, args.history_stride)
-    latent_buffer, action_buffer, _history_span = _init_history_stride_buffers(
-        stacked_gt_latents=stacked_gt_latents,
-        reference_actions=reference_actions,
-        start_index=args.start_index,
-        num_history=args.num_history,
-        history_stride=args.history_stride,
-    )
-
-    pred_segments: List[torch.Tensor] = []
-    output_frame_indices: List[int] = []
-    interactive_action_chunks: List[np.ndarray] = []
-
-    for chunk_id in range(args.num_chunks):
-        start_id = chunk_id * args.stride
-        history_action = np.concatenate([action_buffer[-1 - lag] for lag in history_lags], axis=0)
-        history = torch.cat([latent_buffer[-1 - lag] for lag in history_lags], dim=0).unsqueeze(0)
-        current_latent = latent_buffer[-1][0]
-        current_action = action_buffer[-1][0]
-
-        print(
-            f"[closed-loop] chunk {chunk_id + 1}/{args.num_chunks}: "
-            f"history_stride={args.history_stride}, history_lags={history_lags}, "
-            f"start_index={args.start_index + start_id}"
-        )
-        pred_chunk, frame_actions = _predict_and_update_chunk(
-            model=model,
-            actor=actor,
-            vla_cfg=vla_cfg,
-            vla_dtype=vla_dtype,
-            current_latent=current_latent,
-            history=history,
-            history_action=history_action,
-            current_action=current_action,
-            action_01=action_01,
-            action_99=action_99,
-            instruction=instruction,
-            args=args,
-        )
-
-        take = args.chunk_frames if chunk_id == args.num_chunks - 1 else args.stride
-        pred_segments.append(pred_chunk[:take])
-        output_frame_indices.extend(range(start_id, start_id + take))
-        interactive_action_chunks.append(frame_actions[1:].copy())
-
-        for rel_idx in range(1, int(args.chunk_frames)):
-            latent_buffer.append(pred_chunk[rel_idx : rel_idx + 1])
-            action_buffer.append(frame_actions[rel_idx : rel_idx + 1])
-
-    return (
-        torch.cat(pred_segments, dim=0),
-        output_frame_indices,
-        np.concatenate(interactive_action_chunks, axis=0),
-    )
-
-
-@torch.no_grad()
-def closed_loop_autoregressive_predict(
-    model,
-    actor: ActorCritic,
-    vla_cfg: GenerateConfig,
-    vla_dtype: torch.dtype,
-    stacked_gt_latents: torch.Tensor,
-    reference_actions: np.ndarray,
-    action_01: np.ndarray,
-    action_99: np.ndarray,
-    instruction: str,
-    args: argparse.Namespace,
-    history_idx: Sequence[int],
-) -> Tuple[torch.Tensor, List[int], np.ndarray]:
-    """Closed-loop prediction with legacy sparse history_idx buffering."""
-    base = args.start_index
-    first_latent = stacked_gt_latents[base : base + 1]
-
-    history_buffer_len = args.num_history * 4
-    history_latents: List[torch.Tensor] = [first_latent] * history_buffer_len
-    history_actions: List[np.ndarray] = [reference_actions[base : base + 1]] * history_buffer_len
-    current_latent = first_latent[0]
-
-    pred_segments: List[torch.Tensor] = []
-    output_frame_indices: List[int] = []
-    interactive_action_chunks: List[np.ndarray] = []
-
-    for chunk_id in range(args.num_chunks):
-        start_id = chunk_id * args.stride
-
-        history_part = np.concatenate([history_actions[idx] for idx in history_idx], axis=0)
-        history = torch.cat([history_latents[idx] for idx in history_idx], dim=0).unsqueeze(0)
-
-        print(
-            f"[closed-loop] chunk {chunk_id + 1}/{args.num_chunks}: "
-            f"history_idx={list(history_idx)}, start_index={base + start_id}"
-        )
-        current_action = history_actions[-1][0]
-        pred_chunk, frame_actions = _predict_and_update_chunk(
-            model=model,
-            actor=actor,
-            vla_cfg=vla_cfg,
-            vla_dtype=vla_dtype,
-            current_latent=current_latent,
-            history=history,
-            history_action=history_part,
-            current_action=current_action,
-            action_01=action_01,
-            action_99=action_99,
-            instruction=instruction,
-            args=args,
-        )
-
-        take = args.chunk_frames if chunk_id == args.num_chunks - 1 else args.stride
-        pred_segments.append(pred_chunk[:take])
-        output_frame_indices.extend(range(start_id, start_id + take))
-        interactive_action_chunks.append(frame_actions[1:].copy())
-
-        for rel_idx in range(1, int(args.chunk_frames)):
-            history_latents.append(pred_chunk[rel_idx : rel_idx + 1])
-            history_actions.append(frame_actions[rel_idx : rel_idx + 1])
-        current_latent = pred_chunk[int(args.chunk_frames) - 1]
-
-    return (
-        torch.cat(pred_segments, dim=0),
-        output_frame_indices,
-        np.concatenate(interactive_action_chunks, axis=0),
-    )
-
-
-@torch.no_grad()
-def collect_real_vla_trajectory(
-    actor: ActorCritic,
-    vla_cfg: GenerateConfig,
-    vla_dtype: torch.dtype,
+    cfg: GenerateConfig,
     task: Any,
-    task_suite: Any,
+    suite: Any,
     instruction: str,
     total_frames: int,
     args: argparse.Namespace,
-) -> Tuple[List[List[np.ndarray]], np.ndarray, np.ndarray, bool, bool]:
-    """Collect an independent real trajectory with VLA observing LIBERO."""
-    env, _ = get_libero_env(task, vla_cfg.model_family, resolution=256)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-
+) -> Tuple[List[List[np.ndarray]], np.ndarray, np.ndarray, bool]:
+    env, _ = get_libero_env(task, cfg.model_family, resolution=256)
     raw_obs = env.reset()
-    initial_state = get_initial_state(task_suite, args.task_id, args.initial_state_id)
-    if initial_state is not None:
-        raw_obs = env.set_init_state(initial_state)
-    for _ in range(args.num_steps_wait):
-        raw_obs, _, _, _ = env.step(get_libero_dummy_action(vla_cfg.model_family))
+    initial_states = suite.get_task_init_states(args.task_id)
+    if not 0 <= args.initial_state_id < len(initial_states):
+        raise ValueError(f"initial-state-id must be in [0, {len(initial_states) - 1}]")
+    raw_obs = env.set_init_state(initial_states[args.initial_state_id])
+    for _ in range(10):
+        raw_obs, _, _, _ = env.step(get_libero_dummy_action(cfg.model_family))
 
-    frames: List[List[np.ndarray]] = [
-        camera_frames_from_raw_obs(raw_obs, rotate=args.rotate_libero_images)
-    ]
+    frames = [rotated_camera_frames(raw_obs)]
     raw_actions: List[np.ndarray] = []
     env_actions: List[np.ndarray] = []
-    action_queue = deque()
+    queue = deque()
     done = False
-    success = False
-
     try:
         while len(frames) < total_frames:
             if done:
@@ -662,454 +246,336 @@ def collect_real_vla_trajectory(
                     else np.zeros(ACTION_DIM, dtype=np.float32)
                 )
                 continue
-            if not action_queue:
-                env_batch, raw_batch = query_vla_on_raw_observation(
-                    actor=actor,
-                    cfg=vla_cfg,
-                    raw_obs=raw_obs,
-                    instruction=instruction,
-                    vla_dtype=vla_dtype,
-                    deterministic=args.vla_deterministic,
-                )
-                action_queue.extend(zip(env_batch, raw_batch))
-
-            env_action, raw_action = action_queue.popleft()
-            raw_obs, _, done, info = env.step(env_action.tolist())
-            success = bool(info.get("is_success", done))
-            env_actions.append(np.asarray(env_action, dtype=np.float32))
-            raw_actions.append(np.asarray(raw_action, dtype=np.float32))
-            frames.append(
-                camera_frames_from_raw_obs(
-                    raw_obs,
-                    rotate=args.rotate_libero_images,
-                )
-            )
+            if not queue:
+                queue.extend(query_vla(actor, cfg, real_observation(raw_obs), instruction))
+            raw_action = np.asarray(queue.popleft(), dtype=np.float32)
+            env_action = process_action_for_env(raw_action)
+            raw_obs, _, done, _ = env.step(env_action.tolist())
+            raw_actions.append(raw_action)
+            env_actions.append(env_action)
+            frames.append(rotated_camera_frames(raw_obs))
     finally:
         env.close()
 
     return (
         frames,
-        np.stack(raw_actions, axis=0),
-        np.stack(env_actions, axis=0)
-        if env_actions
-        else np.zeros((0, ACTION_DIM), dtype=np.float32),
+        np.stack(raw_actions),
+        np.stack(env_actions) if env_actions else np.zeros((0, ACTION_DIM), np.float32),
         done,
-        success,
+    )
+
+
+def resize_video(frames: Sequence[np.ndarray]) -> np.ndarray:
+    tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float()
+    tensor = F.interpolate(tensor, size=(HEIGHT, WIDTH), mode="bilinear", align_corners=False)
+    return tensor.clamp(0, 255).byte().permute(0, 2, 3, 1).numpy()
+
+
+@torch.no_grad()
+def encode_frames(
+    model: CrtlWorld,
+    frames: Sequence[List[np.ndarray]],
+    device: str,
+) -> torch.Tensor:
+    per_camera = []
+    for camera in range(NUM_CAMS):
+        video = resize_video([frame[camera] for frame in frames])
+        pixels = torch.from_numpy(video).permute(0, 3, 1, 2).to(device, DTYPE)
+        pixels = pixels / 255.0 * 2.0 - 1.0
+        chunks = []
+        for start in range(0, len(pixels), 8):
+            latent = model.pipeline.vae.encode(pixels[start : start + 8]).latent_dist.sample()
+            chunks.append(latent * model.pipeline.vae.config.scaling_factor)
+        per_camera.append(torch.cat(chunks))
+    return torch.cat(per_camera, dim=2)
+
+
+@torch.no_grad()
+def decode_latents(model: CrtlWorld, latents: torch.Tensor) -> List[np.ndarray]:
+    latent_height = HEIGHT // 8
+    videos = []
+    for camera in range(NUM_CAMS):
+        camera_latents = latents[
+            :,
+            :,
+            camera * latent_height : (camera + 1) * latent_height,
+            :,
+        ]
+        decoded = []
+        for start in range(0, len(camera_latents), CHUNK_FRAMES):
+            chunk = camera_latents[start : start + CHUNK_FRAMES]
+            chunk = chunk / model.pipeline.vae.config.scaling_factor
+            decoded.append(model.pipeline.vae.decode(chunk, num_frames=len(chunk)).sample)
+        video = ((torch.cat(decoded) / 2.0 + 0.5).clamp(0, 1) * 255).byte()
+        videos.append(video.permute(0, 2, 3, 1).cpu().numpy())
+    return videos
+
+
+def frame_aligned_real_actions(step_actions: np.ndarray, num_frames: int) -> np.ndarray:
+    aligned = np.zeros((num_frames, ACTION_DIM), dtype=np.float32)
+    aligned[1:] = step_actions[: num_frames - 1]
+    return aligned
+
+
+def frame_aligned_imagination_actions(
+    current_action: np.ndarray,
+    queried_actions: np.ndarray,
+) -> np.ndarray:
+    return np.concatenate(
+        [
+            np.asarray(current_action, dtype=np.float32).reshape(1, ACTION_DIM),
+            np.asarray(queried_actions[:STRIDE], dtype=np.float32),
+        ],
+        axis=0,
     )
 
 
 @torch.no_grad()
-def run_live_closed_loop(
-    model,
-    actor: ActorCritic,
-    vla_cfg: GenerateConfig,
-    vla_dtype: torch.dtype,
-    task: Any,
-    task_suite: Any,
+def predict_chunk(
+    model: CrtlWorld,
+    current: torch.Tensor,
+    history: torch.Tensor,
+    actions: np.ndarray,
+    low: np.ndarray,
+    high: np.ndarray,
     instruction: str,
-    action_01: np.ndarray,
-    action_99: np.ndarray,
+    device: str,
+) -> torch.Tensor:
+    normalized = 2.0 * (actions - low) / (high - low + 1e-8) - 1.0
+    normalized = np.clip(normalized, -1.0, 1.0).astype(np.float32)
+    action_dtype = model.action_encoder.action_encode[0].weight.dtype
+    action_tensor = torch.from_numpy(normalized).unsqueeze(0).to(device, action_dtype)
+    if model.args.text_cond:
+        text = model.action_encoder(
+            action_tensor,
+            [instruction],
+            model.tokenizer,
+            model.text_encoder,
+        )
+    else:
+        text = model.action_encoder(action_tensor)
+
+    _, latents = CtrlWorldDiffusionPipeline.__call__(
+        model.pipeline,
+        image=current,
+        text=text,
+        width=WIDTH,
+        height=HEIGHT * NUM_CAMS,
+        num_frames=CHUNK_FRAMES,
+        history=history,
+        num_inference_steps=NUM_INFERENCE_STEPS,
+        decode_chunk_size=CHUNK_FRAMES,
+        max_guidance_scale=1.0,
+        fps=7,
+        motion_bucket_id=127,
+        output_type="latent",
+        return_dict=False,
+        frame_level_cond=True,
+    )
+    return latents[0]
+
+
+@torch.no_grad()
+def imagine(
+    model: CrtlWorld,
+    actor: ActorCritic,
+    cfg: GenerateConfig,
+    warmup_latents: torch.Tensor,
+    real_actions: np.ndarray,
+    instruction: str,
+    low: np.ndarray,
+    high: np.ndarray,
     args: argparse.Namespace,
-) -> Tuple[torch.Tensor, List[List[np.ndarray]], np.ndarray, np.ndarray, bool, bool]:
-    """Run one synchronized WM/VLA/LIBERO closed loop.
-
-    Before start_index, VLA acts on real LIBERO observations to build real WM
-    history. After start_index, VLA sees only the current WM-decoded image.
-    Each online VLA action is then supplied to both WM and LIBERO, so the
-    resulting simulator frames are a valid action-matched reference.
-    """
-    env, _ = get_libero_env(task, vla_cfg.model_family, resolution=256)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-
-    raw_obs = env.reset()
-    initial_state = get_initial_state(task_suite, args.task_id, args.initial_state_id)
-    if initial_state is not None:
-        raw_obs = env.set_init_state(initial_state)
-    for _ in range(args.num_steps_wait):
-        raw_obs, _, _, _ = env.step(get_libero_dummy_action(vla_cfg.model_family))
-
-    warmup_frames: List[List[np.ndarray]] = [
-        camera_frames_from_raw_obs(raw_obs, rotate=args.rotate_libero_images)
+) -> Tuple[torch.Tensor, np.ndarray]:
+    action_buffer = [
+        real_actions[index : index + 1]
+        for index in range(args.start_index + 1)
     ]
-    warmup_raw_actions: List[np.ndarray] = []
-    executed_env_actions: List[np.ndarray] = []
-    warmup_queue = deque()
-    done = False
-    success = False
+    latent_buffer = [
+        warmup_latents[index : index + 1]
+        for index in range(args.start_index + 1)
+    ]
+    history_lags = list(range(NUM_HISTORY, 0, -1))
+    segments = []
+    imagined_actions = []
 
-    try:
-        while len(warmup_frames) <= args.start_index:
-            if not warmup_queue:
-                env_batch, wm_batch = query_vla_on_raw_observation(
-                    actor=actor,
-                    cfg=vla_cfg,
-                    raw_obs=raw_obs,
-                    instruction=instruction,
-                    vla_dtype=vla_dtype,
-                    deterministic=args.vla_deterministic,
-                )
-                warmup_queue.extend(zip(env_batch, wm_batch))
-
-            env_action, raw_action = warmup_queue.popleft()
-            if not done:
-                raw_obs, _, done, info = env.step(env_action.tolist())
-                success = bool(info.get("is_success", done))
-            executed_env_actions.append(np.asarray(env_action, dtype=np.float32))
-            warmup_raw_actions.append(np.asarray(raw_action, dtype=np.float32))
-            warmup_frames.append(
-                camera_frames_from_raw_obs(raw_obs, rotate=args.rotate_libero_images)
-            )
-
-        stacked_warmup_latents = encode_views_to_stacked_latents(
+    for chunk_id in range(args.num_chunks):
+        history = torch.cat(
+            [latent_buffer[-1 - lag] for lag in history_lags]
+        ).unsqueeze(0)
+        history_actions = np.concatenate(
+            [action_buffer[-1 - lag] for lag in history_lags]
+        )
+        current = latent_buffer[-1][0]
+        current_images = [
+            video[0] for video in decode_latents(model, current.unsqueeze(0))
+        ]
+        queried = query_vla(
+            actor,
+            cfg,
+            predicted_observation(current_images),
+            instruction,
+        )
+        frame_actions = frame_aligned_imagination_actions(
+            action_buffer[-1][0],
+            queried,
+        )
+        condition = np.concatenate([history_actions, frame_actions])
+        predicted = predict_chunk(
             model,
-            warmup_frames,
-            height=args.height,
-            width=args.width,
-            dtype=torch_dtype(args.dtype),
-            device=args.device,
-        )
-        reference_actions = frame_aligned_reference_actions(
-            warmup_raw_actions,
-            len(warmup_frames),
-        )
-        history_lags = _history_lags(args.num_history, args.history_stride)
-        latent_buffer, action_buffer, _ = _init_history_stride_buffers(
-            stacked_gt_latents=stacked_warmup_latents,
-            reference_actions=reference_actions,
-            start_index=args.start_index,
-            num_history=args.num_history,
-            history_stride=args.history_stride,
+            current.unsqueeze(0),
+            history,
+            condition,
+            low,
+            high,
+            instruction,
+            args.device,
         )
 
-        pred_segments: List[torch.Tensor] = []
-        interactive_action_chunks: List[np.ndarray] = []
-        live_gt_frames: List[List[np.ndarray]] = [warmup_frames[-1]]
+        take = CHUNK_FRAMES if chunk_id == args.num_chunks - 1 else STRIDE
+        segments.append(predicted[:take])
+        imagined_actions.append(frame_actions[1:])
+        for relative_index in range(1, CHUNK_FRAMES):
+            latent_buffer.append(predicted[relative_index : relative_index + 1])
+            action_buffer.append(frame_actions[relative_index : relative_index + 1])
+        print(f"[imagine] chunk {chunk_id + 1}/{args.num_chunks}")
 
-        for chunk_id in range(args.num_chunks):
-            history_action = np.concatenate(
-                [action_buffer[-1 - lag] for lag in history_lags],
-                axis=0,
-            )
-            history = torch.cat(
-                [latent_buffer[-1 - lag] for lag in history_lags],
-                dim=0,
-            ).unsqueeze(0)
-            current_latent = latent_buffer[-1][0]
-            current_action = action_buffer[-1][0]
+    return torch.cat(segments), np.concatenate(imagined_actions)
 
-            # This is the online interaction point: VLA sees the current WM image.
-            predicted_images = decode_latent_to_images(
-                model,
-                current_latent,
-                num_cams=args.num_cams,
-                height=args.height,
-                width=args.width,
-            )
-            queried_actions = query_vla_on_predicted_images(
-                actor=actor,
-                cfg=vla_cfg,
-                images=predicted_images,
-                instruction=instruction,
-                vla_dtype=vla_dtype,
-                deterministic=args.vla_deterministic,
-            )
-            frame_actions = build_frame_aligned_future_actions(
-                current_action=current_action,
-                actions_unnorm=queried_actions,
-                num_frames=args.chunk_frames,
-            )
 
-            # Apply exactly the same future actions to the real simulator.
-            for raw_action in frame_actions[1:]:
-                env_action = process_vla_action_for_env(raw_action)
-                if not done:
-                    raw_obs, _, done, info = env.step(env_action.tolist())
-                    success = bool(info.get("is_success", done))
-                executed_env_actions.append(env_action)
-                live_gt_frames.append(
-                    camera_frames_from_raw_obs(
-                        raw_obs,
-                        rotate=args.rotate_libero_images,
-                    )
+def metrics(gt: Sequence[np.ndarray], pred: Sequence[np.ndarray]) -> Dict[str, float]:
+    squared_errors = []
+    absolute_errors = []
+    for gt_video, pred_video in zip(gt, pred):
+        error = pred_video.astype(np.float32) / 255.0 - gt_video.astype(np.float32) / 255.0
+        squared_errors.append(np.mean(error**2, axis=(1, 2, 3)))
+        absolute_errors.append(np.mean(np.abs(error), axis=(1, 2, 3)))
+    mse = float(np.mean(np.concatenate(squared_errors)))
+    mae = float(np.mean(np.concatenate(absolute_errors)))
+    return {"mse": mse, "mae": mae, "psnr": float(-10.0 * np.log10(max(mse, 1e-12)))}
+
+
+def label(image: np.ndarray, text: str) -> np.ndarray:
+    pil = Image.fromarray(image)
+    draw = ImageDraw.Draw(pil)
+    draw.rectangle((0, 0, 150, 18), fill=(0, 0, 0))
+    draw.text((4, 3), text, fill=(255, 255, 255))
+    return np.asarray(pil)
+
+
+def comparison_video(gt: Sequence[np.ndarray], pred: Sequence[np.ndarray]) -> np.ndarray:
+    frames = []
+    for index in range(len(pred[0])):
+        camera_rows = []
+        for camera, (gt_video, pred_video) in enumerate(zip(gt, pred)):
+            diff = np.abs(
+                pred_video[index].astype(np.int16) - gt_video[index].astype(np.int16)
+            )
+            diff = np.clip(diff * 3, 0, 255).astype(np.uint8)
+            camera_rows.append(
+                np.concatenate(
+                    [
+                        label(gt_video[index], f"cam{camera} REAL"),
+                        label(pred_video[index], f"cam{camera} IMAGINED"),
+                        label(diff, f"cam{camera} DIFF x3"),
+                    ],
+                    axis=1,
                 )
-
-            raw_action_cond = np.concatenate(
-                [history_action, frame_actions],
-                axis=0,
-            ).astype(np.float32)
-            out_of_stat = np.logical_or(
-                raw_action_cond < action_01,
-                raw_action_cond > action_99,
             )
-            clipped_fraction = float(out_of_stat.mean())
-            pred_chunk = predict_chunk_latents(
-                model=model,
-                current_latent=current_latent.unsqueeze(0),
-                history=history,
-                raw_action_cond=raw_action_cond,
-                state_01=action_01,
-                state_99=action_99,
-                instruction=instruction,
-                args=args,
-            )
-
-            take = args.chunk_frames if chunk_id == args.num_chunks - 1 else args.stride
-            pred_segments.append(pred_chunk[:take])
-            interactive_action_chunks.append(frame_actions[1:].copy())
-            for rel_idx in range(1, args.chunk_frames):
-                latent_buffer.append(pred_chunk[rel_idx : rel_idx + 1])
-                action_buffer.append(frame_actions[rel_idx : rel_idx + 1])
-
-            print(
-                f"[live closed-loop] chunk {chunk_id + 1}/{args.num_chunks}: "
-                f"WM image -> VLA -> {args.chunk_frames - 1} shared WM/LIBERO actions; "
-                f"condition clip fraction={clipped_fraction:.3f}"
-            )
-
-        pred_latents = torch.cat(pred_segments, dim=0)
-        if len(live_gt_frames) != int(pred_latents.shape[0]):
-            raise RuntimeError(
-                f"Action-matched GT/pred length mismatch: "
-                f"gt={len(live_gt_frames)}, pred={pred_latents.shape[0]}"
-            )
-        return (
-            pred_latents,
-            live_gt_frames,
-            np.concatenate(interactive_action_chunks, axis=0),
-            np.stack(executed_env_actions, axis=0),
-            done,
-            success,
-        )
-    finally:
-        env.close()
+        frames.append(np.concatenate(camera_rows, axis=0))
+    return np.stack(frames)
 
 
-# ================================================================
-# Main
-# ================================================================
+def write_video(path: Path, frames: np.ndarray, fps: int = 5) -> None:
+    imageio.mimsave(path, list(frames), fps=fps)
+
 
 def main() -> None:
     args = parse_args()
-    history_stride: Optional[int] = None if args.no_history_stride else int(args.history_stride)
-    history_idx: Optional[List[int]] = None
-    if history_stride is not None:
-        if history_stride <= 0:
-            raise ValueError("--history-stride must be positive")
-    else:
-        raise ValueError(
-            "The synchronized live closed-loop requires --history-stride; "
-            "--no-history-stride is only supported by the legacy offline path."
-        )
-    if args.chunk_frames <= 0:
-        raise ValueError("--chunk-frames must be positive")
-    if args.stride != args.chunk_frames - 1:
-        raise ValueError(
-            "--stride must equal chunk_frames - 1 to match Ctrl-World replay inference"
-        )
-    if args.vla_open_loop_steps <= 0 or args.vla_open_loop_steps > NUM_ACTIONS_CHUNK:
-        raise ValueError(
-            f"--vla-open-loop-steps must be in [1, {NUM_ACTIONS_CHUNK}]"
-        )
+    if args.start_index < NUM_HISTORY:
+        raise ValueError(f"start-index must be >= {NUM_HISTORY}")
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
-    total_pred_frames = args.stride * (args.num_chunks - 1) + args.chunk_frames
-    total_rollout_frames = args.start_index + total_pred_frames
-    out_dir = Path(args.output_dir) / time.strftime("%Y%m%d_%H%M%S")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    task, task_suite = get_task(args.benchmark, args.task_id)
+    task, suite = get_task(args.task_id)
     instruction = task.language
-    print(f"[task] {args.benchmark} task_id={args.task_id}: {task.name}")
-    print(f"[task] instruction: {instruction}")
-    history_desc = (
-        f"history_stride={history_stride}"
-        if history_stride is not None
-        else f"history_idx={history_idx}"
+    predicted_frames = STRIDE * (args.num_chunks - 1) + CHUNK_FRAMES
+    total_frames = args.start_index + predicted_frames
+    output = Path(args.output_dir) / time.strftime("%Y%m%d_%H%M%S")
+    output.mkdir(parents=True, exist_ok=True)
+    print(f"[task] {task.name}: {instruction}")
+
+    print("[models] loading VLA and Ctrl-World")
+    actor, vla_cfg = load_vla(args.device, args.seed)
+    model = load_world_model(args.checkpoint, args.device)
+    low, high = load_action_stats(args.checkpoint)
+
+    print(f"[real] collecting {total_frames} VLA/LIBERO frames")
+    real_frames, step_actions, env_actions, rollout_done = collect_real_trajectory(
+        actor,
+        vla_cfg,
+        task,
+        suite,
+        instruction,
+        total_frames,
+        args,
     )
-    print(
-        f"[eval] closed-loop prediction: "
-        f"rollout_frames={total_rollout_frames}, pred_frames={total_pred_frames}, "
-        f"chunk_frames={args.chunk_frames}, stride={args.stride}, "
-        f"start_index={args.start_index}, {history_desc}"
-    )
-
-    # ---- Load VLA policy ----
-    print("[vla] loading ActorCritic/OpenVLA...")
-    actor, vla_cfg, vla_dtype = load_vla_actor(args)
-    print(f"[vla] loaded, unnorm_key={vla_cfg.unnorm_key}")
-
-    # ---- Load Ctrl-World WM ----
-    print("[ctrl-world] loading Ctrl-World...")
-    model_args = SimpleNamespace(**vars(args))
-    model_args.num_frames = args.chunk_frames
-    ctrl_world = load_ctrl_world_model(model_args)
-    print("[models] loaded")
-    if args.keep_model_loaded_only:
-        return
-
-    # ---- Load normalisation stats ----
-    action_01, action_99 = load_action_condition_stats(
-        args.condition_stat_path,
-        args.ckpt_path,
+    aligned_actions = frame_aligned_real_actions(step_actions, len(real_frames))
+    warmup_latents = encode_frames(
+        model,
+        real_frames[: args.start_index + 1],
+        args.device,
     )
 
-    args.history_stride = history_stride
-    if args.evaluation_mode == "trajectory-imagination":
-        print(
-            "[trajectory] collecting real VLA/LIBERO trajectory, then imagining "
-            "from start-index with VLA conditioned only on WM images"
-        )
-        (
-            real_frames,
-            real_raw_actions,
-            executed_actions,
-            rollout_done,
-            rollout_success,
-        ) = collect_real_vla_trajectory(
-            actor=actor,
-            vla_cfg=vla_cfg,
-            vla_dtype=vla_dtype,
-            task=task,
-            task_suite=task_suite,
-            instruction=instruction,
-            total_frames=total_rollout_frames,
-            args=args,
-        )
-        warmup_latents = encode_views_to_stacked_latents(
-            ctrl_world,
-            real_frames[: args.start_index + 1],
-            height=args.height,
-            width=args.width,
-            dtype=torch_dtype(args.dtype),
-            device=args.device,
-        )
-        reference_actions = frame_aligned_reference_actions(
-            real_raw_actions,
-            len(real_frames),
-        )
-        (
-            pred_latents,
-            relative_gt_indices,
-            interactive_actions,
-        ) = closed_loop_history_stride_predict(
-            model=ctrl_world,
-            actor=actor,
-            vla_cfg=vla_cfg,
-            vla_dtype=vla_dtype,
-            stacked_gt_latents=warmup_latents,
-            reference_actions=reference_actions,
-            action_01=action_01,
-            action_99=action_99,
-            instruction=instruction,
-            args=args,
-        )
-        gt_frames = [
-            real_frames[args.start_index + relative_idx]
-            for relative_idx in relative_gt_indices
-        ]
-    else:
-        print(
-            "[live] real warmup, then repeat: "
-            "WM image -> VLA action -> both WM and LIBERO"
-        )
-        (
-            pred_latents,
-            gt_frames,
-            interactive_actions,
-            executed_actions,
-            rollout_done,
-            rollout_success,
-        ) = run_live_closed_loop(
-            model=ctrl_world,
-            actor=actor,
-            vla_cfg=vla_cfg,
-            vla_dtype=vla_dtype,
-            task=task,
-            task_suite=task_suite,
-            instruction=instruction,
-            action_01=action_01,
-            action_99=action_99,
-            args=args,
-        )
-
-    actions_path = out_dir / "vla_executed_env_actions.npy"
-    np.save(actions_path, executed_actions)
-    interactive_actions_path = out_dir / "vla_wm_closed_loop_actions.npy"
-    np.save(interactive_actions_path, interactive_actions)
-
-    # ---- Decode predicted latents to videos ----
-    pred_videos = decode_stacked_latents(
-        ctrl_world,
-        pred_latents,
-        num_cams=args.num_cams,
-        height=args.height,
-        width=args.width,
-        chunk_size=args.chunk_frames,
+    print(f"[imagine] starting from real frame {args.start_index}")
+    pred_latents, imagined_actions = imagine(
+        model,
+        actor,
+        vla_cfg,
+        warmup_latents,
+        aligned_actions,
+        instruction,
+        low,
+        high,
+        args,
     )
-
-    # ---- Build LIBERO reference videos for comparison ----
+    pred_videos = decode_latents(model, pred_latents)
+    selected_real = real_frames[
+        args.start_index : args.start_index + len(pred_latents)
+    ]
     gt_videos = [
-        resize_uint8_video(
-            [frames[cam_id] for frames in gt_frames], (args.height, args.width)
-        )
-        for cam_id in range(args.num_cams)
+        resize_video([frame[camera] for frame in selected_real])
+        for camera in range(NUM_CAMS)
     ]
 
-    # ---- Metrics & videos ----
-    metrics = compute_metrics(gt_videos, pred_videos)
-    comparison = make_comparison_video(gt_videos, pred_videos)
+    score = metrics(gt_videos, pred_videos)
+    comparison = comparison_video(gt_videos, pred_videos)
+    comparison_path = output / "real_vs_imagined.mp4"
+    write_video(comparison_path, comparison)
+    for camera, (real, imagined) in enumerate(zip(gt_videos, pred_videos)):
+        write_video(output / f"cam{camera}_real.mp4", real)
+        write_video(output / f"cam{camera}_imagined.mp4", imagined)
 
-    video_paths: Dict[str, str] = {}
-    comparison_path = out_dir / "closed_loop_comparison_gt_pred_diff.mp4"
-    write_video(comparison_path, comparison, fps=args.fps)
-    video_paths["comparison"] = str(comparison_path)
-    for cam_id, (gt, pred) in enumerate(zip(gt_videos, pred_videos)):
-        gt_path = out_dir / f"cam{cam_id}_gt.mp4"
-        pred_path = out_dir / f"cam{cam_id}_closed_loop_pred.mp4"
-        write_video(gt_path, gt, fps=args.fps)
-        write_video(pred_path, pred, fps=args.fps)
-        video_paths[f"cam{cam_id}_gt"] = str(gt_path)
-        video_paths[f"cam{cam_id}_pred"] = str(pred_path)
-    video_paths["vla_env_actions_npy"] = str(actions_path)
-    video_paths["vla_wm_closed_loop_actions_npy"] = str(interactive_actions_path)
-
-    # ---- Summary ----
-    summary = ClosedLoopSummary(
-        evaluation_mode=args.evaluation_mode,
-        benchmark=args.benchmark,
-        task_id=args.task_id,
-        task_name=task.name,
-        instruction=instruction,
-        initial_state_id=args.initial_state_id,
-        vla_pretrained_checkpoint=args.vla_pretrained_checkpoint,
-        vla_checkpoint2=args.vla_checkpoint2 if not args.no_vla_checkpoint2 else None,
-        vla_unnorm_key=vla_cfg.unnorm_key,
-        checkpoint=args.ckpt_path,
-        output_dir=str(out_dir),
-        num_history=args.num_history,
-        chunk_frames=args.chunk_frames,
-        num_chunks=args.num_chunks,
-        stride=args.stride,
-        history_stride=history_stride,
-        history_idx=history_idx,
-        total_pred_frames=int(pred_latents.shape[0]),
-        rollout_steps=len(executed_actions),
-        rollout_done=rollout_done,
-        rollout_success=rollout_success,
-        num_cams=args.num_cams,
-        height=args.height,
-        width=args.width,
-        metrics=metrics,
-        videos=video_paths,
+    np.save(output / "real_env_actions.npy", env_actions)
+    np.save(output / "imagined_vla_actions.npy", imagined_actions)
+    summary = {
+        "task_id": args.task_id,
+        "task": task.name,
+        "instruction": instruction,
+        "checkpoint": args.checkpoint,
+        "start_index": args.start_index,
+        "num_chunks": args.num_chunks,
+        "predicted_frames": len(pred_latents),
+        "real_rollout_done": rollout_done,
+        "metrics": score,
+        "comparison_video": str(comparison_path),
+    }
+    (output / "summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
     )
-    summary_path = out_dir / "summary.json"
-    summary_path.write_text(json.dumps(asdict(summary), indent=2), encoding="utf-8")
-
-    print("[done] wrote:")
-    print(f"  summary: {summary_path}")
-    for key, value in video_paths.items():
-        print(f"  {key}: {value}")
-    print("[metrics]", json.dumps(metrics["overall"], indent=2))
+    print(f"[done] {comparison_path}")
+    print("[metrics]", json.dumps(score, indent=2))
 
 
 if __name__ == "__main__":
