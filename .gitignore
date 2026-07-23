@@ -11,6 +11,7 @@ __pycache__/
 .nox/
 .hypothesis/
 .cache/
+.runtime/
 
 # Build, packaging, and local installs
 build/

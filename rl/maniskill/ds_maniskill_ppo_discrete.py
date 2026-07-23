@@ -1,10 +1,9 @@
 import os
 import json
 import argparse
+
 os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
-# 设置临时文件目录，避免磁盘I/O瓶颈
-os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
 # 注意: CUDA_VISIBLE_DEVICES 现在通过命令行参数设置
 os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
@@ -147,8 +146,11 @@ def build_task_slug(task_ids: List[str]) -> str:
 
 #region agent log
 def _agent_log(hypothesis_id: str, location: str, message: str, data: Dict = None, run_id: str = "pre-fix"):
-    """调试日志：写入 .cursor/debug.log（NDJSON）。"""
+    """将 NDJSON 调试日志写入 --debug-log-dir 指定的目录。"""
     try:
+        debug_log_dir = os.environ.get("ACCERL_DEBUG_LOG_DIR")
+        if not debug_log_dir:
+            return
         payload = {
             "id": f"log_{int(time.time() * 1000)}",
             "timestamp": int(time.time() * 1000),
@@ -158,8 +160,8 @@ def _agent_log(hypothesis_id: str, location: str, message: str, data: Dict = Non
             "message": message,
             "data": data or {},
         }
-        log_path = "/cpfs01/liuwei_workspace/openvla_oft_rl/.cursor/debug.log"
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log_path = os.path.join(debug_log_dir, "maniskill_ppo.log")
+        os.makedirs(debug_log_dir, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception:
@@ -260,10 +262,12 @@ def parse_args():
     # Ray 对象存储
     parser.add_argument('--object-store-memory-gb', type=int, default=256,
                         help='Ray object store memory in GB (default: 256)')
+    parser.add_argument('--ray-temp-dir', type=str, required=True,
+                        help='Ray temporary directory')
     
     # Checkpoint
-    parser.add_argument('--ckpt-dir', type=str, default='/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/rl_maniskill',
-                        help='Checkpoint directory (default: /cpfs01/liuwei_workspace/models/finetune_rl)')
+    parser.add_argument('--ckpt-dir', type=str, required=True,
+                        help='Checkpoint output directory')
     parser.add_argument('--ckpt-every-steps', type=int, default=2000000,
                         help='Save checkpoint every N steps (default: 2000000)')
     
@@ -304,6 +308,10 @@ def parse_args():
                         help='Moving average window size (default: 1000)')
     parser.add_argument('--log-interval-seconds', type=int, default=10,
                         help='Log interval in seconds (default: 10)')
+    parser.add_argument('--log-root', type=str, required=True,
+                        help='TensorBoard log root directory')
+    parser.add_argument('--debug-log-dir', type=str, required=True,
+                        help='Debug log output directory')
     
     # 通信组
     parser.add_argument('--broadcast-group-name', type=str, default='trainer_to_inference_broadcast',
@@ -1912,6 +1920,17 @@ def main(args):
     Args:
         args: 解析后的命令行参数
     """
+    for path_arg in ("ckpt_dir", "log_root", "debug_log_dir", "ray_temp_dir"):
+        path_value = os.path.expanduser(getattr(args, path_arg))
+        setattr(args, path_arg, os.path.abspath(path_value))
+
+    os.makedirs(args.ckpt_dir, exist_ok=True)
+    os.makedirs(args.log_root, exist_ok=True)
+    os.makedirs(args.debug_log_dir, exist_ok=True)
+    os.makedirs(args.ray_temp_dir, exist_ok=True)
+    # Ray worker 会继承该环境变量，避免依赖模块级项目路径。
+    os.environ["ACCERL_DEBUG_LOG_DIR"] = args.debug_log_dir
+
     torch_dtype = torch.bfloat16 if args.use_bf16 else torch.float32
     task_configs = resolve_maniskill_task_configs(args)
     task_ids = [task_cfg["maniskill_task"] for task_cfg in task_configs]
@@ -1935,7 +1954,8 @@ def main(args):
     print(f"正在初始化 Ray，并为对象存储分配 {args.object_store_memory_gb} GB 内存...")
     ray.init(
         ignore_reinit_error=True, 
-        _temp_dir='/dev/shm',
+        _temp_dir=args.ray_temp_dir,
+        runtime_env={"env_vars": {"ACCERL_DEBUG_LOG_DIR": os.environ["ACCERL_DEBUG_LOG_DIR"]}},
         object_store_memory=object_store_memory_bytes,
         num_cpus=96,
         # num_cpus=args.num_rollout_workers + args.num_eval_workers + args.num_trainer_gpus + args.num_inference_actors + 8,
@@ -1945,7 +1965,12 @@ def main(args):
 
     print(f"Ray 初始化完成。对象存储内存: {args.object_store_memory_gb} GB。")
     task_slug = build_task_slug(task_ids)
-    log_dir = f"runs/ManiSkill/{task_slug}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}"
+    log_dir = os.path.join(
+        args.log_root,
+        task_slug,
+        f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}",
+    )
+    os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
 
     # 保存命令行参数到log_dir中的json文件
