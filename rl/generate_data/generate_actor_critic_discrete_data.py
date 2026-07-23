@@ -1,3 +1,7 @@
+'''
+example
+python rl/generate_data/generate_actor_critic_discrete_data.py --output_dir /mnt/data/lcx3/AcceRL/tests_dsj/dataset_episode --benchmark_name libero_spatial --num_tasks 5 --episodes_per_task 10 --pretrained_checkpoint /mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt --device cuda:0 --use_bf16 --use_proprio
+'''
 import os
 import json
 import time
@@ -39,15 +43,26 @@ def generate_data(
     num_images_in_input: int = 2,
     use_proprio: bool = True,
 ):
-    """Generate windowed (video, action) samples using ActorCritic discrete policy.
+    """Generate full-episode samples using ActorCritic discrete policy.
 
-    Output format intentionally matches `rl/generate_data/generate_random_data.py`:
-      - per-sample `.pt` with keys: video, actions, mask, instruction
-      - `metadata.json` containing path/task_id/instruction/valid_frames (+ extra fields)
+    Output format is episode-oriented for Ctrl-World training:
+      - one `.pt` file per completed episode
+      - `video`: full agentview RGB sequence, shape [T, H, W, 3]
+      - `wrist_video`: full wrist RGB sequence, shape [T, H, W, 3]
+      - `proprio`: full proprio sequence, shape [T, 8]
+      - `actions`: discretized actions, shape [T, 7], action[0] is padding
+      - `actions_continuous`: continuous env delta actions, shape [T, 7],
+        action[0] is padding and action[t] produced observation frame t
+      - `mask`: all True, shape [T]
+      - `metadata.json`: per-frame sample entries under `metadata`, plus full
+        episode entries under `episodes`, matching Ctrl-World's frame-anchor
+        sampling convention
 
     Notes:
       - Policy generates `NUM_ACTIONS_CHUNK` actions at once; we queue them per-env.
       - We discretize the executed env action into 256 bins for tokenization compatibility.
+      - `max_frames` and `require_full_window` are kept as CLI-compatible no-ops;
+        episode files always save the full rollout.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -106,15 +121,104 @@ def generate_data(
     task_descriptions: List[str] = ["" for _ in envs]
 
     buffer_obs: List[List[np.ndarray]] = [[] for _ in envs]
+    buffer_wrist_obs: List[List[np.ndarray]] = [[] for _ in envs]
+    buffer_proprio: List[List[np.ndarray]] = [[] for _ in envs]
     buffer_actions: List[List[np.ndarray]] = [[] for _ in envs]
+    buffer_actions_continuous: List[List[np.ndarray]] = [[] for _ in envs]
     step_counts = [0 for _ in envs]
 
-    metadata: List[Dict[str, Any]] = []
+    episode_metadata: List[Dict[str, Any]] = []
+    sample_metadata: List[Dict[str, Any]] = []
     sample_idx = 0
     
     # Success rate tracking
     total_success = 0
     total_episodes = 0
+
+    if max_frames != 16 or require_full_window:
+        print(
+            "Note: full-episode save mode ignores --max_frames and "
+            "--require_full_window; complete episodes are saved at termination."
+        )
+
+    def _save_episode(i: int, reward: float, terminated: bool, truncated: bool, info: Dict[str, Any]):
+        nonlocal sample_idx, total_success
+
+        valid_frames = len(buffer_obs[i])
+        if valid_frames <= 1:
+            return
+
+        video_tensor_seq = np.asarray(buffer_obs[i], dtype=np.uint8)
+        wrist_video_tensor_seq = np.asarray(buffer_wrist_obs[i], dtype=np.uint8)
+        proprio_seq_final = np.asarray(buffer_proprio[i], dtype=np.float32)
+
+        # Align actions to frames. actions[0] is padding for the initial frame;
+        # actions[t] is the control that led from frame t-1 to frame t.
+        action_seq_final = np.zeros((valid_frames, 7), dtype=int)
+        action_continuous_seq_final = np.zeros((valid_frames, 7), dtype=np.float32)
+        if buffer_actions[i]:
+            action_seq_final[1:] = np.asarray(buffer_actions[i], dtype=int)
+            action_continuous_seq_final[1:] = np.asarray(buffer_actions_continuous[i], dtype=np.float32)
+        mask_seq = np.ones((valid_frames,), dtype=bool)
+
+        task_id = envs[i].task_id
+        ep = episodes_done[i]
+        sample_name = f"task{task_id}_ep{ep}_{sample_idx:06d}.pt"
+        save_path = os.path.join(output_dir, sample_name)
+        is_success = bool(info.get("is_success", False))
+
+        torch.save(
+            {
+                "video": video_tensor_seq,
+                "wrist_video": wrist_video_tensor_seq,
+                "view_names": ["agentview_image", "robot0_eye_in_hand_image"],
+                "proprio": proprio_seq_final,
+                "actions": action_seq_final,
+                "actions_continuous": action_continuous_seq_final,
+                "mask": mask_seq,
+                "instruction": task_descriptions[i],
+                "reward": float(reward),
+                "success": is_success,
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "task_id": int(task_id),
+                "episode": int(ep),
+                "num_frames": int(valid_frames),
+            },
+            save_path,
+        )
+
+        episode_meta = {
+            "path": save_path,
+            "task_id": int(task_id),
+            "instruction": task_descriptions[i],
+            "valid_frames": int(valid_frames),
+            "episode": int(ep),
+            "reward": float(reward),
+            "terminated": bool(terminated),
+            "truncated": bool(truncated),
+            "is_success": is_success,
+            "views": ["agentview_image", "robot0_eye_in_hand_image"],
+            "proprio_dim": 8,
+            "action_dim": 7,
+            "action_format": {
+                "actions": "discrete_0_255_frame_aligned_padding_at_0",
+                "actions_continuous": "unnormalized_env_delta_frame_aligned_padding_at_0",
+            },
+        }
+        episode_metadata.append(episode_meta)
+        for frame_id in range(valid_frames):
+            sample_metadata.append(
+                {
+                    **episode_meta,
+                    "frame_ids": [int(frame_id)],
+                    "sample_id": int(len(sample_metadata)),
+                }
+            )
+        sample_idx += 1
+
+        if is_success:
+            total_success += 1
 
     def _reset_env(i: int):
         if seed is not None:
@@ -123,9 +227,12 @@ def generate_data(
             obs, info = envs[i].reset(seed=int(time.time()) + i)
         observations[i] = obs
         task_descriptions[i] = info.get("task_description", envs[i].task_description)
-        # start buffers with initial image (same as random script)
+        # start buffers with initial observation (same alignment as random script)
         buffer_obs[i] = [obs["full_image"]]
+        buffer_wrist_obs[i] = [obs["wrist_image"]]
+        buffer_proprio[i] = [obs["state"]]
         buffer_actions[i] = []
+        buffer_actions_continuous[i] = []
         step_counts[i] = 0
         env_queues[i].clear()
 
@@ -179,67 +286,16 @@ def generate_data(
 
                 # Update buffers
                 buffer_obs[i].append(obs["full_image"])
+                buffer_wrist_obs[i].append(obs["wrist_image"])
+                buffer_proprio[i].append(obs["state"])
                 disc_action = discretize_action(action_env)  # (7,)
                 buffer_actions[i].append(disc_action)
+                buffer_actions_continuous[i].append(np.asarray(action_env, dtype=np.float32))
 
                 step_counts[i] += 1
 
-                # Save window (same alignment as random script)
-                current_obs_seq = buffer_obs[i][-max_frames:]
-                current_action_seq = buffer_actions[i][-max_frames:]
-                valid_frames = len(current_obs_seq)
-
-                if (not require_full_window) or (valid_frames >= max_frames):
-                    video_tensor_seq = np.zeros((max_frames, image_size, image_size, 3), dtype=np.uint8)
-                    action_seq_final = np.zeros((max_frames, 7), dtype=int)
-                    mask_seq = np.zeros((max_frames,), dtype=bool)
-
-                    video_tensor_seq[-valid_frames:] = np.asarray(current_obs_seq)
-                    mask_seq[-valid_frames:] = True
-
-                    valid_actions = len(current_action_seq)
-                    if valid_actions > 0:
-                        action_seq_final[-valid_actions:] = np.asarray(current_action_seq)
-
-                    task_id = envs[i].task_id
-                    ep = episodes_done[i]
-                    step = step_counts[i]
-                    sample_name = f"task{task_id}_ep{ep}_step{step}_{sample_idx:06d}.pt"
-                    save_path = os.path.join(output_dir, sample_name)
-
-                    is_success = bool(info.get("is_success", False))
-                    torch.save(
-                        {
-                            "video": video_tensor_seq,
-                            "actions": action_seq_final,
-                            "mask": mask_seq,
-                            "instruction": task_descriptions[i],
-                            "reward": float(reward),
-                            "success": is_success,
-                        },
-                        save_path,
-                    )
-                    metadata.append(
-                        {
-                            "path": save_path,
-                            "task_id": int(task_id),
-                            "instruction": task_descriptions[i],
-                            "valid_frames": int(valid_frames),
-                            "episode": int(ep),
-                            "step": int(step),
-                            "reward": float(reward),
-                            "terminated": bool(terminated),
-                            "truncated": bool(truncated),
-                            "is_success": is_success,
-                        }
-                    )
-                    sample_idx += 1
-                    
-                    # Update success rate tracking
-                    if is_success:
-                        total_success += 1
-                    
                 if terminated or truncated:
+                    _save_episode(i, reward, terminated, truncated, info)
                     total_episodes += 1
                      # Print success rate periodically
                     if total_episodes % print_success_interval == 0:
@@ -271,7 +327,8 @@ def generate_data(
         with open(os.path.join(output_dir, "metadata.json"), "w") as f:
             json.dump(
                 {
-                    "metadata": metadata,
+                    "metadata": sample_metadata,
+                    "episodes": episode_metadata,
                     "config": {
                         "benchmark_name": benchmark_name,
                         "num_tasks": num_tasks,
@@ -279,6 +336,7 @@ def generate_data(
                         "max_frames": max_frames,
                         "image_size": image_size,
                         "require_full_window": require_full_window,
+                        "save_format": "full_episode",
                         "pretrained_checkpoint": str(cfg.pretrained_checkpoint),
                         "device": device,
                         "use_bf16": use_bf16,
@@ -286,6 +344,17 @@ def generate_data(
                         "unnorm_key": cfg.unnorm_key,
                         "num_open_loop_steps": int(cfg.num_open_loop_steps),
                         "torch_dtype": str(torch_dtype),
+                        "saved_observation_keys": [
+                            "video",
+                            "wrist_video",
+                            "proprio",
+                        ],
+                        "view_names": ["agentview_image", "robot0_eye_in_hand_image"],
+                        "proprio_dim": 8,
+                        "action_keys": {
+                            "actions": "discrete_0_255_frame_aligned_padding_at_0",
+                            "actions_continuous": "unnormalized_env_delta_frame_aligned_padding_at_0",
+                        },
                     },
                 },
                 f,
@@ -300,7 +369,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--benchmark_name", type=str, default="libero_spatial")
     parser.add_argument("--num_tasks", type=int, default=5)
-    parser.add_argument("--episodes_per_task", type=int, default=155)
+    parser.add_argument("--episodes_per_task", type=int, default=10)
     parser.add_argument("--max_frames", type=int, default=16)
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--require_full_window", action="store_true")

@@ -227,7 +227,7 @@ def load_reward_model(
     )
 
     model = RewardModel(cfg, torch_dtype, keep_num=4, focal_alpha=focal_alpha)
-    state = torch.load(model_path, map_location=model.device)
+    state = torch.load(model_path, map_location=model.device, weights_only=False)
     if "model" in state:
         state = state["model"]
     model.load_state_dict(state, strict=True)

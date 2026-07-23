@@ -48,12 +48,12 @@
 
 
 python rl/ds_wm_discrete_diffusion.py \
-    --cuda-visible-devices 1,4,6,7 \
+    --cuda-visible-devices 1,2,3,4 \
     --use-bf16 \
     --benchmark libero_spatial \
     --num-images-in-input 1 \
-    --pretrained-checkpoint /cpfs01/liuwei_workspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt \
-    --checkpoint2 runs/distill/20251225_113851_distill/checkpoints/checkpoint_latest.pt \
+    --pretrained-checkpoint /mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt \
+    --checkpoint2 /mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt \
     --agent-config-path envs/config/agent.yaml \
     --trainer-config-path envs/config/trainer.yaml \
     --num-trainer-gpus 1 \
@@ -99,6 +99,8 @@ python rl/ds_wm_discrete_diffusion.py \
     --ckpt-every-steps 2000000 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
-    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_train_wm
+    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_train_wm \
+    --denoiser-checkpoint /mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/denoiser_smoke_test/denoiser_smoke_test.pt \
+    --reward-checkpoint /mnt/data/lcx3/checkpoint/reward/reward.pt
 
 

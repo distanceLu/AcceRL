@@ -420,6 +420,13 @@ def maniskill_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+def maniskill_converted_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    # The externally converted dataset already exposes ``tcp_pose`` and stores
+    # its scalar gripper state in the final component of ``state``.
+    trajectory["observation"]["gripper_state"] = trajectory["observation"]["state"][..., 7:8]
+    return trajectory
+
+
 def furniture_bench_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     import tensorflow_graphics.geometry.transformation as tft
 
@@ -877,7 +884,7 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "maniskill_pickcube": maniskill_dataset_transform,
     "maniskill_stackcube": maniskill_dataset_transform,
     "maniskill_peginsertionside": maniskill_dataset_transform,
-    "maniskill_dataset_converted_externally_to_rlds": maniskill_dataset_transform,
+    "maniskill_dataset_converted_externally_to_rlds": maniskill_converted_dataset_transform,
     "furniture_bench_dataset_converted_externally_to_rlds": furniture_bench_dataset_transform,
     "cmu_franka_exploration_dataset_converted_externally_to_rlds": cmu_franka_exploration_dataset_transform,
     "ucsd_kitchen_dataset_converted_externally_to_rlds": ucsd_kitchen_dataset_transform,
