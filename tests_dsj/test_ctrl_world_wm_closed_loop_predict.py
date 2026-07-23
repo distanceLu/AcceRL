@@ -82,9 +82,9 @@ DTYPE = torch.bfloat16
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task-id", type=int, default=9)
-    parser.add_argument("--initial-state-id", type=int, default=20)
-    parser.add_argument("--start-index", type=int, default=28)
+    parser.add_argument("--task-id", type=int, default=1)
+    parser.add_argument("--initial-state-id", type=int, default=0)
+    parser.add_argument("--start-index", type=int, default=6)
     parser.add_argument("--num-chunks", type=int, default=16)
     parser.add_argument("--checkpoint", default=DEFAULT_WM_CHECKPOINT)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
