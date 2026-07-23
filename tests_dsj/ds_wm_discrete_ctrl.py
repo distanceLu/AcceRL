@@ -8,6 +8,7 @@ import sys
 import time
 import random
 import asyncio
+import json
 from collections import deque, defaultdict
 from typing import Dict, Optional, Tuple, List, Any
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ from rl.com_utils import find_free_port
 from envs.utils import tensor_to_image, image_to_tensor, load_reward_model
 
 # ---- Ctrl-World 相关导入（ctrl_world 已作为包安装在 merged-env 中）----
-from ctrl_world_env_batch import CtrlWorldEnvBatch
+from tests_dsj.ctrl_world_env_batch import CtrlWorldEnvBatch
 from ctrl_world.config import wm_args
 from ctrl_world.models.ctrl_world import CrtlWorld
 from rl.ray_debug_utils import setup_debugger
@@ -56,8 +57,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='OpenVLA RL Training with Ctrl-World World Model')
 
     # 环境变量
-    parser.add_argument('--cuda-visible-devices', type=str, default='1,2',
-                        help='CUDA visible devices (default: 1,2)')
+    parser.add_argument('--cuda-visible-devices', type=str, default='0,1,2,3',
+                        help='CUDA devices; defaults cover trainer, policy, reward and Ctrl-World actors')
 
     # Libero benchmark
     parser.add_argument('--benchmark', type=str, default='libero_spatial',
@@ -102,7 +103,8 @@ def parse_args():
 
     # 世界模型配置
     parser.add_argument('--imagine-horizon', type=int, default=8)
-    parser.add_argument('--num-step-cond', type=int, default=4)
+    parser.add_argument('--num-step-cond', type=int, default=7,
+                        help='Real context frames; must be at least num_history + 1')
     parser.add_argument('--num-reward-inference-actors', type=int, default=1)
     parser.add_argument('--num-ctrl-inference-actors', type=int, default=1,
                         help='Number of Ctrl-World inference actors')
@@ -120,7 +122,7 @@ def parse_args():
     parser.add_argument('--use-bf16', action='store_true', default=True)
     parser.add_argument('--no-bf16', action='store_false', dest='use_bf16')
     parser.add_argument('--use-proprio', action='store_true', default=False)
-    parser.add_argument('--num-images-in-input', type=int, default=1)
+    parser.add_argument('--num-images-in-input', type=int, default=2)
     parser.add_argument('--pretrained-checkpoint', type=str,
                         default='/mnt/data/lcx2/yanjieworkspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt')
     parser.add_argument('--checkpoint2', type=str, default=None)
@@ -136,18 +138,20 @@ def parse_args():
     parser.add_argument('--clip-model-path', type=str,
                         default='/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model',
                         help='Path to CLIP model')
-    parser.add_argument('--ctrl-world-ckpt', type=str, default=None,
-                        help='Path to Ctrl-World checkpoint')
+    parser.add_argument('--ctrl-world-ckpt', type=str, required=True,
+                        help='Path to a Ctrl-World checkpoint trained on AcceRL delta actions')
+    parser.add_argument('--condition-stat-path', type=str, default=None,
+                        help='condition_stat.json; defaults to checkpoint sibling')
     parser.add_argument('--num-cams', type=int, default=2,
                         help='Number of camera views for Ctrl-World')
     parser.add_argument('--num-history', type=int, default=6,
                         help='Ctrl-World latent history length')
-    parser.add_argument('--num-inference-steps', type=int, default=4,
+    parser.add_argument('--num-inference-steps', type=int, default=50,
                         help='SVD denoising steps')
     parser.add_argument('--target-height', type=int, default=192)
     parser.add_argument('--target-width', type=int, default=320)
-    parser.add_argument('--num-frames-pred', type=int, default=1,
-                        help='Number of frames to predict per step')
+    parser.add_argument('--num-frames-pred', type=int, default=5,
+                        help='Ctrl-World chunk length including current anchor (checkpoint protocol: 5)')
 
     # Reward Model checkpoint 路径覆盖
     parser.add_argument('--reward-checkpoint', type=str, default=None,
@@ -167,10 +171,6 @@ def parse_args():
     # World Model 训练频率控制
     parser.add_argument('--reward-train-interval', type=int, default=10,
                         help='Train reward model every N actor training steps')
-    # Ctrl-World 冻结，不训练，但保留参数以保持接口一致
-    parser.add_argument('--ctrl-train-interval', type=int, default=999999,
-                        help='Ctrl-World train interval (default: frozen, never train)')
-
     # ============ 调试参数 ============
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Enable debugpy in Ray actors (each actor starts a debug server)')
@@ -178,6 +178,29 @@ def parse_args():
                         help='Actors wait for VS Code debugger to attach before proceeding')
 
     args = parser.parse_args()
+
+    if args.num_cams != 2:
+        raise ValueError("This AcceRL integration requires agentview + wrist (num_cams=2)")
+    if args.num_images_in_input != 2:
+        raise ValueError("VLA must receive both generated views (num_images_in_input=2)")
+    if args.use_proprio:
+        raise ValueError("Imagined proprio is not modeled; run this integration with --use-proprio disabled")
+    if args.num_frames_pred != 5:
+        raise ValueError("The current Ctrl-World checkpoint protocol requires num_frames_pred=5")
+    if args.num_step_cond < args.num_history + 1:
+        raise ValueError("num_step_cond must provide num_history previous frames plus current")
+    required_gpu_actors = (
+        args.num_trainer_gpus
+        + args.num_inference_actors
+        + args.num_reward_inference_actors
+        + args.num_ctrl_inference_actors
+    )
+    visible_gpus = [x for x in args.cuda_visible_devices.split(",") if x.strip()]
+    if len(visible_gpus) < required_gpu_actors:
+        raise ValueError(
+            f"{required_gpu_actors} one-GPU Ray actors requested but only "
+            f"{len(visible_gpus)} CUDA devices are visible"
+        )
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
 
@@ -213,7 +236,7 @@ class Experience:
 @dataclass
 class WMExperience:
     """World Model 训练数据结构"""
-    obs: np.ndarray                         # [num_steps_conditioning+1, C, H, W]
+    obs: np.ndarray                         # [num_steps_conditioning+1, M, C, H, W]
     act: np.ndarray                         # [num_steps_conditioning, act_dim]
     rew: float
     instruction: str
@@ -419,10 +442,20 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.num_step_cond = num_step_cond
         self.imagine_horizon = imagine_horizon
         if self.imagine_horizon % NUM_ACTIONS_CHUNK != 0:
-            Warning(f"imagine_horizon {self.imagine_horizon} is not divisible by NUM_ACTIONS_CHUNK {NUM_ACTIONS_CHUNK}")
+            raise ValueError(
+                f"imagine_horizon ({self.imagine_horizon}) must be divisible by "
+                f"NUM_ACTIONS_CHUNK ({NUM_ACTIONS_CHUNK})"
+            )
+        self.num_policy_chunks = self.imagine_horizon // NUM_ACTIONS_CHUNK
         self.torch_dtype = torch_dtype
         self.reward_infer = reward_infer
         self.ctrl_world_infer = ctrl_world_infer  # ★ 替换 denoiser_infer
+        self.ctrl_world_num_history = int(
+            ray.get(self.ctrl_world_infer.get_num_history.remote())
+        )
+        self.ctrl_world_infer_stride = int(
+            ray.get(self.ctrl_world_infer.get_stride.remote())
+        )
         self.reward_scale = reward_scale
         self.gamma = gamma
         self.lambda_ = lambda_
@@ -448,59 +481,93 @@ class RolloutWorkerActor(BaseWorkerActor):
                     self.get_one_episode()
                 imagine_step += 1
                 experience = random.choice(self.episodes)
-                obs_list, reward_list, done_list, act_norm_list, task_description = experience
-                obs_list2 = [obs['full_image'] for obs in obs_list]
+                (
+                    obs_list,
+                    reward_list,
+                    done_list,
+                    action_env_list,
+                    task_description,
+                ) = experience
                 num_imagine_samples = 0
-                for i in range(len(obs_list2) - self.num_step_cond):
-                    obs_list_sub = obs_list2[i:i+self.num_step_cond]
-                    for idx, sub_obs in enumerate(obs_list_sub):
-                        sub_obs = image_to_tensor(sub_obs, 'cpu')
-                        obs_list_sub[idx] = sub_obs
-                    act_list_sub = act_norm_list[i:i+self.num_step_cond-1]
-                    obs_tensor = torch.stack(obs_list_sub, dim=0)  # [num_step_cond, C, H, W]
-                    if isinstance(act_list_sub[0], np.ndarray):
-                        act_list_sub = [torch.from_numpy(a.copy()) for a in act_list_sub]
-                    act_tensor = torch.stack(act_list_sub, dim=0)  # [num_step_cond-1, act_dim]
+                for i in range(len(obs_list) - self.num_step_cond):
+                    obs_list_sub = obs_list[i:i + self.num_step_cond]
+                    obs_tensor = torch.stack(
+                        [self._obs_to_views(obs) for obs in obs_list_sub], dim=0
+                    )  # [T,M,C,H,W]
+                    raw_actions = action_env_list[i:i + self.num_step_cond - 1]
+                    first_frame_action = (
+                        np.asarray(action_env_list[i - 1], dtype=np.float32)
+                        if i > 0
+                        else np.zeros(ACTION_DIM, dtype=np.float32)
+                    )
+                    action_window = torch.cat(
+                        [
+                            torch.from_numpy(first_frame_action).unsqueeze(0),
+                            torch.from_numpy(np.stack(raw_actions)).float(),
+                        ],
+                        dim=0,
+                    )  # frame-aligned actions for the observation window
                     last_succ_prob = self.predict_rew_end(obs_tensor[-1], task_description)[0]
 
-                    # ★ 初始化 latent_history（通过 RPC 调用 CtrlWorldInferenceActor）
-                    latent_history = ray.get(
-                        self.ctrl_world_infer.init_latent_history.remote(obs_tensor)
-                    )  # [num_history, 4, latent_h*num_cams, latent_w] on CPU
+                    latent_history, current_latent = ray.get(
+                        self.ctrl_world_infer.init_latent_state.remote(obs_tensor)
+                    )
 
-                    for j in range(self.imagine_horizon):
+                    end = False
+                    for j in range(self.num_policy_chunks):
                         inputs_t = self.obs2inp(obs_tensor[-1], task_description)
                         act_norm, action_env, action_token, logits, value = ray.get(
                             self.infer.request.remote(inputs_t, deterministic=False))
                         num_imagine_samples += 1
-                        if isinstance(act_norm, np.ndarray):
-                            act_norm = torch.from_numpy(act_norm.copy())
-                        act_norm = act_norm.float().to(act_tensor.device)
                         chunk_reward = 0.0
-                        for k in range(len(action_env)):
-                            single_action = act_norm[k]
-                            act_tensor = torch.cat([act_tensor, single_action.unsqueeze(0)], dim=0)
-
-                            # ★ 调用 Ctrl-World 无状态接口
-                            # current_obs = obs_tensor[-1], act_history = act_tensor
-                            nxt, next_latent = self.predict_next_obs(
-                                obs_tensor[-1], latent_history, act_tensor, task_description
+                        action_env = torch.from_numpy(
+                            np.asarray(action_env, dtype=np.float32)
+                        )
+                        stride = self.ctrl_world_infer_stride
+                        for group_start in range(0, len(action_env), stride):
+                            future_actions = action_env[group_start:group_start + stride]
+                            valid_count = len(future_actions)
+                            if valid_count < stride:
+                                pad_value = future_actions[-1:] if valid_count else torch.zeros(1, ACTION_DIM)
+                                future_actions = torch.cat(
+                                    [future_actions, pad_value.repeat(stride - valid_count, 1)],
+                                    dim=0,
+                                )
+                            action_condition = torch.cat(
+                                [
+                                    action_window[-(self.ctrl_world_num_history + 1):],
+                                    future_actions,
+                                ],
+                                dim=0,
                             )
-
-                            # ★ Worker 端更新 latent_history（无需 RPC，纯 tensor 操作）
-                            latent_history = torch.cat(
-                                [latent_history[1:], next_latent.unsqueeze(0)], dim=0
+                            future_obs, future_latents = self.predict_next_chunk(
+                                current_latent,
+                                latent_history,
+                                action_condition,
+                                task_description,
                             )
-
-                            # 更新 obs / act 滑窗（与原版一致）
-                            obs_tensor = torch.roll(obs_tensor, -1, dims=0)
-                            act_tensor = act_tensor[1:]
-                            obs_tensor[-1] = nxt
-
-                            succ_prob, end = self.predict_rew_end(nxt, task_description)
-                            rew = succ_prob - last_succ_prob
-                            last_succ_prob = succ_prob
-                            chunk_reward += rew * self.reward_scale
+                            for k in range(valid_count):
+                                nxt = future_obs[k]
+                                next_latent = future_latents[k]
+                                latent_history = torch.cat(
+                                    [latent_history[1:], current_latent.unsqueeze(0)], dim=0
+                                )
+                                current_latent = next_latent
+                                obs_tensor = torch.roll(obs_tensor, -1, dims=0)
+                                obs_tensor[-1] = nxt
+                                action_window = torch.cat(
+                                    [
+                                        action_window[1:],
+                                        future_actions[k:k + 1],
+                                    ],
+                                    dim=0,
+                                )
+                                succ_prob, end = self.predict_rew_end(nxt, task_description)
+                                rew = succ_prob - last_succ_prob
+                                last_succ_prob = succ_prob
+                                chunk_reward += rew * self.reward_scale
+                                if end:
+                                    break
                             if end:
                                 break
                         self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
@@ -524,7 +591,8 @@ class RolloutWorkerActor(BaseWorkerActor):
             traceback.print_exc(); raise
 
     def get_one_episode(self):
-        obs_list, reward_list, done_list, action_norm_list = [], [], [], []
+        obs_list, reward_list, done_list = [], [], []
+        action_env_list = []
         current_seed = int(time.time() * 1000) + self.wid + os.getpid()
         obs, info = self._reset_and_select_env(seed=current_seed)
         obs_list.append(obs)
@@ -542,7 +610,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                 obs_list.append(nxt)
                 reward_list.append(r)
                 done_list.append(term or trunc)
-                action_norm_list.append(act_norm[i])
+                action_env_list.append(np.asarray(action_env[i], dtype=np.float32))
                 reward_sum += r
                 chunk_reward += r * self.reward_scale
                 step_count_total += 1
@@ -556,22 +624,38 @@ class RolloutWorkerActor(BaseWorkerActor):
                 self.stats_actor.add_episode_return.remote(
                     self.current_env_name, reward_sum, step_time,
                     step_count_total, success, actor_id=self.wid, step_num=step_count)
-                self.episodes.append((obs_list, reward_list, done_list, action_norm_list, self.task_description))
-                self._process_episode_for_wm(obs_list, reward_list, action_norm_list, self.task_description)
+                self.episodes.append(
+                    (
+                        obs_list,
+                        reward_list,
+                        done_list,
+                        action_env_list,
+                        self.task_description,
+                    )
+                )
+                self._process_episode_for_wm(
+                    obs_list, reward_list, action_env_list, self.task_description
+                )
                 break
 
-    def _process_episode_for_wm(self, obs_list, reward_list, action_norm_list, task_description):
+    def _obs_to_views(self, obs):
+        return torch.stack(
+            [
+                image_to_tensor(obs["full_image"], "cpu"),
+                image_to_tensor(obs["wrist_image"], "cpu"),
+            ],
+            dim=0,
+        )
+
+    def _process_episode_for_wm(self, obs_list, reward_list, action_env_list, task_description):
         T = len(obs_list)
         if T < self.num_step_cond + 1:
             return
         obs_images = []
         for obs_dict in obs_list:
-            img = obs_dict['full_image']
-            obs_tensor = image_to_tensor(img, 'cpu')
-            obs_images.append(obs_tensor.numpy())
+            obs_images.append(self._obs_to_views(obs_dict).numpy())
         obs_images = np.stack(obs_images, axis=0)
-        actions = np.stack([a if isinstance(a, np.ndarray) else a.numpy()
-                            for a in action_norm_list], axis=0)
+        actions = np.stack(action_env_list, axis=0)
         num_valid_windows = T - self.num_step_cond
         wm_batch = []
         for window_idx in range(num_valid_windows):
@@ -615,20 +699,21 @@ class RolloutWorkerActor(BaseWorkerActor):
             ))
         self.replay.add_batch.remote(batch)
 
-    # ★ 修改：使用 Ctrl-World 无状态接口
-    def predict_next_obs(self, current_obs, latent_history, act_history, task_description):
-        """
-        通过 CtrlWorldInferenceActor 预测下一帧。
-        Worker 传入完整状态 (current_obs, latent_history, act_history)，
-        返回 (next_obs, next_latent)。
-        """
-        next_obs, next_latent = ray.get(self.ctrl_world_infer.request.remote(
-            current_obs.float(), latent_history.float(), act_history.float(), task_description
+    def predict_next_chunk(
+        self, current_latent, latent_history, action_condition, task_description
+    ):
+        future_obs, future_latents = ray.get(self.ctrl_world_infer.request.remote(
+            current_latent, latent_history, action_condition.float(), task_description
         ))
-        return next_obs, next_latent
+        return future_obs, future_latents
 
     def predict_rew_end(self, next_obs, task_description):
-        inputs = self.obs2inp(next_obs, task_description)
+        if next_obs.ndim != 4:
+            raise ValueError(f"Expected multi-view observation, got {tuple(next_obs.shape)}")
+        reward_obs = {"full_image": tensor_to_image(next_obs[0])}
+        inputs = prepare_one_obs(
+            self.cfg, self.processor, reward_obs, task_description, self.torch_dtype
+        )
         logits = ray.get(self.reward_infer.request.remote(inputs))
         probs = torch.softmax(logits, dim=-1)
         succ_prob = probs[1].item()
@@ -636,8 +721,12 @@ class RolloutWorkerActor(BaseWorkerActor):
         return succ_prob, end
 
     def obs2inp(self, obs, task_description):
-        frame_uint8 = tensor_to_image(obs)
-        obs_for_vla = {"full_image": frame_uint8}
+        if obs.ndim != 4 or obs.shape[0] < 2:
+            raise ValueError(f"Expected [M,C,H,W] with two views, got {tuple(obs.shape)}")
+        obs_for_vla = {
+            "full_image": tensor_to_image(obs[0]),
+            "wrist_image": tensor_to_image(obs[1]),
+        }
         inputs = prepare_one_obs(self.cfg, self.processor, obs_for_vla, task_description, self.torch_dtype)
         return inputs
 
@@ -907,15 +996,47 @@ class CtrlWorldInferenceActor(InferenceActorCom):
         ctrl_world = CrtlWorld(cfg).to(device).to(torch.bfloat16)
         ctrl_world.eval()
 
-        # 加载 Ctrl-World checkpoint（如果有）
-        if args.ctrl_world_ckpt and os.path.exists(args.ctrl_world_ckpt):
-            print(f"CtrlWorldInferenceActor {actor_id}: 加载 checkpoint: {args.ctrl_world_ckpt}")
-            ckpt = torch.load(args.ctrl_world_ckpt, map_location=device, weights_only=False)
-            state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
-            ctrl_world.load_state_dict(state_dict, strict=False)
-            print(f"CtrlWorldInferenceActor {actor_id}: checkpoint 加载完成。")
-        else:
-            print(f"CtrlWorldInferenceActor {actor_id}: 未提供 checkpoint，使用随机权重（仅 smoke test）。")
+        if not os.path.isfile(args.ctrl_world_ckpt):
+            raise FileNotFoundError(f"Ctrl-World checkpoint not found: {args.ctrl_world_ckpt}")
+        print(f"CtrlWorldInferenceActor {actor_id}: 加载 checkpoint: {args.ctrl_world_ckpt}")
+        ckpt = torch.load(args.ctrl_world_ckpt, map_location="cpu", weights_only=False)
+        state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
+        state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+        ctrl_world.load_state_dict(state_dict, strict=True)
+        print(f"CtrlWorldInferenceActor {actor_id}: checkpoint 加载完成。")
+
+        stat_path = args.condition_stat_path
+        if stat_path is None:
+            stat_path = str(Path(args.ctrl_world_ckpt).resolve().parent / "condition_stat.json")
+        if not os.path.isfile(stat_path):
+            raise FileNotFoundError(f"Ctrl-World condition statistics not found: {stat_path}")
+        with open(stat_path, "r", encoding="utf-8") as f:
+            condition_stats = json.load(f)
+        if condition_stats.get("condition_mode") != "action":
+            raise ValueError(
+                f"Expected action condition statistics, got "
+                f"{condition_stats.get('condition_mode')!r}"
+            )
+        if condition_stats.get("normalize_condition") != "bounds":
+            raise ValueError("Ctrl-World checkpoint must use bounds-normalized conditions")
+        if (
+            set(condition_stats.get("skip_choices", [])) != {1}
+            or int(condition_stats.get("skip_his_multiplier", -1)) != 1
+            or float(condition_stats.get("skip_his_zero_prob", -1.0)) != 0.0
+        ):
+            raise ValueError(
+                "Ctrl-World checkpoint statistics are not frame-aligned for "
+                "single-step delta actions"
+            )
+        condition_low = torch.tensor(condition_stats["condition_p01"], dtype=torch.float32)
+        condition_high = torch.tensor(condition_stats["condition_p99"], dtype=torch.float32)
+        if condition_low.shape != (ACTION_DIM,) or condition_high.shape != (ACTION_DIM,):
+            raise ValueError(
+                f"Expected {ACTION_DIM}-D condition bounds, got "
+                f"{tuple(condition_low.shape)} and {tuple(condition_high.shape)}"
+            )
+        if not torch.all(condition_high > condition_low):
+            raise ValueError("Every condition p99 value must be greater than p01")
 
         # 创建 CtrlWorldEnvBatch（仅用其无状态接口和编解码工具）
         @dataclass
@@ -935,6 +1056,8 @@ class CtrlWorldInferenceActor(InferenceActorCom):
             target_width=args.target_width,
             num_frames_pred=args.num_frames_pred,
             num_inference_steps=args.num_inference_steps,
+            condition_low=condition_low,
+            condition_high=condition_high,
         )
 
         self.model = ctrl_world  # InferenceActorCom 期望 self.model
@@ -958,31 +1081,40 @@ class CtrlWorldInferenceActor(InferenceActorCom):
             traceback.print_exc()
 
     # ★ 无状态接口：Worker 传入完整状态
-    async def request(self, current_obs, latent_history, act_history, instruction):
+    async def request(self, current_latent, latent_history, action_condition, instruction):
         """
         Args:
-            current_obs:    [C, H, W] in [-1, 1] (CPU tensor)
+            current_latent: [4, latent_h*num_cams, latent_w]
             latent_history: [num_history, 4, latent_h*num_cams, latent_w] (CPU tensor)
-            act_history:    [T, act_dim] (CPU tensor)
+            action_condition: [num_history+num_frames, act_dim], raw delta actions
             instruction:    str
         Returns:
-            (next_obs: [C, H, W], next_latent: [4, latent_h*num_cams, latent_w])
+            future observations/latents for frames 1: of the generated chunk
         """
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
-        self.requests.append((current_obs, latent_history, act_history, instruction))
+        self.requests.append((current_latent, latent_history, action_condition, instruction))
         self.promises.append(fut)
         return await fut
 
-    def init_latent_history(self, obs_seq):
+    def init_latent_state(self, obs_seq):
         """
         Worker 端调用：从观测序列初始化 latent_history。
         Args:
-            obs_seq: [T, C, H, W] in [-1, 1] (CPU tensor)
+            obs_seq: [T,M,C,H,W] in [-1, 1] (CPU tensor)
         Returns:
-            latent_history: [num_history, 4, latent_h*num_cams, latent_w] (CPU tensor)
+            (latent_history, current_latent)
         """
-        return self.ctrl_world_env.init_latent_history(obs_seq.unsqueeze(0).to(self.device))[0].cpu()
+        history, current = self.ctrl_world_env.init_latent_state(
+            obs_seq.unsqueeze(0).to(self.device)
+        )
+        return history[0].cpu(), current[0].cpu()
+
+    def get_num_history(self):
+        return self.ctrl_world_env.num_history
+
+    def get_stride(self):
+        return self.ctrl_world_env.num_frames_pred - 1
 
     async def _loop(self):
         while True:
@@ -1000,30 +1132,31 @@ class CtrlWorldInferenceActor(InferenceActorCom):
             self.last_process_time = time.time()
 
             # 拆分请求
-            current_obs_list = [req[0] for req in requests_to_process]
+            current_latent_list = [req[0] for req in requests_to_process]
             latent_history_list = [req[1] for req in requests_to_process]
-            act_history_list = [req[2] for req in requests_to_process]
+            action_condition_list = [req[2] for req in requests_to_process]
             instructions = [req[3] for req in requests_to_process]
 
             # Stack into batch
-            current_obs_batch = torch.stack(current_obs_list, dim=0).to(self.device)  # [B, C, H, W]
+            current_latent_batch = torch.stack(current_latent_list, dim=0).to(self.device)
             latent_history_batch = torch.stack(latent_history_list, dim=0).to(self.device)  # [B, num_history, 4, ...]
-            act_history_batch = torch.stack(act_history_list, dim=0).to(self.device)  # [B, T, act_dim]
+            action_condition_batch = torch.stack(action_condition_list, dim=0).to(self.device)
 
             t_loop_start = time.time()
             try:
                 with torch.inference_mode():
-                    next_obs, next_latent = self.ctrl_world_env.predict_next_stateless(
-                        current_obs=current_obs_batch,
+                    future_obs, future_latents = self.ctrl_world_env.predict_chunk_stateless(
+                        current_latent=current_latent_batch,
                         latent_history=latent_history_batch,
-                        act_history=act_history_batch,
+                        action_condition=action_condition_batch,
                         instructions=instructions,
+                        output_size=(224, 224),
                     )
-                    next_obs = next_obs.cpu()
-                    next_latent = next_latent.cpu()
+                    future_obs = future_obs.cpu()
+                    future_latents = future_latents.cpu()
 
                 for i, promise in enumerate(promises_to_process):
-                    promise.set_result((next_obs[i], next_latent[i]))
+                    promise.set_result((future_obs[i], future_latents[i]))
 
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/ctrl_world_loop_time_s", loop_duration)
@@ -1463,7 +1596,7 @@ class TrainerActor(TrainerActorCom):
                 device = next(self.model.parameters()).device
 
                 # Reward Model 数据 - 需要准备 inputs_batch
-                last_obs_np = obs_np[:, -1]  # [B, C, H, W]
+                last_obs_np = obs_np[:, -1, 0]  # reward model uses primary camera [B,C,H,W]
 
                 inputs_list = []
                 for i in range(len(last_obs_np)):
@@ -1650,6 +1783,16 @@ def main(args):
     if not os.path.exists(args.pretrained_checkpoint):
         print(f"错误: OpenVLA checkpoint 路径 '{args.pretrained_checkpoint}' 不存在。")
         return
+    if not os.path.isfile(args.ctrl_world_ckpt):
+        raise FileNotFoundError(f"Ctrl-World checkpoint not found: {args.ctrl_world_ckpt}")
+    if args.condition_stat_path is None:
+        args.condition_stat_path = str(
+            Path(args.ctrl_world_ckpt).resolve().parent / "condition_stat.json"
+        )
+    if not os.path.isfile(args.condition_stat_path):
+        raise FileNotFoundError(
+            f"Ctrl-World condition statistics not found: {args.condition_stat_path}"
+        )
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
     object_store_size_gb = 256
