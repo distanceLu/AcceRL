@@ -2,7 +2,7 @@ import os
 import json
 import argparse
 
-os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
+os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染 
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
 # 注意: CUDA_VISIBLE_DEVICES 现在通过命令行参数设置
