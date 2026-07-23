@@ -7,6 +7,9 @@ VLA, and the resulting raw VLA actions condition the next WM prediction.
 
 Default usage:
     CUDA_VISIBLE_DEVICES=0 python tests_dsj/test_ctrl_world_wm_closed_loop_predict.py
+
+Action-matched comparison:
+    CUDA_VISIBLE_DEVICES=0 python tests_dsj/test_ctrl_world_wm_closed_loop_predict.py --action-matched
 """
 from __future__ import annotations
 
@@ -87,6 +90,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--action-matched",
+        action="store_true",
+        help="Send each VLA action to both WM and LIBERO, then compare their results.",
+    )
     return parser.parse_args()
 
 
@@ -443,6 +451,130 @@ def imagine(
     return torch.cat(segments), np.concatenate(imagined_actions)
 
 
+@torch.no_grad()
+def action_matched_imagination(
+    model: CrtlWorld,
+    actor: ActorCritic,
+    cfg: GenerateConfig,
+    task: Any,
+    suite: Any,
+    instruction: str,
+    low: np.ndarray,
+    high: np.ndarray,
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, List[List[np.ndarray]], np.ndarray, np.ndarray, bool]:
+    """Query VLA from WM images and apply the same actions to WM and LIBERO."""
+    env, _ = get_libero_env(task, cfg.model_family, resolution=256)
+    raw_obs = env.reset()
+    initial_states = suite.get_task_init_states(args.task_id)
+    if not 0 <= args.initial_state_id < len(initial_states):
+        raise ValueError(f"initial-state-id must be in [0, {len(initial_states) - 1}]")
+    raw_obs = env.set_init_state(initial_states[args.initial_state_id])
+    for _ in range(10):
+        raw_obs, _, _, _ = env.step(get_libero_dummy_action(cfg.model_family))
+
+    warmup_frames = [rotated_camera_frames(raw_obs)]
+    warmup_actions: List[np.ndarray] = []
+    executed_actions: List[np.ndarray] = []
+    queue = deque()
+    done = False
+
+    try:
+        while len(warmup_frames) <= args.start_index:
+            if not queue:
+                queue.extend(query_vla(actor, cfg, real_observation(raw_obs), instruction))
+            raw_action = np.asarray(queue.popleft(), dtype=np.float32)
+            env_action = process_action_for_env(raw_action)
+            raw_obs, _, done, _ = env.step(env_action.tolist())
+            warmup_actions.append(raw_action)
+            executed_actions.append(env_action)
+            warmup_frames.append(rotated_camera_frames(raw_obs))
+            if done and len(warmup_frames) <= args.start_index:
+                raise RuntimeError("LIBERO episode ended before start-index")
+
+        warmup_latents = encode_frames(model, warmup_frames, args.device)
+        aligned_actions = frame_aligned_real_actions(
+            np.stack(warmup_actions),
+            len(warmup_frames),
+        )
+        latent_buffer = [
+            warmup_latents[index : index + 1]
+            for index in range(args.start_index + 1)
+        ]
+        action_buffer = [
+            aligned_actions[index : index + 1]
+            for index in range(args.start_index + 1)
+        ]
+        history_lags = list(range(NUM_HISTORY, 0, -1))
+        segments = []
+        imagined_actions = []
+        libero_frames = [warmup_frames[-1]]
+
+        for chunk_id in range(args.num_chunks):
+            history = torch.cat(
+                [latent_buffer[-1 - lag] for lag in history_lags]
+            ).unsqueeze(0)
+            history_actions = np.concatenate(
+                [action_buffer[-1 - lag] for lag in history_lags]
+            )
+            current = latent_buffer[-1][0]
+            current_images = [
+                video[0] for video in decode_latents(model, current.unsqueeze(0))
+            ]
+            queried = query_vla(
+                actor,
+                cfg,
+                predicted_observation(current_images),
+                instruction,
+            )
+            frame_actions = frame_aligned_imagination_actions(
+                action_buffer[-1][0],
+                queried,
+            )
+
+            # The exact same raw VLA actions condition WM and advance LIBERO.
+            for raw_action in frame_actions[1:]:
+                env_action = process_action_for_env(raw_action)
+                if not done:
+                    raw_obs, _, done, _ = env.step(env_action.tolist())
+                executed_actions.append(env_action)
+                libero_frames.append(rotated_camera_frames(raw_obs))
+
+            condition = np.concatenate([history_actions, frame_actions])
+            predicted = predict_chunk(
+                model,
+                current.unsqueeze(0),
+                history,
+                condition,
+                low,
+                high,
+                instruction,
+                args.device,
+            )
+            take = CHUNK_FRAMES if chunk_id == args.num_chunks - 1 else STRIDE
+            segments.append(predicted[:take])
+            imagined_actions.append(frame_actions[1:])
+            for relative_index in range(1, CHUNK_FRAMES):
+                latent_buffer.append(predicted[relative_index : relative_index + 1])
+                action_buffer.append(frame_actions[relative_index : relative_index + 1])
+            print(f"[action-matched] chunk {chunk_id + 1}/{args.num_chunks}")
+
+        predictions = torch.cat(segments)
+        if len(libero_frames) != len(predictions):
+            raise RuntimeError(
+                f"LIBERO/prediction length mismatch: {len(libero_frames)} != {len(predictions)}"
+            )
+        return (
+            predictions,
+            libero_frames,
+            np.concatenate(imagined_actions),
+            np.stack(executed_actions),
+            done,
+        )
+    finally:
+        env.close()
+
+
 def metrics(gt: Sequence[np.ndarray], pred: Sequence[np.ndarray]) -> Dict[str, float]:
     squared_errors = []
     absolute_errors = []
@@ -510,39 +642,59 @@ def main() -> None:
     model = load_world_model(args.checkpoint, args.device)
     low, high = load_action_stats(args.checkpoint)
 
-    print(f"[real] collecting {total_frames} VLA/LIBERO frames")
-    real_frames, step_actions, env_actions, rollout_done = collect_real_trajectory(
-        actor,
-        vla_cfg,
-        task,
-        suite,
-        instruction,
-        total_frames,
-        args,
-    )
-    aligned_actions = frame_aligned_real_actions(step_actions, len(real_frames))
-    warmup_latents = encode_frames(
-        model,
-        real_frames[: args.start_index + 1],
-        args.device,
-    )
+    if args.action_matched:
+        print("[action-matched] WM image -> VLA -> same actions to WM and LIBERO")
+        (
+            pred_latents,
+            selected_real,
+            imagined_actions,
+            env_actions,
+            rollout_done,
+        ) = action_matched_imagination(
+            model,
+            actor,
+            vla_cfg,
+            task,
+            suite,
+            instruction,
+            low,
+            high,
+            args,
+        )
+    else:
+        print(f"[real] collecting {total_frames} VLA/LIBERO frames")
+        real_frames, step_actions, env_actions, rollout_done = collect_real_trajectory(
+            actor,
+            vla_cfg,
+            task,
+            suite,
+            instruction,
+            total_frames,
+            args,
+        )
+        aligned_actions = frame_aligned_real_actions(step_actions, len(real_frames))
+        warmup_latents = encode_frames(
+            model,
+            real_frames[: args.start_index + 1],
+            args.device,
+        )
+        print(f"[imagine] starting from real frame {args.start_index}")
+        pred_latents, imagined_actions = imagine(
+            model,
+            actor,
+            vla_cfg,
+            warmup_latents,
+            aligned_actions,
+            instruction,
+            low,
+            high,
+            args,
+        )
+        selected_real = real_frames[
+            args.start_index : args.start_index + len(pred_latents)
+        ]
 
-    print(f"[imagine] starting from real frame {args.start_index}")
-    pred_latents, imagined_actions = imagine(
-        model,
-        actor,
-        vla_cfg,
-        warmup_latents,
-        aligned_actions,
-        instruction,
-        low,
-        high,
-        args,
-    )
     pred_videos = decode_latents(model, pred_latents)
-    selected_real = real_frames[
-        args.start_index : args.start_index + len(pred_latents)
-    ]
     gt_videos = [
         resize_video([frame[camera] for frame in selected_real])
         for camera in range(NUM_CAMS)
@@ -559,6 +711,7 @@ def main() -> None:
     np.save(output / "real_env_actions.npy", env_actions)
     np.save(output / "imagined_vla_actions.npy", imagined_actions)
     summary = {
+        "mode": "action-matched" if args.action_matched else "trajectory-imagination",
         "task_id": args.task_id,
         "task": task.name,
         "instruction": instruction,
