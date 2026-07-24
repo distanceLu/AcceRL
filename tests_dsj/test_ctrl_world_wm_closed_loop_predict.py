@@ -61,7 +61,8 @@ VLA_CHECKPOINT = (
     "openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0"
     "--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
 )
-VLA_CHECKPOINT2 = "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt"
+#VLA_CHECKPOINT2 = "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt"
+VLA_CHECKPOINT2 =""
 DEFAULT_WM_CHECKPOINT = (
     "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/"
     "2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-20000.pt"
@@ -84,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", type=int, default=1)
     parser.add_argument("--initial-state-id", type=int, default=0)
-    parser.add_argument("--start-index", type=int, default=6)
+    parser.add_argument("--start-index", type=int, default=28)
     parser.add_argument("--num-chunks", type=int, default=16)
     parser.add_argument("--checkpoint", default=DEFAULT_WM_CHECKPOINT)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
@@ -112,7 +113,7 @@ def load_vla(device: str, seed: int) -> Tuple[ActorCritic, GenerateConfig]:
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=1,
+        num_images_in_input=2,
         use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,
