@@ -188,7 +188,9 @@ def _predict_reward_end(
 
     inputs_list = []
     for index in range(batch_size):
-        reward_obs = {"full_image": tensor_to_image(observations[index, 0])}
+        reward_obs = {
+            "full_image": tensor_to_image(observations[index, 0].float())
+        }
         inputs_list.append(
             prepare_one_obs(
                 env_batch.reward_cfg,
@@ -206,9 +208,9 @@ def _predict_reward_end(
 
 def _policy_observation(observation: torch.Tensor) -> Dict[str, np.ndarray]:
     """Convert [M,C,H,W] in [-1,1] to the VLA observation dictionary."""
-    result = {"full_image": tensor_to_image(observation[0])}
+    result = {"full_image": tensor_to_image(observation[0].float())}
     if observation.shape[0] > 1:
-        result["wrist_image"] = tensor_to_image(observation[1])
+        result["wrist_image"] = tensor_to_image(observation[1].float())
     return result
 
 
@@ -692,7 +694,9 @@ def train_reward_model_only(
     last_agentview = obs[:, -1, 0]
     inputs_list = []
     for index in range(last_agentview.shape[0]):
-        reward_obs = {"full_image": tensor_to_image(last_agentview[index])}
+        reward_obs = {
+            "full_image": tensor_to_image(last_agentview[index].float())
+        }
         inputs_list.append(
             prepare_one_obs(
                 reward_cfg,
