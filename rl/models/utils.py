@@ -68,7 +68,7 @@ class RewardFrameDataset(Dataset):
                 if not fname.endswith(".pt"):
                     continue
                 fpath = os.path.join(data_dir, fname)
-                sample = torch.load(fpath, map_location='cpu')
+                sample = torch.load(fpath, map_location='cpu',weights_only=False)
                 # video = sample["video"]  # (T, H, W, 3)
                 mask = sample["mask"]    # (T,)
                 last_rew = sample["reward"]
@@ -89,7 +89,7 @@ class RewardFrameDataset(Dataset):
 
     def __getitem__(self, index: int):
         fpath, frame_idx, rew = self.items[index]
-        sample = torch.load(fpath, map_location='cpu')
+        sample = torch.load(fpath, map_location='cpu',weights_only=False)
         frame = sample["video"][frame_idx]  # HWC uint8
         instruction = sample["instruction"]
 
