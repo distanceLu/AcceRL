@@ -1,8 +1,8 @@
 '''
 example
 python rl/generate_data/generate_actor_critic_discrete_data.py \
-     --output_dir /mnt/data/lcx3/AcceRL/tests_dsj/dataset_episode_task0 \
-     --benchmark_name libero_spatial --num_tasks 1 --episodes_per_task 100 \
+     --output_dir /mnt/data/lcx3/AcceRL/tests_dsj/dataset_episode_task_train \
+     --benchmark_name libero_spatial --num_tasks 1 --episodes_per_task 1000 \
      --pretrained_checkpoint /mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt \
      --device cuda:2 --use_bf16 --use_proprio
 '''
