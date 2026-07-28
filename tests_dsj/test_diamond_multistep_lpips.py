@@ -17,12 +17,14 @@ from typing import Any, Dict, List, Mapping, Tuple
 import lpips
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from test_diamond_world_model_metrics import (
     DEFAULT_DATASET,
     DEFAULT_DIAMOND_CHECKPOINT,
     DEFAULT_FRAMEWORK_CHECKPOINT,
+    batch_ssim,
     build_denoiser,
     load_action_stats,
     prepare_actions,
@@ -138,6 +140,31 @@ def load_rollout_batch(
     )
 
 
+def clips_to_fvd_numpy(
+    clips: torch.Tensor,
+    horizon: int,
+    temporal_length: int = 16,
+) -> np.ndarray:
+    """Convert short clips to I3D input, temporally resampling to 16 frames."""
+    clips = clips[:, :horizon].permute(0, 2, 1, 3, 4).float()
+    clips = F.interpolate(
+        clips,
+        size=(temporal_length, 224, 224),
+        mode="trilinear",
+        align_corners=False,
+    )
+    return (
+        clips.clamp(-1.0, 1.0)
+        .add(1.0)
+        .mul(127.5)
+        .round()
+        .byte()
+        .permute(0, 2, 3, 4, 1)
+        .contiguous()
+        .numpy()
+    )
+
+
 def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     if args.max_horizon < 2:
         raise ValueError("--max-horizon 必须至少为 2")
@@ -170,7 +197,12 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         raise FileNotFoundError(f"{args.dataset} 中没有 episode .pt 文件")
 
     lpips_sums = torch.zeros(args.max_horizon, dtype=torch.float64)
+    ssim_sums = torch.zeros(args.max_horizon, dtype=torch.float64)
+    squared_error_sums = torch.zeros(args.max_horizon, dtype=torch.float64)
+    pixel_counts = torch.zeros(args.max_horizon, dtype=torch.long)
     horizon_counts = torch.zeros(args.max_horizon, dtype=torch.long)
+    predicted_clips = []
+    target_clips = []
     rollout_count = 0
     progress = tqdm(
         range(0, len(episode_paths), args.episode_batch_size),
@@ -195,6 +227,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
             act_buffer = act_buffer.to(device)
             future_actions = future_actions.to(device)
             targets = targets.to(device)
+            batch_predictions = []
 
             for horizon_index in range(args.max_horizon):
                 step_actions = future_actions[:, horizon_index]
@@ -208,28 +241,93 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
                 ).flatten()
 
                 lpips_sums[horizon_index] += distances.double().sum().cpu()
+                predictions_01 = predictions.float().add(1.0).mul(0.5)
+                targets_01 = targets[:, horizon_index].float().add(1.0).mul(0.5)
+                ssim_sums[horizon_index] += (
+                    batch_ssim(predictions_01, targets_01).double().sum().cpu()
+                )
+                squared_error_sums[horizon_index] += (
+                    (predictions_01 - targets_01).square().double().sum().cpu()
+                )
+                pixel_counts[horizon_index] += predictions_01.numel()
                 horizon_counts[horizon_index] += len(distances)
+                batch_predictions.append(predictions.cpu())
 
                 obs_buffer = torch.cat(
                     [obs_buffer[:, 1:], predictions.unsqueeze(1)], dim=1
                 )
                 act_buffer = model_actions[:, 1:]
 
+            predicted_clips.append(torch.stack(batch_predictions, dim=1))
+            target_clips.append(targets.cpu())
             rollout_count += len(rollout_ids)
             progress.set_postfix(rollouts=rollout_count)
 
     if rollout_count == 0:
         raise RuntimeError("没有生成任何 multi-step rollout")
 
-    curve = {
+    lpips_curve = {
         str(horizon): float(
             lpips_sums[horizon - 1] / horizon_counts[horizon - 1]
         )
         for horizon in range(2, args.max_horizon + 1)
         if horizon_counts[horizon - 1] > 0
     }
+    ssim_curve = {
+        str(horizon): float(
+            ssim_sums[horizon - 1] / horizon_counts[horizon - 1]
+        )
+        for horizon in range(2, args.max_horizon + 1)
+        if horizon_counts[horizon - 1] > 0
+    }
+    psnr_curve = {
+        str(horizon): float(
+            -10.0
+            * torch.log10(
+                (
+                    squared_error_sums[horizon - 1]
+                    / pixel_counts[horizon - 1]
+                ).clamp_min(1e-12)
+            )
+        )
+        for horizon in range(2, args.max_horizon + 1)
+        if pixel_counts[horizon - 1] > 0
+    }
+
+    # Canonical I3D requires at least 16 temporal frames.  For short-horizon
+    # curves, each prefix is linearly resampled to 16 frames before extraction.
+    from cdfvd import fvd
+
+    all_predictions = torch.cat(predicted_clips, dim=0)
+    all_targets = torch.cat(target_clips, dim=0)
+    fvd_evaluator = fvd.cdfvd(
+        "i3d",
+        n_real="full",
+        n_fake="full",
+        device=str(device),
+        seed=args.seed,
+    )
+    fvd_curve = {}
+    for horizon in tqdm(
+        range(2, args.max_horizon + 1),
+        desc="I3D FVD by horizon",
+        unit="horizon",
+    ):
+        real_videos = clips_to_fvd_numpy(all_targets, horizon)
+        fake_videos = clips_to_fvd_numpy(all_predictions, horizon)
+        fvd_curve[str(horizon)] = float(
+            fvd_evaluator.compute_fvd(real_videos, fake_videos)
+        )
+        fvd_evaluator.empty_real_stats()
+        fvd_evaluator.empty_fake_stats()
+
     return {
-        "lpips_by_horizon": curve,
+        "lpips_by_horizon": lpips_curve,
+        "ssim_by_horizon": ssim_curve,
+        "psnr_by_horizon": psnr_curve,
+        "fvd_by_horizon": fvd_curve,
+        "fvd_feature_extractor": "I3D-Kinetics-400",
+        "fvd_temporal_resample_frames": 16,
         "max_horizon": args.max_horizon,
         "num_rollouts": rollout_count,
         "num_episodes": len(episode_paths),
