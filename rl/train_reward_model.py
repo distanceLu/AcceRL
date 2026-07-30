@@ -187,9 +187,9 @@ def evaluate(model, dataloader, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_dirs", nargs="+", default=["/cpfs01/lcx_workspace/Open-Sora/debug/spatial_ep300"])
-    parser.add_argument("--test_dirs", nargs="+", default=["/cpfs01/lcx_workspace/Open-Sora/debug/spatial_ep30"])
-    parser.add_argument("--device", default="cuda:7")
+    parser.add_argument("--train_dirs", nargs="+", default=["/mnt/data/lcx3/AcceRL/tests_dsj/dataset_episode_task_train_1"])
+    parser.add_argument("--test_dirs", nargs="+", default=["tests_dsj/dataset_episode_task_test"])
+    parser.add_argument("--device", default="cuda:1")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--grad_accum", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=30)

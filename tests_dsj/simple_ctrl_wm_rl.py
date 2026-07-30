@@ -5,6 +5,24 @@ LIBERO collection -> world-model imagination -> PPO update.  The only model
 that is not trained online is Ctrl-World; it is loaded once and used under
 ``torch.no_grad`` for all imagined rollouts.
 """
+'''
+CUDA_VISIBLE_DEVICES=2 \
+TF_CPP_MIN_LOG_LEVEL=3 \
+python tests_dsj/simple_ctrl_wm_rl.py \
+  --device cuda:0 \
+  --benchmark libero_spatial \
+  --task-id 0 \
+  --num-iterations 500 \
+  --num-trajectories 3 \
+  --num-samples-for-rollout 128 \
+  --rollout-max-steps 16 \
+  --rollout-batch-size 8 \
+  --ppo-batch-size 16 \
+  --ppo-epochs 4 \
+  --ppo-lr 1e-6 \
+  --gradient-accumulation 8 \
+  --num-inference-steps 10
+'''
 import os
 import json
 os.environ["MUJOCO_GL"] = "osmesa"
@@ -305,7 +323,10 @@ def rollout_with_ctrl_world(
         raw_actions = torch.as_tensor(raw_actions, dtype=torch.float32, device=device)
         raw_actions = raw_actions * chunk_start_alive[:, None, None]
 
-        obs_list.append(current_obs[:, 0].clone())
+        # Keep every camera view.  The old policy logits above were produced
+        # from the same multi-view observation, so PPO must reconstruct the
+        # new-policy inputs from both agent-view and wrist-view images.
+        obs_list.append(current_obs.clone())
         val_list.append(values)
         act_logits_list.append(action_logits)
         act_tokens_list.append(action_token_ids)
@@ -402,7 +423,7 @@ def rollout_with_ctrl_world(
 
 def _empty_rollout_result(device):
     return {
-        "obs": torch.zeros(0, 0, 3, 224, 224, device=device),
+        "obs": torch.zeros(0, 0, 2, 3, 224, 224, device=device),
         "act_logits": torch.zeros(0, 0, 8, 1, device=device),
         "act_tokens": torch.zeros(0, 0, 8, dtype=torch.long, device=device),
         "rew": torch.zeros(0, 0, device=device),
@@ -520,7 +541,12 @@ def ppo_update(
     mask = rollout_data["mask"]
     instructions = rollout_data.get("instructions", [""] * obs.shape[0])
 
-    B, T_ac, C, H, W = obs.shape
+    if obs.ndim != 6:
+        raise ValueError(
+            "PPO observations must retain all camera views as "
+            f"[B,T,M,C,H,W], got {tuple(obs.shape)}"
+        )
+    B, T_ac, M, C, H, W = obs.shape
     device = actor_critic.device
     print(f"  PPO: batch={obs.shape}, valid_steps={mask.sum().item()}")
 
@@ -553,7 +579,7 @@ def ppo_update(
             "mean_episode_length": 0.0,
         }
 
-    obs_flat = obs.reshape(B * T_ac, C, H, W)[valid_indices]
+    obs_flat = obs.reshape(B * T_ac, M, C, H, W)[valid_indices]
     advantages_flat = advantages.reshape(B * T_ac)[valid_indices]
     returns_flat = returns.reshape(B * T_ac)[valid_indices]
     old_action_tokens_flat = old_action_tokens.reshape(B * T_ac, -1)[valid_indices]
@@ -590,9 +616,7 @@ def ppo_update(
             inputs_list = []
             for i in range(len(batch_obs)):
                 obs_tensor = batch_obs[i]
-                obs_np = obs_tensor.cpu().numpy().transpose(1, 2, 0)
-                obs_img = ((obs_np + 1) / 2 * 255).astype(np.uint8)
-                obs_dict = {"full_image": obs_img}
+                obs_dict = _policy_observation(obs_tensor)
                 inputs = prepare_one_obs(
                     actor_critic.cfg, actor_critic.processor, obs_dict,
                     batch_instructions[i], actor_critic.model_dtype,
@@ -753,8 +777,7 @@ def main():
     parser.add_argument(
         "--ctrl-world-ckpt",
         default=(
-            "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/"
-            "2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-20000.pt"
+            "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/best_val_loss.pt"
         ),
         help="Pretrained Ctrl-World checkpoint; it is never optimized by this script",
     )
@@ -764,7 +787,7 @@ def main():
                         help="Path to agent.yaml")
     parser.add_argument("--trainer-config", type=str,
                         default=str(ACCE_RL_ROOT / "envs/config/trainer.yaml"))
-    parser.add_argument("--reward-ckpt", type=str, default=None)
+    parser.add_argument("--reward-ckpt", type=str, default="/mnt/data/lcx3/checkpoint/reward/reward.pt")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--num-cams", type=int, default=2)
     parser.add_argument("--num-history", type=int, default=6)
@@ -836,7 +859,7 @@ def main():
         use_l1_regression=False,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=1,
+        num_images_in_input=2,
         use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,

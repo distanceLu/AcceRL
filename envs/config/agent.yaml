@@ -24,5 +24,6 @@ reward_model:
 #checkpoint2_path: "/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl_from_oss/runs/distill_quick_test/20260608_164220_object_task0_distill_1img_nopro_150/checkpoints/checkpoint_latest.pt"
 denoiser_path: "/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/denoiser_smoke_test/denoiser_smoke_test.pt"
 reward_model_path: "/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/reward_model_object0_alpha_0d95_epoch15_v2/best_model.pt"
-openvla_path: "/mnt/data/lcx2/yanjieworkspace/models/finetune_im/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
-checkpoint2_path: "/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/distill_object_teacher_2img_proprio_student_1img_no_proprio/checkpoint_step_100.pt"
+openvla_path: "/mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt"
+#checkpoint2_path: "/mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/distill_object_teacher_2img_proprio_student_1img_no_proprio/checkpoint_step_100.pt"
+checkpoint2_path: ""
