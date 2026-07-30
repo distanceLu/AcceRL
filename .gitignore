@@ -147,3 +147,4 @@ tests_dsj/ctrl_world_vla_imagine_eval/
 tests_dsj/dataset_episode/
 tests_dsj/dataset_episode_task_train/
 tests_dsj/dataset_episode_task0
+tests_dsj/dataset_episode_task_test/

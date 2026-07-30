@@ -16,8 +16,8 @@ from rl.models.reward_model import RewardModel
 from rl.models.utils import RewardFrameDataset, make_collate_fn
 
 
-DEFAULT_DATA_DIR = "tests_dsj/dataset_episode_task0"
-DEFAULT_REWARD_CHECKPOINT = "/mnt/data/lcx3/checkpoint/reward/reward.pt"
+DEFAULT_DATA_DIR = "tests_dsj/dataset_episode_task_test"
+DEFAULT_REWARD_CHECKPOINT = "/mnt/data/lcx3/AcceRL/runs/reward_model/20260728_162203_reward_model/best_model.pt"
 DEFAULT_PRETRAINED_CHECKPOINT = (
     "/mnt/data/lcx3/checkpoint/dsj/"
     "openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0"

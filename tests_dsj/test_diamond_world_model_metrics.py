@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
@@ -58,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--agent-config", type=Path, default=Path("envs/config/agent.yaml"))
     parser.add_argument("--trainer-config", type=Path, default=Path("envs/config/trainer.yaml"))
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--device", default="cuda:2")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-episodes", type=int, default=None)
     parser.add_argument(
@@ -342,6 +343,8 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         if args.action_source == "normalized_continuous"
         else None
     )
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     episode_paths = sorted(args.dataset.glob("*.pt"))
     if args.max_episodes is not None:
@@ -355,6 +358,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     pixel_count = 0
     prediction_count = 0
     evaluated_episodes = 0
+    sample_time_seconds = 0.0
 
     progress = tqdm(episode_paths, desc="DIAMOND evaluation", unit="episode")
     with torch.inference_mode():
@@ -376,10 +380,18 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
                     [actions[index - history + 1 : index + 1] for index in indices]
                 )
                 targets = torch.stack([video[index] for index in indices]).to(device)
+                previous_obs = previous_obs.to(device, non_blocking=True)
+                previous_act = previous_act.to(device, non_blocking=True)
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                sample_start = time.perf_counter()
                 predictions, _ = sampler.sample(
-                    previous_obs.to(device, non_blocking=True),
-                    previous_act.to(device, non_blocking=True),
+                    previous_obs,
+                    previous_act,
                 )
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                sample_time_seconds += time.perf_counter() - sample_start
                 predictions = predictions.clamp(-1.0, 1.0)
 
                 # Metrics are computed in RGB [0, 1].
@@ -394,7 +406,15 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
 
             evaluated_episodes += 1
             running_mse = squared_error_sum / pixel_count
-            progress.set_postfix(mse=f"{running_mse:.6f}")
+            running_sps = (
+                prediction_count / sample_time_seconds
+                if sample_time_seconds > 0
+                else 0.0
+            )
+            progress.set_postfix(
+                mse=f"{running_mse:.6f}",
+                imagined_sps=f"{running_sps:.2f}",
+            )
 
     if pixel_count == 0:
         raise RuntimeError("没有可评估的预测帧")
@@ -402,11 +422,23 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     mae = absolute_error_sum / pixel_count
     psnr = -10.0 * np.log10(max(mse, 1e-12))
     ssim = ssim_sum / prediction_count
+    ms_per_imagined_step = sample_time_seconds * 1000.0 / prediction_count
+    imagined_sps = (
+        prediction_count / sample_time_seconds if sample_time_seconds > 0 else 0.0
+    )
+    gpu_mem_mb = (
+        torch.cuda.max_memory_allocated(device) / (1024**2)
+        if device.type == "cuda"
+        else None
+    )
     return {
         "mse": float(mse),
         "mae": float(mae),
         "psnr": float(psnr),
         "ssim": float(ssim),
+        "ms_per_imagined_step": float(ms_per_imagined_step),
+        "imagined_sps": float(imagined_sps),
+        "gpu_mem_mb": float(gpu_mem_mb) if gpu_mem_mb is not None else None,
         "num_episodes": evaluated_episodes,
         "num_predictions": prediction_count,
         "num_steps_conditioning": history,

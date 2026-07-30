@@ -1152,7 +1152,7 @@ class CtrlWorldInferenceActor(InferenceActorCom):
                         instructions=instructions,
                         output_size=(224, 224),
                     )
-                    future_obs = future_obs.cpu()
+                    future_obs = future_obs.float().cpu()
                     future_latents = future_latents.cpu()
 
                 for i, promise in enumerate(promises_to_process):
