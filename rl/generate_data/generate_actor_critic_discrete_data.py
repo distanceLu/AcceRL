@@ -1,10 +1,10 @@
 '''
 example
 python rl/generate_data/generate_actor_critic_discrete_data.py \
-     --output_dir /mnt/data/lcx3/AcceRL/tests_dsj/dataset_episode_task_train \
+     --output_dir /mnt/data/lcx3/AcceRL/tests_dsj/dataset_episode_task_train_1 \
      --benchmark_name libero_spatial --num_tasks 1 --episodes_per_task 1000 \
      --pretrained_checkpoint /mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt \
-     --device cuda:2 --use_bf16 --use_proprio
+     --device cuda:2 --use_bf16 --use_proprio --temperature 10 
 '''
 import os
 import json
@@ -42,6 +42,7 @@ def generate_data(
     device: str = "cuda:0",
     use_bf16: bool = True,
     greedy: bool = False,
+    temperature: float = 1.0,
     seed: int = None,
     print_success_interval: int = 100,
     num_images_in_input: int = 2,
@@ -69,6 +70,8 @@ def generate_data(
         episode files always save the full rollout.
     """
     os.makedirs(output_dir, exist_ok=True)
+    if temperature <= 0:
+        raise ValueError("--temperature must be greater than 0")
 
     # Reproducibility (best-effort)
     if seed is not None:
@@ -266,9 +269,13 @@ def generate_data(
                 inputs_batch = actor.prepare_inputs_batch(inputs_t_list)
                 with torch.inference_mode():
                     action_logits, _value = actor.forward(inputs_batch)
+                sampling_logits = action_logits / temperature
                 B = int(action_logits.size(0))
                 deterministic_flags = [bool(greedy) for _ in range(B)]
-                _dist, _token_ids, normalized_actions = actor.post_process(action_logits, deterministic_flags)
+                _dist, _token_ids, normalized_actions = actor.post_process(
+                    sampling_logits,
+                    deterministic_flags,
+                )
                 # normalized_actions: (B, NUM_ACTIONS_CHUNK, 7)
                 for b, env_i in enumerate(need_gen_indices):
                     env_queues[env_i].extend(normalized_actions[b])
@@ -345,6 +352,7 @@ def generate_data(
                         "device": device,
                         "use_bf16": use_bf16,
                         "greedy": greedy,
+                        "temperature": temperature,
                         "unnorm_key": cfg.unnorm_key,
                         "num_open_loop_steps": int(cfg.num_open_loop_steps),
                         "torch_dtype": str(torch_dtype),
@@ -382,6 +390,12 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--use_bf16", action="store_true")
     parser.add_argument("--greedy", action="store_true")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature for action logits; >1.0 makes actions more random.",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--print_success_interval", type=int, default=10, help="Print success rate every N samples")
     parser.add_argument("--num_images_in_input", type=int, default=2)
@@ -402,6 +416,7 @@ if __name__ == "__main__":
         device=args.device,
         use_bf16=args.use_bf16,
         greedy=args.greedy,
+        temperature=args.temperature,
         seed=args.seed,
         print_success_interval=args.print_success_interval,
         num_images_in_input=args.num_images_in_input,
