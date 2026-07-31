@@ -10,7 +10,7 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export RAY_DEDUP_LOGS=0
 
 /mnt/data/lcx3/envs/merged-env/bin/python tests_dsj/ds_wm_discrete_ctrl.py \
-    --cuda-visible-devices 3,4,5,6 \
+    --cuda-visible-devices 0,1,2,3 \
     --use-bf16 \
     --benchmark libero_spatial \
     --num-images-in-input 2 \
@@ -29,8 +29,8 @@ export RAY_DEDUP_LOGS=0
     --num-inference-steps 10 \
     --num-trainer-gpus 1 \
     --num-inference-actors 1 \
-    --num-rollout-workers 4 \
-    --num-eval-workers 2 \
+    --num-rollout-workers 10 \
+    --num-eval-workers 10 \
     --num-reward-inference-actors 1 \
     --num-ctrl-inference-actors 1 \
     --train-iters 30000 \
@@ -64,5 +64,5 @@ export RAY_DEDUP_LOGS=0
     --ckpt-every-steps 5000 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
-    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm \
+    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_horizon8_rolloutworkers10 \
     --reward-checkpoint /mnt/data/lcx3/checkpoint/reward/reward.pt
