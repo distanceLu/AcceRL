@@ -64,8 +64,7 @@ VLA_CHECKPOINT = (
 #VLA_CHECKPOINT2 = "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt"
 VLA_CHECKPOINT2 =""
 DEFAULT_WM_CHECKPOINT = (
-    "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/"
-    "2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-20000.pt"
+    "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-100000.pt"
 )
 SVD_MODEL = "/mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model"
 CLIP_MODEL = "/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model"
@@ -85,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", type=int, default=1)
     parser.add_argument("--initial-state-id", type=int, default=0)
-    parser.add_argument("--start-index", type=int, default=28)
+    parser.add_argument("--start-index", type=int, default=70)
     parser.add_argument("--num-chunks", type=int, default=16)
     parser.add_argument("--checkpoint", default=DEFAULT_WM_CHECKPOINT)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
