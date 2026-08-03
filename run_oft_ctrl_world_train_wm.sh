@@ -64,6 +64,10 @@ export RAY_DEDUP_LOGS=0
     --ctrl-lr 1e-5 \
     --ctrl-warmup-steps 500 \
     --ctrl-train-interval 10 \
+    --ctrl-eval-interval 100 \
+    --ctrl-eval-batch-size 4 \
+    --ctrl-eval-max-horizon 4 \
+    --ctrl-eval-lpips-net alex \
     --replay-capacity 10000 \
     --ckpt-dir /mnt/data/lcx3/AcceRL/runs/ctrl_train_wm_checkpoints \
     --ckpt-every-steps 5000 \
