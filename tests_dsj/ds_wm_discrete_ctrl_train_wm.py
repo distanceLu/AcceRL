@@ -53,6 +53,41 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 
+def batch_ssim(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    window_size: int = 11,
+    sigma: float = 1.5,
+) -> torch.Tensor:
+    """Gaussian-window SSIM for each RGB image in [0, 1]. Returns [N]."""
+    channels = predictions.shape[1]
+    coordinates = torch.arange(
+        window_size, device=predictions.device, dtype=predictions.dtype
+    ) - (window_size - 1) / 2
+    kernel_1d = torch.exp(-(coordinates.square()) / (2 * sigma**2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    window = kernel_2d.expand(channels, 1, window_size, window_size)
+    mu_pred = F.conv2d(predictions, window, groups=channels)
+    mu_target = F.conv2d(targets, window, groups=channels)
+    mu_pred_sq = mu_pred.square()
+    mu_target_sq = mu_target.square()
+    mu_product = mu_pred * mu_target
+    variance_pred = F.conv2d(predictions.square(), window, groups=channels) - mu_pred_sq
+    variance_target = F.conv2d(targets.square(), window, groups=channels) - mu_target_sq
+    covariance = F.conv2d(predictions * targets, window, groups=channels) - mu_product
+    c1 = 0.01**2
+    c2 = 0.03**2
+    ssim_map = ((2 * mu_product + c1) * (2 * covariance + c2)) / (
+        (mu_pred_sq + mu_target_sq + c1) * (variance_pred + variance_target + c2)
+    )
+    return ssim_map.mean(dim=(1, 2, 3))
+
+
+def _normalize_actions_bounds(actions: torch.Tensor, low: torch.Tensor, high: torch.Tensor) -> torch.Tensor:
+    return (2.0 * (actions - low) / (high - low + 1e-8) - 1.0).clamp(-1.0, 1.0)
+
+
 class AcceRLCtrlWorld(CrtlWorld):
     """Multi-camera pixel encoder matching Ctrl-World AcceRL offline training."""
 
@@ -154,10 +189,6 @@ class AcceRLCtrlWorld(CrtlWorld):
         loss = ((predict_x0[:, num_history:] - latents[:, num_history:]) ** 2 * loss_weight).mean()
 
         return loss, torch.tensor(0.0, device=device, dtype=dtype)
-
-
-def _normalize_actions_bounds(actions: torch.Tensor, low: torch.Tensor, high: torch.Tensor) -> torch.Tensor:
-    return (2.0 * (actions - low) / (high - low + 1e-8) - 1.0).clamp(-1.0, 1.0)
 
 
 # ================================================================
@@ -293,6 +324,16 @@ def parse_args():
     parser.add_argument('--ctrl-warmup-steps', type=int, default=500)
     parser.add_argument('--ctrl-train-interval', type=int, default=10,
                         help='Train Ctrl-World every N actor training steps')
+    # Ctrl-World prediction quality eval (LPIPS / PSNR / SSIM -> TensorBoard)
+    parser.add_argument('--ctrl-eval-interval', type=int, default=100,
+                        help='Evaluate Ctrl-World prediction metrics every N steps (0 disables)')
+    parser.add_argument('--ctrl-eval-batch-size', type=int, default=4,
+                        help='Number of WM windows used per Ctrl-World metric eval')
+    parser.add_argument('--ctrl-eval-max-horizon', type=int, default=4,
+                        help='Max future frames for teacher-forced Ctrl-World metrics')
+    parser.add_argument('--ctrl-eval-lpips-net', type=str, default='alex',
+                        choices=['alex', 'vgg', 'squeeze'],
+                        help='LPIPS backbone used for Ctrl-World eval')
     # ============ 调试参数 ============
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Enable debugpy in Ray actors (each actor starts a debug server)')
@@ -1277,6 +1318,138 @@ class CtrlWorldInferenceActor(InferenceActorCom):
 
     def get_stride(self):
         return self.ctrl_world_env.num_frames_pred - 1
+
+    def _ensure_lpips(self, net_name: str = "alex"):
+        if getattr(self, "_lpips_net_name", None) == net_name and hasattr(self, "_lpips"):
+            return self._lpips
+        import lpips
+        self._lpips = lpips.LPIPS(net=net_name).to(self.device).eval()
+        self._lpips_net_name = net_name
+        return self._lpips
+
+    @torch.no_grad()
+    def evaluate_prediction_metrics(
+        self,
+        obs_np: np.ndarray,
+        act_np: np.ndarray,
+        instructions: List[str],
+        max_horizon: int = 4,
+        lpips_net: str = "alex",
+    ) -> Dict[str, float]:
+        """Teacher-forced Ctrl-World rollout metrics on WM replay windows.
+
+        Uses GT actions and compares predicted future frames against GT.
+        Returns scalar means plus per-horizon LPIPS/PSNR/SSIM.
+        """
+        env = self.ctrl_world_env
+        num_history = env.num_history
+        stride = env.num_frames_pred - 1
+        if max_horizon < 1:
+            raise ValueError("max_horizon must be >= 1")
+
+        obs = torch.as_tensor(obs_np, dtype=torch.float32)
+        acts = torch.as_tensor(act_np, dtype=torch.float32)
+        if obs.ndim != 6:
+            raise ValueError(f"Expected obs [B,F,M,C,H,W], got {tuple(obs.shape)}")
+        if acts.ndim != 3:
+            raise ValueError(f"Expected act [B,F,A], got {tuple(acts.shape)}")
+
+        B, nF, M, C, H, W = obs.shape
+        context_len = num_history + 1
+        available_future = nF - context_len
+        if available_future < 1:
+            raise ValueError(
+                f"WM windows need at least {context_len + 1} frames, got F={nF}"
+            )
+        eval_horizon = min(int(max_horizon), int(available_future), int(stride))
+        if eval_horizon < 1:
+            raise ValueError("No future frames available for Ctrl-World eval")
+
+        flat = obs.reshape(B * nF * M, C, H, W)
+        flat = F.interpolate(
+            flat,
+            size=(env.target_height, env.target_width),
+            mode="bilinear",
+            align_corners=False,
+        )
+        obs = flat.reshape(B, nF, M, C, env.target_height, env.target_width)
+
+        context = obs[:, :context_len].to(self.device)
+        gt_future = obs[:, context_len : context_len + eval_horizon].to(self.device)
+        acts = acts.to(self.device)
+
+        history, current = env.init_latent_state(context)
+        # Frame-aligned action condition: history+current + next stride actions.
+        needed_act = num_history + 1 + stride
+        if acts.shape[1] < needed_act:
+            pad = acts[:, -1:].repeat(1, needed_act - acts.shape[1], 1)
+            act_cond = torch.cat([acts, pad], dim=1)
+        else:
+            act_cond = acts[:, :needed_act]
+
+        future_obs, _ = env.predict_chunk_stateless(
+            current_latent=current,
+            latent_history=history,
+            action_condition=act_cond,
+            instructions=list(instructions),
+            output_size=(env.target_height, env.target_width),
+        )
+        pred_future = future_obs[:, :eval_horizon].float()
+        gt_future = gt_future.float()
+
+        lpips_model = self._ensure_lpips(lpips_net)
+        lpips_by_h, psnr_by_h, ssim_by_h, mse_by_h = {}, {}, {}, {}
+        lpips_vals, psnr_vals, ssim_vals, mse_vals = [], [], [], []
+
+        for h in range(1, eval_horizon + 1):
+            pred_h = pred_future[:, h - 1]  # [B,M,C,H,W]
+            gt_h = gt_future[:, h - 1]
+            pred_flat = pred_h.reshape(B * M, C, env.target_height, env.target_width)
+            gt_flat = gt_h.reshape(B * M, C, env.target_height, env.target_width)
+            pred_01 = ((pred_flat + 1.0) * 0.5).clamp(0.0, 1.0)
+            gt_01 = ((gt_flat + 1.0) * 0.5).clamp(0.0, 1.0)
+
+            mse = (pred_01 - gt_01).square().mean()
+            psnr = -10.0 * torch.log10(mse.clamp_min(1e-12))
+            ssim = batch_ssim(pred_01, gt_01).mean()
+            lpips_val = lpips_model(pred_flat, gt_flat).mean()
+
+            key = str(h)
+            mse_by_h[key] = float(mse.item())
+            psnr_by_h[key] = float(psnr.item())
+            ssim_by_h[key] = float(ssim.item())
+            lpips_by_h[key] = float(lpips_val.item())
+            mse_vals.append(mse_by_h[key])
+            psnr_vals.append(psnr_by_h[key])
+            ssim_vals.append(ssim_by_h[key])
+            lpips_vals.append(lpips_by_h[key])
+
+        # Agent-view-only summary at full evaluated horizon.
+        pred_agent = pred_future[:, -1, 0]
+        gt_agent = gt_future[:, -1, 0]
+        pred_agent_01 = ((pred_agent + 1.0) * 0.5).clamp(0.0, 1.0)
+        gt_agent_01 = ((gt_agent + 1.0) * 0.5).clamp(0.0, 1.0)
+        agent_mse = (pred_agent_01 - gt_agent_01).square().mean()
+        agent_psnr = -10.0 * torch.log10(agent_mse.clamp_min(1e-12))
+        agent_ssim = batch_ssim(pred_agent_01, gt_agent_01).mean()
+        agent_lpips = lpips_model(pred_agent, gt_agent).mean()
+
+        return {
+            "mse": float(np.mean(mse_vals)),
+            "psnr": float(np.mean(psnr_vals)),
+            "ssim": float(np.mean(ssim_vals)),
+            "lpips": float(np.mean(lpips_vals)),
+            "mse_by_horizon": mse_by_h,
+            "psnr_by_horizon": psnr_by_h,
+            "ssim_by_horizon": ssim_by_h,
+            "lpips_by_horizon": lpips_by_h,
+            "agent_view_mse": float(agent_mse.item()),
+            "agent_view_psnr": float(agent_psnr.item()),
+            "agent_view_ssim": float(agent_ssim.item()),
+            "agent_view_lpips": float(agent_lpips.item()),
+            "eval_horizon": float(eval_horizon),
+            "num_windows": float(B),
+        }
 
     async def _loop(self):
         while True:
@@ -2408,6 +2581,71 @@ def main(args):
             ray.get([broadcast_task] + receive_tasks)
 
         sync_time = time.time() - t_sync_start
+
+        # Ctrl-World prediction quality eval (after latest weight sync)
+        if (
+            args.ctrl_eval_interval > 0
+            and global_step > 0
+            and global_step % args.ctrl_eval_interval == 0
+        ):
+            try:
+                wm_size = ray.get(wm_replay_buffers[0].size.remote())
+                if wm_size >= args.ctrl_eval_batch_size:
+                    obs_np, act_np, _rew_np, instructions = ray.get(
+                        wm_replay_buffers[0].sample.remote(args.ctrl_eval_batch_size)
+                    )
+                    ctrl_eval_metrics = ray.get(
+                        ctrl_world_inference_pool[0].evaluate_prediction_metrics.remote(
+                            obs_np,
+                            act_np,
+                            instructions,
+                            max_horizon=args.ctrl_eval_max_horizon,
+                            lpips_net=args.ctrl_eval_lpips_net,
+                        )
+                    )
+                    writer.add_scalar('WorldModel/Eval/MSE', ctrl_eval_metrics['mse'], global_step)
+                    writer.add_scalar('WorldModel/Eval/PSNR', ctrl_eval_metrics['psnr'], global_step)
+                    writer.add_scalar('WorldModel/Eval/SSIM', ctrl_eval_metrics['ssim'], global_step)
+                    writer.add_scalar('WorldModel/Eval/LPIPS', ctrl_eval_metrics['lpips'], global_step)
+                    writer.add_scalar(
+                        'WorldModel/Eval/AgentView_PSNR',
+                        ctrl_eval_metrics['agent_view_psnr'],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        'WorldModel/Eval/AgentView_SSIM',
+                        ctrl_eval_metrics['agent_view_ssim'],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        'WorldModel/Eval/AgentView_LPIPS',
+                        ctrl_eval_metrics['agent_view_lpips'],
+                        global_step,
+                    )
+                    for h, value in ctrl_eval_metrics['psnr_by_horizon'].items():
+                        writer.add_scalar(f'WorldModel/Eval/PSNR_h{h}', value, global_step)
+                    for h, value in ctrl_eval_metrics['ssim_by_horizon'].items():
+                        writer.add_scalar(f'WorldModel/Eval/SSIM_h{h}', value, global_step)
+                    for h, value in ctrl_eval_metrics['lpips_by_horizon'].items():
+                        writer.add_scalar(f'WorldModel/Eval/LPIPS_h{h}', value, global_step)
+                    writer.flush()
+                    print(
+                        f"[CtrlEval] step={global_step} "
+                        f"LPIPS={ctrl_eval_metrics['lpips']:.4f} "
+                        f"PSNR={ctrl_eval_metrics['psnr']:.3f} "
+                        f"SSIM={ctrl_eval_metrics['ssim']:.4f} "
+                        f"horizon={int(ctrl_eval_metrics['eval_horizon'])} "
+                        f"windows={int(ctrl_eval_metrics['num_windows'])}"
+                    )
+                else:
+                    print(
+                        f"[CtrlEval] skip step={global_step}: "
+                        f"WM buffer {wm_size} < {args.ctrl_eval_batch_size}"
+                    )
+            except Exception as e:
+                import traceback
+                print(f"[CtrlEval] failed at step={global_step}: {e}", flush=True)
+                traceback.print_exc()
 
         if global_step > 0 and global_step % args.ckpt_every_steps == 0:
             ray.get(trainer_group[0].save_agent.remote(args.ckpt_dir, global_step))
