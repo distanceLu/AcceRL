@@ -26,11 +26,11 @@ export RAY_DEDUP_LOGS=0
     --num-history 6 \
     --num-step-cond 7 \
     --num-frames-pred 5 \
-    --num-inference-steps 10 \
+    --num-inference-steps 50 \
     --num-trainer-gpus 1 \
     --num-inference-actors 1 \
-    --num-rollout-workers 4 \
-    --num-eval-workers 2 \
+    --num-rollout-workers 10 \
+    --num-eval-workers 4 \
     --num-reward-inference-actors 1 \
     --num-ctrl-inference-actors 1 \
     --train-iters 30000 \
@@ -59,6 +59,8 @@ export RAY_DEDUP_LOGS=0
     --reward-lr 1e-4 \
     --reward-warmup-steps 500 \
     --reward-train-interval 5 \
+    --reward-pos-ratio 0.5 \
+    --reward-replay-capacity 5000 \
     --ctrl-batch-size 8 \
     --ctrl-accumulation-steps 8 \
     --ctrl-lr 1e-5 \
@@ -73,5 +75,5 @@ export RAY_DEDUP_LOGS=0
     --ckpt-every-steps 5000 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
-    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_train_wm \
+    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_train_wm_reward_balance_50denoiser \
     --reward-checkpoint /mnt/data/lcx3/checkpoint/reward/reward.pt
