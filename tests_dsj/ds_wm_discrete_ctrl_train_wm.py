@@ -313,6 +313,10 @@ def parse_args():
     # World Model 训练频率控制
     parser.add_argument('--reward-train-interval', type=int, default=10,
                         help='Train reward model every N actor training steps')
+    parser.add_argument('--reward-pos-ratio', type=float, default=0.5,
+                        help='Target positive ratio when sampling reward terminal frames')
+    parser.add_argument('--reward-replay-capacity', type=int, default=5000,
+                        help='Per-class capacity for terminal-frame reward replay (pos and neg each)')
 
     # Ctrl-World online training (mirrors Diamond denoiser train/broadcast)
     parser.add_argument('--ctrl-batch-size', type=int, default=1,
@@ -402,6 +406,14 @@ class WMExperience:
     obs: np.ndarray                         # [num_steps_conditioning+1, M, C, H, W]
     act: np.ndarray                         # [num_steps_conditioning, act_dim]
     rew: float
+    instruction: str
+
+
+@dataclass
+class RewardFrameExperience:
+    """Episode-terminal frame for reward-model training (matches offline RewardFrameDataset)."""
+    obs: np.ndarray                         # [C, H, W] primary cam in [-1, 1]
+    label: float                            # 1.0 success / 0.0 failure
     instruction: str
 
 
@@ -540,15 +552,31 @@ class ReplayBufferActor:
 
 @ray.remote
 class WMReplayBufferActor:
-    def __init__(self, capacity):
+    def __init__(self, capacity, reward_capacity=5000):
         setup_debugger("wm_replay")
         self.buffer = deque(maxlen=capacity)
+        # Terminal-frame reward buffers (aligned with offline RewardFrameDataset).
+        self.reward_pos = deque(maxlen=reward_capacity)
+        self.reward_neg = deque(maxlen=reward_capacity)
 
     def add_batch(self, batch: List[WMExperience]):
         self.buffer.extend(batch)
 
+    def add_reward_frames(self, batch: List[RewardFrameExperience]):
+        for item in batch:
+            if float(item.label) > 0.5:
+                self.reward_pos.append(item)
+            else:
+                self.reward_neg.append(item)
+
     def size(self):
         return len(self.buffer)
+
+    def reward_size(self):
+        return len(self.reward_pos) + len(self.reward_neg)
+
+    def reward_stats(self):
+        return {"pos": len(self.reward_pos), "neg": len(self.reward_neg)}
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -557,6 +585,38 @@ class WMReplayBufferActor:
         rew = np.asarray([b.rew for b in batch], np.float32)
         instructions = [b.instruction for b in batch]
         return obs, act, rew, instructions
+
+    def sample_reward(self, batch_size, pos_ratio=0.5):
+        """Stratified terminal-frame sample for reward training."""
+        n_pos_avail = len(self.reward_pos)
+        n_neg_avail = len(self.reward_neg)
+        if n_pos_avail + n_neg_avail == 0:
+            raise RuntimeError("Reward terminal-frame buffer is empty")
+
+        pos_ratio = float(np.clip(pos_ratio, 0.0, 1.0))
+        if n_pos_avail == 0:
+            n_pos, n_neg = 0, batch_size
+        elif n_neg_avail == 0:
+            n_pos, n_neg = batch_size, 0
+        else:
+            n_pos = int(round(batch_size * pos_ratio))
+            n_neg = batch_size - n_pos
+
+        def _take(buf, n):
+            if n <= 0:
+                return []
+            buf_list = list(buf)
+            if len(buf_list) >= n:
+                return random.sample(buf_list, n)
+            # With replacement when a class is still rare early in training.
+            return [random.choice(buf_list) for _ in range(n)]
+
+        batch = _take(self.reward_pos, n_pos) + _take(self.reward_neg, n_neg)
+        random.shuffle(batch)
+        obs = np.stack([b.obs for b in batch])
+        labels = np.asarray([b.label for b in batch], np.float32)
+        instructions = [b.instruction for b in batch]
+        return obs, labels, instructions
 
 
 class BaseWorkerActor:
@@ -799,7 +859,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                     )
                 )
                 self._process_episode_for_wm(
-                    obs_list, reward_list, action_env_list, self.task_description
+                    obs_list, reward_list, action_env_list, self.task_description, success
                 )
                 break
 
@@ -812,11 +872,12 @@ class RolloutWorkerActor(BaseWorkerActor):
             dim=0,
         )
 
-    def _process_episode_for_wm(self, obs_list, reward_list, action_env_list, task_description):
-        """Pack Ctrl-World training windows: F = num_history + num_frames.
+    def _process_episode_for_wm(self, obs_list, reward_list, action_env_list, task_description, success=None):
+        """Pack Ctrl-World training windows + terminal reward frame.
 
-        obs: [F,M,C,H,W], act: [F,act_dim] frame-aligned delta actions (raw),
-        rew: reward associated with the transition into the last frame.
+        Ctrl-World still uses dense sliding windows.
+        Reward model only gets the episode-terminal primary-cam frame (offline-style),
+        labeled by episode success — avoids flooding with intermediate-frame negatives.
         """
         T = len(obs_list)
         wm_len = self.ctrl_wm_frames
@@ -847,6 +908,20 @@ class RolloutWorkerActor(BaseWorkerActor):
             ))
         if wm_batch:
             self.wm_replay_buffer.add_batch.remote(wm_batch)
+
+        # Terminal-frame reward label (episode-level), not per-window sparse r.
+        if success is None:
+            ep_label = 1.0 if any(float(r) > 0 for r in reward_list) else 0.0
+        else:
+            ep_label = 1.0 if float(success) > 0.5 else 0.0
+        last_primary = obs_images[-1, 0].astype(np.float32)  # [C,H,W]
+        self.wm_replay_buffer.add_reward_frames.remote([
+            RewardFrameExperience(
+                obs=last_primary,
+                label=ep_label,
+                instruction=task_description,
+            )
+        ])
 
     def _process_traj(self, traj_segment, bootstrap_val):
         rets, advs = [], []
@@ -1519,6 +1594,7 @@ class TrainerActor(TrainerActorCom):
                  reward_batch_size, reward_accumulation_steps, reward_lr, reward_warmup_steps,
                  reward_train_interval,
                  reward_checkpoint=None,
+                 reward_pos_ratio=0.5,
                  # Ctrl-World train/broadcast
                  ctrl_world_args=None,
                  ctrl_batch_size=1, ctrl_accumulation_steps=8, ctrl_lr=1e-5,
@@ -1583,6 +1659,7 @@ class TrainerActor(TrainerActorCom):
 
         # World Model 训练频率
         self.reward_train_interval = reward_train_interval
+        self.reward_pos_ratio = float(reward_pos_ratio)
 
         # World Model 独立训练步数计数器
         self.reward_step = 0
@@ -1929,14 +2006,26 @@ class TrainerActor(TrainerActorCom):
             'ctrl_train_time': train_time,
         }
 
-    def _train_reward_model(self, wm_reward_inputs, wm_labels, current_lrs):
+    def _train_reward_model(self, wm_reward_inputs, wm_labels, current_lrs, reward_can_train=True):
         """Reward Model 训练 (bf16) — 与原版一致"""
-        should_train = (self.global_step % self.reward_train_interval == 0)
+        should_train = (self.global_step % self.reward_train_interval == 0) and reward_can_train
         epoch_reward_losses = []
         epoch_reward_tp, epoch_reward_tn, epoch_reward_fp, epoch_reward_fn = 0, 0, 0, 0
         reward_train_time = 0.0
 
         if not should_train:
+            return {
+                'should_train': False,
+                'epoch_reward_losses': epoch_reward_losses,
+                'reward_train_time': reward_train_time,
+                'reward_tp': epoch_reward_tp,
+                'reward_tn': epoch_reward_tn,
+                'reward_fp': epoch_reward_fp,
+                'reward_fn': epoch_reward_fn,
+            }
+
+        if wm_reward_inputs is None or wm_labels is None:
+            print(f"Trainer {self.rank}: skip reward train (no balanced reward batch).")
             return {
                 'should_train': False,
                 'epoch_reward_losses': epoch_reward_losses,
@@ -2029,9 +2118,14 @@ class TrainerActor(TrainerActorCom):
                 await asyncio.sleep(3)
 
     async def _wm_data_fetching_loop(self):
-        """Prepare Ctrl-World pixel/action batches + Reward Model inputs."""
-        wm_super_batch_size = max(self.reward_super_batch_size, self.ctrl_super_batch_size)
-        print(f"Trainer {self.rank}: WM 后台数据准备循环已启动 (超级批次大小: {wm_super_batch_size})。")
+        """Prepare Ctrl-World windows + balanced terminal-frame reward batches."""
+        ctrl_need = self.ctrl_super_batch_size
+        reward_need = self.reward_super_batch_size
+        print(
+            f"Trainer {self.rank}: WM 后台数据准备循环已启动 "
+            f"(ctrl_super={ctrl_need}, reward_super={reward_need}, "
+            f"reward_pos_ratio={self.reward_pos_ratio})."
+        )
 
         while True:
             try:
@@ -2039,13 +2133,34 @@ class TrainerActor(TrainerActorCom):
                     await asyncio.sleep(0.1)
                     continue
 
-                while await self.wm_replay_buffer.size.remote() < wm_super_batch_size:
-                    print(f"Trainer {self.rank} (BG-WM): 等待 WM ReplayBuffer 填充至 {wm_super_batch_size}...")
+                while True:
+                    ctrl_size = await self.wm_replay_buffer.size.remote()
+                    rew_stats = await self.wm_replay_buffer.reward_stats.remote()
+                    rew_size = rew_stats["pos"] + rew_stats["neg"]
+                    if ctrl_size >= ctrl_need and rew_size >= 1:
+                        break
+                    print(
+                        f"Trainer {self.rank} (BG-WM): 等待 buffer "
+                        f"ctrl={ctrl_size}/{ctrl_need}, "
+                        f"reward_frames={rew_size} (pos={rew_stats['pos']}, neg={rew_stats['neg']})..."
+                    )
                     await asyncio.sleep(3)
 
                 t_sample_start = time.time()
                 obs_np, act_np, rew_np, instructions = \
-                    await self.wm_replay_buffer.sample.remote(wm_super_batch_size)
+                    await self.wm_replay_buffer.sample.remote(ctrl_need)
+
+                # Skip reward sampling/training until both classes exist in the terminal buffer.
+                rew_stats = await self.wm_replay_buffer.reward_stats.remote()
+                reward_can_train = (rew_stats["pos"] > 0 and rew_stats["neg"] > 0)
+                reward_obs_np = None
+                reward_label_np = None
+                reward_instructions = None
+                if reward_can_train:
+                    reward_obs_np, reward_label_np, reward_instructions = \
+                        await self.wm_replay_buffer.sample_reward.remote(
+                            reward_need, self.reward_pos_ratio
+                        )
                 sample_time = time.time() - t_sample_start
 
                 t_prep_start = time.time()
@@ -2073,25 +2188,36 @@ class TrainerActor(TrainerActorCom):
                 action = _normalize_actions_bounds(act_t, self.condition_low, self.condition_high)
                 action = action.to(dtype=torch.bfloat16)
 
-                # ---- Reward Model inputs from primary camera of last frame ----
-                last_obs_np = obs_np[:, -1, 0]
-                inputs_list = []
-                for i in range(len(last_obs_np)):
-                    obs_tensor = last_obs_np[i]
-                    obs_np_hwc = np.transpose(obs_tensor, (1, 2, 0))
-                    obs_img = ((obs_np_hwc + 1) / 2 * 255).astype(np.uint8)
-                    obs_dict = {"full_image": obs_img}
-                    inputs = prepare_one_obs(
-                        self.reward_cfg,
-                        self.processor,
-                        obs_dict,
-                        instructions[i],
-                        torch.bfloat16,
-                    )
-                    inputs_list.append(inputs)
+                # ---- Reward Model inputs from terminal primary-cam frames (balanced) ----
+                reward_inputs_batch = None
+                labels = None
+                reward_pos_ratio_batch = 0.0
+                if reward_can_train:
+                    inputs_list = []
+                    for i in range(len(reward_obs_np)):
+                        obs_tensor = reward_obs_np[i]
+                        obs_np_hwc = np.transpose(obs_tensor, (1, 2, 0))
+                        obs_img = ((obs_np_hwc + 1) / 2 * 255).astype(np.uint8)
+                        obs_dict = {"full_image": obs_img}
+                        inputs = prepare_one_obs(
+                            self.reward_cfg,
+                            self.processor,
+                            obs_dict,
+                            reward_instructions[i],
+                            torch.bfloat16,
+                        )
+                        inputs_list.append(inputs)
 
-                reward_inputs_batch = self.reward_model.prepare_inputs_batch(inputs_list)
-                labels = torch.tensor((rew_np > 0).astype(np.int64), dtype=torch.long, device=device)
+                    reward_inputs_batch = self.reward_model.prepare_inputs_batch(inputs_list)
+                    labels = torch.tensor(
+                        (reward_label_np > 0.5).astype(np.int64), dtype=torch.long, device=device
+                    )
+                    reward_pos_ratio_batch = float(labels.float().mean().item()) if labels.numel() else 0.0
+                else:
+                    print(
+                        f"Trainer {self.rank} (BG-WM): skip reward prep "
+                        f"(pos={rew_stats['pos']}, neg={rew_stats['neg']}); need both classes."
+                    )
 
                 prep_time = time.time() - t_prep_start
 
@@ -2102,6 +2228,10 @@ class TrainerActor(TrainerActorCom):
                     'rew': torch.tensor(rew_np, dtype=torch.float32, device=device),
                     'reward_inputs_batch': reward_inputs_batch,
                     'labels': labels,
+                    'reward_can_train': reward_can_train,
+                    'reward_pos_ratio_batch': reward_pos_ratio_batch,
+                    'reward_buffer_pos': int(rew_stats["pos"]),
+                    'reward_buffer_neg': int(rew_stats["neg"]),
                     'instructions': instructions,
                     'sample_time': sample_time,
                     'prep_time': prep_time,
@@ -2166,8 +2296,13 @@ class TrainerActor(TrainerActorCom):
         # ============ 2. World Model 训练（Ctrl-World + Reward）============
         wm_batch = self.next_ready_wm_batch
         ctrl_should_train = (self.global_step % self.ctrl_train_interval == 0)
-        reward_should_train = (self.global_step % self.reward_train_interval == 0)
-        if ctrl_should_train or reward_should_train:
+        reward_can_train = bool(wm_batch.get("reward_can_train", False))
+        reward_should_train = (
+            (self.global_step % self.reward_train_interval == 0) and reward_can_train
+        )
+        if ctrl_should_train or reward_should_train or (self.global_step % self.reward_train_interval == 0):
+            # Refresh WM batch even when reward is skipped due to missing neg/pos,
+            # so the next attempt sees updated reward buffers.
             self.next_ready_wm_batch = None
         wm_reward_inputs = wm_batch['reward_inputs_batch']
         wm_labels = wm_batch['labels']
@@ -2177,7 +2312,15 @@ class TrainerActor(TrainerActorCom):
         ctrl_result = self._train_ctrl_world(
             wm_batch['pixel'], wm_batch['action'], wm_batch['text'], current_lrs
         )
-        reward_result = self._train_reward_model(wm_reward_inputs, wm_labels, current_lrs)
+        if (self.global_step % self.reward_train_interval == 0) and not reward_can_train:
+            print(
+                f"Trainer {self.rank}: skip reward train "
+                f"(pos={wm_batch.get('reward_buffer_pos', '?')}, "
+                f"neg={wm_batch.get('reward_buffer_neg', '?')}); need both classes."
+            )
+        reward_result = self._train_reward_model(
+            wm_reward_inputs, wm_labels, current_lrs, reward_can_train=reward_can_train
+        )
 
         # ============ 汇总结果 ============
         avg_loss = np.mean(policy_result['epoch_losses'])
@@ -2217,6 +2360,9 @@ class TrainerActor(TrainerActorCom):
             wm_metrics["reward_tn"] = reward_result['reward_tn']
             wm_metrics["reward_fp"] = reward_result['reward_fp']
             wm_metrics["reward_fn"] = reward_result['reward_fn']
+            wm_metrics["reward_pos_ratio_batch"] = float(
+                wm_batch.get("reward_pos_ratio_batch", 0.0)
+            )
 
         return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, avg_kl_loss, current_lrs, self.global_step, avg_ent, avg_kl_div, perf_metrics, wm_metrics
 
@@ -2328,7 +2474,13 @@ def main(args):
     # Actor Replay Buffer (imagination rollout 数据)
     replay_buffers = [ReplayBufferActor.remote(capacity=args.replay_capacity) for _ in range(args.num_trainer_gpus)]
     # World Model Replay Buffer (真实轨迹数据)
-    wm_replay_buffers = [WMReplayBufferActor.remote(capacity=args.wm_replay_capacity) for _ in range(args.num_trainer_gpus)]
+    wm_replay_buffers = [
+        WMReplayBufferActor.remote(
+            capacity=args.wm_replay_capacity,
+            reward_capacity=args.reward_replay_capacity,
+        )
+        for _ in range(args.num_trainer_gpus)
+    ]
 
     ctrl_world_args = {
         "svd_model_path": args.svd_model_path,
@@ -2361,6 +2513,7 @@ def main(args):
             reward_warmup_steps=args.reward_warmup_steps,
             reward_train_interval=args.reward_train_interval,
             reward_checkpoint=args.reward_checkpoint,
+            reward_pos_ratio=args.reward_pos_ratio,
             ctrl_world_args=ctrl_world_args,
             ctrl_batch_size=args.ctrl_batch_size,
             ctrl_accumulation_steps=args.ctrl_accumulation_steps,
@@ -2529,18 +2682,25 @@ def main(args):
         args.ctrl_batch_size * args.ctrl_accumulation_steps,
     )
     assert wm_min_buffer_size < args.wm_replay_capacity, "WM初始填充量必须小于WM回放池总容量"
+    reward_min_frames = 1
 
     while True:
         actor_sizes = ray.get([rb.size.remote() for rb in replay_buffers])
         wm_sizes = ray.get([rb.size.remote() for rb in wm_replay_buffers])
+        reward_sizes = ray.get([rb.reward_size.remote() for rb in wm_replay_buffers])
+        reward_stats = ray.get([rb.reward_stats.remote() for rb in wm_replay_buffers])
         actor_ready = all(size >= min_buffer_size_for_start for size in actor_sizes)
         wm_ready = all(size >= wm_min_buffer_size for size in wm_sizes)
+        reward_ready = all(size >= reward_min_frames for size in reward_sizes)
 
-        if actor_ready and wm_ready:
+        if actor_ready and wm_ready and reward_ready:
             break
 
-        print(f"等待经验池填充... Actor (目标: {min_buffer_size_for_start}): {actor_sizes}, "
-              f"WM (目标: {wm_min_buffer_size}): {wm_sizes}")
+        print(
+            f"等待经验池填充... Actor (目标: {min_buffer_size_for_start}): {actor_sizes}, "
+            f"WM (目标: {wm_min_buffer_size}): {wm_sizes}, "
+            f"RewardFrames (目标: >={reward_min_frames}): {reward_sizes} {reward_stats}"
+        )
         time.sleep(5)
     print("所有远程经验池已准备好，训练器将按需获取数据。")
 
@@ -2680,6 +2840,9 @@ def main(args):
             elapsed_time = current_time - start_time
             total_buffer_size = sum(ray.get([rb.size.remote() for rb in replay_buffers]))
             wm_buffer_size = sum(ray.get([rb.size.remote() for rb in wm_replay_buffers]))
+            reward_stats_list = ray.get([rb.reward_stats.remote() for rb in wm_replay_buffers])
+            reward_pos_size = sum(s["pos"] for s in reward_stats_list)
+            reward_neg_size = sum(s["neg"] for s in reward_stats_list)
 
             wm_loss_str = ""
             if 'reward_loss' in wm_metrics:
@@ -2719,6 +2882,12 @@ def main(args):
                 reward_neg_acc = wm_metrics['reward_tn'] / neg_total if neg_total > 0 else 0.0
                 writer.add_scalar('WorldModel/Reward_Pos_Acc', reward_pos_acc, global_step)
                 writer.add_scalar('WorldModel/Reward_Neg_Acc', reward_neg_acc, global_step)
+            if 'reward_pos_ratio_batch' in wm_metrics:
+                writer.add_scalar(
+                    'WorldModel/Reward_Batch_Pos_Ratio',
+                    wm_metrics['reward_pos_ratio_batch'],
+                    global_step,
+                )
 
             writer.add_scalar('Metrics/Entropy', np.mean(ents), global_step)
             writer.add_scalar('Metrics/KL_Divergence', np.mean(avg_kl_divs), global_step)
@@ -2755,6 +2924,8 @@ def main(args):
 
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
             writer.add_scalar('System/WM_Replay_Buffer_Size_Total', wm_buffer_size, global_step)
+            writer.add_scalar('System/Reward_Buffer_Pos', reward_pos_size, global_step)
+            writer.add_scalar('System/Reward_Buffer_Neg', reward_neg_size, global_step)
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
             writer.add_scalar('System/Total_Env_Steps', total_env_steps, global_step)
             writer.add_scalar('System/Avg_Step_Time', avg_step_time, global_step)
