@@ -82,7 +82,7 @@ class CtrlWorldEnvBatch:
     # ------------------------------------------------------------------
     # 内部工具：每个视角独立 VAE 编解码，再沿 latent 高度拼接
     # ------------------------------------------------------------------
-    def _encode_obs_to_latent(self, obs: Tensor) -> Tensor:
+    def _encode_obs_to_latent(self, obs: Tensor, deterministic: bool = False) -> Tensor:
         """obs: [B,M,C,H,W] -> [B,4,M*latent_h,latent_w]."""
         if obs.ndim != 5:
             raise ValueError(f"Expected multi-view obs [B,M,C,H,W], got {tuple(obs.shape)}")
@@ -95,24 +95,32 @@ class CtrlWorldEnvBatch:
             mode="bilinear", align_corners=False,
         ).to(dtype=self.vae.dtype, device=self.vae.device)
         with torch.no_grad():
-            latent = self.vae.encode(x).latent_dist.sample()
+            latent_dist = self.vae.encode(x).latent_dist
+            latent = latent_dist.mode() if deterministic else latent_dist.sample()
             latent = latent * self.vae.config.scaling_factor
         latent = latent.reshape(B, M, *latent.shape[1:])
         return latent.permute(0, 2, 1, 3, 4).reshape(
             B, latent.shape[2], M * latent.shape[3], latent.shape[4]
         )
 
-    def _encode_obs_sequence(self, obs_seq: Tensor) -> Tensor:
+    def _encode_obs_sequence(
+        self, obs_seq: Tensor, deterministic: bool = False
+    ) -> Tensor:
         """Encode [B,T,M,C,H,W] into combined-view latents."""
         if obs_seq.ndim != 6:
             raise ValueError(f"Expected obs sequence [B,T,M,C,H,W], got {tuple(obs_seq.shape)}")
         B, T, M, C, H, W = obs_seq.shape
-        latents = [self._encode_obs_to_latent(obs_seq[:, t]) for t in range(T)]
+        latents = [
+            self._encode_obs_to_latent(obs_seq[:, t], deterministic=deterministic)
+            for t in range(T)
+        ]
         return torch.stack(latents, dim=1)
 
-    def init_latent_state(self, obs_seq: Tensor) -> Tuple[Tensor, Tensor]:
+    def init_latent_state(
+        self, obs_seq: Tensor, deterministic: bool = False
+    ) -> Tuple[Tensor, Tensor]:
         """Return history strictly before current, plus current latent."""
-        latents = self._encode_obs_sequence(obs_seq)
+        latents = self._encode_obs_sequence(obs_seq, deterministic=deterministic)
         previous, current = latents[:, :-1], latents[:, -1]
         if previous.shape[1] == 0:
             previous = current.unsqueeze(1)
@@ -175,6 +183,7 @@ class CtrlWorldEnvBatch:
         action_condition: Tensor,
         instructions: List[str],
         output_size: Optional[Tuple[int, int]] = None,
+        generator: Optional[torch.Generator] = None,
     ) -> Tuple[Tensor, Tensor]:
         """
         无状态预测下一帧。Worker 自行维护 latent_history，每次把完整状态传入。
@@ -221,6 +230,7 @@ class CtrlWorldEnvBatch:
             output_type="latent",
             return_dict=False,
             frame_level_cond=True,
+            generator=generator,
         )
         # Decode the full temporal chunk (the temporal VAE expects the training
         # sequence), then discard frame 0 because it reconstructs current.

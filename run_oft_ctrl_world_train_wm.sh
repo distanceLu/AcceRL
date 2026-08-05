@@ -10,7 +10,7 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export RAY_DEDUP_LOGS=0
 
 /mnt/data/lcx3/envs/merged-env/bin/python tests_dsj/ds_wm_discrete_ctrl_train_wm.py \
-    --cuda-visible-devices 3,2,1,0 \
+    --cuda-visible-devices 0,1,2,3 \
     --use-bf16 \
     --benchmark libero_spatial \
     --num-images-in-input 2 \
@@ -20,8 +20,8 @@ export RAY_DEDUP_LOGS=0
     --trainer-config-path envs/config/trainer.yaml \
     --svd-model-path /mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model \
     --clip-model-path /mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model \
-    --ctrl-world-ckpt /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/best_val_loss.pt \
-    --condition-stat-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json \
+    --ctrl-world-ckpt /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-21T16-40-56_libero_vla_delta_finetune/best_val_loss.pt \
+    --condition-stat-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json \
     --num-cams 2 \
     --num-history 6 \
     --num-step-cond 7 \
@@ -50,24 +50,31 @@ export RAY_DEDUP_LOGS=0
     --value-warmup-steps 500 \
     --policy-warmup-steps 500 \
     --policy-train-start-step 0 \
-    --imagine-horizon 64 \
+    --imagine-horizon 8 \
     --reward-scale 1.0 \
     --wm-replay-capacity 50000 \
     --real-traj-collect-interval 1 \
     --reward-batch-size 16 \
     --reward-accumulation-steps 8 \
-    --reward-lr 1e-4 \
-    --reward-warmup-steps 500 \
-    --reward-train-interval 5 \
+    --reward-lr 1e-5 \
+    --reward-warmup-steps 100 \
+    --reward-train-interval 50 \
     --reward-pos-ratio 0.5 \
     --reward-replay-capacity 5000 \
+    --reward-min-unique-per-class 64 \
+    --reward-eval-per-class 8 \
     --ctrl-batch-size 8 \
     --ctrl-accumulation-steps 8 \
-    --ctrl-lr 1e-5 \
-    --ctrl-warmup-steps 500 \
-    --ctrl-train-interval 10 \
-    --ctrl-eval-interval 100 \
-    --ctrl-eval-batch-size 4 \
+    --ctrl-lr 1e-6 \
+    --ctrl-warmup-steps 100 \
+    --ctrl-train-interval 20 \
+    --ctrl-ema-decay 0.99 \
+    --ctrl-eval-interval 500 \
+    --ctrl-eval-batch-size 64 \
+    --ctrl-eval-micro-batch-size 4 \
+    --ctrl-eval-seed 12345 \
+    --ctrl-eval-episode-ratio 0.2 \
+    --ctrl-eval-windows-per-episode 8 \
     --ctrl-eval-max-horizon 4 \
     --ctrl-eval-lpips-net alex \
     --replay-capacity 10000 \
@@ -75,5 +82,5 @@ export RAY_DEDUP_LOGS=0
     --ckpt-every-steps 5000 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
-    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_train_wm_reward_balance_50denoiser \
+    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_stable_eval_aligned_ema \
     --reward-checkpoint /mnt/data/lcx3/checkpoint/reward/reward.pt
