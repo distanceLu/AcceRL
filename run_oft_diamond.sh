@@ -2,6 +2,16 @@
 # OpenVLA RL训练脚本示例
 # 使用命令行参数启动训练
 
+ACCERL_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ACCERL_SCRIPT_DIR}" || exit 1
+export PYTHONPATH="${ACCERL_SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+ACCERL_PYTHON="/mnt/data/lcx3/envs/merged-env/bin/python"
+
+if [[ ! -x "${ACCERL_PYTHON}" ]]; then
+    echo "Python environment not found: ${ACCERL_PYTHON}" >&2
+    exit 1
+fi
+
 # python rl/ds_wm_discrete_diffusion.py \
 #   --cuda-visible-devices "0,5" \
 #   --benchmark libero_spatial \
@@ -46,9 +56,8 @@
 #   --exp-name "OpenVLA_DS_sapo_DISCRETE_task0_wm_args"
 
 
-
-python rl/ds_wm_discrete_diffusion.py \
-    --cuda-visible-devices 1,2,3,4 \
+"${ACCERL_PYTHON}" rl/ds_wm_discrete_diffusion.py \
+    --cuda-visible-devices 0,1,2,3 \
     --use-bf16 \
     --benchmark libero_spatial \
     --num-images-in-input 1 \
@@ -94,6 +103,11 @@ python rl/ds_wm_discrete_diffusion.py \
     --reward-warmup-steps 500 \
     --denoiser-train-interval 5 \
     --reward-train-interval 5 \
+    --wm-validation-fraction 0.1 \
+    --wm-eval-interval 50 \
+    --wm-eval-batch-size 8 \
+    --reward-eval-batch-size 512 \
+    --reward-trajectory-eval-window 100 \
     --replay-capacity 10000 \
     --ckpt-dir /cpfs01/liuwei_workspace/models/finetune_rl \
     --ckpt-every-steps 2000000 \
@@ -102,5 +116,3 @@ python rl/ds_wm_discrete_diffusion.py \
     --exp-name OpenVLA_DS_gipo_DISCRETE_task0_train_wm \
     --denoiser-checkpoint /mnt/data/lcx2/yanjieworkspace/openvla_oft_rl/runs/wm_reward_denoiser_distill_named/denoiser_smoke_test/denoiser_smoke_test.pt \
     --reward-checkpoint /mnt/data/lcx3/checkpoint/reward/reward.pt
-
-

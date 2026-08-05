@@ -25,6 +25,7 @@ from envs.world_model_env_batch import WorldModelEnvConfig
 import ray
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributions
 from torch.distributions import kl
 import deepspeed
@@ -212,6 +213,16 @@ def parse_args():
                         help='Train denoiser every N actor training steps (default: 10)')
     parser.add_argument('--reward-train-interval', type=int, default=10,
                         help='Train reward model every N actor training steps (default: 10)')
+    parser.add_argument('--wm-validation-fraction', type=float, default=0.1,
+                        help='Fraction of complete real episodes reserved for WM/reward validation (default: 0.1)')
+    parser.add_argument('--wm-eval-interval', type=int, default=50,
+                        help='Evaluate WM and reward model every N actor training steps (default: 50)')
+    parser.add_argument('--wm-eval-batch-size', type=int, default=8,
+                        help='Validation batch size for WM/reward metrics (default: 8)')
+    parser.add_argument('--reward-eval-batch-size', type=int, default=512,
+                        help='Validation batch size for stable reward classification metrics (default: 512)')
+    parser.add_argument('--reward-trajectory-eval-window', type=int, default=100,
+                        help='Number of complete eval trajectories used for reward metrics (default: 100)')
     
     # ============ 调试参数 ============
     parser.add_argument('--debug', action='store_true', default=False,
@@ -220,6 +231,16 @@ def parse_args():
                         help='Actors wait for VS Code debugger to attach before proceeding')
 
     args = parser.parse_args()
+    if not 0.0 < args.wm_validation_fraction < 1.0:
+        parser.error('--wm-validation-fraction must be between 0 and 1')
+    if args.wm_eval_interval <= 0:
+        parser.error('--wm-eval-interval must be positive')
+    if args.wm_eval_batch_size <= 0:
+        parser.error('--wm-eval-batch-size must be positive')
+    if args.reward_eval_batch_size <= 0:
+        parser.error('--reward-eval-batch-size must be positive')
+    if args.reward_trajectory_eval_window <= 0:
+        parser.error('--reward-trajectory-eval-window must be positive')
 
     # 设置 CUDA_VISIBLE_DEVICES 环境变量
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
@@ -261,12 +282,108 @@ class WMExperience:
     rew: float                              # 标量奖励，对应最后一个观测
     instruction: str                        # 任务描述
 
+
+@dataclass
+class WMRolloutExperience:
+    """用于闭环 rollout 验证，不参与训练。"""
+    obs: np.ndarray                         # [num_step_cond + horizon, C, H, W]
+    act: np.ndarray                         # [num_step_cond + horizon - 1, act_dim]
+    instruction: str
+
+
+def image_batch_ssim(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Mean SSIM for image batches in [0, 1], using an 11x11 local window."""
+    pred = pred.float().clamp(0.0, 1.0)
+    target = target.float().clamp(0.0, 1.0)
+    mu_pred = F.avg_pool2d(pred, kernel_size=11, stride=1, padding=5)
+    mu_target = F.avg_pool2d(target, kernel_size=11, stride=1, padding=5)
+    sigma_pred = F.avg_pool2d(pred * pred, 11, 1, 5) - mu_pred.square()
+    sigma_target = F.avg_pool2d(target * target, 11, 1, 5) - mu_target.square()
+    sigma_cross = F.avg_pool2d(pred * target, 11, 1, 5) - mu_pred * mu_target
+    c1, c2 = 0.01 ** 2, 0.03 ** 2
+    ssim = ((2 * mu_pred * mu_target + c1) * (2 * sigma_cross + c2)) / (
+        (mu_pred.square() + mu_target.square() + c1)
+        * (sigma_pred + sigma_target + c2)
+    )
+    return ssim.mean()
+
+
+def binary_classification_metrics(
+    success_probs: torch.Tensor,
+    labels: torch.Tensor,
+) -> Dict[str, float]:
+    """Binary metrics at threshold 0.5 plus non-interpolated AUPRC/AP."""
+    probs = success_probs.detach().float().flatten()
+    targets = labels.detach().bool().flatten()
+    predictions = probs >= 0.5
+
+    tp = ((predictions == 1) & (targets == 1)).sum().item()
+    tn = ((predictions == 0) & (targets == 0)).sum().item()
+    fp = ((predictions == 1) & (targets == 0)).sum().item()
+    fn = ((predictions == 0) & (targets == 1)).sum().item()
+
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    f1 = 2.0 * precision * recall / max(precision + recall, 1e-12)
+    accuracy = (tp + tn) / max(targets.numel(), 1)
+
+    # Average precision equals the area under the step-wise PR curve.
+    sorted_targets = targets[torch.argsort(probs, descending=True)].float()
+    num_positive = sorted_targets.sum()
+    if num_positive.item() > 0:
+        cumulative_tp = torch.cumsum(sorted_targets, dim=0)
+        ranks = torch.arange(
+            1,
+            sorted_targets.numel() + 1,
+            device=sorted_targets.device,
+            dtype=torch.float32,
+        )
+        precision_at_rank = cumulative_tp / ranks
+        auprc = (
+            precision_at_rank * sorted_targets
+        ).sum().div(num_positive).item()
+    else:
+        auprc = 0.0
+
+    return {
+        "auprc": auprc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "accuracy": accuracy,
+        "tp": float(tp),
+        "tn": float(tn),
+        "fp": float(fp),
+        "fn": float(fn),
+    }
+
+
+def binary_auroc(success_probs: torch.Tensor, labels: torch.Tensor) -> float:
+    """Exact binary AUROC via positive/negative pair comparisons, including ties."""
+    probs = success_probs.detach().float().flatten()
+    targets = labels.detach().bool().flatten()
+    positive_probs = probs[targets]
+    negative_probs = probs[~targets]
+    if positive_probs.numel() == 0 or negative_probs.numel() == 0:
+        return 0.0
+    comparisons = positive_probs[:, None] - negative_probs[None, :]
+    return (
+        (comparisons > 0).float().mean()
+        + 0.5 * (comparisons == 0).float().mean()
+    ).item()
+
+
 # ================================================================
 # 1.5. 统计模块 (StatsActor)
 # ================================================================
 @ray.remote
 class StatsActor:
-    def __init__(self, window_size):
+    def __init__(
+        self,
+        window_size: int,
+        reward_trajectory_eval_window: int = 100,
+        reward_focal_alpha: float = 0.99,
+    ):
         setup_debugger("stats")
         self.stats = defaultdict(lambda: {
             "episode_returns": deque(maxlen=window_size),
@@ -277,11 +394,17 @@ class StatsActor:
             "total_env_steps": 0
         })
         self.timings = defaultdict(lambda: deque(maxlen=window_size))
+        self.peaks = defaultdict(float)
         self.imagine_rewards = deque(maxlen=window_size)  # 用于记录 imagination rollout 的 imagine_reward
         self.actor_last_active = {}
         self.active_window_seconds = 600
         self.total_samples_produced = 0
         self.total_imagine_samples = 0  # 记录 imagination rollout 生成的样本数量
+        self.total_imagined_steps = 0   # Denoiser 实际生成的低层环境步数
+        self.reward_focal_alpha = reward_focal_alpha
+        self.reward_trajectory_probs = deque(maxlen=reward_trajectory_eval_window)
+        self.reward_trajectory_labels = deque(maxlen=reward_trajectory_eval_window)
+        self.reward_model_version = 0
 
     def add_episode_return(
         self,
@@ -309,7 +432,32 @@ class StatsActor:
         """记录系统性能相关的计时指标"""
         self.timings[metric_name].append(value)
 
-    def add_imagine_reward(self, avg_imagine_reward: float, actor_id: int, num_samples: int = 1):
+    def add_peak_metric(self, metric_name: str, value: float):
+        """记录跨 actor、跨时间的峰值指标（如 GPU memory）。"""
+        self.peaks[metric_name] = max(self.peaks[metric_name], value)
+
+    def add_reward_trajectory_prediction(
+        self,
+        success_probability: float,
+        success_label: float,
+    ):
+        """Add one complete real-evaluation trajectory endpoint."""
+        self.reward_trajectory_probs.append(float(success_probability))
+        self.reward_trajectory_labels.append(int(success_label > 0.5))
+
+    def reset_reward_trajectory_metrics(self):
+        """Start a fresh trajectory window after reward weights are updated."""
+        self.reward_trajectory_probs.clear()
+        self.reward_trajectory_labels.clear()
+        self.reward_model_version += 1
+
+    def add_imagine_reward(
+        self,
+        avg_imagine_reward: float,
+        actor_id: int,
+        num_samples: int = 1,
+        num_steps: int = 0,
+    ):
         """记录 imagination rollout 中的平均 imagine_reward 和样本数量
         
         Args:
@@ -319,6 +467,7 @@ class StatsActor:
         """
         self.imagine_rewards.append(avg_imagine_reward)
         self.total_imagine_samples += num_samples
+        self.total_imagined_steps += num_steps
         self.actor_last_active[actor_id] = time.time()
 
     def get_active_actor_count(self) -> int:
@@ -328,11 +477,11 @@ class StatsActor:
 
     def get_stats(self) -> Dict[str, Dict[str, float]]:
         per_env_stats = {}
-        all_returns, all_lengths, all_step_times = [], [], []
+        all_returns, all_lengths, all_step_times, all_successes = [], [], [], []
         total_episodes_processed = 0
         total_env_steps = 0
         
-        eval_returns, eval_lengths, eval_step_times = [], [], []
+        eval_returns, eval_lengths, eval_step_times, eval_successes = [], [], [], []
         eval_total_episodes_processed = 0
         eval_total_env_steps = 0
 
@@ -359,26 +508,31 @@ class StatsActor:
                 eval_returns.extend(env_data["episode_returns"])
                 eval_lengths.extend(env_data["episode_lengths"])
                 eval_step_times.extend(env_data["step_times"])
+                eval_successes.extend(env_data["successes"])
             else:
                 total_episodes_processed += env_data["total_episodes_processed"]
                 total_env_steps += env_data["total_env_steps"]
                 all_returns.extend(env_data["episode_returns"])
                 all_lengths.extend(env_data["episode_lengths"])
                 all_step_times.extend(env_data["step_times"])
+                all_successes.extend(env_data["successes"])
 
         per_env_stats["_global_rollout_"] = {
             "avg_return": np.mean(all_returns) if all_returns else 0.0,
+            "avg_success_rate": np.mean(all_successes) if all_successes else 0.0,
             "avg_ep_len": np.mean(all_lengths) if all_lengths else 0.0,
             "avg_step_time": np.mean(all_step_times) if all_step_times else 0.0,
             "total_episodes_processed": total_episodes_processed,
             "total_env_steps": total_env_steps,
             "total_samples_produced": self.total_samples_produced,
             "total_imagine_samples": self.total_imagine_samples,
+            "total_imagined_steps": self.total_imagined_steps,
             "active_actor_count": self.get_active_actor_count(),
             "avg_imagine_reward": np.mean(self.imagine_rewards) if self.imagine_rewards else 0.0
         }
         per_env_stats["_global_eval_"] = {
             "avg_return": np.mean(eval_returns) if eval_returns else 0.0,
+            "avg_success_rate": np.mean(eval_successes) if eval_successes else 0.0,
             "avg_ep_len": np.mean(eval_lengths) if eval_lengths else 0.0,
             "avg_step_time": np.mean(eval_step_times) if eval_step_times else 0.0,
             "total_episodes_processed": eval_total_episodes_processed,
@@ -387,7 +541,66 @@ class StatsActor:
         timing_stats = {}
         for name, deq in self.timings.items():
             timing_stats[name] = np.mean(deq) if deq else 0.0
+        timing_stats.update(self.peaks)
         per_env_stats["_timings_"] = timing_stats
+
+        if self.reward_trajectory_probs:
+            reward_probs = torch.tensor(
+                list(self.reward_trajectory_probs), dtype=torch.float32
+            )
+            reward_labels = torch.tensor(
+                list(self.reward_trajectory_labels), dtype=torch.long
+            )
+            reward_metrics = binary_classification_metrics(
+                reward_probs, reward_labels
+            )
+            reward_metrics["auroc"] = binary_auroc(reward_probs, reward_labels)
+            reward_metrics["num_trajectories"] = float(reward_labels.numel())
+            reward_metrics["num_positive"] = float(reward_labels.sum().item())
+            reward_metrics["num_negative"] = float(
+                reward_labels.numel() - reward_labels.sum().item()
+            )
+            reward_metrics["has_both_classes"] = float(
+                0 < reward_labels.sum().item() < reward_labels.numel()
+            )
+            reward_metrics["model_version"] = float(self.reward_model_version)
+            reward_metrics["mae"] = torch.abs(
+                reward_probs - reward_labels.float()
+            ).mean().item()
+
+            clipped_probs = reward_probs.clamp(1e-7, 1.0 - 1e-7)
+            pt = torch.where(
+                reward_labels.bool(), clipped_probs, 1.0 - clipped_probs
+            )
+            alpha_t = torch.where(
+                reward_labels.bool(),
+                torch.full_like(clipped_probs, self.reward_focal_alpha),
+                torch.full_like(clipped_probs, 1.0 - self.reward_focal_alpha),
+            )
+            reward_metrics["loss"] = (
+                -alpha_t * (1.0 - pt).square() * torch.log(pt)
+            ).mean().item()
+        else:
+            reward_metrics = {
+                "auprc": 0.0,
+                "auroc": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+                "accuracy": 0.0,
+                "tp": 0.0,
+                "tn": 0.0,
+                "fp": 0.0,
+                "fn": 0.0,
+                "mae": 0.0,
+                "loss": 0.0,
+                "num_trajectories": 0.0,
+                "num_positive": 0.0,
+                "num_negative": 0.0,
+                "has_both_classes": 0.0,
+                "model_version": float(self.reward_model_version),
+            }
+        per_env_stats["_reward_trajectory_eval_"] = reward_metrics
         return per_env_stats
 
 # ================================================================
@@ -422,12 +635,38 @@ class WMReplayBufferActor:
     def __init__(self, capacity):
         setup_debugger("wm_replay")
         self.buffer = deque(maxlen=capacity)
+        self.validation_buffer = deque(maxlen=max(1000, capacity // 5))
+        self.rollout_validation_buffer = deque(maxlen=max(256, capacity // 20))
+        self.validation_accumulator = 0.0
 
-    def add_batch(self, batch: List[WMExperience]):
-        self.buffer.extend(batch)
+    def add_batch(
+        self,
+        batch: List[WMExperience],
+        validation: Optional[bool] = None,
+        rollout_batch: Optional[List[WMRolloutExperience]] = None,
+        validation_fraction: float = 0.1,
+    ):
+        # All workers feeding this replay actor share one episode-level split
+        # counter, so validation starts after ~1/fraction total episodes rather
+        # than ~1/fraction episodes from every individual worker.
+        if validation is None:
+            self.validation_accumulator += validation_fraction
+            validation = self.validation_accumulator >= 1.0 - 1e-12
+            if validation:
+                self.validation_accumulator -= 1.0
+        target = self.validation_buffer if validation else self.buffer
+        target.extend(batch)
+        if validation and rollout_batch:
+            self.rollout_validation_buffer.extend(rollout_batch)
 
     def size(self):
         return len(self.buffer)
+
+    def validation_size(self):
+        return len(self.validation_buffer)
+
+    def rollout_validation_size(self):
+        return len(self.rollout_validation_buffer)
     
     def sample(self, batch_size):
         """
@@ -445,6 +684,37 @@ class WMReplayBufferActor:
         rew = np.asarray([b.rew for b in batch], np.float32)
         instructions = [b.instruction for b in batch]
         return obs, act, rew, instructions
+
+    def sample_validation(self, batch_size: int, reward_batch_size: int):
+        if not self.validation_buffer:
+            return None
+        batch = random.sample(
+            self.validation_buffer,
+            min(batch_size, len(self.validation_buffer)),
+        )
+        reward_batch = random.sample(
+            self.validation_buffer,
+            min(reward_batch_size, len(self.validation_buffer)),
+        )
+        rollout_batch = []
+        if self.rollout_validation_buffer:
+            rollout_batch = random.sample(
+                self.rollout_validation_buffer,
+                min(batch_size, len(self.rollout_validation_buffer)),
+            )
+        return {
+            "obs": np.stack([b.obs for b in batch]),
+            "act": np.stack([b.act for b in batch]),
+            "reward_obs": np.stack([b.obs[-1] for b in reward_batch]),
+            "reward_rew": np.asarray([b.rew for b in reward_batch], np.float32),
+            "reward_instructions": [b.instruction for b in reward_batch],
+            "rollout_obs": (
+                np.stack([b.obs for b in rollout_batch]) if rollout_batch else None
+            ),
+            "rollout_act": (
+                np.stack([b.act for b in rollout_batch]) if rollout_batch else None
+            ),
+        }
 
 class BaseWorkerActor:
     """rollout 和 eval worker 的共享逻辑。"""
@@ -477,7 +747,12 @@ class BaseWorkerActor:
 
 @ray.remote
 class RolloutWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name, num_step_cond, imagine_horizon, torch_dtype, reward_infer, denoiser_infer, reward_scale, gamma, lambda_, wm_replay_buffer, real_traj_collect_interval):
+    def __init__(
+        self, infer, replay, wid, stats_actor, cfg, benchmark_name,
+        num_step_cond, imagine_horizon, torch_dtype, reward_infer,
+        denoiser_infer, reward_scale, gamma, lambda_, wm_replay_buffer,
+        real_traj_collect_interval, wm_validation_fraction,
+    ):
         super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
         setup_debugger("rollout_worker", wid)
         self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
@@ -496,6 +771,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         # World Model 训练相关
         self.wm_replay_buffer = wm_replay_buffer
         self.real_traj_collect_interval = real_traj_collect_interval
+        self.wm_validation_fraction = wm_validation_fraction
 
     def _reset_and_select_env(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
         failure_counts = np.array([sum(history) for history in self.env_outcome])
@@ -518,8 +794,9 @@ class RolloutWorkerActor(BaseWorkerActor):
                 experience = random.choice(self.episodes)
                 obs_list, reward_list, done_list, act_norm_list, task_description = experience
                 obs_list2 = [obs['full_image'] for obs in obs_list]
-                num_imagine_samples = 0  # 统计本次 imagination rollout 的样本数量
                 for i in range(len(obs_list2) - self.num_step_cond):
+                    num_imagine_samples = 0
+                    num_imagined_steps = 0
                     obs_list_sub = obs_list2[i:i+self.num_step_cond]
                     for idx, sub_obs in enumerate(obs_list_sub):
                         sub_obs = image_to_tensor(sub_obs, 'cpu')
@@ -545,6 +822,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                             single_action = act_norm[k]
                             act_tensor = torch.cat([act_tensor, single_action.unsqueeze(0)], dim=0)
                             nxt = self.predict_next_obs(obs_tensor, act_tensor)
+                            num_imagined_steps += 1
                             obs_tensor = torch.roll(obs_tensor, -1, dims=0)
                             act_tensor = act_tensor[1:]
                             obs_tensor[-1] = nxt
@@ -566,7 +844,12 @@ class RolloutWorkerActor(BaseWorkerActor):
                         # 记录 imagine_reward 平均值和样本数量
                         imagine_rewards = [exp[2] for exp in self.local_buffer]
                         avg_imagine_reward = sum(imagine_rewards) / len(imagine_rewards)
-                        self.stats_actor.add_imagine_reward.remote(avg_imagine_reward, self.wid, num_imagine_samples)
+                        self.stats_actor.add_imagine_reward.remote(
+                            avg_imagine_reward,
+                            self.wid,
+                            num_imagine_samples,
+                            num_imagined_steps,
+                        )
                     self.local_buffer.clear()
         except Exception as e:
             import traceback
@@ -634,7 +917,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         if T < self.num_step_cond + 1:
             # 轨迹太短，跳过
             return
-        
+
         # 提取图像并转换为 tensor 格式
         obs_images = []
         for obs_dict in obs_list:
@@ -674,8 +957,28 @@ class RolloutWorkerActor(BaseWorkerActor):
                 instruction=task_description,
             ))
         
+        rollout_batch: List[WMRolloutExperience] = []
+        max_eval_horizon = 10
+        rollout_obs_len = self.num_step_cond + max_eval_horizon
+        if T >= rollout_obs_len:
+            num_rollout_windows = T - rollout_obs_len + 1
+            for window_idx in range(num_rollout_windows):
+                rollout_batch.append(WMRolloutExperience(
+                    obs=obs_images[
+                        window_idx:window_idx + rollout_obs_len
+                    ].astype(np.float32),
+                    act=actions[
+                        window_idx:window_idx + rollout_obs_len - 1
+                    ].astype(np.float32),
+                    instruction=task_description,
+                ))
+
         if wm_batch:
-            self.wm_replay_buffer.add_batch.remote(wm_batch)
+            self.wm_replay_buffer.add_batch.remote(
+                wm_batch,
+                rollout_batch=rollout_batch,
+                validation_fraction=self.wm_validation_fraction,
+            )
 
     def _process_traj(self, traj_segment, bootstrap_val):
         rets, advs = [], []
@@ -745,9 +1048,19 @@ class RolloutWorkerActor(BaseWorkerActor):
 
 @ray.remote
 class EvaluationWorkerActor(BaseWorkerActor):
-    def __init__(self, infer, wid, stats_actor, cfg, benchmark_name, torch_dtype):
+    def __init__(
+        self,
+        infer,
+        reward_infer,
+        wid,
+        stats_actor,
+        cfg,
+        benchmark_name,
+        torch_dtype,
+    ):
         super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
         setup_debugger("eval_worker", self.wid)
+        self.reward_infer = reward_infer
         self.torch_dtype = torch_dtype
         print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
 
@@ -775,6 +1088,23 @@ class EvaluationWorkerActor(BaseWorkerActor):
                         if term or trunc: done = True; break
                 step_time = (time.time() - time_start) / max(step_count_total, 1)
                 success = float(info.get('is_success', 0.0))
+                reward_inputs = prepare_one_obs(
+                    self.cfg,
+                    self.processor,
+                    obs,
+                    self.task_description,
+                    self.torch_dtype,
+                )
+                reward_logits = ray.get(
+                    self.reward_infer.request.remote(reward_inputs)
+                )
+                success_probability = torch.softmax(
+                    reward_logits.float(), dim=-1
+                )[1].item()
+                self.stats_actor.add_reward_trajectory_prediction.remote(
+                    success_probability,
+                    success,
+                )
                 self.stats_actor.add_episode_return.remote(
                     f"eval_{self.current_env_name}",
                     reward_sum,
@@ -895,6 +1225,14 @@ class InferenceActor(InferenceActorCom):
                     ))
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/loop_time_s", loop_duration)
+                batch_count = len(promises_to_process)
+                self.stats_actor.add_timing_metric.remote(
+                    "Policy/Latency_ms_per_batch", loop_duration * 1000.0
+                )
+                self.stats_actor.add_timing_metric.remote(
+                    "Policy/Samples_per_second",
+                    batch_count / max(loop_duration, 1e-9),
+                )
             except Exception as e:
                 import traceback
                 print(f"[ERROR] InferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
@@ -985,6 +1323,18 @@ class RewardInferenceActor(InferenceActorCom):
                     promises_to_process[i].set_result(logits[i])
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/reward_loop_time_s", loop_duration)
+                batch_count = len(promises_to_process)
+                self.stats_actor.add_timing_metric.remote(
+                    "RewardModel/Latency_ms_per_batch", loop_duration * 1000.0
+                )
+                self.stats_actor.add_timing_metric.remote(
+                    "RewardModel/Samples_per_second",
+                    batch_count / max(loop_duration, 1e-9),
+                )
+                self.stats_actor.add_peak_metric.remote(
+                    "RewardModel/GPU_Peak_Memory_MB",
+                    torch.cuda.max_memory_allocated() / (1024 ** 2),
+                )
             except Exception as e:
                 import traceback
                 print(f"[ERROR] RewardInferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
@@ -1116,6 +1466,26 @@ class DenoiserInferenceActor(InferenceActorCom):
                     promises_to_process[i].set_result(next_obs[i])
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/denoiser_loop_time_s", loop_duration)
+                batch_count = len(promises_to_process)
+                self.stats_actor.add_timing_metric.remote(
+                    "WorldModel/Latency_ms_per_batch", loop_duration * 1000.0
+                )
+                self.stats_actor.add_timing_metric.remote(
+                    "WorldModel/Latency_ms_per_frame",
+                    loop_duration * 1000.0 / max(batch_count, 1),
+                )
+                self.stats_actor.add_timing_metric.remote(
+                    "WorldModel/FPS",
+                    batch_count / max(loop_duration, 1e-9),
+                )
+                self.stats_actor.add_peak_metric.remote(
+                    "WorldModel/GPU_Peak_Memory_MB",
+                    torch.cuda.max_memory_allocated() / (1024 ** 2),
+                )
+                self.stats_actor.add_peak_metric.remote(
+                    "WorldModel/GPU_Reserved_Memory_MB",
+                    torch.cuda.memory_reserved() / (1024 ** 2),
+                )
             except Exception as e:
                 import traceback
                 print(f"[ERROR] DenoiserInferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
@@ -1140,6 +1510,7 @@ class TrainerActor(TrainerActorCom):
                  denoiser_batch_size, denoiser_accumulation_steps, denoiser_lr, denoiser_warmup_steps,
                  reward_batch_size, reward_accumulation_steps, reward_lr, reward_warmup_steps,
                  denoiser_train_interval, reward_train_interval,
+                 wm_eval_interval, wm_eval_batch_size, reward_eval_batch_size,
                  denoiser_checkpoint=None, reward_checkpoint=None):
         super().__init__()
         setup_debugger("trainer", rank)
@@ -1203,6 +1574,10 @@ class TrainerActor(TrainerActorCom):
         # World Model 训练频率
         self.denoiser_train_interval = denoiser_train_interval
         self.reward_train_interval = reward_train_interval
+        self.wm_eval_interval = wm_eval_interval
+        self.wm_eval_batch_size = wm_eval_batch_size
+        self.reward_eval_batch_size = reward_eval_batch_size
+        self.last_wm_eval_step = 0
         
         # World Model 独立的训练步数计数器（用于 lr scheduling）
         self.denoiser_step = 0
@@ -1212,6 +1587,7 @@ class TrainerActor(TrainerActorCom):
         self.denoiser_engine = None
         self.reward_engine = None
         self.denoiser_model = None
+        self.denoiser_sampler = None
         self.reward_model = None
         self.reward_cfg = None
         self.processor = None
@@ -1327,6 +1703,9 @@ class TrainerActor(TrainerActorCom):
 
         self.denoiser_model.load_state_dict(state_dict, strict=False)
         print(f"Trainer {self.rank}: Denoiser 权重加载完成 (effective_step={checkpoint.get('effective_step', 'N/A')})")
+
+        sampler_cfg = instantiate(trainer_cfg.world_model_env.diffusion_sampler)
+        self.denoiser_sampler = DiffusionSampler(self.denoiser_model, sampler_cfg)
 
         denoiser_ds_config = {
             "train_micro_batch_size_per_gpu": self.denoiser_batch_size,
@@ -1572,6 +1951,11 @@ class TrainerActor(TrainerActorCom):
         should_train = (self.global_step % self.reward_train_interval == 0)
         epoch_reward_losses = []
         epoch_reward_tp, epoch_reward_tn, epoch_reward_fp, epoch_reward_fn = 0, 0, 0, 0
+        epoch_reward_abs_error = 0.0
+        epoch_reward_correct = 0
+        epoch_reward_count = 0
+        epoch_reward_probs = []
+        epoch_reward_labels = []
         reward_train_time = 0.0
         
         if not should_train:
@@ -1583,6 +1967,12 @@ class TrainerActor(TrainerActorCom):
                 'reward_tn': epoch_reward_tn,
                 'reward_fp': epoch_reward_fp,
                 'reward_fn': epoch_reward_fn,
+                'reward_mae': 0.0,
+                'reward_accuracy': 0.0,
+                'reward_auprc': 0.0,
+                'reward_precision': 0.0,
+                'reward_recall': 0.0,
+                'reward_f1': 0.0,
             }
         
         # 使用 reward_step 进行 lr scheduling
@@ -1602,18 +1992,33 @@ class TrainerActor(TrainerActorCom):
             mini_labels = wm_labels[start:end]
             
             logits = self.reward_engine.forward(mini_inputs)
-            reward_loss, metrics = self.reward_engine.module.compute_loss_and_metrics(mini_inputs, mini_labels)
+            reward_loss = self.reward_engine.module.focal_loss(logits, mini_labels)
             self.reward_engine.backward(reward_loss)
             self.reward_engine.step()
-            
+
+            with torch.no_grad():
+                success_probs = torch.softmax(logits.float(), dim=-1)[:, 1]
+                predictions = success_probs >= 0.5
+                labels_bool = mini_labels.bool()
+                epoch_reward_probs.append(success_probs.detach())
+                epoch_reward_labels.append(mini_labels.detach())
             epoch_reward_losses.append(reward_loss.item())
-            epoch_reward_tp += metrics["tp"].item()
-            epoch_reward_tn += metrics["tn"].item()
-            epoch_reward_fp += metrics["fp"].item()
-            epoch_reward_fn += metrics["fn"].item()
+            epoch_reward_tp += ((predictions == 1) & (labels_bool == 1)).sum().item()
+            epoch_reward_tn += ((predictions == 0) & (labels_bool == 0)).sum().item()
+            epoch_reward_fp += ((predictions == 1) & (labels_bool == 0)).sum().item()
+            epoch_reward_fn += ((predictions == 0) & (labels_bool == 1)).sum().item()
+            epoch_reward_abs_error += torch.abs(
+                success_probs - mini_labels.float()
+            ).sum().item()
+            epoch_reward_correct += (predictions == labels_bool).sum().item()
+            epoch_reward_count += mini_labels.numel()
         
         reward_train_time = time.time() - t_reward_train_start
         self.reward_step += 1  # 更新 reward 独立步数
+        classification_metrics = binary_classification_metrics(
+            torch.cat(epoch_reward_probs),
+            torch.cat(epoch_reward_labels),
+        )
         
         return {
             'should_train': True,
@@ -1623,7 +2028,159 @@ class TrainerActor(TrainerActorCom):
             'reward_tn': epoch_reward_tn,
             'reward_fp': epoch_reward_fp,
             'reward_fn': epoch_reward_fn,
+            'reward_mae': epoch_reward_abs_error / max(epoch_reward_count, 1),
+            'reward_accuracy': epoch_reward_correct / max(epoch_reward_count, 1),
+            'reward_auprc': classification_metrics['auprc'],
+            'reward_precision': classification_metrics['precision'],
+            'reward_recall': classification_metrics['recall'],
+            'reward_f1': classification_metrics['f1'],
         }
+
+    def _prepare_reward_inputs(
+        self,
+        obs_np: np.ndarray,
+        instructions: List[str],
+    ) -> Dict[str, torch.Tensor]:
+        inputs_list = []
+        for obs_tensor, instruction in zip(obs_np, instructions):
+            obs_hwc = np.transpose(obs_tensor, (1, 2, 0))
+            obs_img = np.clip((obs_hwc + 1.0) * 127.5, 0, 255).astype(np.uint8)
+            inputs_list.append(prepare_one_obs(
+                self.reward_cfg,
+                self.processor,
+                {"full_image": obs_img},
+                instruction,
+                torch.bfloat16,
+            ))
+        return self.reward_model.prepare_inputs_batch(inputs_list)
+
+    async def _evaluate_world_models(self) -> Dict[str, float]:
+        """Evaluate on held-out complete episodes; rollout metrics are closed-loop."""
+        validation = await self.wm_replay_buffer.sample_validation.remote(
+            self.wm_eval_batch_size,
+            self.reward_eval_batch_size,
+        )
+        if validation is None:
+            return {}
+
+        device = next(self.denoiser_model.parameters()).device
+        val_obs = torch.tensor(
+            validation["obs"], dtype=torch.float32, device=device
+        )
+        val_act = torch.tensor(
+            validation["act"], dtype=torch.float32, device=device
+        )
+        val_labels = torch.tensor(
+            (validation["reward_rew"] > 0).astype(np.int64),
+            dtype=torch.long,
+            device=device,
+        )
+        reward_inputs = self._prepare_reward_inputs(
+            validation["reward_obs"],
+            validation["reward_instructions"],
+        )
+
+        self.denoiser_engine.eval()
+        self.reward_engine.eval()
+        torch.cuda.synchronize()
+        eval_start = time.perf_counter()
+        metrics: Dict[str, float] = {}
+        try:
+            with torch.inference_mode():
+                mask_padding = torch.ones(
+                    val_obs.shape[:2], dtype=torch.bool, device=device
+                )
+                denoiser_val_loss, _ = self.denoiser_engine.module(
+                    val_obs, val_act, mask_padding
+                )
+                reward_logits = self.reward_engine.module(reward_inputs)
+                reward_val_loss = self.reward_engine.module.focal_loss(
+                    reward_logits, val_labels
+                )
+                success_probs = torch.softmax(
+                    reward_logits.float(), dim=-1
+                )[:, 1]
+                reward_classification = binary_classification_metrics(
+                    success_probs, val_labels
+                )
+                metrics.update({
+                    "denoiser_validation_loss": denoiser_val_loss.item(),
+                    "reward_validation_loss": reward_val_loss.item(),
+                    "reward_validation_mae": torch.abs(
+                        success_probs - val_labels.float()
+                    ).mean().item(),
+                    "reward_validation_accuracy": (
+                        (success_probs >= 0.5) == val_labels.bool()
+                    ).float().mean().item(),
+                    "reward_validation_auprc": reward_classification["auprc"],
+                    "reward_validation_precision": reward_classification["precision"],
+                    "reward_validation_recall": reward_classification["recall"],
+                    "reward_validation_f1": reward_classification["f1"],
+                })
+
+                rollout_obs_np = validation["rollout_obs"]
+                rollout_act_np = validation["rollout_act"]
+                if rollout_obs_np is not None and rollout_act_np is not None:
+                    rollout_obs = torch.tensor(
+                        rollout_obs_np, dtype=torch.float32, device=device
+                    )
+                    rollout_act = torch.tensor(
+                        rollout_act_np, dtype=torch.float32, device=device
+                    )
+                    num_cond = self.denoiser_model.cfg.inner_model.num_steps_conditioning
+                    obs_history = rollout_obs[:, :num_cond].clone()
+                    act_history = rollout_act[:, :num_cond - 1].clone()
+                    step_mse, step_ssim = [], []
+
+                    for rollout_step in range(10):
+                        next_action = rollout_act[
+                            :, num_cond - 1 + rollout_step
+                        ].unsqueeze(1)
+                        act_history = torch.cat(
+                            [act_history, next_action], dim=1
+                        )
+                        prediction, _ = self.denoiser_sampler.sample(
+                            obs_history, act_history
+                        )
+                        target = rollout_obs[:, num_cond + rollout_step]
+                        prediction_01 = prediction.clamp(-1, 1).add(1).div(2)
+                        target_01 = target.clamp(-1, 1).add(1).div(2)
+                        step_mse.append(
+                            F.mse_loss(prediction_01, target_01).item()
+                        )
+                        step_ssim.append(
+                            image_batch_ssim(prediction_01, target_01).item()
+                        )
+                        obs_history = torch.cat(
+                            [obs_history[:, 1:], prediction.unsqueeze(1)], dim=1
+                        )
+                        act_history = act_history[:, 1:]
+
+                    for step_idx, (mse, ssim) in enumerate(
+                        zip(step_mse, step_ssim), start=1
+                    ):
+                        metrics[f"rollout_step_{step_idx}_mse"] = mse
+                        metrics[f"rollout_step_{step_idx}_ssim"] = ssim
+                    metrics.update({
+                        "one_step_prediction_mse": step_mse[0],
+                        "one_step_prediction_ssim": step_ssim[0],
+                        "rollout_5_step_mse": float(np.mean(step_mse[:5])),
+                        "rollout_5_step_ssim": float(np.mean(step_ssim[:5])),
+                        "rollout_10_step_mse": float(np.mean(step_mse[:10])),
+                        "rollout_10_step_ssim": float(np.mean(step_ssim[:10])),
+                    })
+        finally:
+            torch.cuda.synchronize()
+            metrics["validation_time_s"] = time.perf_counter() - eval_start
+            metrics["trainer_gpu_peak_memory_mb"] = (
+                torch.cuda.max_memory_allocated() / (1024 ** 2)
+            )
+            metrics["trainer_gpu_reserved_memory_mb"] = (
+                torch.cuda.memory_reserved() / (1024 ** 2)
+            )
+            self.denoiser_engine.train()
+            self.reward_engine.train()
+        return metrics
 
     async def _data_fetching_loop(self):
         print(f"Trainer {self.rank}: 后台数据准备循环已启动 (超级批次大小: {self.super_batch_size})。")
@@ -1807,6 +2364,18 @@ class TrainerActor(TrainerActorCom):
         
         # 2.2 Reward Model 训练
         reward_result = self._train_reward_model(wm_reward_inputs, wm_labels, current_lrs)
+
+        # 2.3 独立验证集评估（包含 1/5/10-step 闭环 rollout）
+        validation_result = {}
+        if (
+            self.global_step >= self.wm_eval_interval
+            and self.global_step - self.last_wm_eval_step >= self.wm_eval_interval
+        ):
+            validation_result = await self._evaluate_world_models()
+            # If validation is not ready yet, retry next epoch rather than
+            # waiting for another full evaluation interval.
+            if validation_result:
+                self.last_wm_eval_step = self.global_step
         
         # ============ 汇总结果 ============
         avg_loss = np.mean(policy_result['epoch_losses'])
@@ -1830,6 +2399,8 @@ class TrainerActor(TrainerActorCom):
             perf_metrics["denoiser_train_time"] = denoiser_result['denoiser_train_time']
         if reward_result['should_train']:
             perf_metrics["reward_train_time"] = reward_result['reward_train_time']
+        if validation_result:
+            perf_metrics["wm_validation_time"] = validation_result["validation_time_s"]
         
         # wm_metrics 只在实际训练时记录相应指标
         wm_metrics = {
@@ -1848,6 +2419,14 @@ class TrainerActor(TrainerActorCom):
             wm_metrics["reward_tn"] = reward_result['reward_tn']
             wm_metrics["reward_fp"] = reward_result['reward_fp']
             wm_metrics["reward_fn"] = reward_result['reward_fn']
+            wm_metrics["reward_mae"] = reward_result['reward_mae']
+            wm_metrics["reward_accuracy"] = reward_result['reward_accuracy']
+            wm_metrics["reward_auprc"] = reward_result['reward_auprc']
+            wm_metrics["reward_precision"] = reward_result['reward_precision']
+            wm_metrics["reward_recall"] = reward_result['reward_recall']
+            wm_metrics["reward_f1"] = reward_result['reward_f1']
+
+        wm_metrics.update(validation_result)
 
         return avg_loss, avg_p_loss, avg_v_loss, avg_e_loss, avg_kl_loss, current_lrs, self.global_step, avg_ent, avg_kl_div, perf_metrics, wm_metrics
 
@@ -1926,7 +2505,12 @@ def main(args):
     print(f"Ray 初始化完成，对象存储分配 {object_store_size_gb} GB 内存。")
     log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
     writer = SummaryWriter(log_dir)
-    stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
+    agent_cfg_for_metrics = OmegaConf.load(agent_config_path)
+    stats_actor = StatsActor.remote(
+        window_size=args.moving_avg_window,
+        reward_trajectory_eval_window=args.reward_trajectory_eval_window,
+        reward_focal_alpha=float(agent_cfg_for_metrics.reward_model.focal_alpha),
+    )
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
     cfg = build_openvla_cfg(args)
@@ -1961,6 +2545,9 @@ def main(args):
             reward_warmup_steps=args.reward_warmup_steps,
             denoiser_train_interval=args.denoiser_train_interval,
             reward_train_interval=args.reward_train_interval,
+            wm_eval_interval=args.wm_eval_interval,
+            wm_eval_batch_size=args.wm_eval_batch_size,
+            reward_eval_batch_size=args.reward_eval_batch_size,
             denoiser_checkpoint=args.denoiser_checkpoint,
             reward_checkpoint=args.reward_checkpoint,
         )
@@ -2006,11 +2593,18 @@ def main(args):
             args.lambda_,                   # lambda_
             wm_replay_buffers[i % args.num_trainer_gpus],  # wm_replay_buffer
             args.real_traj_collect_interval,  # real_traj_collect_interval
+            args.wm_validation_fraction,      # episode-level validation split
         ) for i in range(args.num_rollout_workers)
     ]
     eval_workers = [
         EvaluationWorkerActor.remote(
-            inference_pool[i % args.num_inference_actors], f"eval_{i}", stats_actor, cfg, benchmark, torch_dtype
+            inference_pool[i % args.num_inference_actors],
+            reward_inference_pool[i % args.num_reward_inference_actors],
+            f"eval_{i}",
+            stats_actor,
+            cfg,
+            benchmark,
+            torch_dtype,
         ) for i in range(args.num_eval_workers)
     ]
     print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")
@@ -2138,12 +2732,17 @@ def main(args):
     last_log_time = time.time()
     last_log_global_step = 0
     global_step = 0
+    latest_wm_metrics: Dict[str, float] = {}
     while global_step < args.train_iters:
         t_train_start = time.time()
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
         # 返回值现在包含 wm_metrics
         _, _, _, _, _, _, global_step, _, _, _, wm_metrics = results[0]
+        latest_wm_metrics.update({
+            key: value for key, value in wm_metrics.items()
+            if key not in {"trained_denoiser", "trained_reward"}
+        })
         train_time = time.time() - t_train_start
 
         # ============ 权重同步 ============
@@ -2160,6 +2759,7 @@ def main(args):
             broadcast_task = trainer_group[0].broadcast_weights.remote("broadcast_reward")
             receive_tasks = [inf.receive_and_update_weights.remote("broadcast_reward") for inf in reward_inference_pool]
             ray.get([broadcast_task] + receive_tasks)
+            ray.get(stats_actor.reset_reward_trajectory_metrics.remote())
         
         # 同步 Denoiser 权重（只在训练时同步）
         if wm_metrics.get("trained_denoiser", False):
@@ -2183,13 +2783,16 @@ def main(args):
             timing_stats = all_stats.pop("_timings_", {})
             global_stats = all_stats.pop("_global_rollout_")
             eval_stats = all_stats.pop("_global_eval_")
+            reward_trajectory_stats = all_stats.pop("_reward_trajectory_eval_")
             avg_return = global_stats["avg_return"]
+            avg_success_rate = global_stats["avg_success_rate"]
             avg_ep_len = global_stats["avg_ep_len"]
             total_episodes = global_stats["total_episodes_processed"]
             total_env_steps = global_stats["total_env_steps"]
             avg_step_time = global_stats["avg_step_time"]
 
             eval_avg_return = eval_stats["avg_return"]
+            eval_success_rate = eval_stats["avg_success_rate"]
             eval_avg_ep_len = eval_stats["avg_ep_len"]
             eval_total_episodes = eval_stats["total_episodes_processed"]
             eval_env_steps = eval_stats["total_env_steps"]
@@ -2198,11 +2801,17 @@ def main(args):
 
             total_losses, p_losses, v_losses, e_losses, kl_losses, lrs_list, _, ents, avg_kl_divs, perf_metrics_list, wm_metrics_list = zip(*results)
             current_lrs = lrs_list[0]
-            wm_metrics = wm_metrics_list[0]
+            wm_metrics = latest_wm_metrics
 
             elapsed_time = current_time - start_time
             total_buffer_size = sum(ray.get([rb.size.remote() for rb in replay_buffers]))
             wm_buffer_size = sum(ray.get([rb.size.remote() for rb in wm_replay_buffers]))
+            wm_validation_size = sum(ray.get([
+                rb.validation_size.remote() for rb in wm_replay_buffers
+            ]))
+            wm_rollout_validation_size = sum(ray.get([
+                rb.rollout_validation_size.remote() for rb in wm_replay_buffers
+            ]))
 
             # 构建打印消息，只在训练时包含 WM loss
             wm_loss_str = ""
@@ -2235,8 +2844,61 @@ def main(args):
             # World Model losses - 只在实际训练时记录
             if 'denoiser_loss' in wm_metrics:
                 writer.add_scalar('Loss/Denoiser', wm_metrics['denoiser_loss'], global_step)
+                writer.add_scalar('WorldModel/Train/Loss', wm_metrics['denoiser_loss'], global_step)
+                writer.add_scalar('DIAMOND/Train/Loss', wm_metrics['denoiser_loss'], global_step)
             if 'reward_loss' in wm_metrics:
                 writer.add_scalar('Loss/Reward_Model', wm_metrics['reward_loss'], global_step)
+                writer.add_scalar('RewardModel/Train/Loss', wm_metrics['reward_loss'], global_step)
+                writer.add_scalar('RewardModel/FrameTrain/Loss', wm_metrics['reward_loss'], global_step)
+
+            if 'denoiser_validation_loss' in wm_metrics:
+                writer.add_scalar(
+                    'WorldModel/Validation/Loss',
+                    wm_metrics['denoiser_validation_loss'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'DIAMOND/Validation/Loss',
+                    wm_metrics['denoiser_validation_loss'],
+                    global_step,
+                )
+            rollout_metric_tags = {
+                'one_step_prediction_mse': 'WorldModel/Validation/One_Step_Prediction_MSE',
+                'rollout_5_step_mse': 'WorldModel/Validation/Rollout_5_Step_MSE',
+                'rollout_10_step_mse': 'WorldModel/Validation/Rollout_10_Step_MSE',
+                'one_step_prediction_ssim': 'WorldModel/Validation/One_Step_Prediction_SSIM',
+                'rollout_5_step_ssim': 'WorldModel/Validation/Rollout_5_Step_SSIM',
+                'rollout_10_step_ssim': 'WorldModel/Validation/Rollout_10_Step_SSIM',
+            }
+            for metric_key, tag in rollout_metric_tags.items():
+                if metric_key in wm_metrics:
+                    writer.add_scalar(tag, wm_metrics[metric_key], global_step)
+            diamond_metric_tags = {
+                'one_step_prediction_mse': 'DIAMOND/Validation/1_Step_MSE',
+                'rollout_5_step_mse': 'DIAMOND/Validation/5_Step_Rollout_MSE',
+                'rollout_10_step_mse': 'DIAMOND/Validation/10_Step_Rollout_MSE',
+                'one_step_prediction_ssim': 'DIAMOND/Validation/1_Step_SSIM',
+                'rollout_5_step_ssim': 'DIAMOND/Validation/5_Step_Rollout_SSIM',
+                'rollout_10_step_ssim': 'DIAMOND/Validation/10_Step_Rollout_SSIM',
+            }
+            for metric_key, tag in diamond_metric_tags.items():
+                if metric_key in wm_metrics:
+                    writer.add_scalar(tag, wm_metrics[metric_key], global_step)
+            for rollout_step in range(1, 11):
+                mse_key = f'rollout_step_{rollout_step}_mse'
+                ssim_key = f'rollout_step_{rollout_step}_ssim'
+                if mse_key in wm_metrics:
+                    writer.add_scalar(
+                        f'WorldModel/Error_Accumulation/MSE_Step_{rollout_step}',
+                        wm_metrics[mse_key],
+                        global_step,
+                    )
+                if ssim_key in wm_metrics:
+                    writer.add_scalar(
+                        f'WorldModel/Error_Accumulation/SSIM_Step_{rollout_step}',
+                        wm_metrics[ssim_key],
+                        global_step,
+                    )
             
             # Reward Model metrics - 只在实际训练时记录
             if 'reward_tp' in wm_metrics:
@@ -2250,12 +2912,121 @@ def main(args):
                 reward_neg_acc = wm_metrics['reward_tn'] / neg_total if neg_total > 0 else 0.0
                 writer.add_scalar('WorldModel/Reward_Pos_Acc', reward_pos_acc, global_step)
                 writer.add_scalar('WorldModel/Reward_Neg_Acc', reward_neg_acc, global_step)
+            if 'reward_mae' in wm_metrics:
+                writer.add_scalar('RewardModel/Train/MAE', wm_metrics['reward_mae'], global_step)
+                writer.add_scalar('RewardModel/FrameTrain/MAE', wm_metrics['reward_mae'], global_step)
+                writer.add_scalar(
+                    'RewardModel/Train/Success_Probability_Accuracy',
+                    wm_metrics['reward_accuracy'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/FrameTrain/Success_Probability_Accuracy',
+                    wm_metrics['reward_accuracy'],
+                    global_step,
+                )
+                writer.add_scalar('RewardModel/Train/AUPRC', wm_metrics['reward_auprc'], global_step)
+                writer.add_scalar('RewardModel/Train/Precision', wm_metrics['reward_precision'], global_step)
+                writer.add_scalar('RewardModel/Train/Recall', wm_metrics['reward_recall'], global_step)
+                writer.add_scalar('RewardModel/Train/F1', wm_metrics['reward_f1'], global_step)
+                writer.add_scalar('RewardModel/FrameTrain/AUPRC', wm_metrics['reward_auprc'], global_step)
+                writer.add_scalar('RewardModel/FrameTrain/Precision', wm_metrics['reward_precision'], global_step)
+                writer.add_scalar('RewardModel/FrameTrain/Recall', wm_metrics['reward_recall'], global_step)
+                writer.add_scalar('RewardModel/FrameTrain/F1', wm_metrics['reward_f1'], global_step)
+            if 'reward_validation_loss' in wm_metrics:
+                writer.add_scalar(
+                    'RewardModel/FrameValidation/Loss',
+                    wm_metrics['reward_validation_loss'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/FrameValidation/MAE',
+                    wm_metrics['reward_validation_mae'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/FrameValidation/Success_Probability_Accuracy',
+                    wm_metrics['reward_validation_accuracy'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/FrameValidation/AUPRC',
+                    wm_metrics['reward_validation_auprc'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/FrameValidation/Precision',
+                    wm_metrics['reward_validation_precision'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/FrameValidation/Recall',
+                    wm_metrics['reward_validation_recall'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/FrameValidation/F1',
+                    wm_metrics['reward_validation_f1'],
+                    global_step,
+                )
+
+            # One terminal-frame prediction per complete real eval trajectory.
+            # This matches the offline 100-trajectory reward evaluation protocol.
+            if reward_trajectory_stats["num_trajectories"] > 0:
+                trajectory_tags = {
+                    "loss": "Loss",
+                    "mae": "MAE",
+                    "accuracy": "Accuracy",
+                    "auroc": "AUROC",
+                    "auprc": "AUPRC",
+                    "precision": "Precision",
+                    "recall": "Recall",
+                    "f1": "F1",
+                    "tp": "TP",
+                    "tn": "TN",
+                    "fp": "FP",
+                    "fn": "FN",
+                    "num_trajectories": "Num_Trajectories",
+                    "num_positive": "Num_Positive",
+                    "num_negative": "Num_Negative",
+                    "has_both_classes": "Has_Both_Classes",
+                    "model_version": "Model_Version",
+                }
+                for metric_key, tag_suffix in trajectory_tags.items():
+                    metric_value = reward_trajectory_stats[metric_key]
+                    writer.add_scalar(
+                        f'RewardModel/Validation/{tag_suffix}',
+                        metric_value,
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        f'RewardModel/TrajectoryEval/{tag_suffix}',
+                        metric_value,
+                        global_step,
+                    )
+                writer.add_scalar(
+                    'RewardModel/Validation/Success_Probability_Accuracy',
+                    reward_trajectory_stats["accuracy"],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'RewardModel/Validation/Threshold',
+                    0.5,
+                    global_step,
+                )
 
             writer.add_scalar('Metrics/Entropy', np.mean(ents), global_step)
             writer.add_scalar('Metrics/KL_Divergence', np.mean(avg_kl_divs), global_step)
             writer.add_scalar('Metrics/Training_Speed_Steps_per_Sec', training_speed_steps_per_sec, global_step)
             for metric_name, metric_value in timing_stats.items():
                 writer.add_scalar(f'Performance/{metric_name}', metric_value, global_step)
+                if metric_name.startswith('WorldModel/'):
+                    diamond_name = metric_name.removeprefix('WorldModel/')
+                    writer.add_scalar(
+                        f'DIAMOND/Performance/{diamond_name}',
+                        metric_value,
+                        global_step,
+                    )
             avg_policy_sample_time = np.mean([pm["policy_sample_time"] for pm in perf_metrics_list])
             avg_policy_prep_time = np.mean([pm["policy_prep_time"] for pm in perf_metrics_list])
             avg_policy_train_time = np.mean([pm["policy_train_time"] for pm in perf_metrics_list])
@@ -2280,15 +3051,34 @@ def main(args):
             writer.add_scalar('Performance/train_time', train_time, global_step)
             writer.add_scalar('Performance/sync_time', sync_time, global_step)
             writer.add_scalar('Performance/train_time_total', time.time() - t_train_start, global_step)
+            if 'trainer_gpu_peak_memory_mb' in wm_metrics:
+                writer.add_scalar(
+                    'Performance/Trainer/GPU_Peak_Memory_MB',
+                    wm_metrics['trainer_gpu_peak_memory_mb'],
+                    global_step,
+                )
+                writer.add_scalar(
+                    'Performance/Trainer/GPU_Reserved_Memory_MB',
+                    wm_metrics['trainer_gpu_reserved_memory_mb'],
+                    global_step,
+                )
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
+            writer.add_scalar('Rollout/_Global/Success_Rate', avg_success_rate, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
             writer.add_scalar('Rollout/_Global/Average_Imagine_Reward', global_stats.get("avg_imagine_reward", 0.0), global_step)
             writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
+            writer.add_scalar('Eval/_Global/Success_Rate', eval_success_rate, global_step)
             writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
 
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
             writer.add_scalar('System/WM_Replay_Buffer_Size_Total', wm_buffer_size, global_step)
+            writer.add_scalar('System/WM_Validation_Buffer_Size', wm_validation_size, global_step)
+            writer.add_scalar(
+                'System/WM_Rollout_Validation_Buffer_Size',
+                wm_rollout_validation_size,
+                global_step,
+            )
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
             writer.add_scalar('System/Total_Env_Steps', total_env_steps, global_step)
             writer.add_scalar('System/Avg_Step_Time', avg_step_time, global_step)
@@ -2298,6 +3088,15 @@ def main(args):
             writer.add_scalar('System/Active_Rollout_Actors', global_stats.get("active_actor_count", 0), global_step)
             writer.add_scalar('System/Total_Samples_Produced', global_stats.get("total_samples_produced", 0), global_step)
             writer.add_scalar('System/Total_Imagine_Samples', global_stats.get("total_imagine_samples", 0), global_step)
+            writer.add_scalar('System/Total_Imagined_Steps', global_stats.get("total_imagined_steps", 0), global_step)
+            writer.add_scalar('RL/Environment_Steps', total_env_steps, global_step)
+            writer.add_scalar('RL/Average_Return', avg_return, global_step)
+            writer.add_scalar('RL/Success_Rate', avg_success_rate, global_step)
+            writer.add_scalar(
+                'RL/Imagined_Steps',
+                global_stats.get("total_imagined_steps", 0),
+                global_step,
+            )
 
             for env_name, env_stats in all_stats.items():
                 if env_name.startswith("eval_"):
