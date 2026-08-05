@@ -48,6 +48,11 @@ from ctrl_world.config import wm_args
 from ctrl_world.models.ctrl_world import CrtlWorld
 from rl.ray_debug_utils import setup_debugger
 from rl.ds_com import _unwrap_module
+from rl.wm_training_utils import (
+    cosine_warmup_lr,
+    frame_align_transition_actions,
+    stable_episode_fraction,
+)
 import einops
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -129,9 +134,13 @@ class AcceRLCtrlWorld(CrtlWorld):
 
         current_img = latents[:, num_history : (num_history + 1)][:, 0]
         bsz, num_frames = latents.shape[:2]
-        sigma_img = torch.rand([bsz, 1, 1, 1], device=device, dtype=dtype) * 0.2
+        # Keep stochastic schedules/loss weights in fp32 even when the UNet is
+        # bf16; this matches the offline trainer and avoids quantizing EDM sigma.
+        sigma_img = torch.rand([bsz, 1, 1, 1], device=device, dtype=torch.float32) * 0.2
         c_in_img = 1 / (sigma_img**2 + 1) ** 0.5
-        current_img = c_in_img * (current_img + torch.randn_like(current_img) * sigma_img)
+        current_img = c_in_img.to(dtype) * (
+            current_img + torch.randn_like(current_img) * sigma_img.to(dtype)
+        )
         condition_latent = einops.repeat(current_img, "b c h w -> b f c h w", f=num_frames)
         if self.args.his_cond_zero:
             condition_latent[:, :num_history] = 0.0
@@ -149,19 +158,26 @@ class AcceRLCtrlWorld(CrtlWorld):
         text_mask = (torch.rand(action_hidden.shape[0], device=device) > 0.05).unsqueeze(1).unsqueeze(2)
         action_hidden = action_hidden * text_mask + uncond_hidden_states * (~text_mask)
 
-        rnd_normal = torch.randn([bsz, 1, 1, 1, 1], device=device, dtype=dtype)
+        rnd_normal = torch.randn([bsz, 1, 1, 1, 1], device=device, dtype=torch.float32)
         sigma = (rnd_normal * p_std + p_mean).exp()
         c_skip = 1 / (sigma**2 + 1)
         c_out = -sigma / (sigma**2 + 1) ** 0.5
         c_in = 1 / (sigma**2 + 1) ** 0.5
         c_noise = (sigma.log() / 4).reshape([bsz]).to(dtype=dtype)
         loss_weight = (sigma**2 + 1) / sigma**2
-        noisy_latents = latents + torch.randn_like(latents) * sigma
+        noisy_latents = latents + torch.randn_like(latents) * sigma.to(dtype)
 
-        sigma_h = torch.randn([bsz, num_history, 1, 1, 1], device=device, dtype=dtype) * 0.3
+        sigma_h = torch.randn(
+            [bsz, num_history, 1, 1, 1], device=device, dtype=torch.float32
+        ) * 0.3
         history = latents[:, :num_history]
-        noisy_history = 1 / (sigma_h**2 + 1) ** 0.5 * (history + sigma_h * torch.randn_like(history))
-        input_latents = torch.cat([noisy_history, c_in * noisy_latents[:, num_history:]], dim=1)
+        sigma_h_model = sigma_h.to(dtype)
+        noisy_history = 1 / (sigma_h_model**2 + 1) ** 0.5 * (
+            history + sigma_h_model * torch.randn_like(history)
+        )
+        input_latents = torch.cat(
+            [noisy_history, c_in.to(dtype) * noisy_latents[:, num_history:]], dim=1
+        )
 
         input_latents = torch.cat(
             [input_latents, condition_latent / self.vae.config.scaling_factor],
@@ -185,8 +201,11 @@ class AcceRLCtrlWorld(CrtlWorld):
             added_time_ids=added_time_ids,
             frame_level_cond=self.args.frame_level_cond,
         ).sample
-        predict_x0 = c_out * model_pred + c_skip * noisy_latents
-        loss = ((predict_x0[:, num_history:] - latents[:, num_history:]) ** 2 * loss_weight).mean()
+        predict_x0 = c_out.to(dtype) * model_pred + c_skip.to(dtype) * noisy_latents
+        prediction_error = (
+            predict_x0[:, num_history:].float() - latents[:, num_history:].float()
+        )
+        loss = (prediction_error.square() * loss_weight).mean()
 
         return loss, torch.tensor(0.0, device=device, dtype=dtype)
 
@@ -317,6 +336,10 @@ def parse_args():
                         help='Target positive ratio when sampling reward terminal frames')
     parser.add_argument('--reward-replay-capacity', type=int, default=5000,
                         help='Per-class capacity for terminal-frame reward replay (pos and neg each)')
+    parser.add_argument('--reward-min-unique-per-class', type=int, default=64,
+                        help='Do not train reward model before each train class has this many unique episodes')
+    parser.add_argument('--reward-eval-per-class', type=int, default=8,
+                        help='Fixed episode-level reward holdout size per class')
 
     # Ctrl-World online training (mirrors Diamond denoiser train/broadcast)
     parser.add_argument('--ctrl-batch-size', type=int, default=1,
@@ -332,12 +355,22 @@ def parse_args():
     parser.add_argument('--ctrl-eval-interval', type=int, default=100,
                         help='Evaluate Ctrl-World prediction metrics every N steps (0 disables)')
     parser.add_argument('--ctrl-eval-batch-size', type=int, default=4,
-                        help='Number of WM windows used per Ctrl-World metric eval')
+                        help='Number of fixed held-out WM windows used per eval')
+    parser.add_argument('--ctrl-eval-micro-batch-size', type=int, default=4,
+                        help='Inference micro-batch for fixed Ctrl-World evaluation')
+    parser.add_argument('--ctrl-eval-seed', type=int, default=12345,
+                        help='Fixed VAE/diffusion seed for reproducible Ctrl-World eval')
+    parser.add_argument('--ctrl-eval-episode-ratio', type=float, default=0.2,
+                        help='Deterministic episode-level fraction reserved from WM training')
+    parser.add_argument('--ctrl-eval-windows-per-episode', type=int, default=8,
+                        help='Maximum fixed eval windows retained from one held-out episode')
     parser.add_argument('--ctrl-eval-max-horizon', type=int, default=4,
                         help='Max future frames for teacher-forced Ctrl-World metrics')
     parser.add_argument('--ctrl-eval-lpips-net', type=str, default='alex',
                         choices=['alex', 'vgg', 'squeeze'],
                         help='LPIPS backbone used for Ctrl-World eval')
+    parser.add_argument('--ctrl-ema-decay', type=float, default=0.99,
+                        help='EMA decay applied by Ctrl inference actors when receiving train weights')
     # ============ 调试参数 ============
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Enable debugpy in Ray actors (each actor starts a debug server)')
@@ -407,6 +440,7 @@ class WMExperience:
     act: np.ndarray                         # [num_steps_conditioning, act_dim]
     rew: float
     instruction: str
+    episode_id: str
 
 
 @dataclass
@@ -415,6 +449,7 @@ class RewardFrameExperience:
     obs: np.ndarray                         # [C, H, W] primary cam in [-1, 1]
     label: float                            # 1.0 success / 0.0 failure
     instruction: str
+    episode_id: str
 
 
 # ================================================================
@@ -552,19 +587,71 @@ class ReplayBufferActor:
 
 @ray.remote
 class WMReplayBufferActor:
-    def __init__(self, capacity, reward_capacity=5000):
+    def __init__(
+        self,
+        capacity,
+        reward_capacity=5000,
+        ctrl_eval_capacity=64,
+        ctrl_eval_episode_ratio=0.2,
+        ctrl_eval_windows_per_episode=8,
+        reward_eval_per_class=8,
+    ):
         setup_debugger("wm_replay")
         self.buffer = deque(maxlen=capacity)
+        self.eval_buffer = []
+        self.ctrl_eval_capacity = int(ctrl_eval_capacity)
+        self.ctrl_eval_episode_ratio = float(ctrl_eval_episode_ratio)
+        self.ctrl_eval_windows_per_episode = int(ctrl_eval_windows_per_episode)
+        self.train_episode_ids = set()
+        self.eval_episode_ids = set()
+        self.sampled_episode_ids = set()
         # Terminal-frame reward buffers (aligned with offline RewardFrameDataset).
         self.reward_pos = deque(maxlen=reward_capacity)
         self.reward_neg = deque(maxlen=reward_capacity)
+        self.reward_eval_pos = []
+        self.reward_eval_neg = []
+        self.reward_eval_per_class = int(reward_eval_per_class)
+
+    def _is_eval_episode(self, episode_id):
+        episode_id = str(episode_id)
+        if episode_id in self.eval_episode_ids:
+            return True
+        if episode_id in self.train_episode_ids:
+            return False
+        is_eval = stable_episode_fraction(episode_id) < self.ctrl_eval_episode_ratio
+        target = self.eval_episode_ids if is_eval else self.train_episode_ids
+        target.add(episode_id)
+        return is_eval
 
     def add_batch(self, batch: List[WMExperience]):
-        self.buffer.extend(batch)
+        if not batch:
+            return
+        episode_ids = {str(item.episode_id) for item in batch}
+        if len(episode_ids) != 1:
+            raise ValueError("add_batch expects windows from exactly one episode")
+        if not self._is_eval_episode(next(iter(episode_ids))):
+            self.buffer.extend(batch)
+            return
+        if len(self.eval_buffer) >= self.ctrl_eval_capacity:
+            return
+        keep = min(
+            self.ctrl_eval_windows_per_episode,
+            self.ctrl_eval_capacity - len(self.eval_buffer),
+            len(batch),
+        )
+        if keep <= 0:
+            return
+        indices = np.linspace(0, len(batch) - 1, num=keep, dtype=np.int64)
+        self.eval_buffer.extend(batch[int(i)] for i in indices)
 
     def add_reward_frames(self, batch: List[RewardFrameExperience]):
         for item in batch:
-            if float(item.label) > 0.5:
+            is_pos = float(item.label) > 0.5
+            if self._is_eval_episode(item.episode_id):
+                eval_buf = self.reward_eval_pos if is_pos else self.reward_eval_neg
+                if len(eval_buf) < self.reward_eval_per_class:
+                    eval_buf.append(item)
+            elif is_pos:
                 self.reward_pos.append(item)
             else:
                 self.reward_neg.append(item)
@@ -576,7 +663,21 @@ class WMReplayBufferActor:
         return len(self.reward_pos) + len(self.reward_neg)
 
     def reward_stats(self):
-        return {"pos": len(self.reward_pos), "neg": len(self.reward_neg)}
+        return {
+            "pos": len(self.reward_pos),
+            "neg": len(self.reward_neg),
+            "eval_pos": len(self.reward_eval_pos),
+            "eval_neg": len(self.reward_eval_neg),
+        }
+
+    def eval_size(self):
+        return len(self.eval_buffer)
+
+    def episode_stats(self):
+        return {
+            "train": len(self.train_episode_ids),
+            "eval": len(self.eval_episode_ids),
+        }
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -584,7 +685,25 @@ class WMReplayBufferActor:
         act = np.stack([b.act for b in batch])
         rew = np.asarray([b.rew for b in batch], np.float32)
         instructions = [b.instruction for b in batch]
-        return obs, act, rew, instructions
+        sampled_ids = {str(b.episode_id) for b in batch}
+        new_ids = sampled_ids - self.sampled_episode_ids
+        self.sampled_episode_ids.update(sampled_ids)
+        sample_stats = {
+            "unique_episodes": len(sampled_ids),
+            "fresh_episode_ratio": len(new_ids) / max(len(sampled_ids), 1),
+        }
+        return obs, act, rew, instructions, sample_stats
+
+    def sample_eval(self, batch_size):
+        if len(self.eval_buffer) < batch_size:
+            raise RuntimeError(
+                f"Fixed WM eval set has {len(self.eval_buffer)} windows, needs {batch_size}"
+            )
+        batch = self.eval_buffer[:batch_size]
+        obs = np.stack([b.obs for b in batch])
+        act = np.stack([b.act for b in batch])
+        instructions = [b.instruction for b in batch]
+        return obs, act, instructions
 
     def sample_reward(self, batch_size, pos_ratio=0.5):
         """Stratified terminal-frame sample for reward training."""
@@ -606,13 +725,26 @@ class WMReplayBufferActor:
             if n <= 0:
                 return []
             buf_list = list(buf)
-            if len(buf_list) >= n:
-                return random.sample(buf_list, n)
-            # With replacement when a class is still rare early in training.
-            return [random.choice(buf_list) for _ in range(n)]
+            if len(buf_list) < n:
+                raise RuntimeError(
+                    f"Reward class has {len(buf_list)} unique episodes, needs {n}; "
+                    "sampling with replacement is disabled"
+                )
+            return random.sample(buf_list, n)
 
         batch = _take(self.reward_pos, n_pos) + _take(self.reward_neg, n_neg)
         random.shuffle(batch)
+        obs = np.stack([b.obs for b in batch])
+        labels = np.asarray([b.label for b in batch], np.float32)
+        instructions = [b.instruction for b in batch]
+        return obs, labels, instructions
+
+    def sample_reward_eval(self):
+        if not self.reward_eval_pos or not self.reward_eval_neg:
+            raise RuntimeError(
+                "Reward holdout needs at least one positive and one negative episode"
+            )
+        batch = list(self.reward_eval_pos) + list(self.reward_eval_neg)
         obs = np.stack([b.obs for b in batch])
         labels = np.asarray([b.label for b in batch], np.float32)
         instructions = [b.instruction for b in batch]
@@ -859,7 +991,12 @@ class RolloutWorkerActor(BaseWorkerActor):
                     )
                 )
                 self._process_episode_for_wm(
-                    obs_list, reward_list, action_env_list, self.task_description, success
+                    obs_list,
+                    reward_list,
+                    action_env_list,
+                    self.task_description,
+                    success,
+                    episode_id=f"worker{self.wid}:seed{current_seed}",
                 )
                 break
 
@@ -872,7 +1009,15 @@ class RolloutWorkerActor(BaseWorkerActor):
             dim=0,
         )
 
-    def _process_episode_for_wm(self, obs_list, reward_list, action_env_list, task_description, success=None):
+    def _process_episode_for_wm(
+        self,
+        obs_list,
+        reward_list,
+        action_env_list,
+        task_description,
+        success=None,
+        episode_id=None,
+    ):
         """Pack Ctrl-World training windows + terminal reward frame.
 
         Ctrl-World still uses dense sliding windows.
@@ -888,16 +1033,18 @@ class RolloutWorkerActor(BaseWorkerActor):
             obs_images.append(self._obs_to_views(obs_dict).numpy())
         obs_images = np.stack(obs_images, axis=0)
         actions = np.stack(action_env_list, axis=0)  # [T-1, act_dim]
+        aligned_actions = frame_align_transition_actions(actions, T)
+        if episode_id is None:
+            episode_id = f"worker{self.wid}:episode{time.time_ns()}"
         num_valid_windows = T - wm_len + 1
         wm_batch = []
         for window_idx in range(num_valid_windows):
             obs_start_idx = window_idx
             obs_end_idx = obs_start_idx + wm_len
-            frame_ids = np.arange(obs_start_idx, obs_end_idx)
-            # Frame-aligned actions: clip into available env actions.
-            act_ids = np.clip(frame_ids, 0, len(actions) - 1)
             window_obs = obs_images[obs_start_idx:obs_end_idx]
-            window_act = actions[act_ids]
+            # Offline convention: action[t] is the transition into obs[t], with
+            # a synthetic zero action for the reset frame.
+            window_act = aligned_actions[obs_start_idx:obs_end_idx]
             rew_idx = min(obs_end_idx - 2, len(reward_list) - 1)
             window_rew = reward_list[max(rew_idx, 0)]
             wm_batch.append(WMExperience(
@@ -905,6 +1052,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                 act=window_act.astype(np.float32),
                 rew=float(window_rew),
                 instruction=task_description,
+                episode_id=str(episode_id),
             ))
         if wm_batch:
             self.wm_replay_buffer.add_batch.remote(wm_batch)
@@ -920,6 +1068,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                 obs=last_primary,
                 label=ep_label,
                 instruction=task_description,
+                episode_id=str(episode_id),
             )
         ])
 
@@ -1152,6 +1301,7 @@ class RewardInferenceActor(InferenceActorCom):
             pretrained_checkpoint=agent_cfg.openvla_path,
             focal_alpha=agent_cfg.reward_model.focal_alpha,
         )
+        self.processor = get_processor(self.rew_cfg)
         self.model = self.reward_model
         self.batch_size = inference_batch
         self.timeout_sec = inference_timeout_ms / 1000.0
@@ -1177,6 +1327,62 @@ class RewardInferenceActor(InferenceActorCom):
         self.requests.append(inputs_t)
         self.promises.append(fut)
         return await fut
+
+    @torch.no_grad()
+    def evaluate_fixed_holdout(self, obs_np, labels_np, instructions):
+        """Evaluate unique terminal episodes never used for reward training."""
+        labels = np.asarray(labels_np, dtype=np.int64)
+        probs = []
+        for start in range(0, len(labels), self.batch_size):
+            end = min(len(labels), start + self.batch_size)
+            inputs_list = []
+            for i in range(start, end):
+                obs_hwc = np.transpose(obs_np[i], (1, 2, 0))
+                obs_img = ((obs_hwc + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+                inputs_list.append(
+                    prepare_one_obs(
+                        self.rew_cfg,
+                        self.processor,
+                        {"full_image": obs_img},
+                        instructions[i],
+                        torch.bfloat16,
+                    )
+                )
+            inputs_batch = self.reward_model.prepare_inputs_batch(inputs_list)
+            logits = self.reward_model.forward(inputs_batch)
+            probs.extend(torch.softmax(logits.float(), dim=-1)[:, 1].cpu().tolist())
+        probs = np.asarray(probs, dtype=np.float64)
+        preds = probs >= 0.5
+        pos = labels == 1
+        neg = labels == 0
+        pos_acc = float(np.mean(preds[pos] == 1)) if np.any(pos) else float("nan")
+        neg_acc = float(np.mean(preds[neg] == 0)) if np.any(neg) else float("nan")
+        pos_probs, neg_probs = probs[pos], probs[neg]
+        if len(pos_probs) and len(neg_probs):
+            comparisons = pos_probs[:, None] - neg_probs[None, :]
+            roc_auc = float(
+                np.mean(comparisons > 0) + 0.5 * np.mean(comparisons == 0)
+            )
+        else:
+            roc_auc = float("nan")
+        eps = 1e-7
+        log_loss = float(
+            -np.mean(
+                labels * np.log(np.clip(probs, eps, 1.0 - eps))
+                + (1 - labels) * np.log(np.clip(1.0 - probs, eps, 1.0 - eps))
+            )
+        )
+        return {
+            "balanced_acc": float(np.nanmean([pos_acc, neg_acc])),
+            "pos_acc": pos_acc,
+            "neg_acc": neg_acc,
+            "roc_auc": roc_auc,
+            "brier": float(np.mean((probs - labels) ** 2)),
+            "log_loss": log_loss,
+            "num_samples": float(len(labels)),
+            "num_pos": float(np.sum(pos)),
+            "num_neg": float(np.sum(neg)),
+        }
 
     async def _loop(self):
         while True:
@@ -1224,6 +1430,11 @@ class CtrlWorldInferenceActor(InferenceActorCom):
         setup_debugger("ctrl_world_inference", actor_id)
         self.actor_id = actor_id
         self.stats_actor = stats_actor
+        self.ema_decay = float(args.ctrl_ema_decay)
+        if not 0.0 <= self.ema_decay < 1.0:
+            raise ValueError(f"ctrl_ema_decay must be in [0,1), got {self.ema_decay}")
+        self.ema_initialized = False
+        self.ema_updates = 0
 
         print(f"CtrlWorldInferenceActor {actor_id}: 正在加载 Ctrl-World 模型...")
 
@@ -1341,13 +1552,19 @@ class CtrlWorldInferenceActor(InferenceActorCom):
         for _, p in params:
             buf = torch.empty_like(p.data, device=device)
             dist.broadcast(buf, src=0, group=group_handle)
-            p.data.copy_(buf)
+            if self.ema_initialized and self.ema_decay > 0.0:
+                p.data.mul_(self.ema_decay).add_(buf, alpha=1.0 - self.ema_decay)
+            else:
+                p.data.copy_(buf)
+        self.ema_initialized = True
+        self.ema_updates += 1
         if torch.cuda.is_available():
             torch.cuda.synchronize(device)
         self.model.eval()
         print(
             f"CtrlWorldInferenceActor {self.actor_id}: "
-            f"received {len(params)} trainable tensors ({group_name})"
+            f"received {len(params)} trainable tensors ({group_name}), "
+            f"EMA decay={self.ema_decay}, updates={self.ema_updates}"
         )
 
     def _on_bg_task_done(self, task):
@@ -1410,17 +1627,17 @@ class CtrlWorldInferenceActor(InferenceActorCom):
         instructions: List[str],
         max_horizon: int = 4,
         lpips_net: str = "alex",
+        micro_batch_size: int = 4,
+        seed: int = 12345,
     ) -> Dict[str, float]:
-        """Teacher-forced Ctrl-World rollout metrics on WM replay windows.
-
-        Uses GT actions and compares predicted future frames against GT.
-        Returns scalar means plus per-horizon LPIPS/PSNR/SSIM.
-        """
+        """Deterministic, micro-batched metrics on a fixed held-out WM set."""
         env = self.ctrl_world_env
         num_history = env.num_history
         stride = env.num_frames_pred - 1
         if max_horizon < 1:
             raise ValueError("max_horizon must be >= 1")
+        if micro_batch_size < 1:
+            raise ValueError("micro_batch_size must be >= 1")
 
         obs = torch.as_tensor(obs_np, dtype=torch.float32)
         acts = torch.as_tensor(act_np, dtype=torch.float32)
@@ -1440,91 +1657,129 @@ class CtrlWorldInferenceActor(InferenceActorCom):
         if eval_horizon < 1:
             raise ValueError("No future frames available for Ctrl-World eval")
 
-        flat = obs.reshape(B * nF * M, C, H, W)
-        flat = F.interpolate(
-            flat,
-            size=(env.target_height, env.target_width),
-            mode="bilinear",
-            align_corners=False,
-        )
-        obs = flat.reshape(B, nF, M, C, env.target_height, env.target_width)
-
-        context = obs[:, :context_len].to(self.device)
-        gt_future = obs[:, context_len : context_len + eval_horizon].to(self.device)
-        acts = acts.to(self.device)
-
-        history, current = env.init_latent_state(context)
-        # Frame-aligned action condition: history+current + next stride actions.
         needed_act = num_history + 1 + stride
-        if acts.shape[1] < needed_act:
-            pad = acts[:, -1:].repeat(1, needed_act - acts.shape[1], 1)
-            act_cond = torch.cat([acts, pad], dim=1)
-        else:
-            act_cond = acts[:, :needed_act]
-
-        future_obs, _ = env.predict_chunk_stateless(
-            current_latent=current,
-            latent_history=history,
-            action_condition=act_cond,
-            instructions=list(instructions),
-            output_size=(env.target_height, env.target_width),
-        )
-        pred_future = future_obs[:, :eval_horizon].float()
-        gt_future = gt_future.float()
-
         lpips_model = self._ensure_lpips(lpips_net)
-        lpips_by_h, psnr_by_h, ssim_by_h, mse_by_h = {}, {}, {}, {}
-        lpips_vals, psnr_vals, ssim_vals, mse_vals = [], [], [], []
+        samples = {
+            name: {str(h): [] for h in range(1, eval_horizon + 1)}
+            for name in ("mse", "psnr", "ssim", "lpips")
+        }
+        view_samples = {
+            view: {name: [] for name in ("mse", "psnr", "ssim", "lpips")}
+            for view in range(M)
+        }
 
-        for h in range(1, eval_horizon + 1):
-            pred_h = pred_future[:, h - 1]  # [B,M,C,H,W]
-            gt_h = gt_future[:, h - 1]
-            pred_flat = pred_h.reshape(B * M, C, env.target_height, env.target_width)
-            gt_flat = gt_h.reshape(B * M, C, env.target_height, env.target_width)
-            pred_01 = ((pred_flat + 1.0) * 0.5).clamp(0.0, 1.0)
-            gt_01 = ((gt_flat + 1.0) * 0.5).clamp(0.0, 1.0)
+        for start in range(0, B, micro_batch_size):
+            end = min(B, start + micro_batch_size)
+            obs_mb = obs[start:end]
+            acts_mb = acts[start:end].to(self.device)
+            mb = end - start
+            flat = obs_mb.reshape(mb * nF * M, C, H, W)
+            flat = F.interpolate(
+                flat,
+                size=(env.target_height, env.target_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            obs_mb = flat.reshape(
+                mb, nF, M, C, env.target_height, env.target_width
+            )
+            context = obs_mb[:, :context_len].to(self.device)
+            gt_future = obs_mb[
+                :, context_len : context_len + eval_horizon
+            ].to(self.device)
+            history, current = env.init_latent_state(
+                context, deterministic=True
+            )
+            if acts_mb.shape[1] < needed_act:
+                pad = acts_mb[:, -1:].repeat(
+                    1, needed_act - acts_mb.shape[1], 1
+                )
+                act_cond = torch.cat([acts_mb, pad], dim=1)
+            else:
+                act_cond = acts_mb[:, :needed_act]
+            generators = []
+            for sample_index in range(start, end):
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(int(seed) + sample_index)
+                generators.append(generator)
+            future_obs, _ = env.predict_chunk_stateless(
+                current_latent=current,
+                latent_history=history,
+                action_condition=act_cond,
+                instructions=list(instructions[start:end]),
+                output_size=(env.target_height, env.target_width),
+                generator=generators,
+            )
+            pred_future = future_obs[:, :eval_horizon].float()
+            gt_future = gt_future.float()
 
-            mse = (pred_01 - gt_01).square().mean()
-            psnr = -10.0 * torch.log10(mse.clamp_min(1e-12))
-            ssim = batch_ssim(pred_01, gt_01).mean()
-            lpips_val = lpips_model(pred_flat, gt_flat).mean()
+            for horizon in range(1, eval_horizon + 1):
+                pred_h = pred_future[:, horizon - 1]
+                gt_h = gt_future[:, horizon - 1]
+                pred_flat = pred_h.reshape(
+                    mb * M, C, env.target_height, env.target_width
+                )
+                gt_flat = gt_h.reshape(
+                    mb * M, C, env.target_height, env.target_width
+                )
+                pred_01 = ((pred_flat + 1.0) * 0.5).clamp(0.0, 1.0)
+                gt_01 = ((gt_flat + 1.0) * 0.5).clamp(0.0, 1.0)
+                mse_view = (pred_01 - gt_01).square().mean(dim=(1, 2, 3)).reshape(mb, M)
+                psnr_view = -10.0 * torch.log10(mse_view.clamp_min(1e-12))
+                ssim_view = batch_ssim(pred_01, gt_01).reshape(mb, M)
+                lpips_view = lpips_model(pred_flat, gt_flat).reshape(mb, M)
+                key = str(horizon)
+                for name, tensor in (
+                    ("mse", mse_view.mean(dim=1)),
+                    ("psnr", psnr_view.mean(dim=1)),
+                    ("ssim", ssim_view.mean(dim=1)),
+                    ("lpips", lpips_view.mean(dim=1)),
+                ):
+                    samples[name][key].extend(tensor.float().cpu().tolist())
+                if horizon == eval_horizon:
+                    for view in range(M):
+                        for name, tensor in (
+                            ("mse", mse_view[:, view]),
+                            ("psnr", psnr_view[:, view]),
+                            ("ssim", ssim_view[:, view]),
+                            ("lpips", lpips_view[:, view]),
+                        ):
+                            view_samples[view][name].extend(
+                                tensor.float().cpu().tolist()
+                            )
 
-            key = str(h)
-            mse_by_h[key] = float(mse.item())
-            psnr_by_h[key] = float(psnr.item())
-            ssim_by_h[key] = float(ssim.item())
-            lpips_by_h[key] = float(lpips_val.item())
-            mse_vals.append(mse_by_h[key])
-            psnr_vals.append(psnr_by_h[key])
-            ssim_vals.append(ssim_by_h[key])
-            lpips_vals.append(lpips_by_h[key])
+        def _mean(values):
+            return float(np.mean(np.asarray(values, dtype=np.float64)))
 
-        # Agent-view-only summary at full evaluated horizon.
-        pred_agent = pred_future[:, -1, 0]
-        gt_agent = gt_future[:, -1, 0]
-        pred_agent_01 = ((pred_agent + 1.0) * 0.5).clamp(0.0, 1.0)
-        gt_agent_01 = ((gt_agent + 1.0) * 0.5).clamp(0.0, 1.0)
-        agent_mse = (pred_agent_01 - gt_agent_01).square().mean()
-        agent_psnr = -10.0 * torch.log10(agent_mse.clamp_min(1e-12))
-        agent_ssim = batch_ssim(pred_agent_01, gt_agent_01).mean()
-        agent_lpips = lpips_model(pred_agent, gt_agent).mean()
+        def _std(values):
+            return float(np.std(np.asarray(values, dtype=np.float64)))
 
-        return {
-            "mse": float(np.mean(mse_vals)),
-            "psnr": float(np.mean(psnr_vals)),
-            "ssim": float(np.mean(ssim_vals)),
-            "lpips": float(np.mean(lpips_vals)),
-            "mse_by_horizon": mse_by_h,
-            "psnr_by_horizon": psnr_by_h,
-            "ssim_by_horizon": ssim_by_h,
-            "lpips_by_horizon": lpips_by_h,
-            "agent_view_mse": float(agent_mse.item()),
-            "agent_view_psnr": float(agent_psnr.item()),
-            "agent_view_ssim": float(agent_ssim.item()),
-            "agent_view_lpips": float(agent_lpips.item()),
+        result = {
             "eval_horizon": float(eval_horizon),
             "num_windows": float(B),
+            "eval_seed": float(seed),
         }
+        for name in ("mse", "psnr", "ssim", "lpips"):
+            all_values = []
+            by_horizon, std_by_horizon = {}, {}
+            for horizon in range(1, eval_horizon + 1):
+                key = str(horizon)
+                values = samples[name][key]
+                all_values.extend(values)
+                by_horizon[key] = _mean(values)
+                std_by_horizon[key] = _std(values)
+            result[name] = _mean(all_values)
+            result[f"{name}_std"] = _std(all_values)
+            result[f"{name}_by_horizon"] = by_horizon
+            result[f"{name}_std_by_horizon"] = std_by_horizon
+        view_names = ["agent_view", "wrist_view"]
+        for view, metrics in view_samples.items():
+            prefix = view_names[view] if view < len(view_names) else f"view{view}"
+            for name, values in metrics.items():
+                result[f"{prefix}_{name}"] = _mean(values)
+                result[f"{prefix}_{name}_std"] = _std(values)
+
+        return result
 
     async def _loop(self):
         while True:
@@ -1595,6 +1850,7 @@ class TrainerActor(TrainerActorCom):
                  reward_train_interval,
                  reward_checkpoint=None,
                  reward_pos_ratio=0.5,
+                 reward_min_unique_per_class=64,
                  # Ctrl-World train/broadcast
                  ctrl_world_args=None,
                  ctrl_batch_size=1, ctrl_accumulation_steps=8, ctrl_lr=1e-5,
@@ -1660,6 +1916,9 @@ class TrainerActor(TrainerActorCom):
         # World Model 训练频率
         self.reward_train_interval = reward_train_interval
         self.reward_pos_ratio = float(reward_pos_ratio)
+        self.reward_min_unique_per_class = int(reward_min_unique_per_class)
+        self.total_ctrl_steps = max(1, math.ceil(self.train_iters / self.ctrl_train_interval))
+        self.total_reward_steps = max(1, math.ceil(self.train_iters / self.reward_train_interval))
 
         # World Model 独立训练步数计数器
         self.reward_step = 0
@@ -1842,15 +2101,13 @@ class TrainerActor(TrainerActorCom):
         print(f"[Trainer {self.rank}] 已保存 checkpoint -> {ckpt_dir}/agent_lora_epoch_{step}, agent_extra_layers_epoch_{step}.pt")
 
     def _get_current_lr(self, current_step, peak_lr, warmup_steps, total_steps, start_step=0):
-        if current_step < start_step:
-            return 0.0
-        effective_step = current_step - start_step
-        if effective_step < warmup_steps:
-            return peak_lr * (effective_step / warmup_steps)
-        progress = (effective_step - warmup_steps) / (total_steps - start_step - warmup_steps)
-        progress = min(progress, 1.0)
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return peak_lr * cosine_decay
+        return cosine_warmup_lr(
+            current_step=current_step,
+            peak_lr=peak_lr,
+            warmup_steps=warmup_steps,
+            total_steps=total_steps,
+            start_step=start_step,
+        )
 
     def _train_policy(self, inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs):
         """Policy 训练（包含 Value 网络）— 与原版完全一致"""
@@ -1971,7 +2228,7 @@ class TrainerActor(TrainerActorCom):
             }
 
         ctrl_lr = self._get_current_lr(
-            self.ctrl_step, self.ctrl_lr, self.ctrl_warmup_steps, self.train_iters
+            self.ctrl_step, self.ctrl_lr, self.ctrl_warmup_steps, self.total_ctrl_steps
         )
         for pg in self.ctrl_world_engine.optimizer.param_groups:
             pg['lr'] = ctrl_lr
@@ -1979,6 +2236,7 @@ class TrainerActor(TrainerActorCom):
 
         self.ctrl_world_engine.train()
         num_updates = self.ctrl_super_batch_size // self.ctrl_batch_size
+        grad_norms = []
         t0 = time.time()
         # Use only the first ctrl_super_batch_size samples from the shared WM batch.
         pixel = pixel[: self.ctrl_super_batch_size]
@@ -1995,6 +2253,10 @@ class TrainerActor(TrainerActorCom):
             }
             ctrl_loss, _ = self.ctrl_world_engine(batch)
             self.ctrl_world_engine.backward(ctrl_loss)
+            if self.ctrl_world_engine.is_gradient_accumulation_boundary():
+                grad_norm = self.ctrl_world_engine.get_global_grad_norm()
+                if grad_norm is not None and math.isfinite(float(grad_norm)):
+                    grad_norms.append(float(grad_norm))
             self.ctrl_world_engine.step()
             epoch_losses.append(float(ctrl_loss.detach().item()))
 
@@ -2004,6 +2266,8 @@ class TrainerActor(TrainerActorCom):
             'should_train': True,
             'epoch_ctrl_losses': epoch_losses,
             'ctrl_train_time': train_time,
+            'ctrl_grad_norm': float(np.mean(grad_norms)) if grad_norms else float('nan'),
+            'ctrl_clip_ratio': float(np.mean(np.asarray(grad_norms) > 1.0)) if grad_norms else float('nan'),
         }
 
     def _train_reward_model(self, wm_reward_inputs, wm_labels, current_lrs, reward_can_train=True):
@@ -2036,13 +2300,19 @@ class TrainerActor(TrainerActorCom):
                 'reward_fn': epoch_reward_fn,
             }
 
-        reward_lr = self._get_current_lr(self.reward_step, self.reward_lr, self.reward_warmup_steps, self.train_iters)
+        reward_lr = self._get_current_lr(
+            self.reward_step,
+            self.reward_lr,
+            self.reward_warmup_steps,
+            self.total_reward_steps,
+        )
         for pg in self.reward_engine.optimizer.param_groups:
             pg['lr'] = reward_lr
         current_lrs['reward'] = reward_lr
 
         self.reward_engine.train()
         num_reward_updates = self.reward_super_batch_size // self.reward_batch_size
+        grad_norms = []
         t_reward_train_start = time.time()
 
         for i in range(num_reward_updates):
@@ -2051,9 +2321,12 @@ class TrainerActor(TrainerActorCom):
             mini_inputs = {k: v[start:end] for k, v in wm_reward_inputs.items()}
             mini_labels = wm_labels[start:end]
 
-            logits = self.reward_engine.forward(mini_inputs)
             reward_loss, metrics = self.reward_engine.module.compute_loss_and_metrics(mini_inputs, mini_labels)
             self.reward_engine.backward(reward_loss)
+            if self.reward_engine.is_gradient_accumulation_boundary():
+                grad_norm = self.reward_engine.get_global_grad_norm()
+                if grad_norm is not None and math.isfinite(float(grad_norm)):
+                    grad_norms.append(float(grad_norm))
             self.reward_engine.step()
 
             epoch_reward_losses.append(reward_loss.item())
@@ -2073,6 +2346,8 @@ class TrainerActor(TrainerActorCom):
             'reward_tn': epoch_reward_tn,
             'reward_fp': epoch_reward_fp,
             'reward_fn': epoch_reward_fn,
+            'reward_grad_norm': float(np.mean(grad_norms)) if grad_norms else float('nan'),
+            'reward_clip_ratio': float(np.mean(np.asarray(grad_norms) > 1.0)) if grad_norms else float('nan'),
         }
 
     async def _data_fetching_loop(self):
@@ -2147,12 +2422,23 @@ class TrainerActor(TrainerActorCom):
                     await asyncio.sleep(3)
 
                 t_sample_start = time.time()
-                obs_np, act_np, rew_np, instructions = \
+                obs_np, act_np, rew_np, instructions, ctrl_sample_stats = \
                     await self.wm_replay_buffer.sample.remote(ctrl_need)
 
-                # Skip reward sampling/training until both classes exist in the terminal buffer.
+                # Require enough unique episodes for a full no-replacement batch.
                 rew_stats = await self.wm_replay_buffer.reward_stats.remote()
-                reward_can_train = (rew_stats["pos"] > 0 and rew_stats["neg"] > 0)
+                reward_pos_need = int(round(reward_need * self.reward_pos_ratio))
+                reward_neg_need = reward_need - reward_pos_need
+                reward_pos_need = max(
+                    reward_pos_need, self.reward_min_unique_per_class
+                )
+                reward_neg_need = max(
+                    reward_neg_need, self.reward_min_unique_per_class
+                )
+                reward_can_train = (
+                    rew_stats["pos"] >= reward_pos_need
+                    and rew_stats["neg"] >= reward_neg_need
+                )
                 reward_obs_np = None
                 reward_label_np = None
                 reward_instructions = None
@@ -2216,7 +2502,9 @@ class TrainerActor(TrainerActorCom):
                 else:
                     print(
                         f"Trainer {self.rank} (BG-WM): skip reward prep "
-                        f"(pos={rew_stats['pos']}, neg={rew_stats['neg']}); need both classes."
+                        f"(pos={rew_stats['pos']}/{reward_pos_need}, "
+                        f"neg={rew_stats['neg']}/{reward_neg_need}); "
+                        "waiting for unique episodes."
                     )
 
                 prep_time = time.time() - t_prep_start
@@ -2232,7 +2520,13 @@ class TrainerActor(TrainerActorCom):
                     'reward_pos_ratio_batch': reward_pos_ratio_batch,
                     'reward_buffer_pos': int(rew_stats["pos"]),
                     'reward_buffer_neg': int(rew_stats["neg"]),
+                    'reward_buffer_eval_pos': int(rew_stats.get("eval_pos", 0)),
+                    'reward_buffer_eval_neg': int(rew_stats.get("eval_neg", 0)),
+                    'reward_pos_need': int(reward_pos_need),
+                    'reward_neg_need': int(reward_neg_need),
                     'instructions': instructions,
+                    'ctrl_sample_unique_episodes': int(ctrl_sample_stats['unique_episodes']),
+                    'ctrl_sample_fresh_episode_ratio': float(ctrl_sample_stats['fresh_episode_ratio']),
                     'sample_time': sample_time,
                     'prep_time': prep_time,
                 }
@@ -2315,8 +2609,10 @@ class TrainerActor(TrainerActorCom):
         if (self.global_step % self.reward_train_interval == 0) and not reward_can_train:
             print(
                 f"Trainer {self.rank}: skip reward train "
-                f"(pos={wm_batch.get('reward_buffer_pos', '?')}, "
-                f"neg={wm_batch.get('reward_buffer_neg', '?')}); need both classes."
+                f"(pos={wm_batch.get('reward_buffer_pos', '?')}/"
+                f"{wm_batch.get('reward_pos_need', '?')}, "
+                f"neg={wm_batch.get('reward_buffer_neg', '?')}/"
+                f"{wm_batch.get('reward_neg_need', '?')}); waiting for unique episodes."
             )
         reward_result = self._train_reward_model(
             wm_reward_inputs, wm_labels, current_lrs, reward_can_train=reward_can_train
@@ -2347,10 +2643,14 @@ class TrainerActor(TrainerActorCom):
         wm_metrics = {
             "trained_reward": reward_result['should_train'],
             "trained_ctrl": ctrl_result['should_train'],
+            "ctrl_sample_unique_episodes": wm_batch.get('ctrl_sample_unique_episodes', 0),
+            "ctrl_sample_fresh_episode_ratio": wm_batch.get('ctrl_sample_fresh_episode_ratio', 0.0),
         }
 
         if ctrl_result['should_train']:
             wm_metrics["ctrl_loss"] = float(np.mean(ctrl_result['epoch_ctrl_losses']))
+            wm_metrics["ctrl_grad_norm"] = ctrl_result["ctrl_grad_norm"]
+            wm_metrics["ctrl_clip_ratio"] = ctrl_result["ctrl_clip_ratio"]
             print(f"Trainer {self.rank}: Ctrl-World loss={wm_metrics['ctrl_loss']:.6f}")
 
         if reward_result['should_train']:
@@ -2360,6 +2660,8 @@ class TrainerActor(TrainerActorCom):
             wm_metrics["reward_tn"] = reward_result['reward_tn']
             wm_metrics["reward_fp"] = reward_result['reward_fp']
             wm_metrics["reward_fn"] = reward_result['reward_fn']
+            wm_metrics["reward_grad_norm"] = reward_result["reward_grad_norm"]
+            wm_metrics["reward_clip_ratio"] = reward_result["reward_clip_ratio"]
             wm_metrics["reward_pos_ratio_batch"] = float(
                 wm_batch.get("reward_pos_ratio_batch", 0.0)
             )
@@ -2452,6 +2754,28 @@ def main(args):
         raise FileNotFoundError(
             f"Ctrl-World condition statistics not found: {args.condition_stat_path}"
         )
+    if not 0.0 < args.ctrl_eval_episode_ratio < 1.0:
+        raise ValueError("ctrl_eval_episode_ratio must be in (0, 1)")
+    if args.ctrl_eval_batch_size < 1 or args.ctrl_eval_micro_batch_size < 1:
+        raise ValueError("Ctrl eval batch sizes must be positive")
+    if args.ctrl_eval_windows_per_episode < 1:
+        raise ValueError("ctrl_eval_windows_per_episode must be positive")
+    if args.ctrl_train_interval < 1 or args.reward_train_interval < 1:
+        raise ValueError("World-model train intervals must be positive")
+    if args.reward_min_unique_per_class < 1 or args.reward_eval_per_class < 1:
+        raise ValueError("Reward train/eval unique episode thresholds must be positive")
+    total_ctrl_steps = math.ceil(args.train_iters / args.ctrl_train_interval)
+    total_reward_steps = math.ceil(args.train_iters / args.reward_train_interval)
+    if args.ctrl_warmup_steps >= total_ctrl_steps:
+        raise ValueError(
+            f"ctrl_warmup_steps={args.ctrl_warmup_steps} must be smaller than "
+            f"the {total_ctrl_steps} planned Ctrl optimizer updates"
+        )
+    if args.reward_warmup_steps >= total_reward_steps:
+        raise ValueError(
+            f"reward_warmup_steps={args.reward_warmup_steps} must be smaller than "
+            f"the {total_reward_steps} planned reward optimizer updates"
+        )
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
     object_store_size_gb = 256
@@ -2478,6 +2802,10 @@ def main(args):
         WMReplayBufferActor.remote(
             capacity=args.wm_replay_capacity,
             reward_capacity=args.reward_replay_capacity,
+            ctrl_eval_capacity=args.ctrl_eval_batch_size,
+            ctrl_eval_episode_ratio=args.ctrl_eval_episode_ratio,
+            ctrl_eval_windows_per_episode=args.ctrl_eval_windows_per_episode,
+            reward_eval_per_class=args.reward_eval_per_class,
         )
         for _ in range(args.num_trainer_gpus)
     ]
@@ -2514,6 +2842,7 @@ def main(args):
             reward_train_interval=args.reward_train_interval,
             reward_checkpoint=args.reward_checkpoint,
             reward_pos_ratio=args.reward_pos_ratio,
+            reward_min_unique_per_class=args.reward_min_unique_per_class,
             ctrl_world_args=ctrl_world_args,
             ctrl_batch_size=args.ctrl_batch_size,
             ctrl_accumulation_steps=args.ctrl_accumulation_steps,
@@ -2749,10 +3078,12 @@ def main(args):
             and global_step % args.ctrl_eval_interval == 0
         ):
             try:
-                wm_size = ray.get(wm_replay_buffers[0].size.remote())
-                if wm_size >= args.ctrl_eval_batch_size:
-                    obs_np, act_np, _rew_np, instructions = ray.get(
-                        wm_replay_buffers[0].sample.remote(args.ctrl_eval_batch_size)
+                eval_size = ray.get(wm_replay_buffers[0].eval_size.remote())
+                if eval_size >= args.ctrl_eval_batch_size:
+                    obs_np, act_np, instructions = ray.get(
+                        wm_replay_buffers[0].sample_eval.remote(
+                            args.ctrl_eval_batch_size
+                        )
                     )
                     ctrl_eval_metrics = ray.get(
                         ctrl_world_inference_pool[0].evaluate_prediction_metrics.remote(
@@ -2761,33 +3092,54 @@ def main(args):
                             instructions,
                             max_horizon=args.ctrl_eval_max_horizon,
                             lpips_net=args.ctrl_eval_lpips_net,
+                            micro_batch_size=args.ctrl_eval_micro_batch_size,
+                            seed=args.ctrl_eval_seed,
                         )
                     )
-                    writer.add_scalar('WorldModel/Eval/MSE', ctrl_eval_metrics['mse'], global_step)
-                    writer.add_scalar('WorldModel/Eval/PSNR', ctrl_eval_metrics['psnr'], global_step)
-                    writer.add_scalar('WorldModel/Eval/SSIM', ctrl_eval_metrics['ssim'], global_step)
-                    writer.add_scalar('WorldModel/Eval/LPIPS', ctrl_eval_metrics['lpips'], global_step)
+                    for metric in ('mse', 'psnr', 'ssim', 'lpips'):
+                        label = metric.upper()
+                        writer.add_scalar(
+                            f'WorldModel/Eval/{label}',
+                            ctrl_eval_metrics[metric],
+                            global_step,
+                        )
+                        writer.add_scalar(
+                            f'WorldModel/Eval/{label}_Std',
+                            ctrl_eval_metrics[f'{metric}_std'],
+                            global_step,
+                        )
+                        for h, value in ctrl_eval_metrics[
+                            f'{metric}_by_horizon'
+                        ].items():
+                            writer.add_scalar(
+                                f'WorldModel/Eval/{label}_h{h}', value, global_step
+                            )
+                            writer.add_scalar(
+                                f'WorldModel/Eval/{label}_h{h}_Std',
+                                ctrl_eval_metrics[f'{metric}_std_by_horizon'][h],
+                                global_step,
+                            )
+                    for view_prefix, tb_prefix in (
+                        ('agent_view', 'AgentView'),
+                        ('wrist_view', 'WristView'),
+                    ):
+                        for metric in ('psnr', 'ssim', 'lpips'):
+                            if f'{view_prefix}_{metric}' not in ctrl_eval_metrics:
+                                continue
+                            label = metric.upper()
+                            writer.add_scalar(
+                                f'WorldModel/Eval/{tb_prefix}_{label}',
+                                ctrl_eval_metrics[f'{view_prefix}_{metric}'],
+                                global_step,
+                            )
+                            writer.add_scalar(
+                                f'WorldModel/Eval/{tb_prefix}_{label}_Std',
+                                ctrl_eval_metrics[f'{view_prefix}_{metric}_std'],
+                                global_step,
+                            )
                     writer.add_scalar(
-                        'WorldModel/Eval/AgentView_PSNR',
-                        ctrl_eval_metrics['agent_view_psnr'],
-                        global_step,
+                        'WorldModel/Eval/Fixed_Set_Size', eval_size, global_step
                     )
-                    writer.add_scalar(
-                        'WorldModel/Eval/AgentView_SSIM',
-                        ctrl_eval_metrics['agent_view_ssim'],
-                        global_step,
-                    )
-                    writer.add_scalar(
-                        'WorldModel/Eval/AgentView_LPIPS',
-                        ctrl_eval_metrics['agent_view_lpips'],
-                        global_step,
-                    )
-                    for h, value in ctrl_eval_metrics['psnr_by_horizon'].items():
-                        writer.add_scalar(f'WorldModel/Eval/PSNR_h{h}', value, global_step)
-                    for h, value in ctrl_eval_metrics['ssim_by_horizon'].items():
-                        writer.add_scalar(f'WorldModel/Eval/SSIM_h{h}', value, global_step)
-                    for h, value in ctrl_eval_metrics['lpips_by_horizon'].items():
-                        writer.add_scalar(f'WorldModel/Eval/LPIPS_h{h}', value, global_step)
                     writer.flush()
                     print(
                         f"[CtrlEval] step={global_step} "
@@ -2800,11 +3152,46 @@ def main(args):
                 else:
                     print(
                         f"[CtrlEval] skip step={global_step}: "
-                        f"WM buffer {wm_size} < {args.ctrl_eval_batch_size}"
+                        f"fixed holdout {eval_size} < {args.ctrl_eval_batch_size}"
                     )
             except Exception as e:
                 import traceback
                 print(f"[CtrlEval] failed at step={global_step}: {e}", flush=True)
+                traceback.print_exc()
+
+            try:
+                fixed_reward_stats = ray.get(
+                    wm_replay_buffers[0].reward_stats.remote()
+                )
+                if (
+                    fixed_reward_stats.get("eval_pos", 0) >= args.reward_eval_per_class
+                    and fixed_reward_stats.get("eval_neg", 0) >= args.reward_eval_per_class
+                ):
+                    reward_obs, reward_labels, reward_instructions = ray.get(
+                        wm_replay_buffers[0].sample_reward_eval.remote()
+                    )
+                    reward_eval = ray.get(
+                        reward_inference_pool[0].evaluate_fixed_holdout.remote(
+                            reward_obs, reward_labels, reward_instructions
+                        )
+                    )
+                    for name, value in reward_eval.items():
+                        if math.isfinite(float(value)):
+                            writer.add_scalar(
+                                f'WorldModel/RewardEval/{name}', value, global_step
+                            )
+                    writer.flush()
+                else:
+                    print(
+                        f"[RewardEval] skip step={global_step}: fixed holdout "
+                        f"pos={fixed_reward_stats.get('eval_pos', 0)}/"
+                        f"{args.reward_eval_per_class}, "
+                        f"neg={fixed_reward_stats.get('eval_neg', 0)}/"
+                        f"{args.reward_eval_per_class}"
+                    )
+            except Exception as e:
+                import traceback
+                print(f"[RewardEval] failed at step={global_step}: {e}", flush=True)
                 traceback.print_exc()
 
         if global_step > 0 and global_step % args.ckpt_every_steps == 0:
@@ -2843,6 +3230,14 @@ def main(args):
             reward_stats_list = ray.get([rb.reward_stats.remote() for rb in wm_replay_buffers])
             reward_pos_size = sum(s["pos"] for s in reward_stats_list)
             reward_neg_size = sum(s["neg"] for s in reward_stats_list)
+            reward_eval_pos_size = sum(s.get("eval_pos", 0) for s in reward_stats_list)
+            reward_eval_neg_size = sum(s.get("eval_neg", 0) for s in reward_stats_list)
+            wm_eval_size = sum(ray.get([rb.eval_size.remote() for rb in wm_replay_buffers]))
+            episode_stats_list = ray.get(
+                [rb.episode_stats.remote() for rb in wm_replay_buffers]
+            )
+            wm_train_episodes = sum(s["train"] for s in episode_stats_list)
+            wm_eval_episodes = sum(s["eval"] for s in episode_stats_list)
 
             wm_loss_str = ""
             if 'reward_loss' in wm_metrics:
@@ -2869,8 +3264,24 @@ def main(args):
 
             if 'ctrl_loss' in wm_metrics:
                 writer.add_scalar('Loss/CtrlWorld', wm_metrics['ctrl_loss'], global_step)
+                if math.isfinite(wm_metrics.get('ctrl_grad_norm', float('nan'))):
+                    writer.add_scalar('WorldModel/Diagnostics/Ctrl_Grad_Norm', wm_metrics['ctrl_grad_norm'], global_step)
+                    writer.add_scalar('WorldModel/Diagnostics/Ctrl_Grad_Clip_Ratio', wm_metrics['ctrl_clip_ratio'], global_step)
+            writer.add_scalar(
+                'WorldModel/Diagnostics/Sampled_Unique_Episodes',
+                wm_metrics.get('ctrl_sample_unique_episodes', 0),
+                global_step,
+            )
+            writer.add_scalar(
+                'WorldModel/Diagnostics/Fresh_Episode_Ratio',
+                wm_metrics.get('ctrl_sample_fresh_episode_ratio', 0.0),
+                global_step,
+            )
             if 'reward_loss' in wm_metrics:
                 writer.add_scalar('Loss/Reward_Model', wm_metrics['reward_loss'], global_step)
+                if math.isfinite(wm_metrics.get('reward_grad_norm', float('nan'))):
+                    writer.add_scalar('WorldModel/Diagnostics/Reward_Grad_Norm', wm_metrics['reward_grad_norm'], global_step)
+                    writer.add_scalar('WorldModel/Diagnostics/Reward_Grad_Clip_Ratio', wm_metrics['reward_clip_ratio'], global_step)
             if 'reward_tp' in wm_metrics:
                 writer.add_scalar('WorldModel/Reward_TP', wm_metrics['reward_tp'], global_step)
                 writer.add_scalar('WorldModel/Reward_TN', wm_metrics['reward_tn'], global_step)
@@ -2926,6 +3337,11 @@ def main(args):
             writer.add_scalar('System/WM_Replay_Buffer_Size_Total', wm_buffer_size, global_step)
             writer.add_scalar('System/Reward_Buffer_Pos', reward_pos_size, global_step)
             writer.add_scalar('System/Reward_Buffer_Neg', reward_neg_size, global_step)
+            writer.add_scalar('System/Reward_Eval_Buffer_Pos', reward_eval_pos_size, global_step)
+            writer.add_scalar('System/Reward_Eval_Buffer_Neg', reward_eval_neg_size, global_step)
+            writer.add_scalar('System/WM_Fixed_Eval_Size', wm_eval_size, global_step)
+            writer.add_scalar('System/WM_Train_Episodes', wm_train_episodes, global_step)
+            writer.add_scalar('System/WM_Eval_Episodes', wm_eval_episodes, global_step)
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
             writer.add_scalar('System/Total_Env_Steps', total_env_steps, global_step)
             writer.add_scalar('System/Avg_Step_Time', avg_step_time, global_step)
