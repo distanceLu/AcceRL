@@ -2,6 +2,7 @@
 import time
 import random
 import os
+import json
 import warnings
 from pathlib import Path
 
@@ -60,6 +61,11 @@ class ActorCritic(nn.Module):
         self.vocab_size = self.vla.config.text_config.vocab_size - self.vla.config.pad_to_multiple_of
         self.n_action_bins = self.vla.config.n_action_bins
         self.action_vocab_start = self.vocab_size - self.n_action_bins
+        # Keep the historical LIBERO shape unless a caller explicitly opts into
+        # another robot action layout (the real-robot imitation path uses 8 x 6).
+        self.action_dim = int(getattr(cfg, "action_dim", ACTION_DIM))
+        self.num_actions_chunk = int(getattr(cfg, "num_actions_chunk", NUM_ACTIONS_CHUNK))
+        self.action_range_table = None
         
         # 原地替换lm_head为精简版本
         original_lm_head = self.vla.language_model.lm_head
@@ -205,12 +211,14 @@ class ActorCritic(nn.Module):
         B, _, D = text_hidden_states.shape
         actions_hidden_states = (
             text_hidden_states[action_mask]
-            .reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, D)
+            .reshape(B, self.num_actions_chunk * self.action_dim, D)
             .to(self.model_dtype)
         )
         
         # 提取动作对应的logits（已经是精简后的256维）
-        action_logits = text_logits[action_mask].reshape(B, NUM_ACTIONS_CHUNK * ACTION_DIM, self.n_action_bins)
+        action_logits = text_logits[action_mask].reshape(
+            B, self.num_actions_chunk * self.action_dim, self.n_action_bins
+        )
         
         return action_logits, actions_hidden_states
 
@@ -242,7 +250,10 @@ class ActorCritic(nn.Module):
           value:         (B,)
         """
         # Sanity checks
-        for k in ("input_ids", "attention_mask", "pixel_values", "labels", "proprio"):
+        required_keys = ["input_ids", "attention_mask", "pixel_values", "labels"]
+        if self.cfg.use_proprio:
+            required_keys.append("proprio")
+        for k in required_keys:
             if k not in inputs_batch:
                 warnings.warn(f"inputs_batch missing key: {k}", UserWarning)
 
@@ -284,10 +295,82 @@ class ActorCritic(nn.Module):
         discretized = np.clip(actions_from_tokens.cpu().numpy(), a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized]  # 形状 (B, NUM_ACTIONS_CHUNK * ACTION_DIM)
         normalized_actions = normalized_actions.reshape(
-            normalized_actions.shape[0], NUM_ACTIONS_CHUNK, ACTION_DIM
+            normalized_actions.shape[0], self.num_actions_chunk, self.action_dim
         )
+        actions = self.denormalize_actions(normalized_actions)
         
-        return dist, action_token_ids, normalized_actions
+        return dist, action_token_ids, actions
+
+    def set_action_range_table(self, table: Dict[str, Any] | str | Path | None) -> None:
+        """Attach a per-dimension continuous-action range table.
+
+        When no table is attached, ``post_process`` keeps its original behavior
+        and returns actions in ``[-1, 1]``.  This makes the six-axis real-robot
+        path opt-in and leaves all existing inference callers unchanged.
+        """
+        if table is None:
+            self.action_range_table = None
+            return
+        if isinstance(table, (str, Path)):
+            with Path(table).open("r", encoding="utf-8") as f:
+                table = json.load(f)
+
+        low = np.asarray(table["low"], dtype=np.float64)
+        high = np.asarray(table["high"], dtype=np.float64)
+        expected_shape = (self.action_dim,)
+        if low.shape != expected_shape or high.shape != expected_shape:
+            raise ValueError(
+                f"Action ranges must have shape {expected_shape}; got low={low.shape}, high={high.shape}."
+            )
+        if not np.all(np.isfinite(low)) or not np.all(np.isfinite(high)):
+            raise ValueError("Action ranges must contain only finite values.")
+        if np.any(high <= low):
+            raise ValueError("Every action dimension must have high > low.")
+
+        # Copy through JSON so callers cannot mutate the active table in place.
+        self.action_range_table = json.loads(json.dumps(table))
+
+    def normalize_actions(self, actions: np.ndarray) -> np.ndarray:
+        """Map physical actions to the model's normalized ``[-1, 1]`` space."""
+        actions = np.asarray(actions, dtype=np.float64)
+        if actions.shape[-1] != self.action_dim:
+            raise ValueError(f"Expected final action dimension {self.action_dim}, got {actions.shape}.")
+        if self.action_range_table is None:
+            return np.clip(actions, -1.0, 1.0)
+        low = np.asarray(self.action_range_table["low"], dtype=np.float64)
+        high = np.asarray(self.action_range_table["high"], dtype=np.float64)
+        return np.clip(2.0 * (actions - low) / (high - low) - 1.0, -1.0, 1.0)
+
+    def denormalize_actions(self, normalized_actions: np.ndarray) -> np.ndarray:
+        """Map normalized actions back to the table's physical units."""
+        normalized_actions = np.asarray(normalized_actions)
+        if normalized_actions.shape[-1] != self.action_dim:
+            raise ValueError(
+                f"Expected final normalized action dimension {self.action_dim}, got {normalized_actions.shape}."
+            )
+        if self.action_range_table is None:
+            return normalized_actions
+        low = np.asarray(self.action_range_table["low"], dtype=normalized_actions.dtype)
+        high = np.asarray(self.action_range_table["high"], dtype=normalized_actions.dtype)
+        return low + (normalized_actions + 1.0) * 0.5 * (high - low)
+
+    def continuous_actions_to_token_ids(self, actions: np.ndarray) -> np.ndarray:
+        """Convert physical actions to class IDs for the slim action LM head."""
+        normalized = self.normalize_actions(actions)
+        bin_indices = np.digitize(normalized, self.bins) - 1
+        bin_indices = np.clip(bin_indices, 0, self.bin_centers.shape[0] - 1)
+        return (self.n_action_bins - 1 - bin_indices).astype(np.int64)
+
+    def token_ids_to_continuous_actions(self, token_ids: np.ndarray) -> np.ndarray:
+        """Convert slim-head class IDs to physical actions using the active table."""
+        token_ids = np.asarray(token_ids)
+        bin_indices = np.clip(
+            self.n_action_bins - 1 - token_ids,
+            0,
+            self.bin_centers.shape[0] - 1,
+        )
+        normalized = self.bin_centers[bin_indices]
+        return self.denormalize_actions(normalized)
 
     def prepare_inputs_batch(self, inp, max_len=None):
         return prepare_inputs_batch(self, inp, max_len)
@@ -315,13 +398,21 @@ class ActorCritic(nn.Module):
         save_path.mkdir(parents=True, exist_ok=True)
 
         agent_lora_path = save_path / f"agent_lora"
-        self.vla.save_pretrained(agent_lora_path)
+        # Input embeddings remain frozen and already live in the immutable base
+        # checkpoint.  PEFT otherwise auto-saves them because lm_head is a LoRA
+        # target, adding roughly one full embedding matrix to every checkpoint.
+        # The trainable slim lm_head is persisted in agent_extra_layers.pt below.
+        self.vla.save_pretrained(agent_lora_path, save_embedding_layers=False)
         print(f"✓ Agent LoRA 权重已保存到: {agent_lora_path}")
         
         agent_extra_layers = {
             "value_head": self.value_head.state_dict(),
             "attn_pool": self.attn_pool.state_dict(),
             "lm_head": self.vla.language_model.lm_head.state_dict(),
+            "action_dim": self.action_dim,
+            "num_actions_chunk": self.num_actions_chunk,
+            "num_images_in_input": self.cfg.num_images_in_input,
+            "action_range_table": self.action_range_table,
         }
         # 额外补齐：保存 proprio_projector（因为它在 policy 里会训练）
         if hasattr(self, "proprio_projector") and self.proprio_projector is not None:
@@ -373,6 +464,13 @@ class ActorCritic(nn.Module):
         self.attn_pool.load_state_dict(sd["attn_pool"], strict=strict)
         if "proprio_projector" in sd and self.proprio_projector is not None:
             self.proprio_projector.load_state_dict(sd["proprio_projector"], strict=strict)
+        self.action_dim = int(sd.get("action_dim", self.action_dim))
+        self.num_actions_chunk = int(sd.get("num_actions_chunk", self.num_actions_chunk))
+        if "num_images_in_input" in sd:
+            self.cfg.num_images_in_input = int(sd["num_images_in_input"])
+            self.vla.vision_backbone.set_num_images_in_input(self.cfg.num_images_in_input)
+        if sd.get("action_range_table") is not None:
+            self.set_action_range_table(sd["action_range_table"])
 
         print(f"✅ 已从 {checkpoint_dir} 加载 LoRA 与额外层")
     
@@ -430,6 +528,10 @@ class ActorCritic(nn.Module):
             extra_out["lm_head"] = {k: v.detach().cpu() for k, v in self.vla.language_model.lm_head.state_dict().items()}
             extra_out["value_head"] = {k: v.detach().cpu() for k, v in self.value_head.state_dict().items()}
             extra_out["attn_pool"]  = {k: v.detach().cpu() for k, v in self.attn_pool.state_dict().items()}
+            extra_out["action_dim"] = self.action_dim
+            extra_out["num_actions_chunk"] = self.num_actions_chunk
+            extra_out["num_images_in_input"] = self.cfg.num_images_in_input
+            extra_out["action_range_table"] = self.action_range_table
             if hasattr(self, "proprio_projector") and self.proprio_projector is not None:
                 extra_out["proprio_projector"] = {k: v.detach().cpu() for k, v in self.proprio_projector.state_dict().items()}
             # 直接把 Python dict 存起来（torch.save 支持任意 Python 对象）
@@ -475,7 +577,7 @@ class ActorCritic(nn.Module):
             local_files_only=True,
             device_map="cpu",
         )
-        self.vla.vision_backbone.set_num_images_in_input(2)
+        self.vla.vision_backbone.set_num_images_in_input(self.cfg.num_images_in_input)
         print("[load] 主干加载完成", flush=True)
 
         # 3) 解绑 tie
@@ -501,6 +603,13 @@ class ActorCritic(nn.Module):
             self.attn_pool.load_state_dict(sd["attn_pool"], strict=strict)
             if "proprio_projector" in sd and getattr(self, "proprio_projector", None) is not None:
                 self.proprio_projector.load_state_dict(sd["proprio_projector"], strict=strict)
+            self.action_dim = int(sd.get("action_dim", self.action_dim))
+            self.num_actions_chunk = int(sd.get("num_actions_chunk", self.num_actions_chunk))
+            if "num_images_in_input" in sd:
+                self.cfg.num_images_in_input = int(sd["num_images_in_input"])
+                self.vla.vision_backbone.set_num_images_in_input(self.cfg.num_images_in_input)
+            if sd.get("action_range_table") is not None:
+                self.set_action_range_table(sd["action_range_table"])
 
             # norm_stats
             loaded_norm_stats = sd.get("norm_stats", None)
@@ -558,7 +667,7 @@ class ActorCritic(nn.Module):
         self.vla.eval()
         print("✅ 合并模型与 extra 层加载完成，可用于评估/推理。", flush=True)
 
-if __name__ == "__main__":
+def main() -> None:
     from rl.libero_env import LiberoEnvWrapper
     from rl.utils import prepare_one_obs, check_unnorm_key
     from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
@@ -770,3 +879,7 @@ if __name__ == "__main__":
                 print(f"总体成功率: {total_successes/total_episodes_finished:.3f}")
                 print(f"最近 100 步的平均时间: {np.mean(times)*1000:.2f} ms")
                 print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

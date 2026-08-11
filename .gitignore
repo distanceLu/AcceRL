@@ -120,6 +120,7 @@ gpu_utils.json
 
 # Datasets and generated data
 /data/
+/data_collect/
 /datasets/
 /cache/
 /diamond_world_model/
