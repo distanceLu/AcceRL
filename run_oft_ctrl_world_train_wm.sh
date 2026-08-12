@@ -20,23 +20,23 @@ export RAY_DEDUP_LOGS=0
     --trainer-config-path envs/config/trainer.yaml \
     --svd-model-path /mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model \
     --clip-model-path /mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model \
-    --ctrl-world-ckpt /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-21T16-40-56_libero_vla_delta_finetune/best_val_loss.pt \
+    --ctrl-world-ckpt /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-08-07T10-39-47_libero_spatial_newdecoder_fromlastbest/best_val_loss.pt \
     --condition-stat-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json \
     --num-cams 2 \
     --num-history 6 \
     --num-step-cond 7 \
     --num-frames-pred 5 \
-    --num-inference-steps 50 \
+    --num-inference-steps 10 \
     --num-trainer-gpus 1 \
     --num-inference-actors 1 \
     --num-rollout-workers 10 \
-    --num-eval-workers 4 \
+    --num-eval-workers 10 \
     --num-reward-inference-actors 1 \
     --num-ctrl-inference-actors 1 \
     --train-iters 30000 \
-    --train-batch-size 8 \
-    --accumulation-steps 8 \
-    --inference-batch 4 \
+    --train-batch-size 16 \
+    --accumulation-steps 36 \
+    --inference-batch 8 \
     --inference-timeout-ms 300 \
     --gamma 0.99 \
     --lambda 0.95 \
@@ -50,24 +50,24 @@ export RAY_DEDUP_LOGS=0
     --value-warmup-steps 500 \
     --policy-warmup-steps 500 \
     --policy-train-start-step 0 \
-    --imagine-horizon 8 \
+    --imagine-horizon 32 \
     --reward-scale 1.0 \
     --wm-replay-capacity 50000 \
     --real-traj-collect-interval 1 \
-    --reward-batch-size 16 \
-    --reward-accumulation-steps 8 \
-    --reward-lr 1e-5 \
-    --reward-warmup-steps 100 \
-    --reward-train-interval 50 \
+    --reward-batch-size 32 \
+    --reward-accumulation-steps 32 \
+    --reward-lr 1e-4 \
+    --reward-warmup-steps 500 \
+    --reward-train-interval 5 \
     --reward-pos-ratio 0.5 \
     --reward-replay-capacity 5000 \
     --reward-min-unique-per-class 64 \
     --reward-eval-per-class 8 \
     --ctrl-batch-size 8 \
-    --ctrl-accumulation-steps 8 \
-    --ctrl-lr 1e-6 \
-    --ctrl-warmup-steps 100 \
-    --ctrl-train-interval 20 \
+    --ctrl-accumulation-steps 128 \
+    --ctrl-lr 1e-4 \
+    --ctrl-warmup-steps 500 \
+    --ctrl-train-interval 5 \
     --ctrl-ema-decay 0.99 \
     --ctrl-eval-interval 500 \
     --ctrl-eval-batch-size 64 \

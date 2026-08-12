@@ -39,6 +39,7 @@ def generate_data(
     image_size: int = 256,
     require_full_window: bool = True,
     pretrained_checkpoint: Optional[str] = None,
+    checkpoint2: Optional[str] = None,
     device: str = "cuda:0",
     use_bf16: bool = True,
     greedy: bool = False,
@@ -99,6 +100,7 @@ def generate_data(
         unnorm_key=unnorm_key,
         device=torch.device(device),
         task_suite_name=benchmark_name,
+        checkpoint2=checkpoint2,
     )
 
     # Policy
@@ -349,10 +351,13 @@ def generate_data(
                         "require_full_window": require_full_window,
                         "save_format": "full_episode",
                         "pretrained_checkpoint": str(cfg.pretrained_checkpoint),
+                        "checkpoint2": str(cfg.checkpoint2) if cfg.checkpoint2 else None,
                         "device": device,
                         "use_bf16": use_bf16,
                         "greedy": greedy,
                         "temperature": temperature,
+                        "num_images_in_input": int(cfg.num_images_in_input),
+                        "use_proprio": bool(cfg.use_proprio),
                         "unnorm_key": cfg.unnorm_key,
                         "num_open_loop_steps": int(cfg.num_open_loop_steps),
                         "torch_dtype": str(torch_dtype),
@@ -413,6 +418,7 @@ if __name__ == "__main__":
         image_size=args.image_size,
         require_full_window=args.require_full_window,
         pretrained_checkpoint=args.pretrained_checkpoint,
+        checkpoint2=args.checkpoint2,
         device=args.device,
         use_bf16=args.use_bf16,
         greedy=args.greedy,
