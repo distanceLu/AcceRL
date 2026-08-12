@@ -293,7 +293,7 @@ tensorboard --logdir runs/real_robot_imitation --port 6006
 
 当前指标都是训练 batch 上的指标，且 batch size 为 1 时波动很大。真正的“成功率”只能通过独立验证集或真机 rollout 定义，例如成功次数除以总测试次数；当前训练脚本没有实现这个成功率评估。
 
-## 9. 权重保存、恢复与原推理兼容性
+## 9. 权重保存、恢复、相对偏差评测与原推理兼容性
 
 Actor 的原始默认动作形状和图像配置仍从原 LIBERO 常量读取，因此没有显式启用三视角配置时，原来的推理路径保持不变。三视角训练只在本训练入口中设置 3 图、6 维、8 步和关闭 proprio。
 
@@ -313,6 +313,39 @@ actor.safe_load_model(
 构建 Actor 时必须使用与训练一致的基础权重和三视角配置。加载范围表后，`post_process` 会把离散预测还原成对应维度的物理量；没有范围表时，它只能保持原工程的归一化动作语义。
 
 目前没有完整的真机在线控制脚本。上线前还需要实现并验证：三路相机同步、与训练一致的预处理和视角顺序、相同 task label、action chunk 消费策略、增量动作在机器人坐标系中的执行、安全限幅、碰撞保护与急停。
+
+训练完成后，可以用保存的 checkpoint 对真实轨迹逐样本比较：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 \
+DEVICE=cuda:0 \
+DATA_ROOT=/mnt/data/lcx2/yanjieworkspace/data_collect \
+PRINT_EVERY=1 \
+PRINT_ACTIONS=1 \
+bash scripts/evaluate_real_robot_imitation_3cam.sh \
+  runs/real_robot_imitation/<run>/checkpoints/agent_checkpoint_epoch_<step>
+```
+
+脚本只把三张图片作为可变观测输入，CSV 位姿只在模型外部重建真实动作标签。运行时会实时打印累计相对偏差，并在 checkpoint 的 `evaluations/<timestamp>_relative_deviation/` 下保存：
+
+```text
+evaluation_config.json
+predictions.jsonl
+running_summary.json
+summary.json
+```
+
+其中每个有效维度的相对偏差定义为：
+
+```text
+relative_deviation = MAE / (checkpoint raw_max - checkpoint raw_min)
+```
+
+设置 `PRINT_ACTIONS=1` 后，每次达到 `PRINT_EVERY` 指定的 batch 间隔，终端还会打印该 batch 中每个样本未来 8 步的预测动作、真实动作和二者误差。平移按毫米显示，旋转按弧度显示。若希望每个样本都打印，应同时设置 `PRINT_EVERY=1`；数据量较大时可设为 10 或 50，减少终端输出。
+
+恒定维度的范围为零，脚本会将其标记为 inactive，并把相对偏差保存为 `null`，不会通过添加任意分母制造误导性百分比。`predictions.jsonl` 保留每个样本完整的 8×6 预测和真实动作，`summary.json` 保存每维 MAE、signed bias、RMSE、相对偏差及 token accuracy。
+
+默认会评测全部对齐数据；如果这些 session 也参与过训练，结果属于训练集拟合误差，不能当作未见数据上的泛化误差。可用 `--session-regex` 只选预留的完整 session，避免按相邻帧随机切分造成泄漏。
 
 ## 10. 常见修改需求及入口
 
