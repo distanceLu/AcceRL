@@ -1,0 +1,408 @@
+{
+  "protocol": "online_rl_fixed_holdout_equivalent",
+  "task_id": 0,
+  "checkpoint": "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-08-07T10-39-47_libero_spatial_newdecoder_fromlastbest/best_val_loss.pt",
+  "condition_stat_path": "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json",
+  "dataset": "tests_dsj/dataset_episode",
+  "num_inference_steps": 10,
+  "windows_per_episode": 8,
+  "selected_windows": [
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 9,
+      "end_exclusive": 20
+    },
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 18,
+      "end_exclusive": 29
+    },
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 27,
+      "end_exclusive": 38
+    },
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 36,
+      "end_exclusive": 47
+    },
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 45,
+      "end_exclusive": 56
+    },
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 54,
+      "end_exclusive": 65
+    },
+    {
+      "episode": "task0_ep0_000000.pt",
+      "start": 63,
+      "end_exclusive": 74
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 9,
+      "end_exclusive": 20
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 18,
+      "end_exclusive": 29
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 28,
+      "end_exclusive": 39
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 37,
+      "end_exclusive": 48
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 47,
+      "end_exclusive": 58
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 56,
+      "end_exclusive": 67
+    },
+    {
+      "episode": "task0_ep1_000010.pt",
+      "start": 66,
+      "end_exclusive": 77
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 9,
+      "end_exclusive": 20
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 19,
+      "end_exclusive": 30
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 29,
+      "end_exclusive": 40
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 39,
+      "end_exclusive": 50
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 49,
+      "end_exclusive": 60
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 59,
+      "end_exclusive": 70
+    },
+    {
+      "episode": "task0_ep2_000017.pt",
+      "start": 69,
+      "end_exclusive": 80
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 9,
+      "end_exclusive": 20
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 18,
+      "end_exclusive": 29
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 27,
+      "end_exclusive": 38
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 36,
+      "end_exclusive": 47
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 45,
+      "end_exclusive": 56
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 54,
+      "end_exclusive": 65
+    },
+    {
+      "episode": "task0_ep3_000024.pt",
+      "start": 63,
+      "end_exclusive": 74
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 8,
+      "end_exclusive": 19
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 17,
+      "end_exclusive": 28
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 25,
+      "end_exclusive": 36
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 34,
+      "end_exclusive": 45
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 42,
+      "end_exclusive": 53
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 51,
+      "end_exclusive": 62
+    },
+    {
+      "episode": "task0_ep4_000032.pt",
+      "start": 60,
+      "end_exclusive": 71
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 9,
+      "end_exclusive": 20
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 19,
+      "end_exclusive": 30
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 29,
+      "end_exclusive": 40
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 39,
+      "end_exclusive": 50
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 49,
+      "end_exclusive": 60
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 59,
+      "end_exclusive": 70
+    },
+    {
+      "episode": "task0_ep5_000039.pt",
+      "start": 69,
+      "end_exclusive": 80
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 9,
+      "end_exclusive": 20
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 19,
+      "end_exclusive": 30
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 28,
+      "end_exclusive": 39
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 38,
+      "end_exclusive": 49
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 47,
+      "end_exclusive": 58
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 57,
+      "end_exclusive": 68
+    },
+    {
+      "episode": "task0_ep6_000046.pt",
+      "start": 67,
+      "end_exclusive": 78
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 0,
+      "end_exclusive": 11
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 10,
+      "end_exclusive": 21
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 20,
+      "end_exclusive": 31
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 30,
+      "end_exclusive": 41
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 41,
+      "end_exclusive": 52
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 51,
+      "end_exclusive": 62
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 61,
+      "end_exclusive": 72
+    },
+    {
+      "episode": "task0_ep7_000052.pt",
+      "start": 72,
+      "end_exclusive": 83
+    }
+  ],
+  "metrics": {
+    "eval_horizon": 4,
+    "num_windows": 64,
+    "eval_seed": 12345,
+    "mse_by_horizon": {
+      "1": 0.0003378104997864284,
+      "2": 0.0004343334323948511,
+      "3": 0.0006359448209423135,
+      "4": 0.0009837237271312915
+    },
+    "mse_std_by_horizon": {
+      "1": 0.00017186612573605748,
+      "2": 0.0002670150268715831,
+      "3": 0.0005465870514607482,
+      "4": 0.0012583592704872595
+    },
+    "mse": 0.0005979531200637211,
+    "mse_std": 0.0007462855291185576,
+    "psnr_by_horizon": {
+      "1": 36.29570424556732,
+      "2": 35.48439872264862,
+      "3": 34.53512239456177,
+      "4": 33.299776166677475
+    },
+    "psnr_std_by_horizon": {
+      "1": 1.4378397980126592,
+      "2": 1.6341112127449269,
+      "3": 2.0750460181184915,
+      "4": 2.54706724333454
+    },
+    "psnr": 34.903750382363796,
+    "psnr_std": 2.2646400481138973,
+    "ssim_by_horizon": {
+      "1": 0.973166573792696,
+      "2": 0.9694360848516226,
+      "3": 0.961908346042037,
+      "4": 0.9513151738792658
+    },
+    "ssim_std_by_horizon": {
+      "1": 0.009293257701044907,
+      "2": 0.01176228828566211,
+      "3": 0.019885342160238288,
+      "4": 0.029111163190277654
+    },
+    "ssim": 0.9639565446414053,
+    "ssim_std": 0.02089528708623744,
+    "lpips_by_horizon": {
+      "1": 0.015674463313189335,
+      "2": 0.017255402635782957,
+      "3": 0.019683505131979473,
+      "4": 0.023698917240835726
+    },
+    "lpips_std_by_horizon": {
+      "1": 0.003344610763307649,
+      "2": 0.0036751284211811513,
+      "3": 0.005877162831413614,
+      "4": 0.011474388963531028
+    },
+    "lpips": 0.019078072080446873,
+    "lpips_std": 0.0075419008019331595,
+    "agent_view_mse": 0.00023054383575527027,
+    "agent_view_mse_std": 0.00019110121444822334,
+    "agent_view_psnr": 36.94350543618202,
+    "agent_view_psnr_std": 1.900398637751833,
+    "agent_view_ssim": 0.984014349989593,
+    "agent_view_ssim_std": 0.006268324066489418,
+    "agent_view_lpips": 0.009970618259103503,
+    "agent_view_lpips_std": 0.002712795485095532,
+    "wrist_view_mse": 0.0017369036058880738,
+    "wrist_view_mse_std": 0.002360984574065698,
+    "wrist_view_psnr": 29.656046837568283,
+    "wrist_view_psnr_std": 4.013897921432745,
+    "wrist_view_ssim": 0.9186159987002611,
+    "wrist_view_ssim_std": 0.054478692277096306,
+    "wrist_view_lpips": 0.037427216477226466,
+    "wrist_view_lpips_std": 0.021264662890931013
+  }
+}

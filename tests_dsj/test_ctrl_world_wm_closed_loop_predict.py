@@ -64,7 +64,7 @@ VLA_CHECKPOINT = (
 #VLA_CHECKPOINT2 = "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt"
 VLA_CHECKPOINT2 =""
 DEFAULT_WM_CHECKPOINT = (
-    "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_vla_delta_finetune/2026-07-21T16-40-56_libero_vla_delta_finetune/checkpoint-100000.pt"
+    "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-08-06T16-16-35_libero_spatial/best_val_loss.pt"
 )
 SVD_MODEL = "/mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model"
 CLIP_MODEL = "/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model"
