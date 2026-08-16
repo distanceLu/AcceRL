@@ -10,7 +10,7 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export RAY_DEDUP_LOGS=0
 
 /mnt/data/lcx3/envs/merged-env/bin/python tests_dsj/ds_wm_discrete_ctrl_train_wm.py \
-    --cuda-visible-devices 0,1,2,3 \
+    --cuda-visible-devices 4,5,6,7 \
     --use-bf16 \
     --benchmark libero_spatial \
     --num-images-in-input 2 \
@@ -34,8 +34,8 @@ export RAY_DEDUP_LOGS=0
     --num-reward-inference-actors 1 \
     --num-ctrl-inference-actors 1 \
     --train-iters 30000 \
-    --train-batch-size 16 \
-    --accumulation-steps 36 \
+    --train-batch-size 8 \
+    --accumulation-steps 72 \
     --inference-batch 8 \
     --inference-timeout-ms 300 \
     --gamma 0.99 \
@@ -59,21 +59,17 @@ export RAY_DEDUP_LOGS=0
     --reward-lr 1e-4 \
     --reward-warmup-steps 500 \
     --reward-train-interval 5 \
-    --reward-pos-ratio 0.5 \
-    --reward-replay-capacity 5000 \
-    --reward-min-unique-per-class 64 \
-    --reward-eval-per-class 8 \
-    --ctrl-batch-size 8 \
-    --ctrl-accumulation-steps 128 \
+    --ctrl-batch-size 4 \
+    --ctrl-accumulation-steps 256 \
     --ctrl-lr 1e-4 \
     --ctrl-warmup-steps 500 \
     --ctrl-train-interval 5 \
-    --ctrl-ema-decay 0.99 \
+    --ctrl-ema-decay 0 \
     --ctrl-eval-interval 500 \
     --ctrl-eval-batch-size 64 \
     --ctrl-eval-micro-batch-size 4 \
     --ctrl-eval-seed 12345 \
-    --ctrl-eval-episode-ratio 0.2 \
+    --ctrl-eval-episode-ratio 0.05 \
     --ctrl-eval-windows-per-episode 8 \
     --ctrl-eval-max-horizon 4 \
     --ctrl-eval-lpips-net alex \
@@ -82,5 +78,5 @@ export RAY_DEDUP_LOGS=0
     --ckpt-every-steps 5000 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
-    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_stable_eval_aligned_ema \
+    --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_same_param \
     --reward-checkpoint /mnt/data/lcx3/checkpoint/reward/reward.pt
