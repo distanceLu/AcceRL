@@ -1,0 +1,17 @@
+  dev                                             [m 68fd76b [[34morigin/dev[m] test
++ [36mfeature/brush-trace-detection                   [m 3b8b554 ([36m/tmp/accerl-brush-trace[m) feat: add portable brush trace recognition tools
+* [32mhandoff/real-robot-imitation-3cam               [m 017d923 docs: enhance REAL_ROBOT_IMITATION_HANDOFF with relative deviation evaluation details and update training script for data root path
+  yanjie-use                                      [m 68fd76b test
+  yanjie0807                                      [m c172cbc throughout useless
+  [31mremotes/origin/dev                              [m 68fd76b test
+  [31mremotes/origin/dsj-26-6-25                      [m 05580b2 将wm融合到accerl前
+  [31mremotes/origin/dsj-7-23                         [m 2a292d7 修改reward正确的训练方式以及调整ctrl world的训练参数与diamond尽量对齐
+  [31mremotes/origin/feature/brush-trace-detection    [m 3b8b554 feat: add portable brush trace recognition tools
+  [31mremotes/origin/handoff/real-robot-imitation-3cam[m ff87cd5 feat: add three-camera real-robot imitation training
+  [31mremotes/origin/lcx-26-6-9                       [m 552f98a Update quick_start.md document
+  [31mremotes/origin/lcx-26-8-5                       [m 6b86eb6 Enhance run_oft_diamond.sh script with environment setup and additional parameters. Introduced new parameters for validation fraction, evaluation intervals, and batch sizes.
+  [31mremotes/origin/master                           [m ec28b85 Update README.md
+  [31mremotes/origin/why_5_14_2026                    [m 31ec7f9 modify READEME
+  [31mremotes/origin/why_vllm                         [m c82e197 添加docs文档
+  [31mremotes/origin/zyq                              [m ec28b85 Update README.md
+  [31mremotes/origin/zyq-26-6-12                      [m 3ddbe3f Add datasets as regular files
