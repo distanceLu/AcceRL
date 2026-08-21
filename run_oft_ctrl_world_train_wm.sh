@@ -9,7 +9,7 @@ export TMPDIR=/dev/shm
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export RAY_DEDUP_LOGS=0
 
-/mnt/data/lcx3/envs/merged-env/bin/python tests_dsj/ds_wm_discrete_ctrl_train_wm.py \
+/mnt/data/lcx3/envs/merged-env/bin/python rl/ctrl_world/ds_wm_discrete_ctrl_train_wm.py \
     --cuda-visible-devices 4,5,6,7 \
     --use-bf16 \
     --benchmark libero_spatial \
@@ -21,6 +21,7 @@ export RAY_DEDUP_LOGS=0
     --svd-model-path /mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model \
     --clip-model-path /mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model \
     --ctrl-world-ckpt /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-08-07T10-39-47_libero_spatial_newdecoder_fromlastbest/best_val_loss.pt \
+    --vae-decoder-checkpoint /mnt/data/lcx3/Ctrl-World/model_ckpt/vae_decoder_libero/deterministic_full_stage2/best_decoder.pt \
     --condition-stat-path /mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json \
     --num-cams 2 \
     --num-history 6 \
@@ -75,7 +76,7 @@ export RAY_DEDUP_LOGS=0
     --ctrl-eval-lpips-net alex \
     --replay-capacity 10000 \
     --ckpt-dir /mnt/data/lcx3/AcceRL/runs/ctrl_train_wm_checkpoints \
-    --ckpt-every-steps 5000 \
+    --ckpt-every-steps 1000 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
     --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_same_param \

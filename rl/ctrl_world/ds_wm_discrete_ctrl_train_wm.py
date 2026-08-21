@@ -43,7 +43,7 @@ from rl.com_utils import find_free_port
 from envs.utils import tensor_to_image, image_to_tensor, load_reward_model
 
 # ---- Ctrl-World 相关导入（ctrl_world 已作为包安装在 merged-env 中）----
-from tests_dsj.ctrl_world_env_batch import CtrlWorldEnvBatch
+from ctrl_world_env_batch import CtrlWorldEnvBatch
 from ctrl_world.config import wm_args
 from ctrl_world.models.ctrl_world import CrtlWorld
 from rl.ray_debug_utils import setup_debugger
@@ -91,6 +91,16 @@ def batch_ssim(
 
 def _normalize_actions_bounds(actions: torch.Tensor, low: torch.Tensor, high: torch.Tensor) -> torch.Tensor:
     return (2.0 * (actions - low) / (high - low + 1e-8) - 1.0).clamp(-1.0, 1.0)
+
+
+def _load_vae_decoder_checkpoint(model: CrtlWorld, checkpoint_path: Optional[str]) -> None:
+    if checkpoint_path is None:
+        return
+    print(f"Loading VAE decoder checkpoint from {checkpoint_path}")
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or "decoder" not in payload:
+        raise ValueError(f"{checkpoint_path} is not a decoder checkpoint with key 'decoder'.")
+    model.vae.decoder.load_state_dict(payload["decoder"], strict=True)
 
 
 class AcceRLCtrlWorld(CrtlWorld):
@@ -301,6 +311,8 @@ def parse_args():
                         help='Path to CLIP model')
     parser.add_argument('--ctrl-world-ckpt', type=str, required=True,
                         help='Path to a Ctrl-World checkpoint trained on AcceRL delta actions')
+    parser.add_argument('--vae-decoder-checkpoint', type=str, default=None,
+                        help='Optional fine-tuned VAE decoder loaded after the Ctrl-World checkpoint')
     parser.add_argument('--condition-stat-path', type=str, default=None,
                         help='condition_stat.json; defaults to checkpoint sibling')
     parser.add_argument('--num-cams', type=int, default=2,
@@ -1353,6 +1365,7 @@ class CtrlWorldInferenceActor(InferenceActorCom):
         state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
         state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
         ctrl_world.load_state_dict(state_dict, strict=True)
+        _load_vae_decoder_checkpoint(ctrl_world, args.vae_decoder_checkpoint)
         print(f"CtrlWorldInferenceActor {actor_id}: checkpoint 加载完成。")
 
         stat_path = args.condition_stat_path
@@ -1913,6 +1926,9 @@ class TrainerActor(TrainerActorCom):
         state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
         state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
         self.ctrl_world_model.load_state_dict(state_dict, strict=True)
+        _load_vae_decoder_checkpoint(
+            self.ctrl_world_model, cw_args.get("vae_decoder_checkpoint")
+        )
 
         stat_path = cw_args.get("condition_stat_path")
         if not stat_path:
@@ -2575,6 +2591,10 @@ def main(args):
         return
     if not os.path.isfile(args.ctrl_world_ckpt):
         raise FileNotFoundError(f"Ctrl-World checkpoint not found: {args.ctrl_world_ckpt}")
+    if args.vae_decoder_checkpoint and not os.path.isfile(args.vae_decoder_checkpoint):
+        raise FileNotFoundError(
+            f"VAE decoder checkpoint not found: {args.vae_decoder_checkpoint}"
+        )
     if args.condition_stat_path is None:
         args.condition_stat_path = str(
             Path(args.ctrl_world_ckpt).resolve().parent / "condition_stat.json"
@@ -2611,7 +2631,8 @@ def main(args):
     ray.init(
         ignore_reinit_error=True,
         _temp_dir='/dev/shm',
-        object_store_memory=object_store_memory_bytes,
+        object_store_memory=64 * 1024**3,
+        object_spilling_directory="/mnt/data/lcx3/ray_spill",
     )
     print(f"Ray 初始化完成，对象存储分配 {object_store_size_gb} GB 内存。")
     log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
@@ -2639,6 +2660,7 @@ def main(args):
         "svd_model_path": args.svd_model_path,
         "clip_model_path": args.clip_model_path,
         "ctrl_world_ckpt": args.ctrl_world_ckpt,
+        "vae_decoder_checkpoint": args.vae_decoder_checkpoint,
         "condition_stat_path": args.condition_stat_path,
         "num_cams": args.num_cams,
         "num_history": args.num_history,
