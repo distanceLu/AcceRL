@@ -6,10 +6,10 @@ uses real image/action history.  Afterwards each predicted WM image is sent to
 VLA, and the resulting raw VLA actions condition the next WM prediction.
 
 Default usage:
-    CUDA_VISIBLE_DEVICES=0 python tests_dsj/test_ctrl_world_wm_closed_loop_predict.py
+    CUDA_VISIBLE_DEVICES=0 python rl/ctrl_world/test_ctrl_world_wm_closed_loop_predict.py
 
 Action-matched comparison:
-    CUDA_VISIBLE_DEVICES=0 python tests_dsj/test_ctrl_world_wm_closed_loop_predict.py --action-matched
+    CUDA_VISIBLE_DEVICES=0 python rl/ctrl_world/test_ctrl_world_wm_closed_loop_predict.py --action-matched
 """
 from __future__ import annotations
 
