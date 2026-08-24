@@ -9,7 +9,7 @@ ManiSkill demos
   -> 可选预处理成 .pt shards
   -> OpenVLA SFT
   -> ManiSkill PPO/RL
-  -> rollout/eval/debug
+  -> rollout/eval
 ```
 
 ## 目录角色
@@ -25,25 +25,22 @@ ManiSkill demos
 
 - `maniskill_utils.py`: ManiSkill 环境构建、观测抽取、动作裁剪、success/done 提取等公共函数。
 - `maniskill_env.py`: 单环境封装，提供类似 LIBERO wrapper 的 `reset/step/close` 接口，供 PPO worker 使用。
-- `new_actor_critic.py`: OpenVLA actor-critic 封装，负责动作预测、value head、LoRA/ckpt 加载等。
+- `../actor_critic_model_discrete.py`: PPO 和评估共用的 OpenVLA actor-critic，实现动作预测、value head、LoRA/ckpt 加载等。
 - `preprocessed_dataset.py`: 读取 `.pt` shard 的 PyTorch MapDataset，用于加速 SFT 数据加载。
 
 数据准备和检查：
 
 - `replay_224_two_cam.py`: 早期 PickCube 双相机 replay 脚本。
 - `replay_224_two_cam_7tasks.py`: 多任务 replay 脚本，默认处理额外 7 个 ManiSkill 任务。
-- `maniskill_*_dataset_builder.py`: TFDS/RLDS dataset builder，将 replay 后的 H5 转为 OpenVLA 可读的数据集。
+- `maniskill_pickcube_dataset_builder.py`: 将 PickCube replay H5 转为 OpenVLA 可读的 TFDS/RLDS 数据集。
+- `maniskill_peginsertionside_dataset_builder.py`: 将 PegInsertionSide replay H5 转为 OpenVLA 可读的 TFDS/RLDS 数据集，并过滤失败轨迹。
 - `preprocess_rlds_to_pt.py`: 把 RLDS 样本提前解码、resize、tokenize，并保存为 `.pt` shards。
 - `check_replay_dataset.py`: 检查 replay 后 H5 的相机、action、success 等字段。
 - `check_rlds_dataset.py`: 检查 TFDS/RLDS 数据集结构和样本质量。
 
-评估和调试：
+评估：
 
-- `smoke_maniskill_eval.py`: 最小环境冒烟测试，验证双相机观测和随机动作 step。
 - `maniskill_actor_critic_eval.py`: 使用训练好的 actor-critic 在 ManiSkill 中 rollout 评估。
-- `maniskill_actor_critic_debug.py`: PegInsertionSide 专用 debug 脚本，对比不同 action chunk 执行方式。
-- `debug_rollout_render_gpu.py`: 调试 rollout/render GPU 绑定。
-- `rollout_test.py`: 随机 rollout worker 测试。
 
 ## 环境准备
 
@@ -114,7 +111,7 @@ python rl/maniskill/check_replay_dataset.py \
 
 ## 2. Build RLDS/TFDS Dataset
 
-`maniskill_pickcube_dataset_builder.py`、`maniskill_stackcube_dataset_builder.py`、`maniskill_peginsertionside_dataset_builder.py` 会把 replay 后的 H5 转成 OpenVLA RLDS pipeline 能读取的 TFDS 数据集。
+`maniskill_pickcube_dataset_builder.py` 和 `maniskill_peginsertionside_dataset_builder.py` 会把对应任务 replay 后的 H5 转成 OpenVLA RLDS pipeline 能读取的 TFDS 数据集。两者的数据结构基本一致，但使用不同的数据集名称、语言指令和源轨迹路径；PegInsertionSide builder 还会过滤失败轨迹。
 
 它们输出的核心字段包括：
 
@@ -204,6 +201,8 @@ RL 入口是 `ds_maniskill_ppo_discrete.py`，示例脚本是：
 bash rl/maniskill/maniskill_rl.sh
 ```
 
+`maniskill_rl.sh` 会根据脚本自身位置解析当前仓库根目录，不依赖另一份工作树。Ray 使用 Unix socket，完整 socket 路径不能超过 107 字节；如果仓库内的运行目录过长，应给 `--ray-temp-dir` 使用短路径，例如 `/tmp/ray-lcx4`。
+
 核心配置包括：
 
 - `--maniskill-tasks`: 训练任务列表，例如 `PickCube-v1,StackCube-v1`
@@ -219,18 +218,46 @@ bash rl/maniskill/maniskill_rl.sh
 
 ```bash
 python rl/maniskill/ds_maniskill_ppo_discrete.py \
-  --cuda-visible-devices "0,1,2,3" \
+  --cuda-visible-devices "0,1,2" \
   --maniskill-tasks PickCube-v1,StackCube-v1 \
   --camera-name base_camera \
   --wrist-camera-name hand_camera \
   --robot-uids panda_wristcam \
   --camera-res 224 \
   --num-images-in-input 2 \
-  --num-trainer-gpus 3 \
+  --num-trainer-gpus 2 \
   --num-inference-actors 1 \
   --num-rollout-workers 30 \
   --num-eval-workers 2 \
+  --ray-temp-dir /tmp/ray-lcx4 \
+  --log-root /mnt/data/lcx4/openvla_oft_rl/runs/ManiSkill \
   --pretrained-checkpoint /mnt/data/lcx4/openvla_oft_rl/rl/maniskill/sft_model \
   --ckpt-dir /mnt/data/lcx4/openvla_oft_rl/runs/rl_maniskill \
+  --debug-log-dir /tmp/openvla-maniskill-debug \
+  --clip-mode gipo \
   --exp-name ManiSkill_PickCube_StackCube
 ```
+
+## 6. Actor-Critic Evaluation
+
+当前评估入口是 `maniskill_actor_critic_eval.py`。它加载本机的 `rl/maniskill/sft_model`，在 `PegInsertionSide-v1` 中执行在线仿真 rollout；不会更新模型参数。
+
+```bash
+MANISKILL_EXEC_ACTIONS_PER_INFERENCE=1 \
+python rl/maniskill/maniskill_actor_critic_eval.py
+```
+
+当前脚本固定使用：
+
+- GPU 7；
+- `PegInsertionSide-v1`；
+- `base_camera` + `hand_camera` 两路 224x224 图像；
+- `/mnt/data/lcx4/openvla_oft_rl/rl/maniskill/sft_model` checkpoint。
+
+评估视频写入：
+
+```text
+/mnt/data/lcx4/openvla_oft_rl/rl/maniskill/sft_model/eval_videos/
+```
+
+这属于与 ManiSkill 环境实时交互的 rollout evaluation，不是基于固定数据集计算 validation loss 的离线验证。

@@ -3,12 +3,13 @@ set -eo pipefail
 
 # ManiSkill 训练使用的 Conda 环境；换环境时修改此路径。
 MANISKILL_ENV=/mnt/data/lcx4/miniforge3/envs/why_maniskill
-# AcceRL 项目根目录；移动或复制项目后修改此路径。
-PROJECT_ROOT=/mnt/data/lcx/AcceRL
+# 根据脚本位置解析当前仓库根目录，避免运行到其他工作树或无权限目录。
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # 运行时缓存目录（如 Matplotlib 和 Torch 扩展缓存），一般无需单独修改。
 RUNTIME_ROOT="$PROJECT_ROOT/.runtime/why_maniskill"
 DEBUG_LOG_DIR="$RUNTIME_ROOT/debug"
-RAY_TEMP_DIR="$RUNTIME_ROOT/ray"
+RAY_TEMP_DIR="/tmp/ray-lcx4"
 
 source /mnt/data/lcx4/miniforge3/etc/profile.d/conda.sh
 conda activate why_maniskill
@@ -45,7 +46,7 @@ nvcc --version
 
 
 python rl/maniskill/ds_maniskill_ppo_discrete.py \
-  --cuda-visible-devices "0,1,2" \
+  --cuda-visible-devices "2,3,7" \
   --maniskill-tasks PickCube-v1,StackCube-v1 \
   --camera-name base_camera \
   --wrist-camera-name hand_camera \
