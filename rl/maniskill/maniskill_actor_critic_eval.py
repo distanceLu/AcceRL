@@ -47,7 +47,7 @@ for _p in (_REPO_ROOT, _RL_DIR, _MANISKILL_DIR):
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 
 # Import ActorCritic — no need to redefine
-from new_actor_critic import ActorCritic
+from rl.actor_critic_model_discrete import ActorCritic
 #from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs, check_unnorm_key
 
@@ -134,10 +134,7 @@ def main():
     RECORD_VIDEO_NUM_EPISODES = 5
     EXEC_ACTIONS_PER_INFERENCE = int(os.environ.get("MANISKILL_EXEC_ACTIONS_PER_INFERENCE", "1"))
 
-    maniskill_checkpoint = (
-        "/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/"
-        "20260523_152554_openvla-7b+maniskill_three_tasks+b128+lr-0.0005+lora-r32+dropout-0.0--image_aug--three_tasks_2cam_preprocessed"
-    )
+    maniskill_checkpoint = "/mnt/data/lcx4/openvla_oft_rl/rl/maniskill/sft_model"
 
     cfg = SimpleNamespace(
         pretrained_checkpoint=maniskill_checkpoint,
