@@ -193,6 +193,27 @@ python rl/maniskill/finetune_maniskill.py \
 
 SFT 输出一般作为后续 PPO/RL 的 `--pretrained-checkpoint`。
 
+### 当前 SFT 与 ManiSkill Eval 流程
+
+当前推荐将训练和 ManiSkill rollout 评估分开执行：
+
+```text
+运行 maniskill_sft.sh
+  -> 只进行 SFT 训练
+  -> 训练阶段不创建 ManiSkill 环境
+  -> 训练完成并保存 checkpoint
+  -> 单独运行 maniskill_actor_critic_eval.py
+  -> 在 ManiSkill 中执行 rollout 并统计成功率
+```
+
+因此 `maniskill_sft.sh` 保持：
+
+```bash
+--use_maniskill_env_eval False
+```
+
+`finetune_maniskill.py` 虽然预留了 `--use_maniskill_env_eval True`，但当前训练中 ManiSkill eval 功能不可用：它会导入仓库中不存在的 `experiments.robot.maniskill.maniskill_utils`。不要直接开启该选项。即使后续修复，这个 eval 也是训练循环内的阻塞式评估，即训练暂停、完成所有 rollout 后再恢复训练，并非异步并行评估。
+
 ## 5. PPO/RL Training
 
 RL 入口是 `ds_maniskill_ppo_discrete.py`，示例脚本是：
@@ -240,7 +261,7 @@ python rl/maniskill/ds_maniskill_ppo_discrete.py \
 
 ## 6. Actor-Critic Evaluation
 
-当前评估入口是 `maniskill_actor_critic_eval.py`。它加载本机的 `rl/maniskill/sft_model`，在 `PegInsertionSide-v1` 中执行在线仿真 rollout；不会更新模型参数。
+SFT 训练完成后，使用 `maniskill_actor_critic_eval.py` 单独评估。它加载本机的 `rl/maniskill/sft_model`，在 `PegInsertionSide-v1` 中执行在线仿真 rollout；不会更新模型参数。
 
 ```bash
 MANISKILL_EXEC_ACTIONS_PER_INFERENCE=1 \
