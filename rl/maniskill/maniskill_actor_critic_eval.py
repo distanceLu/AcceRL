@@ -2,10 +2,7 @@
 ManiSkill evaluation script using ActorCritic (imported).
 Replaces the Libero simulation in new_actor_critic.py with ManiSkill envs.
 
-runs:
-    MANISKILL_EXEC_ACTIONS_PER_INFERENCE=1 \
-/cpfs01/lcx_stu4_workspace/envs/why_maniskill/bin/python \
-rl/maniskill/maniskill_actor_critic_eval.py
+runs: python /mnt/data/lcx4/openvla_oft_rl/rl/maniskill/maniskill_actor_critic_eval.py
 """
 
 import time
@@ -18,12 +15,12 @@ from pathlib import Path
 # os.environ["VULKAN_VISIBLE_DEVICES"] = "6" 
 # os.environ["SAPIEN_VULKAN_DEVICE"] = "6"
 
-GPU_ID = "7"
+GPU_ID = "6"
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU_ID
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # Prevent TensorFlow from grabbing other GPUs on import
 os.environ["TF_CUDA_VISIBLE_DEVICES"] = GPU_ID
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "7"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "6"
 
 # Vulkan / SAPIEN device pinning
 os.environ["VULKAN_VISIBLE_DEVICES"] = GPU_ID
@@ -105,24 +102,24 @@ def main():
     # ── ManiSkill env config ──
     NUM_ENVS = 1
     TASKS = [
-        # {
-        #     "task_id": "PickCube-v1",
-        #     "unnorm_key": "maniskill_pickcube",
-        #     "language_instruction": "pick up the red cube and place it at the green target",
-        #     "max_steps": 200,
-        # },
+        {
+            "task_id": "PickCube-v1",
+            "unnorm_key": "maniskill_pickcube",
+            "language_instruction": "pick up the red cube and place it at the green target",
+            "max_steps": 200,
+        },
         # {
         #     "task_id": "StackCube-v1",
         #     "unnorm_key": "maniskill_stackcube",
         #     "language_instruction": "pick up the red cube and stack it on top of the green cube",
         #     "max_steps": 500,
         # },
-        {
-            "task_id": "PegInsertionSide-v1",
-            "unnorm_key": "maniskill_peginsertionside",
-            "language_instruction": "pick up the orange-white peg and insert the orange end into the box with a hole in it",
-            "max_steps": 500,
-        },
+        # {
+        #     "task_id": "PegInsertionSide-v1",
+        #     "unnorm_key": "maniskill_peginsertionside",
+        #     "language_instruction": "pick up the orange-white peg and insert the orange end into the box with a hole in it",
+        #     "max_steps": 500,
+        # },
     ]
     CAMERA_NAME = "base_camera"
     WRIST_CAMERA_NAME = "hand_camera"
@@ -130,11 +127,20 @@ def main():
     CAMERA_RES = 224
     NUM_EVAL_EPISODES = 50
     RECORD_EVAL_VIDEO = True
-    RECORD_VIDEO_TASK_IDS = {"PegInsertionSide-v1"}
+    RECORD_VIDEO_TASK_IDS = {"PickCube-v1"}
     RECORD_VIDEO_NUM_EPISODES = 5
-    EXEC_ACTIONS_PER_INFERENCE = int(os.environ.get("MANISKILL_EXEC_ACTIONS_PER_INFERENCE", "1"))
+    # The PickCube demonstrations used to fine-tune this checkpoint contain the
+    # green goal marker in the policy camera images. Current ManiSkill hides the
+    # marker from sensor observations by default, so expose it to match training.
+    SHOW_PICKCUBE_GOAL_IN_POLICY_OBS = True
+    # Match the action-chunk execution protocol used during fine-tuning eval.
+    # This can still be overridden at runtime for closed-loop ablations, e.g.
+    # MANISKILL_EXEC_ACTIONS_PER_INFERENCE=1.
+    EXEC_ACTIONS_PER_INFERENCE = int(
+        os.environ.get("MANISKILL_EXEC_ACTIONS_PER_INFERENCE", str(NUM_ACTIONS_CHUNK))
+    )
 
-    maniskill_checkpoint = "/mnt/data/lcx4/openvla_oft_rl/rl/maniskill/sft_model"
+    maniskill_checkpoint = "/mnt/data/lcx4/openvla_oft_rl/rl/maniskill/imitation_model"
 
     cfg = SimpleNamespace(
         pretrained_checkpoint=maniskill_checkpoint,
@@ -145,7 +151,9 @@ def main():
         use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,
-        center_crop=False,
+        # Training used image augmentation; center crop matches the historical
+        # ManiSkill evaluation preprocessing for this checkpoint.
+        center_crop=True,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=TASKS[0]["unnorm_key"],
         device=torch.device("cuda"),
@@ -189,6 +197,24 @@ def main():
             },
             max_episode_steps=max_steps,
         )
+
+        if SHOW_PICKCUBE_GOAL_IN_POLICY_OBS and task_id == "PickCube-v1":
+            base_env = env.unwrapped
+            goal_site = getattr(base_env, "goal_site", None)
+            hidden_objects = getattr(base_env, "_hidden_objects", None)
+            if goal_site is None or hidden_objects is None:
+                raise RuntimeError(
+                    "Cannot expose PickCube goal marker: ManiSkill environment "
+                    "does not provide goal_site/_hidden_objects."
+                )
+            base_env._hidden_objects = [
+                obj for obj in hidden_objects if obj is not goal_site
+            ]
+            # The environment has already hidden registered objects during
+            # construction. Removing the marker from the list only prevents
+            # future hide calls; explicitly restore its current visibility too.
+            goal_site.show_visual()
+            print("PickCube green goal marker enabled in policy camera observations.")
 
         video_task_dir = task_id
         if EXEC_ACTIONS_PER_INFERENCE != NUM_ACTIONS_CHUNK:
