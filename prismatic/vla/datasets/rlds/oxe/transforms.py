@@ -884,6 +884,7 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "maniskill_pickcube": maniskill_dataset_transform,
     "maniskill_stackcube": maniskill_dataset_transform,
     "maniskill_peginsertionside": maniskill_dataset_transform,
+    "maniskill_drawtriangle": maniskill_dataset_transform,
     "maniskill_dataset_converted_externally_to_rlds": maniskill_converted_dataset_transform,
     "furniture_bench_dataset_converted_externally_to_rlds": furniture_bench_dataset_transform,
     "cmu_franka_exploration_dataset_converted_externally_to_rlds": cmu_franka_exploration_dataset_transform,

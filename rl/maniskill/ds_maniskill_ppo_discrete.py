@@ -70,6 +70,10 @@ MANISKILL_TASK_PRESETS = {
         "language_instruction": "pick up the orange-white peg and insert the orange end into the box with a hole in it",
         "unnorm_key": "maniskill_peginsertionside",
     },
+    "DrawTriangle-v1": {
+        "language_instruction": "draw the outlined triangle on the canvas",
+        "unnorm_key": "maniskill_drawtriangle",
+    },
 }
 
 
@@ -326,6 +330,10 @@ def parse_args():
                         help='Use proprioceptive state (default: False)')
     parser.add_argument('--num-images-in-input', type=int, default=2,
                         help='Number of images in input (default: 2, base_camera + hand_camera)')
+    parser.add_argument('--center-crop', action='store_true', default=True,
+                        help='Apply center crop during policy image preprocessing (default: True)')
+    parser.add_argument('--no-center-crop', action='store_false', dest='center_crop',
+                        help='Disable center crop during policy image preprocessing')
     parser.add_argument('--pretrained-checkpoint', type=str,
                         default='/cpfs01/lcx_stu4_workspace/openvla_oft_rl/runs/imitation/20260429_182819_openvla-7b+maniskill_pickcube+b64+lr-0.0005+lora-r32+dropout-0.0--image_aug',
                         help='Pretrained checkpoint path')
@@ -1907,7 +1915,7 @@ def build_openvla_cfg(args) -> GenerateConfig:
         use_proprio=args.use_proprio,
         load_in_8bit=False,
         load_in_4bit=False,
-        center_crop=True,
+        center_crop=args.center_crop,
         num_open_loop_steps=NUM_ACTIONS_CHUNK,
         unnorm_key=args.unnorm_key,
         checkpoint2=args.checkpoint2,
@@ -2012,7 +2020,7 @@ def main(args):
             "unnorm_key": task_cfg["unnorm_key"],
             "sim_backend": args.sim_backend,
             "wrist_camera_name": args.wrist_camera_name if args.num_images_in_input > 1 else None,
-            "robot_uids": args.robot_uids if args.num_images_in_input > 1 else None,
+            "robot_uids": args.robot_uids,
         })
     print(f"\nManiSkill tasks: {task_ids}, rollout workers: {args.num_rollout_workers}, eval workers: {args.num_eval_workers}")
     for task_cfg in task_configs:

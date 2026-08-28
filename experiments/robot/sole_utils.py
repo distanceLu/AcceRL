@@ -14,7 +14,7 @@ import tensorflow as tf
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
-from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoTokenizer
 
 # Apply JSON numpy patch for serialization
 json_numpy.patch()
@@ -34,7 +34,7 @@ from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 ## 单独创建该文件，将这两个utils方法复制出来，进行改造
 from experiments.robot.openvla_utils import model_is_on_hf_hub, find_checkpoint_file, load_component_state_dict
 
-def get_processor(cfg: Any) -> AutoProcessor:
+def get_processor(cfg: Any) -> PrismaticProcessor:
     """
     Get the VLA model's Hugging Face processor.
 
@@ -42,9 +42,16 @@ def get_processor(cfg: Any) -> AutoProcessor:
         cfg: Configuration object with model parameters
 
     Returns:
-        AutoProcessor: The model's processor
+        The repository-native Prismatic processor.
     """
-    return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
+    # Fine-tuning checkpoints contain the tokenizer and image-processor config,
+    # but may not contain ``processing_prismatic.py``. Going through
+    # AutoProcessor with trust_remote_code=True therefore tries to resolve a
+    # missing dynamic-module file. Instantiate the already imported local
+    # classes explicitly instead.
+    image_processor = PrismaticImageProcessor.from_pretrained(cfg.pretrained_checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.pretrained_checkpoint)
+    return PrismaticProcessor(image_processor=image_processor, tokenizer=tokenizer)
 
 def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int, device, dtype = torch.bfloat16) -> ProprioProjector:
     """

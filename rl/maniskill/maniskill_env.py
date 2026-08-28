@@ -18,9 +18,9 @@ import numpy as np
 from typing import Any, Dict, Optional
 
 from rl.maniskill.maniskill_utils import (
+    adapt_maniskill_action,
     build_maniskill_env,
     extract_maniskill_observation,
-    clip_maniskill_action,
     extract_success_mask,
     convert_torch_to_numpy,
     LANGUAGE_INSTRUCTION, 
@@ -62,13 +62,21 @@ class ManiSkillSingleEnv:
             render_backend=render_backend,
             robot_uids=robot_uids,
         )
+        self.action_dim = int(self.env.action_space.shape[-1])
+        if self.action_dim not in (6, 7):
+            self.env.close()
+            raise ValueError(
+                f"{task_id} exposes an unsupported {self.action_dim}-D action space; "
+                "only 6-D and 7-D actions are supported"
+            )
 
         # 初始势能
         self._prev_potential = 0.0
         wrist_info = f" + wrist={wrist_camera_name}" if wrist_camera_name else ""
         print(
             f"ManiSkillSingleEnv created: task={task_id}, "
-            f"camera={camera_name}{wrist_info}@{camera_res}, backend={sim_backend}"
+            f"camera={camera_name}{wrist_info}@{camera_res}, backend={sim_backend}, "
+            f"action_dim={self.action_dim}"
         )
 
     def reset(self, seed=None):
@@ -85,8 +93,9 @@ class ManiSkillSingleEnv:
         return obs_dict, info
 
     def step(self, action: np.ndarray):
-        action = clip_maniskill_action(
-            np.asarray(action, dtype=np.float32).reshape(1, -1)
+        action = adapt_maniskill_action(
+            np.asarray(action, dtype=np.float32).reshape(1, -1),
+            self.action_dim,
         )
         obs_raw, reward, terminated, truncated, info = self.env.step(action)
 
