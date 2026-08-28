@@ -5,8 +5,8 @@ Fine-tunes OpenVLA via LoRA (No DDP version for easier debugging).
 """
 
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1,2" 
-os.environ["VULKAN_VISIBLE_DEVICES"] = "1" 
+# GPU visibility is configured by the launcher shell. Within this process the
+# selected physical GPU is always addressed as logical cuda:0.
 
 # 必须在任何 TFDS/RLDS 相关东西之前
 # 让tf不使用gpu
@@ -1458,7 +1458,7 @@ def run_maniskill_real_eval(
 
     from experiments.robot.maniskill.maniskill_utils import (
         build_maniskill_env,
-        clip_maniskill_action,
+        adapt_maniskill_action,
         extract_done_mask,
         extract_maniskill_observation,
         extract_success_mask,
@@ -1513,12 +1513,9 @@ def run_maniskill_real_eval(
             camera_res=cfg.maniskill_eval_camera_res,
             max_episode_steps=cfg.maniskill_eval_max_steps,
             sim_backend=cfg.maniskill_eval_sim_backend,
-            robot_uids=(
-                cfg.maniskill_eval_robot_uids
-                if eval_cfg.num_images_in_input > 1
-                else None
-            ),
+            robot_uids=cfg.maniskill_eval_robot_uids,
         )
+        env_action_dim = int(env.action_space.shape[-1])
         if cfg.maniskill_eval_num_open_loop_steps != NUM_ACTIONS_CHUNK:
             print(
                 f"Warning: maniskill_eval_num_open_loop_steps ({cfg.maniskill_eval_num_open_loop_steps}) "
@@ -1574,7 +1571,7 @@ def run_maniskill_real_eval(
                         [np.asarray(action_queues[i].popleft(), dtype=np.float32) for i in range(num_envs)],
                         axis=0,
                     )
-                    step_action = clip_maniskill_action(step_action)
+                    step_action = adapt_maniskill_action(step_action, env_action_dim)
 
                     obs, _reward, terminated, truncated, info = env.step(step_action)
 
@@ -2029,8 +2026,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Device setup
     if torch.cuda.is_available():
-        device = torch.device("cuda:1")
-        torch.cuda.set_device(1)
+        device = torch.device("cuda:0")
+        torch.cuda.set_device(device)
         torch.cuda.empty_cache()
     else:
         device = torch.device("cpu")

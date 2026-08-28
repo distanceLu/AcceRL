@@ -305,16 +305,39 @@ def extract_done_mask(
 
 
 def clip_maniskill_action(action: np.ndarray) -> np.ndarray:
-    """Clip the gripper dim of an action (or batch of actions) into ManiSkill's
-    valid range. Other dims are left untouched - upstream ``_unnormalize_actions``
-    in the OpenVLA model already maps them to a reasonable continuous range.
-    """
+    """Clip the seventh (gripper) action dimension to ManiSkill's valid range."""
     a = np.asarray(action, dtype=np.float32).copy()
+    if a.ndim == 0 or a.shape[-1] < 7:
+        raise ValueError(
+            f"Gripper clipping requires at least 7 action dimensions, got shape {a.shape}"
+        )
     lo, hi = MANISKILL_GRIPPER_RANGE
     if a.ndim == 1:
         a[6] = float(np.clip(a[6], lo, hi))
     else:
         a[..., 6] = np.clip(a[..., 6], lo, hi)
+    return a
+
+
+def adapt_maniskill_action(action: np.ndarray, env_action_dim: int) -> np.ndarray:
+    """Adapt OpenVLA's fixed 7-D action to a 6-D or 7-D ManiSkill robot.
+
+    PandaStick has no gripper command and consumes only the first six delta-pose
+    dimensions. Standard Panda manipulation robots consume all seven dimensions,
+    with the last dimension controlling the gripper.
+    """
+    if env_action_dim not in (6, 7):
+        raise ValueError(f"Only 6-D and 7-D ManiSkill actions are supported, got {env_action_dim}")
+
+    a = np.asarray(action, dtype=np.float32)
+    if a.ndim == 0 or a.shape[-1] < env_action_dim:
+        raise ValueError(
+            f"Model action shape {a.shape} cannot satisfy a {env_action_dim}-D environment"
+        )
+
+    a = a[..., :env_action_dim].copy()
+    if env_action_dim == 7:
+        a = clip_maniskill_action(a)
     return a
 
 

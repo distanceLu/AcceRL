@@ -32,8 +32,11 @@ ManiSkill demos
 
 - `replay_224_two_cam.py`: 早期 PickCube 双相机 replay 脚本。
 - `replay_224_two_cam_7tasks.py`: 多任务 replay 脚本，默认处理额外 7 个 ManiSkill 任务。
+- `replay_drawtriangle_224.py`: 将 DrawTriangle 的 `pd_joint_pos` 原始演示 replay 成单相机 `pd_ee_delta_pose`。
 - `maniskill_pickcube_dataset_builder.py`: 将 PickCube replay H5 转为 OpenVLA 可读的 TFDS/RLDS 数据集。
 - `maniskill_peginsertionside_dataset_builder.py`: 将 PegInsertionSide replay H5 转为 OpenVLA 可读的 TFDS/RLDS 数据集，并过滤失败轨迹。
+- `maniskill_drawtriangle_dataset_builder.py`: 将 DrawTriangle 的 6D delta pose 补零为 OpenVLA 使用的 7D action。
+- `prepare_drawtriangle_sft_data.sh`: 一次执行 DrawTriangle replay、TFDS 构建和 PT 预处理。
 - `preprocess_rlds_to_pt.py`: 把 RLDS 样本提前解码、resize、tokenize，并保存为 `.pt` shards。
 - `check_replay_dataset.py`: 检查 replay 后 H5 的相机、action、success 等字段。
 - `check_rlds_dataset.py`: 检查 TFDS/RLDS 数据集结构和样本质量。
@@ -107,6 +110,35 @@ python rl/maniskill/check_replay_dataset.py \
   --expect-w 224 \
   --expect-action-dim 7 \
   --dump-keys
+```
+
+### DrawTriangle 单视角 SFT 数据
+
+DrawTriangle 原始 motion-planning actions 是 `pd_joint_pos`，不能直接用于采用
+`pd_ee_delta_pose` 的 RL。专用准备脚本会完成控制模式转换、224px 单相机 replay、
+RLDS 构建和 PT 预处理：
+
+```bash
+bash rl/maniskill/prepare_drawtriangle_sft_data.sh
+```
+
+这里通过 Python 模块直接构建 TFDS，避免部分 TFDS/etils 版本使用
+`tfds build <本地 builder 文件>` 时触发的 `MultiplexedPath` 路径错误。
+
+默认输入和输出位于：
+
+```text
+/mnt/data/lcx/data/maniskill/DrawTriangle-v1/motionplanning/trajectory.h5
+/mnt/data/lcx/data/maniskill/DrawTriangle-v1/motionplanning/trajectory.rgbd.pd_ee_delta_pose.physx_cpu.h5
+/mnt/data/lcx/data/maniskill/DrawTriangle-v1/rlds
+/mnt/data/lcx/data/maniskill/DrawTriangle-v1/preprocessed_pt
+```
+
+PandaStick 环境动作是 6D；builder 会在末尾补零为 7D，以保持现有 OpenVLA
+action head/checkpoint 格式不变。数据准备完成后运行：
+
+```bash
+bash rl/maniskill/maniskill_sft.sh
 ```
 
 ## 2. Build RLDS/TFDS Dataset
