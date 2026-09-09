@@ -66,7 +66,7 @@ export RAY_DEDUP_LOGS=0
     --ctrl-warmup-steps 500 \
     --ctrl-train-interval 5 \
     --ctrl-ema-decay 0 \
-    --ctrl-eval-interval 500 \
+    --ctrl-eval-interval 50 \
     --ctrl-eval-batch-size 64 \
     --ctrl-eval-micro-batch-size 4 \
     --ctrl-eval-seed 12345 \
@@ -75,8 +75,8 @@ export RAY_DEDUP_LOGS=0
     --ctrl-eval-max-horizon 4 \
     --ctrl-eval-lpips-net alex \
     --replay-capacity 10000 \
-    --ckpt-dir /mnt/data/lcx3/AcceRL/runs/ctrl_train_wm_checkpoints \
-    --ckpt-every-steps 1000 \
+    --ckpt-dir /mnt/data/lcx3/AcceRL/runs/ctrl_train_wm_checkpoints_8_26 \
+    --ckpt-every-steps 500 \
     --moving-avg-window 1000 \
     --log-interval-seconds 10 \
     --exp-name OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_same_param \

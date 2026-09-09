@@ -677,6 +677,24 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
+    ### Fixed-tool real-world brush dataset
+    "brush_realworld": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "left_wrist": "left_wrist_image",
+            "right_wrist": "right_wrist_image",
+        },
+        "depth_obs_keys": {
+            "primary": None,
+            "secondary": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "state_obs_keys": ["state"],
+        "state_encoding": StateEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
     ### ManiSkill fine-tuning datasets (Panda, pd_ee_delta_pose)
     # Single front-facing RGB camera (``base_camera``), no wrist camera.
     # ``EEF_state`` = TCP xyz + axis-angle (6D); ``gripper_state`` = two finger qpos (2D).
