@@ -801,7 +801,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     if distributed_state.is_main_process:
         wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{run_id}")
         
-        tb_log_dir = Path("/cpfs01/liuwei_workspace/openvla_oft_rl/runs/Libero/finetune_im") / run_id / "tensorboard"
+        # Keep TensorBoard output next to this run's checkpoints.  The previous
+        # hard-coded /cpfs01 path made non-LIBERO and local-workspace runs write
+        # outside their configured run root.
+        tb_log_dir = run_dir / "tensorboard"
         os.makedirs(tb_log_dir, exist_ok=True)
         tb_writer = SummaryWriter(log_dir=str(tb_log_dir))
         tb_writer.add_text("run/config_summary",
@@ -1009,7 +1012,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             batch_transform,
             resize_resolution=tuple(vla.module.config.image_sizes),
             shuffle_buffer_size=cfg.shuffle_buffer_size // 10,
-            image_aug=cfg.image_aug,
+            # Validation should measure the fixed held-out distribution rather
+            # than a new random augmentation on every pass.
+            image_aug=False,
             train=False,
         )
 
