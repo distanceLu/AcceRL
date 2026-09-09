@@ -856,6 +856,11 @@ def aloha_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+def brush_realworld_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """The brush RLDS builder already emits standardized 7-D EEF actions and 8-D state."""
+    return trajectory
+
+
 # === Registry ===
 OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
@@ -938,6 +943,7 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "libero_goal_no_noops": libero_dataset_transform,
     "libero_10_no_noops": libero_dataset_transform,
     "libero_4_task_suites_no_noops": libero_dataset_transform,
+    "brush_realworld": brush_realworld_dataset_transform,
     ### ALOHA fine-tuning datasets
     "aloha1_fold_shorts_20_demos": aloha_dataset_transform,
     "aloha1_fold_shirt_30_demos": aloha_dataset_transform,

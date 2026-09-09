@@ -141,3 +141,6 @@ triton_cache/
 # Ctrl-World generated evaluation data
 debug_obs/
 test/
+
+!test/openvla_realworldd/
+!test/openvla_realworldd/**
