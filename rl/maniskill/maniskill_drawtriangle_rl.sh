@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 RUNTIME_ROOT="$PROJECT_ROOT/.runtime/why_maniskill_drawtriangle"
 DEBUG_LOG_DIR="$RUNTIME_ROOT/debug"
-RAY_TEMP_DIR="/tmp/ray-lcx-drawtriangle"
+RAY_TEMP_DIR="$RUNTIME_ROOT/ray"
 PRETRAINED_CHECKPOINT="$PROJECT_ROOT/runs/imitation/20260826_202524_openvla-7b+maniskill_drawtriangle+b128+lr-0.0005+lora-r32+dropout-0.0--image_aug--drawtriangle_1cam_delta_pose"
 
 source /mnt/data/lcx4/miniforge3/etc/profile.d/conda.sh
@@ -57,6 +57,12 @@ python rl/maniskill/ds_maniskill_ppo_discrete.py \
   --language-instruction "draw the outlined triangle on the canvas" \
   --unnorm-key maniskill_drawtriangle \
   --sim-backend gpu \
+  --drawtriangle-reward-mode geometric_dense \
+  --drawtriangle-coverage-coef 1.0 \
+  --drawtriangle-overflow-coef 0.3 \
+  --drawtriangle-approach-coef 0.1 \
+  --drawtriangle-success-bonus 1.0 \
+  --reward-scale 1.0 \
   --num-images-in-input 1 \
   --num-trainer-gpus 1 \
   --num-inference-actors 1 \
@@ -84,5 +90,5 @@ python rl/maniskill/ds_maniskill_ppo_discrete.py \
   --pretrained-checkpoint "$PRETRAINED_CHECKPOINT" \
   --no-center-crop \
   --clip-mode gipo \
-  --exp-name "ManiSkill_DrawTriangle_1cam_gipo_60k_no_center_crop" \
+  --exp-name "ManiSkill_DrawTriangle_1cam_gipo_geom_dense_60k_no_center_crop" \
   --sigma 0.5
