@@ -238,6 +238,17 @@ def parse_args():
     parser.add_argument('--sim-backend', type=str, default='cpu',
                         choices=['gpu', 'cpu', 'auto'],
                         help='ManiSkill sim backend (default: cpu)')
+    parser.add_argument('--drawtriangle-reward-mode', type=str, default='geometric_dense',
+                        choices=['geometric_dense', 'sparse'],
+                        help='Reward used for DrawTriangle-v1 (default: geometric_dense)')
+    parser.add_argument('--drawtriangle-coverage-coef', type=float, default=1.0,
+                        help='DrawTriangle reference coverage coefficient (default: 1.0)')
+    parser.add_argument('--drawtriangle-overflow-coef', type=float, default=0.3,
+                        help='DrawTriangle off-target paint coefficient (default: 0.3)')
+    parser.add_argument('--drawtriangle-approach-coef', type=float, default=0.1,
+                        help='DrawTriangle one-way approach progress coefficient (default: 0.1)')
+    parser.add_argument('--drawtriangle-success-bonus', type=float, default=1.0,
+                        help='DrawTriangle official-success terminal bonus (default: 1.0)')
     
     # 分布式系统参数
     parser.add_argument('--num-trainer-gpus', type=int, default=1,
@@ -723,6 +734,11 @@ class BaseWorkerActor:
             render_backend="sapien_cuda:0",
             wrist_camera_name=env_args.get("wrist_camera_name"),
             robot_uids=env_args.get("robot_uids"),
+            drawtriangle_reward_mode=env_args["drawtriangle_reward_mode"],
+            drawtriangle_coverage_coef=env_args["drawtriangle_coverage_coef"],
+            drawtriangle_overflow_coef=env_args["drawtriangle_overflow_coef"],
+            drawtriangle_approach_coef=env_args["drawtriangle_approach_coef"],
+            drawtriangle_success_bonus=env_args["drawtriangle_success_bonus"],
         )
         print(f"BaseWorker {wid}: 环境初始化完成。")
 
@@ -2021,6 +2037,11 @@ def main(args):
             "sim_backend": args.sim_backend,
             "wrist_camera_name": args.wrist_camera_name if args.num_images_in_input > 1 else None,
             "robot_uids": args.robot_uids,
+            "drawtriangle_reward_mode": args.drawtriangle_reward_mode,
+            "drawtriangle_coverage_coef": args.drawtriangle_coverage_coef,
+            "drawtriangle_overflow_coef": args.drawtriangle_overflow_coef,
+            "drawtriangle_approach_coef": args.drawtriangle_approach_coef,
+            "drawtriangle_success_bonus": args.drawtriangle_success_bonus,
         })
     print(f"\nManiSkill tasks: {task_ids}, rollout workers: {args.num_rollout_workers}, eval workers: {args.num_eval_workers}")
     for task_cfg in task_configs:
