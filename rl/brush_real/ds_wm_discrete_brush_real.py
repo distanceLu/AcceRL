@@ -197,7 +197,7 @@ def prepare_brush_obs(
 @ray.remote
 class StatsActor:
     def __init__(self, window_size: int):
-        setup_debugger("brush_stats")
+        setup_debugger("stats")
         self.window_size = int(window_size)
         self.rollout_returns = deque(maxlen=window_size)
         self.eval_returns = deque(maxlen=window_size)
@@ -256,8 +256,8 @@ class StatsActor:
 
 @ray.remote
 class ReplayBufferActor:
-    def __init__(self, capacity: int):
-        setup_debugger("brush_replay")
+    def __init__(self, capacity: int, index: int = 0):
+        setup_debugger("replay", index)
         self.buffer = deque(maxlen=int(capacity))
 
     def add_batch(self, batch: list[Experience]) -> None:
@@ -289,7 +289,7 @@ class PolicyInferenceActor(InferenceActorCom):
         inference_timeout_ms: int,
     ) -> None:
         super().__init__()
-        setup_debugger("brush_policy_inference", actor_id)
+        setup_debugger("inference", actor_id)
         self.actor_id = actor_id
         self.cfg = cfg
         self.stats_actor = stats_actor
@@ -367,7 +367,7 @@ class FrozenCtrlWorldActor:
         checkpoint: str,
         action_stat_path: str,
     ) -> None:
-        setup_debugger("brush_ctrl_world", actor_id)
+        setup_debugger("ctrl_world_inference", actor_id)
         self.actor_id = actor_id
         self.stats_actor = stats_actor
         ctrl_root = str(Path(args.ctrl_world_root).expanduser().resolve())
@@ -689,7 +689,8 @@ class BrushImaginationWorker:
 @ray.remote
 class RolloutWorkerActor(BrushImaginationWorker):
     def __init__(self, policy, world, replay, stats, cfg, args, worker_id):
-        setup_debugger("brush_rollout", worker_id)
+        if worker_id == 0:
+            setup_debugger("rollout_worker", worker_id)
         super().__init__(
             policy, world, stats, cfg, args, worker_id, args.train_split, False, replay
         )
@@ -701,7 +702,8 @@ class RolloutWorkerActor(BrushImaginationWorker):
 @ray.remote
 class EvaluationWorkerActor(BrushImaginationWorker):
     def __init__(self, policy, world, stats, cfg, args, worker_id):
-        setup_debugger("brush_eval", worker_id)
+        if worker_id == 0:
+            setup_debugger("eval_worker", worker_id)
         super().__init__(
             policy, world, stats, cfg, args, worker_id, args.eval_split, True, None
         )
@@ -714,7 +716,7 @@ class EvaluationWorkerActor(BrushImaginationWorker):
 class TrainerActor(TrainerActorCom):
     def __init__(self, rank, world_size, replay, cfg, args, dtype):
         super().__init__()
-        setup_debugger("brush_trainer", rank)
+        setup_debugger("trainer", rank)
         self.rank = rank
         self.world_size = world_size
         self.replay = replay
@@ -1138,7 +1140,10 @@ def main(args: argparse.Namespace) -> None:
     log_dir = REPO_ROOT / "runs/brush_real_async" / f"{int(time.time())}_{args.exp_name}"
     writer = SummaryWriter(str(log_dir))
     stats = StatsActor.remote(args.moving_avg_window)
-    replay = [ReplayBufferActor.remote(args.replay_capacity) for _ in range(args.num_trainer_gpus)]
+    replay = [
+        ReplayBufferActor.remote(args.replay_capacity, index)
+        for index in range(args.num_trainer_gpus)
+    ]
     trainers = [
         TrainerActor.remote(rank, args.num_trainer_gpus, replay[rank], cfg, args, dtype)
         for rank in range(args.num_trainer_gpus)
