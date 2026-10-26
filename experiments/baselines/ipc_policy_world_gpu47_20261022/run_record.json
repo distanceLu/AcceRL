@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "record_type": "user_selected_fastest_training_baseline",
+  "selection": {
+    "selected_by_user": true,
+    "description_zh": "用户指定保存的当前最快训练记录；本发布未重新穷举所有历史运行证明全局纪录。",
+    "new_training_launched_by_publication": false
+  },
+  "tensorboard": {
+    "directory": "1792656951_OpenVLA_IPCPolicyWorld_Ray328GiB_JointPolicy4_World4_RewardFSDP2_gpu47_fresh",
+    "original_directory": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1792656951_OpenVLA_IPCPolicyWorld_Ray328GiB_JointPolicy4_World4_RewardFSDP2_gpu47_fresh",
+    "event_sha256": "48600578411506e91caf04b447a8775cb2643bcbcdc189558a4d4bbc3066a51a",
+    "event_bytes": 611879,
+    "curve_points": 132
+  },
+  "run_id": "ipcpwmanual_1022_161523_17963ef5",
+  "started_ns": 1792656923066996348,
+  "started_bjt": "2026-10-22T16:15:23.066996348+08:00",
+  "source": {
+    "directory": "source_v3",
+    "archive_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+    "file_count": 57,
+    "manifest_sha256": "2d201b5bfc15d405a1879702738ffacac244e7a0004b00fa59936973f51a8ab1",
+    "files_sha256": {
+      "README.md": "a7b1ba689d95bf87b33df21da6ab3afebc6ae566447a64dd7ef690de5176bff5",
+      "analyze_inference_contention.py": "a253d481688b11bcf8cefa80659a5a5dda5355d4b19c623b73e916f75522d540",
+      "analyze_short_measurements.py": "9bcc9de56e84d1ef6beabb997f82fa34de098e64f82e8126e271e6b2f91e79bb",
+      "capture_hooks.py": "ef51c6f67a058d3ca5d5139d119deb3890347b87e485f921bab79bd1fcf47e0b",
+      "capture_telemetry.py": "2ed62024fc0c26ef3e95370e15dcc7e80a7ffaf7b22461ef688ab4fa0ed64d2a",
+      "capture_training.py": "4cf27b5a1e758cddddb29ac96e1394cba134f3f1ca1afcbeb8d3026b4a9a21ed",
+      "cpu_sampler.py": "ae2b28974199b33271d4fba8cf13ce449e3c2bbba1f28e173bdcc6b4812b14df",
+      "cuda_ipc_weights.py": "0fa026ca8a71fc24e7702fe495aac84d5ddf5241869b382b0c6a5685c8396a3c",
+      "deadline_guard.py": "20cc71d4dfdad83cd6cf93595a74c3ad232e403e364bfd651476d9089ee5d3b9",
+      "evaluation_threshold.py": "1be077524e08846e185fbfcab0ee4904c08423ac6ddfdd2c523814a3c0fec1ee",
+      "fsdp_engine.py": "f0b79ae819550131ec02d2af82468e8662c11c4b0349f73238d3c322e00e55ef",
+      "gpu47_safety.py": "cc259a3090fc372b02be932a30cf961f3dbf4baf94a6363dcf79768a8e3c60d1",
+      "installed_deepspeed_boundary_sources.json": "43bf07108c2c9727079bea014f899385574488bb9066f50371804bc8bd18e704",
+      "lineage_trace.py": "91a7791b453d7f0efa28038eaf34316ef6c7cc9e1838d91f38a8f172dcf0ae01",
+      "memory_policy.py": "7b3ad59d661a092d7427deab8350fd24937fa21e7c7068378586f331b7cdedb8",
+      "nsight_capture.py": "0b76c1af3c6e0e573244b8f98a81e512f1ddf74386db2f61d47f1e59e485ddd3",
+      "observed_cpu_prefetch.py": "d4cc0a0eec239e199cf97074ae0dae53088501bb223c528d89255410255c0c3a",
+      "parallel_checkpoint.py": "983bea482fb473bcdc5983294f7685a0c93ddcf8029d30ddc99a225074153c30",
+      "policy_backend_audit.py": "b2aac854dedc01f03025dd0de49400777812c4d526fc5edcf28952bb81184f89",
+      "policy_batch_receipts.py": "2e612f11dee468fc5dc6400a66f0cc564c388dcad8c96159f9f2c12d7bcbbb3e",
+      "policy_joint_batch_mode.py": "9078eb5a4095e0946d8fcdc71e77c1df97cf3a9f33e6fae3a158db764246a5b9",
+      "profile_plan.py": "72f6a5038c36cb99a142d11513145d9deccaade0dd8eec3b478a3b127d2b7588",
+      "ray_memory_config.py": "021102f28357f73ca807d6c720a0c7d157c868f86c5d6e2bd1ffd1aad7974f70",
+      "request_stop.py": "b515958b4ec0aac92360773eee18c59cc6a7252ab393bc2534d2583690d732c5",
+      "reward_features.py": "e16fb3d886a801f4e9a1e4834b7ef3568bf4675d331f820be9c1d4cf93128e43",
+      "run.sh": "ed133a7da8618d5843e31f90c74ddec9c21b22c78fc487daff2c25afc998ca0d",
+      "runner.py": "de1cfc54cc904965f71b356d48ae49e775a474939d8a67b9084057f7fc0e7cbc",
+      "shared_inference.py": "3fe741ab4f14e66c2742f13cb2d8261fc54f16034e1b63cbaaf6a21367e0e5e6",
+      "split_serial.py": "73c597b5f582f40ab6c11dd8c7864f023ef5a266d46eb4b5cbee0290d4034540",
+      "telemetry.py": "0c8054762173fbd7f085f0298e4df323c6748cabd3984892941bd41d150c35e6",
+      "test_analyze_inference_contention_cpu.py": "80e7d14b759bd5e6b61ca6d3673442dc2bab73d898d7b68418154abad7c7560c",
+      "test_analyze_short_measurements.py": "7c132e1a81834fba57794f83a044f9e2bd29b01453ff63d6fe9116a9ba1615a0",
+      "test_deadline_guard.py": "118331c2f0f395c30a6c2cd1d08fa450594059d3bb7167035c22558231ea9715",
+      "test_joint_candidate_invariants_cpu.py": "1d8e9b6e5608dcd4dd6cf92d44319f8c09fc90ea3264498a9e84633d69bbd07f",
+      "test_lineage_trace_cpu.py": "16f582f107b73242d0887910a68bf2cbca9a61800e7c4dea21b12f162d64b968",
+      "test_manual_controller_cpu.py": "97136c21cf9688e6eb7b6280cfce19369a7bfba2da315819f2eff647e0c9cf22",
+      "test_manual_guard_cpu.py": "046e4d8a6113d06c5ad4f41ceae912aaf093663133c9fd9b8d70ab6c638e2ea3",
+      "test_manual_measurement_independence_cpu.py": "be843ff68d0203d9d32afa3138b8a05dfae98ef6487e93c33a53723afa37f937",
+      "test_manual_stop.py": "8fa866f7d9cff1d55cb9848ae7aa6f7b4b1cfaeb4e3ed729dc85350dc117f194",
+      "test_memory_policy_cpu.py": "ca8ba7c271bb2a0143cdf2afc4cdd9ce076eed9a40cc0ebf466736669636dc48",
+      "test_observed_cpu_prefetch.py": "fee100ad9fbc2ed4b40190458ab9647bd10f289d099745eb57416bc3965badb9",
+      "test_policy_backend_audit_cpu.py": "6422135b9ab622dfb44ab1689765ad1027c21bd7cae58c2bc061fed5060369e4",
+      "test_policy_batch_receipts_cpu.py": "cade22c47eb54e4b56a28c0aaad60f4681b08f123efc8d60dc3409aee7a867db",
+      "test_policy_joint_batch_mode_cpu.py": "b58a135db6febc496afa22355f863550be88d9ea592af1fbfacb1c0e5249ec70",
+      "test_policy_zero2_gpu.py": "0f50925d05033d6c989f38d55f6492d069add2df616ee4aac99668fdaaba0a5b",
+      "test_profile_plan_cpu.py": "19cf718c88a569c358680a7ce8e38ab8a40d5e0a0858f40a1d415412646360b4",
+      "test_profiled_preflight_cpu.py": "c746fc504e31f55db18accf457d76e32ee470ddf1dba8a14672b4ec7f280b368",
+      "test_reward_features_cpu.py": "6fd42f96db40d20ecc734d97f58ef96829d554b40907ccde42169904723adaa2",
+      "test_short_preflight_cpu.py": "87f46281777365a79a137f11d0acab1191f2e4a61557295052d5ff760422427b",
+      "test_snapshot_cpu.py": "b073b82cb241ad5b47a4a8a10d5203890ab95fe4c6c3b451cd91d6df94248356",
+      "test_workflow_metadata_cpu.py": "4c392adc453ca8c1fca64f7f825ac39913e19d8aa1d9592bdc3c64dbec00d82b",
+      "test_world_backend_audit_cpu.py": "cacb6b55d24aac4bd8a6f95e96f12576f905d556615f544eb3b939fb51277653",
+      "train.py": "f7f2599d6f5e5fb02668120918c4617ec0611c99f6f45a3006ee6fc6f5f9f5db",
+      "training_stop_policy.py": "95f2ee2df1b3d247a95c631ff476b3ee9dbfcc324e0dcc987d532ea910df772c",
+      "training_topology.py": "656f89656fea403697a934976fbd412e829d0b923ee8b809fb508a73610c3afd",
+      "workflow_baseline.json": "1a2f3f36ce971abd2fb2f169fe101babd80ee9d8ff7f7808bc5aa30cf701d348",
+      "world_backend_audit.py": "6c0192a7e0657e89095e3bfa5f46cb56b4ca2e51f4c0a29f31fb3719b5653042"
+    },
+    "verified_local_frozen_directory": "analysis/workflow_audit_20261022/source_v3",
+    "all57_local_hashes_matched": true
+  },
+  "configuration": {
+    "gpu_physical_indices": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "gpu_uuids": [
+      "GPU-c43d6671-0979-b38d-9eae-4fe0a9d71c8c",
+      "GPU-fe0edfe4-b193-1af7-6a98-cbff40214f74",
+      "GPU-8c9bc264-7f09-989e-1ec7-cecd6cde782c",
+      "GPU-07ae0bbc-8923-bd0c-199e-c726821e655d"
+    ],
+    "mps_default_and_server_active_thread_percent": 100,
+    "client_quotas": null,
+    "gpu_model_processes": 24,
+    "trainers": 12,
+    "backend": {
+      "policy": "ZeRO2",
+      "world": "ZeRO2/CTRL-World",
+      "reward": "FSDP2"
+    },
+    "phase_ratio_policy_world_reward": [
+      5,
+      1,
+      1
+    ],
+    "policy_ordinary": {
+      "micro": 8,
+      "GAS": 18,
+      "world_size": 4,
+      "global_batch": 576
+    },
+    "policy_joint": {
+      "micro": 4,
+      "GAS": 36,
+      "world_size": 4,
+      "global_batch": 576
+    },
+    "world": {
+      "micro": 4,
+      "GAS": 64,
+      "world_size": 4,
+      "global_batch": 1024
+    },
+    "reward": {
+      "micro": 16,
+      "GAS": 16,
+      "world_size": 4,
+      "global_batch": 1024
+    },
+    "inference_caps_policy_world_reward": [
+      2,
+      3,
+      2
+    ],
+    "inference_batch": 8,
+    "inference_timeout_ms": 300,
+    "warmup_successful_updates": {
+      "policy": 100,
+      "value": 100,
+      "world": 20,
+      "reward": 20
+    },
+    "lr_horizon_updates": {
+      "policy": 30000,
+      "value": 30000,
+      "world": 6000,
+      "reward": 30000
+    },
+    "peak_lr": {
+      "policy": 1e-05,
+      "value": 0.0001,
+      "world": 0.0001,
+      "reward": 0.0001
+    },
+    "weight_transport": {
+      "policy": "CUDA IPC",
+      "world": "CUDA IPC",
+      "reward": "CPU-Ray"
+    },
+    "ipc_receiver_owns_separate_parameters": true,
+    "full_CPU_SHA_and_four_rank_ACK_release_retained": true,
+    "ray_object_store_gib": 328,
+    "ray_object_store_bytes": 352187318272,
+    "ray_object_store_is_total_RAM_cap": false,
+    "nsight_collection": false,
+    "manual_until_user_stop": true,
+    "fixed_deadline": null,
+    "automatic_restart": false
+  },
+  "final_result": {
+    "state": "stopped_by_user_audited",
+    "successful_optimizer_updates": {
+      "policy": 132,
+      "world": 26,
+      "reward": 26
+    },
+    "skipped_steps_all_trainers": 0,
+    "all_rank_exposures": {
+      "policy": 76032,
+      "world": 26624,
+      "reward": 26624
+    },
+    "policy_real_microsteps_per_rank": 2844,
+    "joint_cohorts": 26,
+    "consumers_per_cohort": 8,
+    "stop_flag": {
+      "reason": "user_requested_stop",
+      "requested_ns": 1792673527585183106,
+      "at_bjt": "2026-10-22T20:52:07+08:00",
+      "uid": 1004
+    },
+    "experiment_completed": {
+      "stop_reason": "scheduled_stop",
+      "until_manual_stop": true,
+      "until_deadline": false,
+      "deadline_unix_seconds": null,
+      "ts_ns": 1792673570430189375
+    },
+    "checkpoint_weights_only": true,
+    "exact_optimizer_replay_rng_resume_supported": false,
+    "finite_tensor_counts": {
+      "policy": 891,
+      "ctrl": 1434,
+      "reward": 736
+    },
+    "final_audit_passed": true,
+    "GPU_exit_gate_passed": true,
+    "source57_hashes_unchanged": true,
+    "error_events": 0,
+    "unresolved_error_events": 0,
+    "rolling_evaluation_latest": 0.782,
+    "rolling_evaluation_max_full_window": 0.786,
+    "time_to_85_status": "not_reached",
+    "time_to_85_seconds": null
+  },
+  "speed": {
+    "matched_policy_updates": [
+      31,
+      100
+    ],
+    "complete_cycles_per_run": 14,
+    "scope": "Matched Policy updates31-100,14 complete five-update cycles per run",
+    "baseline_updates_per_hour": 28.134829320642044,
+    "ipc_updates_per_hour": 32.584050866210305,
+    "throughput_gain_percent": 15.813927622812841,
+    "cycle_seconds_saved": 87.35890401699999,
+    "sync_reduction_percent": 68.08716714452956,
+    "share_of_saved_seconds_from_sync_percent": 84.32440235843647,
+    "projected_600_update_hours_baseline": 21.325880216369047,
+    "projected_600_update_hours_ipc": 18.413916749135716,
+    "baseline_cycle": {
+      "wall_seconds": 639.7764064910714,
+      "train_seconds": 528.7339906692505,
+      "sync_seconds": 108.1920085804803,
+      "other_seconds": 2.8504072413406334,
+      "ordinary_train_seconds": 278.92318068231856,
+      "joint_train_seconds": 249.81080998693193,
+      "ordinary_sync_seconds": 9.999422584261213,
+      "joint_sync_seconds": 98.1925859962191
+    },
+    "ipc_cycle": {
+      "wall_seconds": 552.4175024740714,
+      "train_seconds": 515.9480709859303,
+      "sync_seconds": 34.52713486126491,
+      "other_seconds": 1.942296626876222,
+      "ordinary_train_seconds": 269.7515024457659,
+      "joint_train_seconds": 246.1965685401644,
+      "ordinary_sync_seconds": 4.716887933867318,
+      "joint_sync_seconds": 29.810246927397593
+    },
+    "causal_limit": "Observed configuration bundle changes IPC for P/W, Ray64->328GiB, warmup and lineage. Not an isolated IPC experiment.",
+    "projection_limit": "600-update projections assume observed steady throughput persists; exclude startup and do not establish learning quality.",
+    "ipc_full_steady6_130_policy_per_hour": 32.5386809334355,
+    "ipc_whole_run_including_startup_policy_per_hour": 28.568658764283285,
+    "compact_evidence": "speed_evidence_compact.json",
+    "recompute_command": "python verify_speed_evidence.py --output speed_recomputed.json"
+  },
+  "environment": {
+    "host": "h20-xyff52ab-0001",
+    "uid": 1004,
+    "repo_original": "/mnt/data/lcx1/dong/AcceRL-scheduler",
+    "python_original": "/mnt/data/lcx3/envs/merged-env/bin/python",
+    "python_major_minor_observed": "3.11",
+    "torch_transport_development_observation": "2.12.0+cu130",
+    "CUDA_transport_development_observation": "13.0",
+    "runtime_version_observation_scope": "Actual module import with no CUDA queries during2026-10-26 publication preflight; consistent with prior transport development observation but not a full historical dependency lock.",
+    "required_external_CPU_archive_support": [
+      "serial_split_verified_run_20261016.py",
+      "mps_target_run_20261014.py",
+      "real_fill_experiment_20261014.py"
+    ],
+    "archive_support_original_directory": "/mnt/data/lcx1/dong/need_data/archive",
+    "checkpoints_in_git": false,
+    "clone_and_run_claim": false,
+    "module_versions_readonly_at_publication": {
+      "python": "3.11.13 (main, Jun  5 2025, 13:12:00) [GCC 11.2.0]",
+      "torch_module_version": "2.12.0+cu130",
+      "torch_module_file": "/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/torch/__init__.py",
+      "torch_compiled_cuda": "13.0",
+      "ray_module_version": "2.55.1",
+      "cuda_queries_performed": false
+    },
+    "package_distribution_metadata_at_publication": {
+      "torch": "2.2.0",
+      "ray": "2.55.1",
+      "deepspeed": "0.19.0",
+      "transformers": "4.40.1",
+      "numpy": "1.26.4"
+    },
+    "distribution_metadata_caveat": "torch distribution metadata2.2.0 disagrees with actual imported torch module2.12.0+cu130; use actual module observation and installed-method source hashes.",
+    "CPU_archive_support_files": {
+      "serial_split_verified_run_20261016.py": {
+        "source_path": "/mnt/data/lcx1/dong/need_data/archive/serial_split_verified_run_20261016.py",
+        "sha256": "578c62a113c47bed52b5d080f3b8d3b1b8de621c29515fa3becc5ef4667ba8d6",
+        "bytes": 128069
+      },
+      "mps_target_run_20261014.py": {
+        "source_path": "/mnt/data/lcx1/dong/need_data/archive/mps_target_run_20261014.py",
+        "sha256": "f004487e410d25a49e9dd3698b963a8b3d0bacaf6ac1310cbe1b154dbcb8475d",
+        "bytes": 43629
+      },
+      "real_fill_experiment_20261014.py": {
+        "source_path": "/mnt/data/lcx1/dong/need_data/archive/real_fill_experiment_20261014.py",
+        "sha256": "57c8704a789e38562ee701eb2c841ac14998de60ea7aed5128c7f5964829969a",
+        "bytes": 55284
+      }
+    },
+    "historical_manual_data_binding": "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/formal_v3",
+    "historical_data_directory_already_exists": true,
+    "new_run_requires_new_candidate_CPU_binding_review_validation_and_freeze": true
+  },
+  "validation": {
+    "historical_CPU_cases_passed": 155,
+    "historical_bash_and_compile": true,
+    "historical_GPU_IPC_synthetic_publications": 88,
+    "synthetic_tests_do_not_guarantee24_model_long_run_safety": true,
+    "evidence_summary": "evidence/final_stop_audit_v3_summary.json"
+  },
+  "limitations": [
+    "This compact projection independently reproduces cycle-wall, phase sums and the headline only; it does not include publication timing, inference traces, checkpoint tensors or full-run claims.",
+    "Observed bundle changes include Policy/World IPC, Ray64->328GiB, warmup500->100/20 and lineage telemetry; this is not an isolated IPC causal A/B.",
+    "Train/sync fields are controller host wall durations; not SM Active/Occupancy, GPU kernel time or physical bandwidth.",
+    "Throughput is a completed5:1:1 update rate, not Policy-only speed or learning-quality/time-to-target improvement.",
+    "No full historical fastest-record search is included in this publication.",
+    "The run finished at132Policy/26World/26Reward before85%; a throughput record is not an accuracy record.",
+    "Lineage early bounded analysis actually covered completeepochs1-9 before its500000-event cap, despite its first15 filename.",
+    "Runtime launchers contain machine-specific paths, UID/UUID/MPS admission checks and externally loaded CPU safety helpers; deployment requires review and is not clone-and-run."
+  ]
+}

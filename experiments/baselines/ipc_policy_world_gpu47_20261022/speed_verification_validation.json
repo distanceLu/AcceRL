@@ -1,0 +1,60 @@
+{
+  "passed": true,
+  "scope": "Local CPU-only standard-library validation; no frozen runtime imports, GPU, SSH, network, or original-source mutation.",
+  "checks": [
+    {
+      "name": "all142_projected_records_exactly_match_original_extraction",
+      "passed": true
+    },
+    {
+      "name": "both_run_cycle_counts_wall_parts_and_throughput_equal_original_full_analyzer",
+      "passed": true
+    },
+    {
+      "name": "tampered_evidence_digest",
+      "passed": true,
+      "rejection": "Projected evidence digest mismatch"
+    },
+    {
+      "name": "missing_epoch",
+      "passed": true,
+      "rejection": "Missing, duplicated or reordered synchronized epoch"
+    },
+    {
+      "name": "rank_step_mismatch",
+      "passed": true,
+      "rejection": "Four-rank completed-update receipt mismatch"
+    },
+    {
+      "name": "joint_schedule_mismatch",
+      "passed": true,
+      "rejection": "Not a complete 5:1:1 schedule"
+    },
+    {
+      "name": "non_integer_timestamp",
+      "passed": true,
+      "rejection": "Invalid or non-monotonic integer timestamp"
+    },
+    {
+      "name": "different_run_id",
+      "passed": true,
+      "rejection": "Run identity mismatch"
+    },
+    {
+      "name": "changed_headline_expected_value",
+      "passed": true,
+      "rejection": "Headline disagreement for ipc_updates_per_hour: 32.584050866210305 vs 0.0"
+    }
+  ],
+  "check_count": 9,
+  "compact_sha256": "996ec6e1a5444164f2e5f4d7ba7d8ceb7c9bfec2e7ceaf6fbc33755eba608953",
+  "verifier_sha256": "20b2c50c67ad068bd379a0ba70336207441be10ef59272b31bccbfd052df87b6",
+  "independent_recomputed_comparison": {
+    "baseline_updates_per_hour": 28.134829320642044,
+    "ipc_updates_per_hour": 32.584050866210305,
+    "throughput_gain_percent": 15.813927622812841,
+    "cycle_seconds_saved": 87.35890401699999,
+    "sync_reduction_percent": 68.08716714452956,
+    "share_of_saved_seconds_from_sync_percent": 84.32440235843647
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "files": {
+    "serial_split_verified_run_20261016.py": {
+      "source_path": "/mnt/data/lcx1/dong/need_data/archive/serial_split_verified_run_20261016.py",
+      "sha256": "578c62a113c47bed52b5d080f3b8d3b1b8de621c29515fa3becc5ef4667ba8d6",
+      "bytes": 128069
+    },
+    "mps_target_run_20261014.py": {
+      "source_path": "/mnt/data/lcx1/dong/need_data/archive/mps_target_run_20261014.py",
+      "sha256": "f004487e410d25a49e9dd3698b963a8b3d0bacaf6ac1310cbe1b154dbcb8475d",
+      "bytes": 43629
+    },
+    "real_fill_experiment_20261014.py": {
+      "source_path": "/mnt/data/lcx1/dong/need_data/archive/real_fill_experiment_20261014.py",
+      "sha256": "57c8704a789e38562ee701eb2c841ac14998de60ea7aed5128c7f5964829969a",
+      "bytes": 55284
+    }
+  },
+  "runtime": {
+    "python": "3.11.13 (main, Jun  5 2025, 13:12:00) [GCC 11.2.0]",
+    "packages": {
+      "torch": "2.2.0",
+      "ray": "2.55.1",
+      "deepspeed": "0.19.0",
+      "transformers": "4.40.1",
+      "numpy": "1.26.4"
+    }
+  }
+}

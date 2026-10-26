@@ -1,0 +1,33 @@
+{
+  "scope": "Matched Policy updates31-100,14 complete five-update cycles per run",
+  "baseline_updates_per_hour": 28.134829320642044,
+  "ipc_updates_per_hour": 32.584050866210305,
+  "throughput_gain_percent": 15.813927622812841,
+  "cycle_seconds_saved": 87.35890401699999,
+  "sync_reduction_percent": 68.08716714452956,
+  "share_of_saved_seconds_from_sync_percent": 84.32440235843647,
+  "projected_600_update_hours_baseline": 21.325880216369047,
+  "projected_600_update_hours_ipc": 18.413916749135716,
+  "baseline_cycle": {
+    "wall_seconds": 639.7764064910714,
+    "train_seconds": 528.7339906692505,
+    "sync_seconds": 108.1920085804803,
+    "other_seconds": 2.8504072413406334,
+    "ordinary_train_seconds": 278.92318068231856,
+    "joint_train_seconds": 249.81080998693193,
+    "ordinary_sync_seconds": 9.999422584261213,
+    "joint_sync_seconds": 98.1925859962191
+  },
+  "ipc_cycle": {
+    "wall_seconds": 552.4175024740714,
+    "train_seconds": 515.9480709859303,
+    "sync_seconds": 34.52713486126491,
+    "other_seconds": 1.942296626876222,
+    "ordinary_train_seconds": 269.7515024457659,
+    "joint_train_seconds": 246.1965685401644,
+    "ordinary_sync_seconds": 4.716887933867318,
+    "joint_sync_seconds": 29.810246927397593
+  },
+  "causal_limit": "Observed configuration bundle changes IPC for P/W, Ray64->328GiB, warmup and lineage. Not an isolated IPC experiment.",
+  "projection_limit": "600-update projections assume observed steady throughput persists; exclude startup and do not establish learning quality."
+}

@@ -95,3 +95,10 @@ If you use our code in your work, please cite [our paper](https://arxiv.org/abs/
   year={2025}
 }
 ```
+
+<!-- ipc-policy-world-baseline-20261022 -->
+## CUDA IPC training baseline
+
+The archived GPU4–7 Policy/World IPC configuration records **32.5841 Policy updates/hour** over matched complete 5:1:1 cycles (updates 31–100). It includes the exact source snapshot, parameters, final audits, and CPU-only speed verification.
+
+See [IPC / Ray 328 GiB baseline](experiments/baselines/ipc_policy_world_gpu47_20261022/README.md) for the TensorBoard identity, measurement scope, and host-specific reproduction requirements.

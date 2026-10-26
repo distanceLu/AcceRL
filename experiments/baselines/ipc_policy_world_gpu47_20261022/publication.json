@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/distanceLu/AcceRL",
+  "branch": "codex/ipc-policy-world-fastest-20261022",
+  "base_commit": "a0a0dfa969a9f1a8f5e85af0bca0b5facab5b5d8",
+  "base_branch": "dev",
+  "layout": "experiments/baselines/ipc_policy_world_gpu47_20261022",
+  "scope": "Historical source snapshot, compact recomputable speed evidence, CPU-only validation receipts and host dependencies",
+  "frozen_source_unchanged": true,
+  "gpu_work_started": false
+}

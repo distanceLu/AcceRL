@@ -1,0 +1,1366 @@
+{
+  "valid": true,
+  "run_id": "ipcpwmanual_1022_161523_17963ef5",
+  "run_started_ns": 1792656923066996348,
+  "checked_ns": 1792674071672095873,
+  "source": "Original run TensorBoard TFRecords read once after experiment_completed; CPU-only, read-only SQLite and checkpoint manifest; no model loading",
+  "logdir": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1792656951_OpenVLA_IPCPolicyWorld_Ray328GiB_JointPolicy4_World4_RewardFSDP2_gpu47_fresh",
+  "tensorboard_started": {
+    "id": 1,
+    "ts_ns": 1792656951392200562,
+    "details": {
+      "log_dir": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1792656951_OpenVLA_IPCPolicyWorld_Ray328GiB_JointPolicy4_World4_RewardFSDP2_gpu47_fresh",
+      "run_started_ns": 1792656923066996348,
+      "metric_tag": "Eval/_Global/Average_Return",
+      "window_size": 1000,
+      "target": 0.85,
+      "mps_enabled": true
+    }
+  },
+  "experiment_completed": {
+    "id": 2116435,
+    "ts_ns": 1792673570430189375,
+    "details": {
+      "global_step": 132,
+      "completed_epochs": 132,
+      "run_started_ns": 1792656923066996348,
+      "stop_reason": "scheduled_stop",
+      "target_reached": false,
+      "stop_on_target": false,
+      "until_deadline": false,
+      "deadline_unix_seconds": null,
+      "stop_policy": {
+        "stop_on_target": false,
+        "configured_stop_on_target": false,
+        "until_deadline": false,
+        "until_manual_stop": true,
+        "deadline_unix_seconds": null,
+        "deadline_utc": null,
+        "stop_boundary": "completed synchronized epoch or pre-update replay-fill boundary; preserve final weights",
+        "learning_rate_horizon_unchanged": true
+      }
+    }
+  },
+  "TFRecord_count": 7964,
+  "all_TFRecord_CRCs_verified": true,
+  "files": [
+    {
+      "path": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1792656951_OpenVLA_IPCPolicyWorld_Ray328GiB_JointPolicy4_World4_RewardFSDP2_gpu47_fresh/events.out.tfevents.1792656951.h20-xyff52ab-0001.3393202.0",
+      "size_bytes": 611879,
+      "sha256": "48600578411506e91caf04b447a8775cb2643bcbcdc189558a4d4bbc3066a51a",
+      "TFRecord_count": 7964,
+      "size_stable_during_scan": true
+    }
+  ],
+  "scalar_count": 7963,
+  "tag_count": 76,
+  "tag_statistics": {
+    "System/MPS_Enabled": {
+      "count": 1,
+      "first_step": 0,
+      "last_step": 0,
+      "last_record": {
+        "step": 0,
+        "wall_time": 1792656951.3923352,
+        "value": 1.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Fill/Policy_Resident": {
+      "count": 66,
+      "first_step": 0,
+      "last_step": 1949,
+      "last_record": {
+        "step": 1949,
+        "wall_time": 1792659030.3061678,
+        "value": 2621.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Fill/WM_Resident": {
+      "count": 66,
+      "first_step": 0,
+      "last_step": 1949,
+      "last_record": {
+        "step": 1949,
+        "wall_time": 1792659030.3062105,
+        "value": 1171.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/_Global/Average_Return": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6809795,
+        "value": 0.7820000052452087,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/Target85/Window_Episodes": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6809795,
+        "value": 1000.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/Target85/New_Completed_Episodes": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6809795,
+        "value": 24.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/Target85/Consecutive_Qualified": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6809795,
+        "value": 0.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/Target85/Threshold": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6809795,
+        "value": 0.8500000238418579,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Train/Learning_Rate/Value": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.685568,
+        "value": 9.99997355393134e-05,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Train/Learning_Rate/Policy": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6856012,
+        "value": 9.9999733720324e-06,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Loss/Total": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.685642,
+        "value": 0.020005304366350174,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Loss/Policy": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6856706,
+        "value": -0.011127565987408161,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Loss/Value": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6856966,
+        "value": 0.029061170294880867,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Loss/Entropy": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.68572,
+        "value": 0.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Loss/KL": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6857443,
+        "value": 0.002071698661893606,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Diagnostics/Sampled_Unique_Episodes": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.685767,
+        "value": 61.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Diagnostics/Fresh_Episode_Ratio": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6857843,
+        "value": 0.06557376682758331,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Metrics/Entropy": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6858103,
+        "value": 0.5555084347724915,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Metrics/KL_Divergence": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6858344,
+        "value": 0.020716985687613487,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Metrics/Training_Speed_Steps_per_Sec": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.685989,
+        "value": 0.014431551098823547,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/Inference/loop_time_s": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.686008,
+        "value": 0.5708968639373779,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/Inference/reward_loop_time_s": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6860251,
+        "value": 0.11492811888456345,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/Inference/ctrl_world_loop_time_s": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6860418,
+        "value": 2.7558822631835938,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/policy_sample_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6860976,
+        "value": 66.45490264892578,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/policy_prep_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6861205,
+        "value": 0.09920352697372437,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/policy_train_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6861415,
+        "value": 67.64230346679688,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/wm_sample_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6861587,
+        "value": 36.404476165771484,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/wm_prep_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6861744,
+        "value": 8.493955612182617,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/policy_batch_wait_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6862047,
+        "value": 1.9073486328125e-06,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/wm_batch_wait_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6863809,
+        "value": 0.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/train_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6864002,
+        "value": 68.25157165527344,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/sync_time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6864169,
+        "value": 1.0331647396087646,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/train_time_total": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6864333,
+        "value": 69.29165649414062,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Rollout/_Global/Average_Return": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6864493,
+        "value": 0.9523809552192688,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Rollout/_Global/Average_Episode_Length": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6864653,
+        "value": 83.9206314086914,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Rollout/_Global/Average_Imagine_Reward": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6864805,
+        "value": 0.11018814891576767,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/_Global/Average_Episode_Length": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6864955,
+        "value": 108.4540023803711,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Replay_Buffer_Size_Total": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6865108,
+        "value": 10000.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/WM_Replay_Buffer_Size_Total": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6865244,
+        "value": 4651.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/WM_Fixed_Eval_Size": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.686673,
+        "value": 8.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/WM_Train_Episodes": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6866887,
+        "value": 62.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/WM_Eval_Episodes": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6867025,
+        "value": 1.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Total_Episodes_Processed": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.686718,
+        "value": 63.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Total_Env_Steps": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6867309,
+        "value": 5287.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Avg_Step_Time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.686745,
+        "value": 0.27621152997016907,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Eval_Total_Episodes_Processed": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6867638,
+        "value": 4610.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Eval_Total_Env_Steps": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6867807,
+        "value": 512247.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Eval_Avg_Step_Time": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6867948,
+        "value": 0.29665815830230713,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Active_Rollout_Actors": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.686809,
+        "value": 10.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Total_Samples_Produced": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6869507,
+        "value": 682.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "System/Total_Imagine_Samples": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6869652,
+        "value": 13068.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Average_Return": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6869895,
+        "value": 0.7820000052452087,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Average_Episode_Length": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6870067,
+        "value": 108.4540023803711,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Success_Rate": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6870224,
+        "value": 0.7820000052452087,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Eval/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Total_Episodes": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6870391,
+        "value": 4610.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Rollout/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Average_Return": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6870565,
+        "value": 0.9523809552192688,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Rollout/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Average_Episode_Length": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6870718,
+        "value": 83.9206314086914,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Rollout/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Success_Rate": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.687086,
+        "value": 0.9523809552192688,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Rollout/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Total_Episodes": {
+      "count": 132,
+      "first_step": 1,
+      "last_step": 132,
+      "last_record": {
+        "step": 132,
+        "wall_time": 1792673556.6871018,
+        "value": 63.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Train/Learning_Rate/Reward": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7479417,
+        "value": 9.99999901978299e-05,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Train/Learning_Rate/CtrlWorld": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7479708,
+        "value": 9.999983012676239e-05,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Loss/CtrlWorld": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7482488,
+        "value": 0.06553933769464493,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Loss/Reward_Model": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7485473,
+        "value": 0.0008611243101768196,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Reward_TP": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7486198,
+        "value": 15.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Reward_TN": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7486422,
+        "value": 902.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Reward_FP": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7486637,
+        "value": 107.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Reward_FN": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7486846,
+        "value": 0.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Reward_Pos_Acc": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7488549,
+        "value": 1.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Reward_Neg_Acc": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.748885,
+        "value": 0.8939543962478638,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Reward_Batch_Pos_Ratio": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7489116,
+        "value": 0.0146484375,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/reward_train_time": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7496028,
+        "value": 33.691200256347656,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "Performance/ctrl_train_time": {
+      "count": 26,
+      "first_step": 5,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7496402,
+        "value": 243.23428344726562,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Diagnostics/Ctrl_Grad_Norm": {
+      "count": 25,
+      "first_step": 10,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7482805,
+        "value": 0.13194625079631805,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Diagnostics/Ctrl_Grad_Clip_Ratio": {
+      "count": 25,
+      "first_step": 10,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.748453,
+        "value": 0.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Diagnostics/Reward_Grad_Norm": {
+      "count": 25,
+      "first_step": 10,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.748573,
+        "value": 0.009825321845710278,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    },
+    "WorldModel/Diagnostics/Reward_Grad_Clip_Ratio": {
+      "count": 25,
+      "first_step": 10,
+      "last_step": 130,
+      "last_record": {
+        "step": 130,
+        "wall_time": 1792673419.7485955,
+        "value": 0.0,
+        "dtype": "simple_float32"
+      },
+      "dtypes": [
+        "simple_float32"
+      ]
+    }
+  },
+  "expected_original_tag_count": 129,
+  "missing_original_tags": [
+    "WorldModel/Eval/AgentView_LPIPS",
+    "WorldModel/Eval/AgentView_LPIPS_Std",
+    "WorldModel/Eval/AgentView_PSNR",
+    "WorldModel/Eval/AgentView_PSNR_Std",
+    "WorldModel/Eval/AgentView_SSIM",
+    "WorldModel/Eval/AgentView_SSIM_Std",
+    "WorldModel/Eval/Fixed_Set_Size",
+    "WorldModel/Eval/LPIPS",
+    "WorldModel/Eval/LPIPS_Std",
+    "WorldModel/Eval/LPIPS_h1",
+    "WorldModel/Eval/LPIPS_h1_Std",
+    "WorldModel/Eval/LPIPS_h2",
+    "WorldModel/Eval/LPIPS_h2_Std",
+    "WorldModel/Eval/LPIPS_h3",
+    "WorldModel/Eval/LPIPS_h3_Std",
+    "WorldModel/Eval/LPIPS_h4",
+    "WorldModel/Eval/LPIPS_h4_Std",
+    "WorldModel/Eval/MSE",
+    "WorldModel/Eval/MSE_Std",
+    "WorldModel/Eval/MSE_h1",
+    "WorldModel/Eval/MSE_h1_Std",
+    "WorldModel/Eval/MSE_h2",
+    "WorldModel/Eval/MSE_h2_Std",
+    "WorldModel/Eval/MSE_h3",
+    "WorldModel/Eval/MSE_h3_Std",
+    "WorldModel/Eval/MSE_h4",
+    "WorldModel/Eval/MSE_h4_Std",
+    "WorldModel/Eval/PSNR",
+    "WorldModel/Eval/PSNR_Std",
+    "WorldModel/Eval/PSNR_h1",
+    "WorldModel/Eval/PSNR_h1_Std",
+    "WorldModel/Eval/PSNR_h2",
+    "WorldModel/Eval/PSNR_h2_Std",
+    "WorldModel/Eval/PSNR_h3",
+    "WorldModel/Eval/PSNR_h3_Std",
+    "WorldModel/Eval/PSNR_h4",
+    "WorldModel/Eval/PSNR_h4_Std",
+    "WorldModel/Eval/SSIM",
+    "WorldModel/Eval/SSIM_Std",
+    "WorldModel/Eval/SSIM_h1",
+    "WorldModel/Eval/SSIM_h1_Std",
+    "WorldModel/Eval/SSIM_h2",
+    "WorldModel/Eval/SSIM_h2_Std",
+    "WorldModel/Eval/SSIM_h3",
+    "WorldModel/Eval/SSIM_h3_Std",
+    "WorldModel/Eval/SSIM_h4",
+    "WorldModel/Eval/SSIM_h4_Std",
+    "WorldModel/Eval/WristView_LPIPS",
+    "WorldModel/Eval/WristView_LPIPS_Std",
+    "WorldModel/Eval/WristView_PSNR",
+    "WorldModel/Eval/WristView_PSNR_Std",
+    "WorldModel/Eval/WristView_SSIM",
+    "WorldModel/Eval/WristView_SSIM_Std"
+  ],
+  "additional_tags": [],
+  "curve_points": 132,
+  "first_step": 1,
+  "last_step": 132,
+  "all_curve_points_match_SQLite_float32": true,
+  "unobserved_original_tags_are_conditional_World_eval_only": true,
+  "all_curve_walltimes_match_SQLite_within_one_microsecond": true,
+  "latest_evaluation": {
+    "evaluation_id": 132,
+    "rate": 0.782,
+    "completed_ns": 1792673556680979574,
+    "completed_iso": "2026-10-22T12:52:36.680979574Z",
+    "elapsed_ns": 16633613983226,
+    "elapsed_seconds": 16633.613983226,
+    "sample_count": 1000,
+    "policy_step": 132,
+    "fresh_count": 24,
+    "evaluation_watermark": 4610,
+    "evaluation_started_ns": null,
+    "evaluation_duration_seconds": null,
+    "metadata": {
+      "metric_tag": "Eval/_Global/Average_Return",
+      "scope": "original_task0_rolling_window",
+      "snapshot_completed_ns": 1792673556680979574,
+      "latest_episode_completed_ns": 1792673555758632889,
+      "latest_episode_policy_versions": [
+        131
+      ],
+      "rolling_window_can_span_policy_versions": true
+    }
+  },
+  "maximum_full_window_evaluation": {
+    "evaluation_id": 116,
+    "rate": 0.786,
+    "completed_ns": 1792671839699910813,
+    "completed_iso": "2026-10-22T12:23:59.699910813Z",
+    "elapsed_ns": 14916632914465,
+    "elapsed_seconds": 14916.632914465,
+    "sample_count": 1000,
+    "policy_step": 116,
+    "fresh_count": 23,
+    "evaluation_watermark": 4146,
+    "evaluation_started_ns": null,
+    "evaluation_duration_seconds": null,
+    "metadata": {
+      "metric_tag": "Eval/_Global/Average_Return",
+      "scope": "original_task0_rolling_window",
+      "snapshot_completed_ns": 1792671839699910813,
+      "latest_episode_completed_ns": 1792671839554361520,
+      "latest_episode_policy_versions": [
+        115
+      ],
+      "rolling_window_can_span_policy_versions": true
+    }
+  },
+  "minimum_full_window_evaluation": {
+    "evaluation_id": 39,
+    "rate": 0.738,
+    "completed_ns": 1792663206391289855,
+    "completed_iso": "2026-10-22T10:00:06.391289855Z",
+    "elapsed_ns": 6283324293507,
+    "elapsed_seconds": 6283.324293507,
+    "sample_count": 1000,
+    "policy_step": 39,
+    "fresh_count": 21,
+    "evaluation_watermark": 1816,
+    "evaluation_started_ns": null,
+    "evaluation_duration_seconds": null,
+    "metadata": {
+      "metric_tag": "Eval/_Global/Average_Return",
+      "scope": "original_task0_rolling_window",
+      "snapshot_completed_ns": 1792663206391289855,
+      "latest_episode_completed_ns": 1792663205690220900,
+      "latest_episode_policy_versions": [
+        38
+      ],
+      "rolling_window_can_span_policy_versions": true
+    }
+  },
+  "full_window_evaluation_count": 123,
+  "threshold_state": {
+    "schema_version": 1,
+    "target": 0.85,
+    "required_consecutive": 2,
+    "min_samples": 1000,
+    "run_started_ns": 1792656923066996348,
+    "run_started_iso": "2026-10-22T08:15:23.066996348Z",
+    "streak": 0,
+    "should_stop": false,
+    "first_qualifying": null,
+    "consecutive_qualifying": null,
+    "latest_evaluation": {
+      "evaluation_id": 132,
+      "rate": 0.782,
+      "completed_ns": 1792673556680979574,
+      "completed_iso": "2026-10-22T12:52:36.680979574Z",
+      "elapsed_ns": 16633613983226,
+      "elapsed_seconds": 16633.613983226,
+      "sample_count": 1000,
+      "policy_step": 132,
+      "fresh_count": 24,
+      "evaluation_watermark": 4610,
+      "evaluation_started_ns": null,
+      "evaluation_duration_seconds": null,
+      "metadata": {
+        "metric_tag": "Eval/_Global/Average_Return",
+        "scope": "original_task0_rolling_window",
+        "snapshot_completed_ns": 1792673556680979574,
+        "latest_episode_completed_ns": 1792673555758632889,
+        "latest_episode_policy_versions": [
+          131
+        ],
+        "rolling_window_can_span_policy_versions": true
+      }
+    },
+    "last_evaluation_id": 132,
+    "last_completed_ns": 1792673556680979574,
+    "last_evaluation_watermark": 4610
+  },
+  "milestones": {
+    "First": null,
+    "Consecutive_Two": null
+  },
+  "time_to_85_tensors": {
+    "TimeTo85/First_Elapsed_Seconds": {
+      "expected_if_milestone_reached": true,
+      "recorded": false,
+      "milestone_reached": false,
+      "records": [],
+      "dtype": null,
+      "nanosecond_error": null,
+      "status": "not_recorded_because_threshold_not_reached"
+    },
+    "TimeTo85/First_Completion_Unix_Seconds": {
+      "expected_if_milestone_reached": true,
+      "recorded": false,
+      "milestone_reached": false,
+      "records": [],
+      "dtype": null,
+      "nanosecond_error": null,
+      "status": "not_recorded_because_threshold_not_reached"
+    },
+    "TimeTo85/Consecutive_Two_Elapsed_Seconds": {
+      "expected_if_milestone_reached": true,
+      "recorded": false,
+      "milestone_reached": false,
+      "records": [],
+      "dtype": null,
+      "nanosecond_error": null,
+      "status": "not_recorded_because_threshold_not_reached"
+    },
+    "TimeTo85/Consecutive_Two_Completion_Unix_Seconds": {
+      "expected_if_milestone_reached": true,
+      "recorded": false,
+      "milestone_reached": false,
+      "records": [],
+      "dtype": null,
+      "nanosecond_error": null,
+      "status": "not_recorded_because_threshold_not_reached"
+    }
+  },
+  "max_time_to_85_nanosecond_error": null,
+  "time_to_85_precision_status": "No milestone reached; all four conditional TimeTo85 tags absent as expected. Precision test not applicable; no zero or fabricated time recorded.",
+  "final_policy_steps_agree": true,
+  "checkpoint_manifest": {
+    "format": "accerl_parallel_weights_v1",
+    "saved_at_unix": 1792673563.9822679,
+    "reason": "final",
+    "rank": 0,
+    "world_size": 4,
+    "steps": {
+      "policy": 132,
+      "ctrl": 26,
+      "reward": 26
+    },
+    "weights_only": true,
+    "exact_resume_supported": false,
+    "weights_file": "latest_weights.pt",
+    "weights_bytes": 7126334262
+  },
+  "curve_definition": "Original task0 latest-1000-completed-evaluation-episodes success rate, possibly spanning policy versions. Time zero is run_started_ns before initialization and replay fill.",
+  "cpu_analysis_started_ns": 1792674071563549301,
+  "cpu_analysis_ended_ns": 1792674071672209070,
+  "remote_writes": false,
+  "cuda_visible_devices": "",
+  "torch_imported": false,
+  "scan_count": 1
+}

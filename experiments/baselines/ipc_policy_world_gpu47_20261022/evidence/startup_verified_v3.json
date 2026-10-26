@@ -1,0 +1,251 @@
+{
+  "passed": true,
+  "run_id": "ipcpwmanual_1022_161523_17963ef5",
+  "started_ns": 1792656923066996348,
+  "checked_ns": 1792657132890557846,
+  "source": "source_v3",
+  "data": "formal_v3",
+  "archive_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+  "actual_models_verified": 24,
+  "actual_trainers_ready": 12,
+  "initial_infer_version0_ACKs": 12,
+  "Policy_World_initial_IPC_released": 8,
+  "initial_commits": [
+    {
+      "ts_ns": 1792657035729401560,
+      "actor": "driver",
+      "actor_id": "fill_experiment",
+      "pid": 3393202,
+      "kind": "weight_publication_committed",
+      "model_version": "0",
+      "details_json": "{\"kind\":\"policy\",\"transport\":\"cuda_ipc\",\"started_ns\":1792657034753943568,\"ack_completed_ns\":1792657035729388895,\"inventories\":[{\"kind\":\"policy\",\"version\":0,\"hash\":\"66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520\",\"bytes\":322508292,\"tensor_count\":987},{\"kind\":\"policy\",\"version\":0,\"hash\":\"66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520\",\"bytes\":322508292,\"tensor_count\":987},{\"kind\":\"policy\",\"version\":0,\"hash\":\"66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520\",\"bytes\":322508292,\"tensor_count\":987},{\"kind\":\"policy\",\"version\":0,\"hash\":\"66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520\",\"bytes\":322508292,\"tensor_count\":987}],\"receiver_ranks\":[0,1,2,3],\"driver_timing\":{\"export_submitted_ns\":1792657034753943568,\"export_ready_ns\":1792657035149844005,\"apply_submitted_ns\":1792657035154961223,\"rank_ACK_observed_ns\":[1792657035699844148,1792657035720336666,1792657035722768473,1792657035726341923],\"release_ready_ns\":1792657035729386325},\"meaning\":\"all_rank_receivers_ACKed; per_receiver_model_version_event_is_its_visibility_point\"}",
+      "details": {
+        "kind": "policy",
+        "transport": "cuda_ipc",
+        "started_ns": 1792657034753943568,
+        "ack_completed_ns": 1792657035729388895,
+        "inventories": [
+          {
+            "kind": "policy",
+            "version": 0,
+            "hash": "66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520",
+            "bytes": 322508292,
+            "tensor_count": 987
+          },
+          {
+            "kind": "policy",
+            "version": 0,
+            "hash": "66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520",
+            "bytes": 322508292,
+            "tensor_count": 987
+          },
+          {
+            "kind": "policy",
+            "version": 0,
+            "hash": "66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520",
+            "bytes": 322508292,
+            "tensor_count": 987
+          },
+          {
+            "kind": "policy",
+            "version": 0,
+            "hash": "66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520",
+            "bytes": 322508292,
+            "tensor_count": 987
+          }
+        ],
+        "receiver_ranks": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "driver_timing": {
+          "export_submitted_ns": 1792657034753943568,
+          "export_ready_ns": 1792657035149844005,
+          "apply_submitted_ns": 1792657035154961223,
+          "rank_ACK_observed_ns": [
+            1792657035699844148,
+            1792657035720336666,
+            1792657035722768473,
+            1792657035726341923
+          ],
+          "release_ready_ns": 1792657035729386325
+        },
+        "meaning": "all_rank_receivers_ACKed; per_receiver_model_version_event_is_its_visibility_point"
+      }
+    },
+    {
+      "ts_ns": 1792657060643974161,
+      "actor": "driver",
+      "actor_id": "fill_experiment",
+      "pid": 3393202,
+      "kind": "weight_publication_committed",
+      "model_version": "0",
+      "details_json": "{\"kind\":\"reward\",\"transport\":\"cpu_ray\",\"started_ns\":1792657035730925205,\"ack_completed_ns\":1792657060643961876,\"inventories\":[{\"kind\":\"reward\",\"version\":0,\"hash\":\"c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6\",\"bytes\":3786796420,\"tensor_count\":748},{\"kind\":\"reward\",\"version\":0,\"hash\":\"c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6\",\"bytes\":3786796420,\"tensor_count\":748},{\"kind\":\"reward\",\"version\":0,\"hash\":\"c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6\",\"bytes\":3786796420,\"tensor_count\":748},{\"kind\":\"reward\",\"version\":0,\"hash\":\"c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6\",\"bytes\":3786796420,\"tensor_count\":748}],\"receiver_ranks\":[0,1,2,3],\"driver_timing\":{\"export_submitted_ns\":1792657035730925205,\"export_ready_ns\":1792657050970379665,\"all_ACK_observed_ns\":1792657060643958198},\"meaning\":\"all_rank_receivers_ACKed; per_receiver_model_version_event_is_its_visibility_point\"}",
+      "details": {
+        "kind": "reward",
+        "transport": "cpu_ray",
+        "started_ns": 1792657035730925205,
+        "ack_completed_ns": 1792657060643961876,
+        "inventories": [
+          {
+            "kind": "reward",
+            "version": 0,
+            "hash": "c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6",
+            "bytes": 3786796420,
+            "tensor_count": 748
+          },
+          {
+            "kind": "reward",
+            "version": 0,
+            "hash": "c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6",
+            "bytes": 3786796420,
+            "tensor_count": 748
+          },
+          {
+            "kind": "reward",
+            "version": 0,
+            "hash": "c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6",
+            "bytes": 3786796420,
+            "tensor_count": 748
+          },
+          {
+            "kind": "reward",
+            "version": 0,
+            "hash": "c7ef902394feb8f0e2ea076f09d7c27a71c1594d0048271331e27a6458c64bb6",
+            "bytes": 3786796420,
+            "tensor_count": 748
+          }
+        ],
+        "receiver_ranks": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "driver_timing": {
+          "export_submitted_ns": 1792657035730925205,
+          "export_ready_ns": 1792657050970379665,
+          "all_ACK_observed_ns": 1792657060643958198
+        },
+        "meaning": "all_rank_receivers_ACKed; per_receiver_model_version_event_is_its_visibility_point"
+      }
+    },
+    {
+      "ts_ns": 1792657066092333042,
+      "actor": "driver",
+      "actor_id": "fill_experiment",
+      "pid": 3393202,
+      "kind": "weight_publication_committed",
+      "model_version": "0",
+      "details_json": "{\"kind\":\"ctrl\",\"transport\":\"cuda_ipc\",\"started_ns\":1792657060644188230,\"ack_completed_ns\":1792657066092324724,\"inventories\":[{\"kind\":\"ctrl\",\"version\":0,\"hash\":\"4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4\",\"bytes\":3053460948,\"tensor_count\":1434},{\"kind\":\"ctrl\",\"version\":0,\"hash\":\"4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4\",\"bytes\":3053460948,\"tensor_count\":1434},{\"kind\":\"ctrl\",\"version\":0,\"hash\":\"4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4\",\"bytes\":3053460948,\"tensor_count\":1434},{\"kind\":\"ctrl\",\"version\":0,\"hash\":\"4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4\",\"bytes\":3053460948,\"tensor_count\":1434}],\"receiver_ranks\":[0,1,2,3],\"driver_timing\":{\"export_submitted_ns\":1792657060644188230,\"export_ready_ns\":1792657063293116550,\"apply_submitted_ns\":1792657063305521504,\"rank_ACK_observed_ns\":[1792657066087757661,1792657066087829462,1792657066087851665,1792657066088936407],\"release_ready_ns\":1792657066092322264},\"meaning\":\"all_rank_receivers_ACKed; per_receiver_model_version_event_is_its_visibility_point\"}",
+      "details": {
+        "kind": "ctrl",
+        "transport": "cuda_ipc",
+        "started_ns": 1792657060644188230,
+        "ack_completed_ns": 1792657066092324724,
+        "inventories": [
+          {
+            "kind": "ctrl",
+            "version": 0,
+            "hash": "4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4",
+            "bytes": 3053460948,
+            "tensor_count": 1434
+          },
+          {
+            "kind": "ctrl",
+            "version": 0,
+            "hash": "4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4",
+            "bytes": 3053460948,
+            "tensor_count": 1434
+          },
+          {
+            "kind": "ctrl",
+            "version": 0,
+            "hash": "4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4",
+            "bytes": 3053460948,
+            "tensor_count": 1434
+          },
+          {
+            "kind": "ctrl",
+            "version": 0,
+            "hash": "4d47665fa9a283317745a570e600e1cdadd9aeee74060841144ada90e648e1c4",
+            "bytes": 3053460948,
+            "tensor_count": 1434
+          }
+        ],
+        "receiver_ranks": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "driver_timing": {
+          "export_submitted_ns": 1792657060644188230,
+          "export_ready_ns": 1792657063293116550,
+          "apply_submitted_ns": 1792657063305521504,
+          "rank_ACK_observed_ns": [
+            1792657066087757661,
+            1792657066087829462,
+            1792657066087851665,
+            1792657066088936407
+          ],
+          "release_ready_ns": 1792657066092322264
+        },
+        "meaning": "all_rank_receivers_ACKed; per_receiver_model_version_event_is_its_visibility_point"
+      }
+    }
+  ],
+  "source_hashes_unchanged": true,
+  "MPS_24_clients_exact_model_PIDs": true,
+  "manual_until_user_stop": true,
+  "deadline_unix": null,
+  "no_resume": true,
+  "warmup_steps": {
+    "policy": 100,
+    "value": 100,
+    "ctrl": 20,
+    "reward": 20
+  },
+  "no_Nsight_or_hardware_SM_capture": true,
+  "helper_profiler_injection_absent": true,
+  "phase": "initial_data_pool_fill",
+  "successful_updates_at_snapshot": {
+    "policy": 0,
+    "ctrl": 0,
+    "reward": 0
+  },
+  "first_joint5_restore6_and_successful_updates_audit_pending": true,
+  "lineage_counts_at_snapshot": {
+    "trainer_ready": 12,
+    "weight_publication_committed": 3,
+    "ipc_weight_publish_released": 8,
+    "lineage_group": 161,
+    "lineage_sample_producer": 642,
+    "replay_reserve": 0,
+    "replay_use": 0,
+    "microstep": 0,
+    "model_version": 12
+  },
+  "live_identity_source": "startup_observation_v3.json",
+  "automatic_restart": false,
+  "automation_id": "ipc",
+  "driver_actual_warmup_arguments": {
+    "--policy-warmup-steps": "100",
+    "--value-warmup-steps": "100",
+    "--ctrl-warmup-steps": "20",
+    "--reward-warmup-steps": "20",
+    "--train-iters": "30000"
+  },
+  "Ray_actual_store": {
+    "capacity_bytes": 352187318272,
+    "used_bytes": 8854935263,
+    "fallback_bytes": 0,
+    "spilled_bytes_total": 0,
+    "restored_bytes_total": 0,
+    "checked_ns": 1792657434118757196,
+    "stats_only": true,
+    "gcs_address": "127.0.0.1:36791"
+  }
+}

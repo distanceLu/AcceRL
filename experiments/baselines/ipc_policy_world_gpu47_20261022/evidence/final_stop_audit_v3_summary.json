@@ -1,0 +1,224 @@
+{
+  "passed": true,
+  "run_id": "ipcpwmanual_1022_161523_17963ef5",
+  "created_ns": 1792674365304867500,
+  "scope": "Final stopped IPC run replay/GAS/cohort/source/checkpoint/TensorBoard audit; no statement that WEAVER was started.",
+  "state": "stopped_by_user",
+  "training_stopped": true,
+  "GPU_exit_gate_passed": true,
+  "steps": {
+    "policy": 132,
+    "ctrl": 26,
+    "reward": 26
+  },
+  "allrank_exposures": {
+    "policy": 76032,
+    "ctrl": 26624,
+    "reward": 26624
+  },
+  "dynamic_policy_modes": {
+    "valid": true,
+    "run_id": "ipcpwmanual_1022_161523_17963ef5",
+    "steps": 132,
+    "ranks": 4,
+    "observed_rank_pids": 4,
+    "mode_receipts": 1056,
+    "micro_steps_per_rank": 2844,
+    "successful_updates_per_rank": 132,
+    "local_exposures_per_rank": 19008,
+    "global_exposures": 76032,
+    "rank_pids": {
+      "1": 3404095,
+      "2": 3404108,
+      "3": 3404125,
+      "0": 3404075
+    },
+    "joint_policy_micro_GAS": [
+      4,
+      36
+    ],
+    "single_policy_micro_GAS": [
+      8,
+      18
+    ],
+    "stopped_before_first_update": false,
+    "validation_scope": "all matching run events, no row cap",
+    "rank_PID_binding": true
+  },
+  "joint_cohorts": 26,
+  "cohort_consumers_per_reservation": 8,
+  "synchronized_epochs": 132,
+  "error_events": 0,
+  "unresolved_error_events": 0,
+  "frozen_source_files_verified": 57,
+  "source_archive_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+  "weights_file_identity": {
+    "bytes": 7126334262,
+    "mtime_ns": 1792673568300025162,
+    "inode": 20407149729,
+    "device": 64512
+  },
+  "finite_tensor_counts": {
+    "policy": 891,
+    "ctrl": 1434,
+    "reward": 736
+  },
+  "finite_scan_count": 1,
+  "all_weight_tensors_finite": true,
+  "TensorBoard": {
+    "single_scan": true,
+    "TFRecord_count": 7964,
+    "scalar_count": 7963,
+    "tag_count": 76,
+    "evaluation_curve_points": 132,
+    "all_CRCs_verified": true,
+    "curve_matches_SQLite": true,
+    "all_original_unconditional_tags_present": true,
+    "missing_conditional_WorldModel_Eval_tags": [
+      "WorldModel/Eval/AgentView_LPIPS",
+      "WorldModel/Eval/AgentView_LPIPS_Std",
+      "WorldModel/Eval/AgentView_PSNR",
+      "WorldModel/Eval/AgentView_PSNR_Std",
+      "WorldModel/Eval/AgentView_SSIM",
+      "WorldModel/Eval/AgentView_SSIM_Std",
+      "WorldModel/Eval/Fixed_Set_Size",
+      "WorldModel/Eval/LPIPS",
+      "WorldModel/Eval/LPIPS_Std",
+      "WorldModel/Eval/LPIPS_h1",
+      "WorldModel/Eval/LPIPS_h1_Std",
+      "WorldModel/Eval/LPIPS_h2",
+      "WorldModel/Eval/LPIPS_h2_Std",
+      "WorldModel/Eval/LPIPS_h3",
+      "WorldModel/Eval/LPIPS_h3_Std",
+      "WorldModel/Eval/LPIPS_h4",
+      "WorldModel/Eval/LPIPS_h4_Std",
+      "WorldModel/Eval/MSE",
+      "WorldModel/Eval/MSE_Std",
+      "WorldModel/Eval/MSE_h1",
+      "WorldModel/Eval/MSE_h1_Std",
+      "WorldModel/Eval/MSE_h2",
+      "WorldModel/Eval/MSE_h2_Std",
+      "WorldModel/Eval/MSE_h3",
+      "WorldModel/Eval/MSE_h3_Std",
+      "WorldModel/Eval/MSE_h4",
+      "WorldModel/Eval/MSE_h4_Std",
+      "WorldModel/Eval/PSNR",
+      "WorldModel/Eval/PSNR_Std",
+      "WorldModel/Eval/PSNR_h1",
+      "WorldModel/Eval/PSNR_h1_Std",
+      "WorldModel/Eval/PSNR_h2",
+      "WorldModel/Eval/PSNR_h2_Std",
+      "WorldModel/Eval/PSNR_h3",
+      "WorldModel/Eval/PSNR_h3_Std",
+      "WorldModel/Eval/PSNR_h4",
+      "WorldModel/Eval/PSNR_h4_Std",
+      "WorldModel/Eval/SSIM",
+      "WorldModel/Eval/SSIM_Std",
+      "WorldModel/Eval/SSIM_h1",
+      "WorldModel/Eval/SSIM_h1_Std",
+      "WorldModel/Eval/SSIM_h2",
+      "WorldModel/Eval/SSIM_h2_Std",
+      "WorldModel/Eval/SSIM_h3",
+      "WorldModel/Eval/SSIM_h3_Std",
+      "WorldModel/Eval/SSIM_h4",
+      "WorldModel/Eval/SSIM_h4_Std",
+      "WorldModel/Eval/WristView_LPIPS",
+      "WorldModel/Eval/WristView_LPIPS_Std",
+      "WorldModel/Eval/WristView_PSNR",
+      "WorldModel/Eval/WristView_PSNR_Std",
+      "WorldModel/Eval/WristView_SSIM",
+      "WorldModel/Eval/WristView_SSIM_Std"
+    ],
+    "files": [
+      {
+        "path": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1792656951_OpenVLA_IPCPolicyWorld_Ray328GiB_JointPolicy4_World4_RewardFSDP2_gpu47_fresh/events.out.tfevents.1792656951.h20-xyff52ab-0001.3393202.0",
+        "size_bytes": 611879,
+        "sha256": "48600578411506e91caf04b447a8775cb2643bcbcdc189558a4d4bbc3066a51a",
+        "TFRecord_count": 7964,
+        "size_stable_during_scan": true
+      }
+    ],
+    "all_scalar_data_saved": "final_tensorboard_audit_v3_raw.json"
+  },
+  "evaluation_definition": "Original task0 latest-1000-completed-evaluation-episodes success rate, possibly spanning policy versions. Time zero is run_started_ns before initialization and replay fill.",
+  "latest_evaluation": {
+    "evaluation_id": 132,
+    "rate": 0.782,
+    "completed_ns": 1792673556680979574,
+    "completed_iso": "2026-10-22T12:52:36.680979574Z",
+    "elapsed_ns": 16633613983226,
+    "elapsed_seconds": 16633.613983226,
+    "sample_count": 1000,
+    "policy_step": 132,
+    "fresh_count": 24,
+    "evaluation_watermark": 4610,
+    "evaluation_started_ns": null,
+    "evaluation_duration_seconds": null,
+    "metadata": {
+      "metric_tag": "Eval/_Global/Average_Return",
+      "scope": "original_task0_rolling_window",
+      "snapshot_completed_ns": 1792673556680979574,
+      "latest_episode_completed_ns": 1792673555758632889,
+      "latest_episode_policy_versions": [
+        131
+      ],
+      "rolling_window_can_span_policy_versions": true
+    }
+  },
+  "maximum_full_window_evaluation": {
+    "evaluation_id": 116,
+    "rate": 0.786,
+    "completed_ns": 1792671839699910813,
+    "completed_iso": "2026-10-22T12:23:59.699910813Z",
+    "elapsed_ns": 14916632914465,
+    "elapsed_seconds": 14916.632914465,
+    "sample_count": 1000,
+    "policy_step": 116,
+    "fresh_count": 23,
+    "evaluation_watermark": 4146,
+    "evaluation_started_ns": null,
+    "evaluation_duration_seconds": null,
+    "metadata": {
+      "metric_tag": "Eval/_Global/Average_Return",
+      "scope": "original_task0_rolling_window",
+      "snapshot_completed_ns": 1792671839699910813,
+      "latest_episode_completed_ns": 1792671839554361520,
+      "latest_episode_policy_versions": [
+        115
+      ],
+      "rolling_window_can_span_policy_versions": true
+    }
+  },
+  "time_to_85_seconds": null,
+  "consecutive_two_time_to_85_seconds": null,
+  "time_to_85_status": "not_reached",
+  "sampler": {
+    "receipt_consistent": true,
+    "system_samples": 16645,
+    "process_rows": 415906,
+    "sqlite_dropped_samples": 19,
+    "missed_ticks": 0,
+    "limitation": "Dropped SQLite samples, missed scheduler ticks and errors are separate; post-stop heartbeat age is normal. Sampled peaks do not guarantee instantaneous margins."
+  },
+  "initial_archive_expectation_typo_corrected_locally": {
+    "reason": "The first wrapper manually copied a 62-character expected archive SHA256. Its observed 64-character SHA256 equals both the frozen deployment validation and local source_v3.tar.gz; all 57 remote source-file hashes already matched.",
+    "original_audit_file": "final_training_audit_v3.json",
+    "original_audit_sha256": "6c10398543b1ff5f495bb5c05ef5db0d704b75920b27b01cdefda5b86510ed81",
+    "original_expected_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4f729c971c332b56cfadb85878",
+    "correct_expected_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+    "validation_receipt_sha256": "ef41cfb1459e78c5b51e6f680a0f5ad8e335b8436e9a4d2aabd00c18352cebf4",
+    "remote_scan_repeated": false
+  },
+  "remote_audit_repeated": false,
+  "weights_reloaded_during_binding": false,
+  "evidence_sha256": {
+    "manual_stop_gate.json": "ba7ef0422497bf79be91e0d24845d0ad0a1877efe23e4505c5889259454c9046",
+    "final_training_audit_v3.json": "6c10398543b1ff5f495bb5c05ef5db0d704b75920b27b01cdefda5b86510ed81",
+    "final_training_audit_v3_corrected_bound.json": "0ec1f82081600c2003747036516b53a63c4d1243c55e8a4b6e8f9970b645f61a",
+    "final_weights_finite.json": "d2a3bba659fcb4b5952d8f372d75276c4e0c82c29e4075a8a85cb509336113c8",
+    "final_tensorboard_audit_v3.json": "abb4c77a7a5e6f7af3d6d458069d0342ec91f82d0712be47807b0e370336569a",
+    "final_tensorboard_audit_v3_raw.json": "141438f123e3f39b214d497e1057b307906e42201bf54ec4980888a6d8d0c8d6",
+    "source_manifest_v3.json": "2d201b5bfc15d405a1879702738ffacac244e7a0004b00fa59936973f51a8ab1",
+    "validation_v3.json": "ef41cfb1459e78c5b51e6f680a0f5ad8e335b8436e9a4d2aabd00c18352cebf4"
+  }
+}

@@ -1,0 +1,2318 @@
+{
+  "schema_version": 1,
+  "scope": "Matched Policy updates31-100: 14 complete 5:1:1 cycles, with epoch30 retained as the first left endpoint.",
+  "source": {
+    "original_extraction": "analysis/ipc_overnight_audit_20261023/speed_raw_evidence.json",
+    "original_extraction_sha256": "def18984a3db685360fd4a952840cf39e5aa9f35093f4c3871e51c28e32ecba7",
+    "original_extraction_bytes": 9532607,
+    "access": "CPU only sqlite mode=ro; stopped databases; no runtime imports/torch/GPU/remote writes",
+    "original_analyzer_sha256": "6ece5401106f2801ac233afdac8257c0372bb38c0828c1346f08c35cabfbda6b",
+    "projection": "Only synchronized_epoch_completed records30..100; integer event id/ts_ns and exact JSON epoch/global/rank/phase-duration fields. No publication/owner/request reconstruction."
+  },
+  "definitions": {
+    "cycle_wall_seconds": "(epoch[end].ts_ns - epoch[start-1].ts_ns)/1e9, starts31,36,...,96; each cycle contains5 Policy,1 World,1 Reward updates.",
+    "policy_updates_per_hour": "70*3600 / sum(14 cycle wall durations)",
+    "sync_seconds": "Sum recorded controller sync_seconds inside each5epoch cycle, host wall span.",
+    "known_measurement_exclusion": "31..100 avoids baseline capture14/15 and CPU25, and conservatively avoids IPC lineage observation16..25. This does not assert all profiler/workload effects eliminated."
+  },
+  "runs": {
+    "ipc": {
+      "run_id": "ipcpwmanual_1022_161523_17963ef5",
+      "projected_rows_sha256": "afdac6a89e26d9d856194f4fdf1526ea76e037f19e6e29b688a526a6667736e7",
+      "epochs": [
+        {
+          "event_id": 777468,
+          "ts_ns": 1792662383386031047,
+          "completed_epochs": 30,
+          "global_step": 30,
+          "rank_steps": [
+            30,
+            30,
+            30,
+            30
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 247.12560367584229,
+          "sync_seconds": 31.785926580429077
+        },
+        {
+          "event_id": 786584,
+          "ts_ns": 1792662450046670077,
+          "completed_epochs": 31,
+          "global_step": 31,
+          "rank_steps": [
+            31,
+            31,
+            31,
+            31
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.29312634468079,
+          "sync_seconds": 1.3565597534179688
+        },
+        {
+          "event_id": 796384,
+          "ts_ns": 1792662519369833559,
+          "completed_epochs": 32,
+          "global_step": 32,
+          "rank_steps": [
+            32,
+            32,
+            32,
+            32
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.03924465179443,
+          "sync_seconds": 1.276885986328125
+        },
+        {
+          "event_id": 805183,
+          "ts_ns": 1792662584251533896,
+          "completed_epochs": 33,
+          "global_step": 33,
+          "rank_steps": [
+            33,
+            33,
+            33,
+            33
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 63.86011624336243,
+          "sync_seconds": 1.0147731304168701
+        },
+        {
+          "event_id": 815284,
+          "ts_ns": 1792662655411702804,
+          "completed_epochs": 34,
+          "global_step": 34,
+          "rank_steps": [
+            34,
+            34,
+            34,
+            34
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.62615060806274,
+          "sync_seconds": 1.5260426998138428
+        },
+        {
+          "event_id": 843400,
+          "ts_ns": 1792662930294748196,
+          "completed_epochs": 35,
+          "global_step": 35,
+          "rank_steps": [
+            35,
+            35,
+            35,
+            35
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 244.2260115146637,
+          "sync_seconds": 30.649819135665894
+        },
+        {
+          "event_id": 852711,
+          "ts_ns": 1792662999149169345,
+          "completed_epochs": 36,
+          "global_step": 36,
+          "rank_steps": [
+            36,
+            36,
+            36,
+            36
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.71615719795227,
+          "sync_seconds": 1.1284985542297363
+        },
+        {
+          "event_id": 861803,
+          "ts_ns": 1792663066126380523,
+          "completed_epochs": 37,
+          "global_step": 37,
+          "rank_steps": [
+            37,
+            37,
+            37,
+            37
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.94338965415955,
+          "sync_seconds": 1.0261735916137695
+        },
+        {
+          "event_id": 871339,
+          "ts_ns": 1792663138052956912,
+          "completed_epochs": 38,
+          "global_step": 38,
+          "rank_steps": [
+            38,
+            38,
+            38,
+            38
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.8640627861023,
+          "sync_seconds": 1.0544254779815674
+        },
+        {
+          "event_id": 880784,
+          "ts_ns": 1792663206390002452,
+          "completed_epochs": 39,
+          "global_step": 39,
+          "rank_steps": [
+            39,
+            39,
+            39,
+            39
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.29078888893127,
+          "sync_seconds": 1.039170742034912
+        },
+        {
+          "event_id": 908212,
+          "ts_ns": 1792663481337479414,
+          "completed_epochs": 40,
+          "global_step": 40,
+          "rank_steps": [
+            40,
+            40,
+            40,
+            40
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 245.0958948135376,
+          "sync_seconds": 29.843125104904175
+        },
+        {
+          "event_id": 917853,
+          "ts_ns": 1792663550670455008,
+          "completed_epochs": 41,
+          "global_step": 41,
+          "rank_steps": [
+            41,
+            41,
+            41,
+            41
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.16595578193665,
+          "sync_seconds": 1.1579558849334717
+        },
+        {
+          "event_id": 927385,
+          "ts_ns": 1792663620473611859,
+          "completed_epochs": 42,
+          "global_step": 42,
+          "rank_steps": [
+            42,
+            42,
+            42,
+            42
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.80603313446045,
+          "sync_seconds": 0.9890363216400146
+        },
+        {
+          "event_id": 936326,
+          "ts_ns": 1792663687393115848,
+          "completed_epochs": 43,
+          "global_step": 43,
+          "rank_steps": [
+            43,
+            43,
+            43,
+            43
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.82510590553284,
+          "sync_seconds": 1.0868117809295654
+        },
+        {
+          "event_id": 945560,
+          "ts_ns": 1792663756134925058,
+          "completed_epochs": 44,
+          "global_step": 44,
+          "rank_steps": [
+            44,
+            44,
+            44,
+            44
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.36208963394165,
+          "sync_seconds": 1.3719558715820312
+        },
+        {
+          "event_id": 974302,
+          "ts_ns": 1792664036813288669,
+          "completed_epochs": 45,
+          "global_step": 45,
+          "rank_steps": [
+            45,
+            45,
+            45,
+            45
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 251.51134610176086,
+          "sync_seconds": 29.1599063873291
+        },
+        {
+          "event_id": 983428,
+          "ts_ns": 1792664104905383940,
+          "completed_epochs": 46,
+          "global_step": 46,
+          "rank_steps": [
+            46,
+            46,
+            46,
+            46
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.79948019981384,
+          "sync_seconds": 1.2836780548095703
+        },
+        {
+          "event_id": 992847,
+          "ts_ns": 1792664172665478193,
+          "completed_epochs": 47,
+          "global_step": 47,
+          "rank_steps": [
+            47,
+            47,
+            47,
+            47
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.538898229599,
+          "sync_seconds": 1.2127368450164795
+        },
+        {
+          "event_id": 1001795,
+          "ts_ns": 1792664238435791578,
+          "completed_epochs": 48,
+          "global_step": 48,
+          "rank_steps": [
+            48,
+            48,
+            48,
+            48
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 64.90477800369263,
+          "sync_seconds": 0.8576650619506836
+        },
+        {
+          "event_id": 1010496,
+          "ts_ns": 1792664303078633677,
+          "completed_epochs": 49,
+          "global_step": 49,
+          "rank_steps": [
+            49,
+            49,
+            49,
+            49
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 63.69029760360718,
+          "sync_seconds": 0.9455060958862305
+        },
+        {
+          "event_id": 1038919,
+          "ts_ns": 1792664581682442956,
+          "completed_epochs": 50,
+          "global_step": 50,
+          "rank_steps": [
+            50,
+            50,
+            50,
+            50
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 248.65072011947632,
+          "sync_seconds": 29.945791244506836
+        },
+        {
+          "event_id": 1051452,
+          "ts_ns": 1792664668374765162,
+          "completed_epochs": 51,
+          "global_step": 51,
+          "rank_steps": [
+            51,
+            51,
+            51,
+            51
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 72.59717345237732,
+          "sync_seconds": 1.089170217514038
+        },
+        {
+          "event_id": 1060604,
+          "ts_ns": 1792664736411481222,
+          "completed_epochs": 52,
+          "global_step": 52,
+          "rank_steps": [
+            52,
+            52,
+            52,
+            52
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.31055426597595,
+          "sync_seconds": 1.7188382148742676
+        },
+        {
+          "event_id": 1070135,
+          "ts_ns": 1792664806360740322,
+          "completed_epochs": 53,
+          "global_step": 53,
+          "rank_steps": [
+            53,
+            53,
+            53,
+            53
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.47522568702698,
+          "sync_seconds": 1.4667067527770996
+        },
+        {
+          "event_id": 1079094,
+          "ts_ns": 1792664873615311789,
+          "completed_epochs": 54,
+          "global_step": 54,
+          "rank_steps": [
+            54,
+            54,
+            54,
+            54
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.32103729248047,
+          "sync_seconds": 0.9251899719238281
+        },
+        {
+          "event_id": 1106843,
+          "ts_ns": 1792665148241316204,
+          "completed_epochs": 55,
+          "global_step": 55,
+          "rank_steps": [
+            55,
+            55,
+            55,
+            55
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 244.71732997894287,
+          "sync_seconds": 29.901066064834595
+        },
+        {
+          "event_id": 1116611,
+          "ts_ns": 1792665217884877390,
+          "completed_epochs": 56,
+          "global_step": 56,
+          "rank_steps": [
+            56,
+            56,
+            56,
+            56
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.38062500953674,
+          "sync_seconds": 1.2546026706695557
+        },
+        {
+          "event_id": 1126226,
+          "ts_ns": 1792665288717764350,
+          "completed_epochs": 57,
+          "global_step": 57,
+          "rank_steps": [
+            57,
+            57,
+            57,
+            57
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.71610808372498,
+          "sync_seconds": 1.1084871292114258
+        },
+        {
+          "event_id": 1135522,
+          "ts_ns": 1792665356120295642,
+          "completed_epochs": 58,
+          "global_step": 58,
+          "rank_steps": [
+            58,
+            58,
+            58,
+            58
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.52966094017029,
+          "sync_seconds": 0.8641090393066406
+        },
+        {
+          "event_id": 1144507,
+          "ts_ns": 1792665422328656792,
+          "completed_epochs": 59,
+          "global_step": 59,
+          "rank_steps": [
+            59,
+            59,
+            59,
+            59
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.15488743782043,
+          "sync_seconds": 1.046004295349121
+        },
+        {
+          "event_id": 1172366,
+          "ts_ns": 1792665695394503540,
+          "completed_epochs": 60,
+          "global_step": 60,
+          "rank_steps": [
+            60,
+            60,
+            60,
+            60
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 243.63954877853394,
+          "sync_seconds": 29.392548322677612
+        },
+        {
+          "event_id": 1181725,
+          "ts_ns": 1792665766226058046,
+          "completed_epochs": 61,
+          "global_step": 61,
+          "rank_steps": [
+            61,
+            61,
+            61,
+            61
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.8680317401886,
+          "sync_seconds": 0.9540188312530518
+        },
+        {
+          "event_id": 1191121,
+          "ts_ns": 1792665833704336087,
+          "completed_epochs": 62,
+          "global_step": 62,
+          "rank_steps": [
+            62,
+            62,
+            62,
+            62
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.11378455162048,
+          "sync_seconds": 1.3571326732635498
+        },
+        {
+          "event_id": 1201977,
+          "ts_ns": 1792665910089492737,
+          "completed_epochs": 63,
+          "global_step": 63,
+          "rank_steps": [
+            63,
+            63,
+            63,
+            63
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 74.76492071151733,
+          "sync_seconds": 1.6128790378570557
+        },
+        {
+          "event_id": 1211226,
+          "ts_ns": 1792665977477309965,
+          "completed_epochs": 64,
+          "global_step": 64,
+          "rank_steps": [
+            64,
+            64,
+            64,
+            64
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.3511574268341,
+          "sync_seconds": 1.0293591022491455
+        },
+        {
+          "event_id": 1239724,
+          "ts_ns": 1792666255164071833,
+          "completed_epochs": 65,
+          "global_step": 65,
+          "rank_steps": [
+            65,
+            65,
+            65,
+            65
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 247.7277500629425,
+          "sync_seconds": 29.950400829315186
+        },
+        {
+          "event_id": 1249081,
+          "ts_ns": 1792666324122418360,
+          "completed_epochs": 66,
+          "global_step": 66,
+          "rank_steps": [
+            66,
+            66,
+            66,
+            66
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.94285488128662,
+          "sync_seconds": 1.0048999786376953
+        },
+        {
+          "event_id": 1258378,
+          "ts_ns": 1792666391493840868,
+          "completed_epochs": 67,
+          "global_step": 67,
+          "rank_steps": [
+            67,
+            67,
+            67,
+            67
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.28664541244507,
+          "sync_seconds": 1.0772638320922852
+        },
+        {
+          "event_id": 1267942,
+          "ts_ns": 1792666459917108967,
+          "completed_epochs": 68,
+          "global_step": 68,
+          "rank_steps": [
+            68,
+            68,
+            68,
+            68
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.83843421936035,
+          "sync_seconds": 1.5770795345306396
+        },
+        {
+          "event_id": 1278121,
+          "ts_ns": 1792666533520837085,
+          "completed_epochs": 69,
+          "global_step": 69,
+          "rank_steps": [
+            69,
+            69,
+            69,
+            69
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 72.50131225585938,
+          "sync_seconds": 1.0953612327575684
+        },
+        {
+          "event_id": 1305327,
+          "ts_ns": 1792666803679801062,
+          "completed_epochs": 70,
+          "global_step": 70,
+          "rank_steps": [
+            70,
+            70,
+            70,
+            70
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 240.2827250957489,
+          "sync_seconds": 29.868632793426514
+        },
+        {
+          "event_id": 1314271,
+          "ts_ns": 1792666871445693277,
+          "completed_epochs": 71,
+          "global_step": 71,
+          "rank_steps": [
+            71,
+            71,
+            71,
+            71
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.08068084716797,
+          "sync_seconds": 1.6753926277160645
+        },
+        {
+          "event_id": 1323394,
+          "ts_ns": 1792666938307584642,
+          "completed_epochs": 72,
+          "global_step": 72,
+          "rank_steps": [
+            72,
+            72,
+            72,
+            72
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.53704452514648,
+          "sync_seconds": 1.3172898292541504
+        },
+        {
+          "event_id": 1332899,
+          "ts_ns": 1792667007900057336,
+          "completed_epochs": 73,
+          "global_step": 73,
+          "rank_steps": [
+            73,
+            73,
+            73,
+            73
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.44367694854736,
+          "sync_seconds": 1.142026424407959
+        },
+        {
+          "event_id": 1341976,
+          "ts_ns": 1792667074098417919,
+          "completed_epochs": 74,
+          "global_step": 74,
+          "rank_steps": [
+            74,
+            74,
+            74,
+            74
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 64.62760519981384,
+          "sync_seconds": 1.5633599758148193
+        },
+        {
+          "event_id": 1370601,
+          "ts_ns": 1792667353751496873,
+          "completed_epochs": 75,
+          "global_step": 75,
+          "rank_steps": [
+            75,
+            75,
+            75,
+            75
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 249.82421207427979,
+          "sync_seconds": 29.82148265838623
+        },
+        {
+          "event_id": 1382465,
+          "ts_ns": 1792667435564015737,
+          "completed_epochs": 76,
+          "global_step": 76,
+          "rank_steps": [
+            76,
+            76,
+            76,
+            76
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.11727643013,
+          "sync_seconds": 1.123844861984253
+        },
+        {
+          "event_id": 1392190,
+          "ts_ns": 1792667504666238918,
+          "completed_epochs": 77,
+          "global_step": 77,
+          "rank_steps": [
+            77,
+            77,
+            77,
+            77
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.28720188140869,
+          "sync_seconds": 1.8079609870910645
+        },
+        {
+          "event_id": 1402426,
+          "ts_ns": 1792667575231242633,
+          "completed_epochs": 78,
+          "global_step": 78,
+          "rank_steps": [
+            78,
+            78,
+            78,
+            78
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.52508854866028,
+          "sync_seconds": 1.0322227478027344
+        },
+        {
+          "event_id": 1412152,
+          "ts_ns": 1792667645685541691,
+          "completed_epochs": 79,
+          "global_step": 79,
+          "rank_steps": [
+            79,
+            79,
+            79,
+            79
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.28891372680664,
+          "sync_seconds": 1.1560964584350586
+        },
+        {
+          "event_id": 1441001,
+          "ts_ns": 1792667924819977121,
+          "completed_epochs": 80,
+          "global_step": 80,
+          "rank_steps": [
+            80,
+            80,
+            80,
+            80
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 249.60414099693298,
+          "sync_seconds": 29.522842168807983
+        },
+        {
+          "event_id": 1450470,
+          "ts_ns": 1792667994046377726,
+          "completed_epochs": 81,
+          "global_step": 81,
+          "rank_steps": [
+            81,
+            81,
+            81,
+            81
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.71781086921692,
+          "sync_seconds": 1.4993422031402588
+        },
+        {
+          "event_id": 1459991,
+          "ts_ns": 1792668062956507072,
+          "completed_epochs": 82,
+          "global_step": 82,
+          "rank_steps": [
+            82,
+            82,
+            82,
+            82
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.87752199172974,
+          "sync_seconds": 1.0255088806152344
+        },
+        {
+          "event_id": 1469247,
+          "ts_ns": 1792668131209871400,
+          "completed_epochs": 83,
+          "global_step": 83,
+          "rank_steps": [
+            83,
+            83,
+            83,
+            83
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.99702143669128,
+          "sync_seconds": 1.2486822605133057
+        },
+        {
+          "event_id": 1478516,
+          "ts_ns": 1792668199494906785,
+          "completed_epochs": 84,
+          "global_step": 84,
+          "rank_steps": [
+            84,
+            84,
+            84,
+            84
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.19777226448059,
+          "sync_seconds": 1.080047369003296
+        },
+        {
+          "event_id": 1506088,
+          "ts_ns": 1792668474274096662,
+          "completed_epochs": 85,
+          "global_step": 85,
+          "rank_steps": [
+            85,
+            85,
+            85,
+            85
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 245.082524061203,
+          "sync_seconds": 29.68932294845581
+        },
+        {
+          "event_id": 1515531,
+          "ts_ns": 1792668544539910295,
+          "completed_epochs": 86,
+          "global_step": 86,
+          "rank_steps": [
+            86,
+            86,
+            86,
+            86
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.29688453674316,
+          "sync_seconds": 0.960566520690918
+        },
+        {
+          "event_id": 1525137,
+          "ts_ns": 1792668613597753605,
+          "completed_epochs": 87,
+          "global_step": 87,
+          "rank_steps": [
+            87,
+            87,
+            87,
+            87
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.9958267211914,
+          "sync_seconds": 1.0538060665130615
+        },
+        {
+          "event_id": 1534145,
+          "ts_ns": 1792668680049435101,
+          "completed_epochs": 88,
+          "global_step": 88,
+          "rank_steps": [
+            88,
+            88,
+            88,
+            88
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.57098889350891,
+          "sync_seconds": 0.8725690841674805
+        },
+        {
+          "event_id": 1543081,
+          "ts_ns": 1792668745718698776,
+          "completed_epochs": 89,
+          "global_step": 89,
+          "rank_steps": [
+            89,
+            89,
+            89,
+            89
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 64.7782335281372,
+          "sync_seconds": 0.8814198970794678
+        },
+        {
+          "event_id": 1571222,
+          "ts_ns": 1792669022718080621,
+          "completed_epochs": 90,
+          "global_step": 90,
+          "rank_steps": [
+            90,
+            90,
+            90,
+            90
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 247.5315294265747,
+          "sync_seconds": 29.460296392440796
+        },
+        {
+          "event_id": 1580501,
+          "ts_ns": 1792669090745933181,
+          "completed_epochs": 91,
+          "global_step": 91,
+          "rank_steps": [
+            91,
+            91,
+            91,
+            91
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.92833638191223,
+          "sync_seconds": 1.0479826927185059
+        },
+        {
+          "event_id": 1590100,
+          "ts_ns": 1792669161352291798,
+          "completed_epochs": 92,
+          "global_step": 92,
+          "rank_steps": [
+            92,
+            92,
+            92,
+            92
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.35352206230164,
+          "sync_seconds": 1.244922399520874
+        },
+        {
+          "event_id": 1599693,
+          "ts_ns": 1792669231639516947,
+          "completed_epochs": 93,
+          "global_step": 93,
+          "rank_steps": [
+            93,
+            93,
+            93,
+            93
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.86463117599487,
+          "sync_seconds": 1.4152591228485107
+        },
+        {
+          "event_id": 1609129,
+          "ts_ns": 1792669300903094564,
+          "completed_epochs": 94,
+          "global_step": 94,
+          "rank_steps": [
+            94,
+            94,
+            94,
+            94
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.9259102344513,
+          "sync_seconds": 1.328519582748413
+        },
+        {
+          "event_id": 1637654,
+          "ts_ns": 1792669578000029879,
+          "completed_epochs": 95,
+          "global_step": 95,
+          "rank_steps": [
+            95,
+            95,
+            95,
+            95
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 246.95542812347412,
+          "sync_seconds": 30.133893728256226
+        },
+        {
+          "event_id": 1646802,
+          "ts_ns": 1792669646551208228,
+          "completed_epochs": 96,
+          "global_step": 96,
+          "rank_steps": [
+            96,
+            96,
+            96,
+            96
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.439120054245,
+          "sync_seconds": 1.1027817726135254
+        },
+        {
+          "event_id": 1655751,
+          "ts_ns": 1792669712979276515,
+          "completed_epochs": 97,
+          "global_step": 97,
+          "rank_steps": [
+            97,
+            97,
+            97,
+            97
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.34389781951904,
+          "sync_seconds": 1.0763030052185059
+        },
+        {
+          "event_id": 1664922,
+          "ts_ns": 1792669779934038854,
+          "completed_epochs": 98,
+          "global_step": 98,
+          "rank_steps": [
+            98,
+            98,
+            98,
+            98
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.09576916694641,
+          "sync_seconds": 0.8499042987823486
+        },
+        {
+          "event_id": 1673741,
+          "ts_ns": 1792669845315775033,
+          "completed_epochs": 99,
+          "global_step": 99,
+          "rank_steps": [
+            99,
+            99,
+            99,
+            99
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 64.35221076011658,
+          "sync_seconds": 1.0216436386108398
+        },
+        {
+          "event_id": 1701934,
+          "ts_ns": 1792670117231065684,
+          "completed_epochs": 100,
+          "global_step": 100,
+          "rank_steps": [
+            100,
+            100,
+            100,
+            100
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 241.90279841423035,
+          "sync_seconds": 30.004329204559326
+        }
+      ]
+    },
+    "baseline": {
+      "run_id": "jointp4manual_1022_104329_229b879f",
+      "projected_rows_sha256": "6013d13d8aeeeaa1a9f05dabb900d4420e6f26c5fb34ce4b2cba4f2a1c3d943d",
+      "epochs": [
+        {
+          "event_id": 676311,
+          "ts_ns": 1792642230637733778,
+          "completed_epochs": 30,
+          "global_step": 30,
+          "rank_steps": [
+            30,
+            30,
+            30,
+            30
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 248.54159569740295,
+          "sync_seconds": 90.80507898330688
+        },
+        {
+          "event_id": 687037,
+          "ts_ns": 1792642310389643711,
+          "completed_epochs": 31,
+          "global_step": 31,
+          "rank_steps": [
+            31,
+            31,
+            31,
+            31
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 77.06444311141968,
+          "sync_seconds": 2.678936004638672
+        },
+        {
+          "event_id": 696882,
+          "ts_ns": 1792642384691702352,
+          "completed_epochs": 32,
+          "global_step": 32,
+          "rank_steps": [
+            32,
+            32,
+            32,
+            32
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 72.14700937271118,
+          "sync_seconds": 2.1469850540161133
+        },
+        {
+          "event_id": 706379,
+          "ts_ns": 1792642457137793343,
+          "completed_epochs": 33,
+          "global_step": 33,
+          "rank_steps": [
+            33,
+            33,
+            33,
+            33
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.56144261360168,
+          "sync_seconds": 2.876762628555298
+        },
+        {
+          "event_id": 715427,
+          "ts_ns": 1792642525973031732,
+          "completed_epochs": 34,
+          "global_step": 34,
+          "rank_steps": [
+            34,
+            34,
+            34,
+            34
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.28366613388062,
+          "sync_seconds": 2.5435805320739746
+        },
+        {
+          "event_id": 749658,
+          "ts_ns": 1792642873906426138,
+          "completed_epochs": 35,
+          "global_step": 35,
+          "rank_steps": [
+            35,
+            35,
+            35,
+            35
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 247.03517484664917,
+          "sync_seconds": 100.89111542701721
+        },
+        {
+          "event_id": 760176,
+          "ts_ns": 1792642951799205445,
+          "completed_epochs": 36,
+          "global_step": 36,
+          "rank_steps": [
+            36,
+            36,
+            36,
+            36
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 75.3326427936554,
+          "sync_seconds": 2.551316261291504
+        },
+        {
+          "event_id": 768996,
+          "ts_ns": 1792643019785269840,
+          "completed_epochs": 37,
+          "global_step": 37,
+          "rank_steps": [
+            37,
+            37,
+            37,
+            37
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.40770649909973,
+          "sync_seconds": 2.5708446502685547
+        },
+        {
+          "event_id": 778226,
+          "ts_ns": 1792643091093599635,
+          "completed_epochs": 38,
+          "global_step": 38,
+          "rank_steps": [
+            38,
+            38,
+            38,
+            38
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.86088252067566,
+          "sync_seconds": 2.4403064250946045
+        },
+        {
+          "event_id": 787714,
+          "ts_ns": 1792643161658061129,
+          "completed_epochs": 39,
+          "global_step": 39,
+          "rank_steps": [
+            39,
+            39,
+            39,
+            39
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.17083716392517,
+          "sync_seconds": 2.3855905532836914
+        },
+        {
+          "event_id": 818763,
+          "ts_ns": 1792643479448539802,
+          "completed_epochs": 40,
+          "global_step": 40,
+          "rank_steps": [
+            40,
+            40,
+            40,
+            40
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 246.60773086547852,
+          "sync_seconds": 71.17385768890381
+        },
+        {
+          "event_id": 829069,
+          "ts_ns": 1792643557341497404,
+          "completed_epochs": 41,
+          "global_step": 41,
+          "rank_steps": [
+            41,
+            41,
+            41,
+            41
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 75.35587763786316,
+          "sync_seconds": 2.527700901031494
+        },
+        {
+          "event_id": 838773,
+          "ts_ns": 1792643628700213309,
+          "completed_epochs": 42,
+          "global_step": 42,
+          "rank_steps": [
+            42,
+            42,
+            42,
+            42
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.76022362709045,
+          "sync_seconds": 2.590578079223633
+        },
+        {
+          "event_id": 849014,
+          "ts_ns": 1792643704804714931,
+          "completed_epochs": 43,
+          "global_step": 43,
+          "rank_steps": [
+            43,
+            43,
+            43,
+            43
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 73.56092381477356,
+          "sync_seconds": 2.5358967781066895
+        },
+        {
+          "event_id": 857899,
+          "ts_ns": 1792643773796484351,
+          "completed_epochs": 44,
+          "global_step": 44,
+          "rank_steps": [
+            44,
+            44,
+            44,
+            44
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.80190896987915,
+          "sync_seconds": 2.177804470062256
+        },
+        {
+          "event_id": 893677,
+          "ts_ns": 1792644150500618432,
+          "completed_epochs": 45,
+          "global_step": 45,
+          "rank_steps": [
+            45,
+            45,
+            45,
+            45
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 255.9865107536316,
+          "sync_seconds": 120.71007370948792
+        },
+        {
+          "event_id": 903734,
+          "ts_ns": 1792644225828999710,
+          "completed_epochs": 46,
+          "global_step": 46,
+          "rank_steps": [
+            46,
+            46,
+            46,
+            46
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 72.7358808517456,
+          "sync_seconds": 2.5837950706481934
+        },
+        {
+          "event_id": 913370,
+          "ts_ns": 1792644298059968258,
+          "completed_epochs": 47,
+          "global_step": 47,
+          "rank_steps": [
+            47,
+            47,
+            47,
+            47
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.81146335601807,
+          "sync_seconds": 2.4107165336608887
+        },
+        {
+          "event_id": 923112,
+          "ts_ns": 1792644369516214819,
+          "completed_epochs": 48,
+          "global_step": 48,
+          "rank_steps": [
+            48,
+            48,
+            48,
+            48
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.05175876617432,
+          "sync_seconds": 2.3971002101898193
+        },
+        {
+          "event_id": 933072,
+          "ts_ns": 1792644444419481310,
+          "completed_epochs": 49,
+          "global_step": 49,
+          "rank_steps": [
+            49,
+            49,
+            49,
+            49
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 72.45053768157959,
+          "sync_seconds": 2.4448001384735107
+        },
+        {
+          "event_id": 966091,
+          "ts_ns": 1792644779220010106,
+          "completed_epochs": 50,
+          "global_step": 50,
+          "rank_steps": [
+            50,
+            50,
+            50,
+            50
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 249.47868418693542,
+          "sync_seconds": 85.31448602676392
+        },
+        {
+          "event_id": 978533,
+          "ts_ns": 1792644871291473795,
+          "completed_epochs": 51,
+          "global_step": 51,
+          "rank_steps": [
+            51,
+            51,
+            51,
+            51
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.43169164657593,
+          "sync_seconds": 2.371814250946045
+        },
+        {
+          "event_id": 988156,
+          "ts_ns": 1792644942948027331,
+          "completed_epochs": 52,
+          "global_step": 52,
+          "rank_steps": [
+            52,
+            52,
+            52,
+            52
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.07713341712952,
+          "sync_seconds": 2.571068286895752
+        },
+        {
+          "event_id": 997562,
+          "ts_ns": 1792645014035872610,
+          "completed_epochs": 53,
+          "global_step": 53,
+          "rank_steps": [
+            53,
+            53,
+            53,
+            53
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.83415937423706,
+          "sync_seconds": 2.2442007064819336
+        },
+        {
+          "event_id": 1007578,
+          "ts_ns": 1792645088476818825,
+          "completed_epochs": 54,
+          "global_step": 54,
+          "rank_steps": [
+            54,
+            54,
+            54,
+            54
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 71.82388138771057,
+          "sync_seconds": 2.6083860397338867
+        },
+        {
+          "event_id": 1041736,
+          "ts_ns": 1792645442995316464,
+          "completed_epochs": 55,
+          "global_step": 55,
+          "rank_steps": [
+            55,
+            55,
+            55,
+            55
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 245.57329273223877,
+          "sync_seconds": 108.93632435798645
+        },
+        {
+          "event_id": 1051744,
+          "ts_ns": 1792645516834514351,
+          "completed_epochs": 56,
+          "global_step": 56,
+          "rank_steps": [
+            56,
+            56,
+            56,
+            56
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 71.3275876045227,
+          "sync_seconds": 2.500882863998413
+        },
+        {
+          "event_id": 1061324,
+          "ts_ns": 1792645589537191724,
+          "completed_epochs": 57,
+          "global_step": 57,
+          "rank_steps": [
+            57,
+            57,
+            57,
+            57
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.92664051055908,
+          "sync_seconds": 2.767483711242676
+        },
+        {
+          "event_id": 1070302,
+          "ts_ns": 1792645658206210489,
+          "completed_epochs": 58,
+          "global_step": 58,
+          "rank_steps": [
+            58,
+            58,
+            58,
+            58
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.30144572257996,
+          "sync_seconds": 2.3597047328948975
+        },
+        {
+          "event_id": 1080194,
+          "ts_ns": 1792645732697373178,
+          "completed_epochs": 59,
+          "global_step": 59,
+          "rank_steps": [
+            59,
+            59,
+            59,
+            59
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 72.13966870307922,
+          "sync_seconds": 2.3433237075805664
+        },
+        {
+          "event_id": 1111840,
+          "ts_ns": 1792646069535844440,
+          "completed_epochs": 60,
+          "global_step": 60,
+          "rank_steps": [
+            60,
+            60,
+            60,
+            60
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 250.13350796699524,
+          "sync_seconds": 86.6946210861206
+        },
+        {
+          "event_id": 1121332,
+          "ts_ns": 1792646140624947427,
+          "completed_epochs": 61,
+          "global_step": 61,
+          "rank_steps": [
+            61,
+            61,
+            61,
+            61
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.71088409423828,
+          "sync_seconds": 2.3333985805511475
+        },
+        {
+          "event_id": 1131145,
+          "ts_ns": 1792646213960013099,
+          "completed_epochs": 62,
+          "global_step": 62,
+          "rank_steps": [
+            62,
+            62,
+            62,
+            62
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.89014172554016,
+          "sync_seconds": 2.4365177154541016
+        },
+        {
+          "event_id": 1140912,
+          "ts_ns": 1792646286215572222,
+          "completed_epochs": 63,
+          "global_step": 63,
+          "rank_steps": [
+            63,
+            63,
+            63,
+            63
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.92886996269226,
+          "sync_seconds": 2.3183116912841797
+        },
+        {
+          "event_id": 1151230,
+          "ts_ns": 1792646361585499044,
+          "completed_epochs": 64,
+          "global_step": 64,
+          "rank_steps": [
+            64,
+            64,
+            64,
+            64
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 72.31565856933594,
+          "sync_seconds": 3.044992685317993
+        },
+        {
+          "event_id": 1185750,
+          "ts_ns": 1792646714780022466,
+          "completed_epochs": 65,
+          "global_step": 65,
+          "rank_steps": [
+            65,
+            65,
+            65,
+            65
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 246.41334319114685,
+          "sync_seconds": 106.77324104309082
+        },
+        {
+          "event_id": 1194680,
+          "ts_ns": 1792646782393681776,
+          "completed_epochs": 66,
+          "global_step": 66,
+          "rank_steps": [
+            66,
+            66,
+            66,
+            66
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 64.85496592521667,
+          "sync_seconds": 2.749333620071411
+        },
+        {
+          "event_id": 1203656,
+          "ts_ns": 1792646851531915946,
+          "completed_epochs": 67,
+          "global_step": 67,
+          "rank_steps": [
+            67,
+            67,
+            67,
+            67
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.56934475898743,
+          "sync_seconds": 2.559758186340332
+        },
+        {
+          "event_id": 1213680,
+          "ts_ns": 1792646924579592716,
+          "completed_epochs": 68,
+          "global_step": 68,
+          "rank_steps": [
+            68,
+            68,
+            68,
+            68
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.51335835456848,
+          "sync_seconds": 2.5257441997528076
+        },
+        {
+          "event_id": 1223535,
+          "ts_ns": 1792646997863867812,
+          "completed_epochs": 69,
+          "global_step": 69,
+          "rank_steps": [
+            69,
+            69,
+            69,
+            69
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.887521982193,
+          "sync_seconds": 2.3880810737609863
+        },
+        {
+          "event_id": 1257761,
+          "ts_ns": 1792647347122804419,
+          "completed_epochs": 70,
+          "global_step": 70,
+          "rank_steps": [
+            70,
+            70,
+            70,
+            70
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 252.39394569396973,
+          "sync_seconds": 96.85660457611084
+        },
+        {
+          "event_id": 1267551,
+          "ts_ns": 1792647418796080182,
+          "completed_epochs": 71,
+          "global_step": 71,
+          "rank_steps": [
+            71,
+            71,
+            71,
+            71
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.34297561645508,
+          "sync_seconds": 2.320995330810547
+        },
+        {
+          "event_id": 1277055,
+          "ts_ns": 1792647490498152836,
+          "completed_epochs": 72,
+          "global_step": 72,
+          "rank_steps": [
+            72,
+            72,
+            72,
+            72
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.1556408405304,
+          "sync_seconds": 2.538539409637451
+        },
+        {
+          "event_id": 1286380,
+          "ts_ns": 1792647560671385994,
+          "completed_epochs": 73,
+          "global_step": 73,
+          "rank_steps": [
+            73,
+            73,
+            73,
+            73
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.8306188583374,
+          "sync_seconds": 2.333719491958618
+        },
+        {
+          "event_id": 1296690,
+          "ts_ns": 1792647636335528965,
+          "completed_epochs": 74,
+          "global_step": 74,
+          "rank_steps": [
+            74,
+            74,
+            74,
+            74
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 73.23458862304688,
+          "sync_seconds": 2.421469211578369
+        },
+        {
+          "event_id": 1328565,
+          "ts_ns": 1792647966946768506,
+          "completed_epochs": 75,
+          "global_step": 75,
+          "rank_steps": [
+            75,
+            75,
+            75,
+            75
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 250.20527124404907,
+          "sync_seconds": 80.39824366569519
+        },
+        {
+          "event_id": 1340995,
+          "ts_ns": 1792648058550129016,
+          "completed_epochs": 76,
+          "global_step": 76,
+          "rank_steps": [
+            76,
+            76,
+            76,
+            76
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.19024968147278,
+          "sync_seconds": 2.4226553440093994
+        },
+        {
+          "event_id": 1350459,
+          "ts_ns": 1792648130286446073,
+          "completed_epochs": 77,
+          "global_step": 77,
+          "rank_steps": [
+            77,
+            77,
+            77,
+            77
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.16535520553589,
+          "sync_seconds": 2.560668468475342
+        },
+        {
+          "event_id": 1360117,
+          "ts_ns": 1792648203144813572,
+          "completed_epochs": 78,
+          "global_step": 78,
+          "rank_steps": [
+            78,
+            78,
+            78,
+            78
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.43560481071472,
+          "sync_seconds": 2.4151570796966553
+        },
+        {
+          "event_id": 1369934,
+          "ts_ns": 1792648273385376019,
+          "completed_epochs": 79,
+          "global_step": 79,
+          "rank_steps": [
+            79,
+            79,
+            79,
+            79
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 67.75763392448425,
+          "sync_seconds": 2.474750280380249
+        },
+        {
+          "event_id": 1404245,
+          "ts_ns": 1792648632668172146,
+          "completed_epochs": 80,
+          "global_step": 80,
+          "rank_steps": [
+            80,
+            80,
+            80,
+            80
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 251.63862943649292,
+          "sync_seconds": 107.63481545448303
+        },
+        {
+          "event_id": 1413964,
+          "ts_ns": 1792648706003911566,
+          "completed_epochs": 81,
+          "global_step": 81,
+          "rank_steps": [
+            81,
+            81,
+            81,
+            81
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.969322681427,
+          "sync_seconds": 2.357062816619873
+        },
+        {
+          "event_id": 1423271,
+          "ts_ns": 1792648775024218731,
+          "completed_epochs": 82,
+          "global_step": 82,
+          "rank_steps": [
+            82,
+            82,
+            82,
+            82
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.71495223045349,
+          "sync_seconds": 2.297247886657715
+        },
+        {
+          "event_id": 1433060,
+          "ts_ns": 1792648848188072716,
+          "completed_epochs": 83,
+          "global_step": 83,
+          "rank_steps": [
+            83,
+            83,
+            83,
+            83
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.41839218139648,
+          "sync_seconds": 2.737668991088867
+        },
+        {
+          "event_id": 1442038,
+          "ts_ns": 1792648915964636087,
+          "completed_epochs": 84,
+          "global_step": 84,
+          "rank_steps": [
+            84,
+            84,
+            84,
+            84
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 65.37697267532349,
+          "sync_seconds": 2.3904025554656982
+        },
+        {
+          "event_id": 1475241,
+          "ts_ns": 1792649263028787069,
+          "completed_epochs": 85,
+          "global_step": 85,
+          "rank_steps": [
+            85,
+            85,
+            85,
+            85
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 250.1047546863556,
+          "sync_seconds": 96.95134925842285
+        },
+        {
+          "event_id": 1484913,
+          "ts_ns": 1792649335565360923,
+          "completed_epochs": 86,
+          "global_step": 86,
+          "rank_steps": [
+            86,
+            86,
+            86,
+            86
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.44059109687805,
+          "sync_seconds": 3.0870532989501953
+        },
+        {
+          "event_id": 1493904,
+          "ts_ns": 1792649403063688436,
+          "completed_epochs": 87,
+          "global_step": 87,
+          "rank_steps": [
+            87,
+            87,
+            87,
+            87
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 64.96822237968445,
+          "sync_seconds": 2.5218212604522705
+        },
+        {
+          "event_id": 1503647,
+          "ts_ns": 1792649475967293074,
+          "completed_epochs": 88,
+          "global_step": 88,
+          "rank_steps": [
+            88,
+            88,
+            88,
+            88
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.72655963897705,
+          "sync_seconds": 2.1693410873413086
+        },
+        {
+          "event_id": 1513534,
+          "ts_ns": 1792649549091255607,
+          "completed_epochs": 89,
+          "global_step": 89,
+          "rank_steps": [
+            89,
+            89,
+            89,
+            89
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.64311146736145,
+          "sync_seconds": 2.4728105068206787
+        },
+        {
+          "event_id": 1548316,
+          "ts_ns": 1792649921838681173,
+          "completed_epochs": 90,
+          "global_step": 90,
+          "rank_steps": [
+            90,
+            90,
+            90,
+            90
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 249.55323886871338,
+          "sync_seconds": 123.18572115898132
+        },
+        {
+          "event_id": 1558029,
+          "ts_ns": 1792649995064697275,
+          "completed_epochs": 91,
+          "global_step": 91,
+          "rank_steps": [
+            91,
+            91,
+            91,
+            91
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.16069841384888,
+          "sync_seconds": 3.0280027389526367
+        },
+        {
+          "event_id": 1567184,
+          "ts_ns": 1792650063882728037,
+          "completed_epochs": 92,
+          "global_step": 92,
+          "rank_steps": [
+            92,
+            92,
+            92,
+            92
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 66.47469520568848,
+          "sync_seconds": 2.3350725173950195
+        },
+        {
+          "event_id": 1576527,
+          "ts_ns": 1792650134989732179,
+          "completed_epochs": 93,
+          "global_step": 93,
+          "rank_steps": [
+            93,
+            93,
+            93,
+            93
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.91131281852722,
+          "sync_seconds": 2.187077522277832
+        },
+        {
+          "event_id": 1586003,
+          "ts_ns": 1792650206444200343,
+          "completed_epochs": 94,
+          "global_step": 94,
+          "rank_steps": [
+            94,
+            94,
+            94,
+            94
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.33436274528503,
+          "sync_seconds": 3.1105871200561523
+        },
+        {
+          "event_id": 1620012,
+          "ts_ns": 1792650570536033821,
+          "completed_epochs": 95,
+          "global_step": 95,
+          "rank_steps": [
+            95,
+            95,
+            95,
+            95
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 250.82658648490906,
+          "sync_seconds": 113.2577154636383
+        },
+        {
+          "event_id": 1629968,
+          "ts_ns": 1792650643849732196,
+          "completed_epochs": 96,
+          "global_step": 96,
+          "rank_steps": [
+            96,
+            96,
+            96,
+            96
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 70.86783218383789,
+          "sync_seconds": 2.43570613861084
+        },
+        {
+          "event_id": 1639213,
+          "ts_ns": 1792650714800646586,
+          "completed_epochs": 97,
+          "global_step": 97,
+          "rank_steps": [
+            97,
+            97,
+            97,
+            97
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 68.45210456848145,
+          "sync_seconds": 2.4910764694213867
+        },
+        {
+          "event_id": 1648544,
+          "ts_ns": 1792650786596252147,
+          "completed_epochs": 98,
+          "global_step": 98,
+          "rank_steps": [
+            98,
+            98,
+            98,
+            98
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 69.34156799316406,
+          "sync_seconds": 2.4414336681365967
+        },
+        {
+          "event_id": 1658153,
+          "ts_ns": 1792650860181013032,
+          "completed_epochs": 99,
+          "global_step": 99,
+          "rank_steps": [
+            99,
+            99,
+            99,
+            99
+          ],
+          "trained_ctrl": false,
+          "trained_reward": false,
+          "train_seconds": 71.12100505828857,
+          "sync_seconds": 2.455880641937256
+        },
+        {
+          "event_id": 1688887,
+          "ts_ns": 1792651187507424653,
+          "completed_epochs": 100,
+          "global_step": 100,
+          "rank_steps": [
+            100,
+            100,
+            100,
+            100
+          ],
+          "trained_ctrl": true,
+          "trained_reward": true,
+          "train_seconds": 251.4006688594818,
+          "sync_seconds": 75.91803503036499
+        }
+      ]
+    }
+  },
+  "expected_headline": {
+    "baseline_updates_per_hour": 28.134829320642044,
+    "ipc_updates_per_hour": 32.584050866210305,
+    "throughput_gain_percent": 15.813927622812841,
+    "cycle_seconds_saved": 87.35890401699999,
+    "sync_reduction_percent": 68.08716714452956,
+    "share_of_saved_seconds_from_sync_percent": 84.32440235843647
+  },
+  "limitations": [
+    "This compact projection independently reproduces cycle-wall, phase sums and the headline only; it does not include publication timing, inference traces, checkpoint tensors or full-run claims.",
+    "Observed bundle changes include Policy/World IPC, Ray64->328GiB, warmup500->100/20 and lineage telemetry; this is not an isolated IPC causal A/B.",
+    "Train/sync fields are controller host wall durations; not SM Active/Occupancy, GPU kernel time or physical bandwidth.",
+    "Throughput is a completed5:1:1 update rate, not Policy-only speed or learning-quality/time-to-target improvement."
+  ]
+}

@@ -1,0 +1,156 @@
+{
+  "checked_ns": 1792656922771628602,
+  "source": {
+    "passed": true,
+    "archive_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+    "source_files": 57,
+    "manifest_sha256": "2d201b5bfc15d405a1879702738ffacac244e7a0004b00fa59936973f51a8ab1",
+    "validation_sha256": "ef41cfb1459e78c5b51e6f680a0f5ad8e335b8436e9a4d2aabd00c18352cebf4",
+    "CPU_cases": 155
+  },
+  "parent": {
+    "run_id": "jointp4manual_1022_104329_229b879f",
+    "state": "stopped_by_user",
+    "archive_sha256": "93b1cf2efdd4118b1a1f423691152dae3c8a5b668dea887d8517a214ef0e56c1",
+    "runnerstatus_sha256": "b1b36c55be56c160cb6a0e56458e21fdb57e934d888659f0123112a3bc4c508b",
+    "weights_resume": false
+  },
+  "previous_failure": {
+    "run_id": "ipcpwmanual_1022_160243_3745efd5",
+    "diagnosis": "missing writer/TensorBoard/StatsActor startup block; zero model updates",
+    "OOM": false,
+    "matching_prior_identities_exited": true,
+    "source_v2_preserved": true
+  },
+  "GPU_correctness": {
+    "passed": true,
+    "cuda_ipc_weights_sha256": "0fa026ca8a71fc24e7702fe495aac84d5ddf5241869b382b0c6a5685c8396a3c",
+    "reports": {
+      "small": {
+        "report": "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/ipc_small_gpu_v3.json",
+        "sha256": "3fa547c1300fe11a8f5eb8d681ec040e37534125958547971d26f3ced7ee5ea0",
+        "run_id": "ipctest_1022_152021_95bfd979"
+      },
+      "large": {
+        "report": "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/ipc_large_gpu_v1.json",
+        "sha256": "9cc2f1a90c0a205171020a5beb7126a60270cad0b90823d7158ef73c607e7ceb",
+        "run_id": "ipctest_1022_153144_35e54554"
+      }
+    }
+  },
+  "preflight": {
+    "GPU_MPS": {
+      "cards": [
+        {
+          "index": 4,
+          "uuid": "GPU-c43d6671-0979-b38d-9eae-4fe0a9d71c8c",
+          "total_mib": 143771.0,
+          "used_mib": 75.0,
+          "utilization_percent": 0.0
+        },
+        {
+          "index": 5,
+          "uuid": "GPU-fe0edfe4-b193-1af7-6a98-cbff40214f74",
+          "total_mib": 143771.0,
+          "used_mib": 75.0,
+          "utilization_percent": 0.0
+        },
+        {
+          "index": 6,
+          "uuid": "GPU-8c9bc264-7f09-989e-1ec7-cecd6cde782c",
+          "total_mib": 143771.0,
+          "used_mib": 75.0,
+          "utilization_percent": 0.0
+        },
+        {
+          "index": 7,
+          "uuid": "GPU-07ae0bbc-8923-bd0c-199e-c726821e655d",
+          "total_mib": 143771.0,
+          "used_mib": 75.0,
+          "utilization_percent": 0.0
+        }
+      ],
+      "mps_pipe": "/dev/shm/mps_lcx1_gpu47_pzero2_20261020/pipe",
+      "mps_log": "/dev/shm/mps_lcx1_gpu47_pzero2_20261020/log",
+      "protected_mps_services": [
+        {
+          "pid": 691086,
+          "uid": 1004,
+          "birth_ticks": 361065122,
+          "command": "nvidia-cuda-mps-server  ",
+          "state": "S"
+        }
+      ],
+      "existing_clients": [],
+      "deadline_unix": null,
+      "until_manual_stop": true
+    },
+    "object_store_admission": {
+      "object_store_gib": 328,
+      "object_store_bytes": 352187318272,
+      "host_mem_available_bytes": 1918208548864,
+      "shm_available_bytes": 995196211200,
+      "cgroup_remaining_bytes": null
+    },
+    "default_mps_cap": "100.0",
+    "server_mps_cap": "100.0",
+    "MPS_identity": {
+      "server": {
+        "pid": 691086,
+        "uid": 1004,
+        "birth_ticks": 361065122,
+        "command": "nvidia-cuda-mps-server  ",
+        "state": "S"
+      },
+      "control": {
+        "pid": 690850,
+        "uid": 1004,
+        "birth_ticks": 361065009,
+        "command": "nvidia-cuda-mps-control -d ",
+        "state": "S"
+      }
+    }
+  },
+  "command": [
+    "/mnt/data/lcx3/envs/merged-env/bin/python",
+    "-B",
+    "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/source_v3/runner.py",
+    "--mode",
+    "manual",
+    "--data",
+    "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/formal_v3"
+  ],
+  "until_manual_stop": true,
+  "deadline_unix": null,
+  "stop_on_target": false,
+  "no_resume": true,
+  "automatic_restart": false,
+  "nsight_collection": false,
+  "GPU_scope": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "state": "manual_runner_identity_bound",
+  "launcher": {
+    "pid": 3392873,
+    "uid": 1004,
+    "birth_ticks": 379096162,
+    "state": "R",
+    "command": "/mnt/data/lcx3/envs/merged-env/bin/python -B /mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/launch_manual_v3.py --launch "
+  },
+  "run_id": "ipcpwmanual_1022_161523_17963ef5",
+  "launcher_script_sha256": "225ccc980cedbc93c70d9bd0a378f0af6d49584f5eff15e89e215ea800f5720f",
+  "launch_performed": true,
+  "supervisor": {
+    "pid": 3393153,
+    "uid": 1004,
+    "birth_ticks": 379096277,
+    "state": "R",
+    "command": "/mnt/data/lcx3/envs/merged-env/bin/python -B /mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/source_v3/runner.py --mode manual --data /mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/formal_v3 "
+  },
+  "launched_ns": 1792656922773012792,
+  "started_ns": 1792656923066996348,
+  "bound_ns": 1792656923173827137
+}

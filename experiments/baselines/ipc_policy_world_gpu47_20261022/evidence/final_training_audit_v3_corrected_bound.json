@@ -1,0 +1,2804 @@
+{
+  "passed": true,
+  "run_id": "ipcpwmanual_1022_161523_17963ef5",
+  "uid": 1004,
+  "cpu_analysis_started_ns": 1792674032006519852,
+  "cpu_analysis_ended_ns": 1792674041541940474,
+  "steps": {
+    "policy": 132,
+    "ctrl": 26,
+    "reward": 26
+  },
+  "expected_recipe_per_rank": {
+    "policy": {
+      "updates": 132,
+      "micro": 2844,
+      "exposure": 19008,
+      "distribution": {
+        "8": 1908,
+        "4": 936
+      }
+    },
+    "ctrl": {
+      "updates": 26,
+      "micro": 1664,
+      "exposure": 6656,
+      "distribution": {
+        "4": 1664
+      }
+    },
+    "reward": {
+      "updates": 26,
+      "micro": 416,
+      "exposure": 6656,
+      "distribution": {
+        "16": 416
+      }
+    }
+  },
+  "ledger": {
+    "passed": true,
+    "ranks": [
+      {
+        "model": "ctrl",
+        "rank": 0,
+        "pid": 3404121,
+        "microsteps": 1664,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "4": 1664
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 1664,
+        "service_exposures": 6656,
+        "replay_use_count": 1664,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      },
+      {
+        "model": "ctrl",
+        "rank": 1,
+        "pid": 3404122,
+        "microsteps": 1664,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "4": 1664
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 1664,
+        "service_exposures": 6656,
+        "replay_use_count": 1664,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      },
+      {
+        "model": "ctrl",
+        "rank": 2,
+        "pid": 3404123,
+        "microsteps": 1664,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "4": 1664
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 1664,
+        "service_exposures": 6656,
+        "replay_use_count": 1664,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      },
+      {
+        "model": "ctrl",
+        "rank": 3,
+        "pid": 3404127,
+        "microsteps": 1664,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "4": 1664
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 1664,
+        "service_exposures": 6656,
+        "replay_use_count": 1664,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      },
+      {
+        "model": "policy",
+        "rank": 0,
+        "pid": 3404075,
+        "microsteps": 2844,
+        "micro_exposures": 19008,
+        "micro_actual_batch_distribution": {
+          "8": 1908,
+          "4": 936
+        },
+        "micro_successful_updates": 132,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 2844,
+        "service_exposures": 19008,
+        "replay_use_count": 2844,
+        "replay_use_exposures": 19008,
+        "optimizer_events": 132,
+        "successful_updates": 132,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 132,
+        "passed": true
+      },
+      {
+        "model": "policy",
+        "rank": 1,
+        "pid": 3404095,
+        "microsteps": 2844,
+        "micro_exposures": 19008,
+        "micro_actual_batch_distribution": {
+          "8": 1908,
+          "4": 936
+        },
+        "micro_successful_updates": 132,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 2844,
+        "service_exposures": 19008,
+        "replay_use_count": 2844,
+        "replay_use_exposures": 19008,
+        "optimizer_events": 132,
+        "successful_updates": 132,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 132,
+        "passed": true
+      },
+      {
+        "model": "policy",
+        "rank": 2,
+        "pid": 3404108,
+        "microsteps": 2844,
+        "micro_exposures": 19008,
+        "micro_actual_batch_distribution": {
+          "8": 1908,
+          "4": 936
+        },
+        "micro_successful_updates": 132,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 2844,
+        "service_exposures": 19008,
+        "replay_use_count": 2844,
+        "replay_use_exposures": 19008,
+        "optimizer_events": 132,
+        "successful_updates": 132,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 132,
+        "passed": true
+      },
+      {
+        "model": "policy",
+        "rank": 3,
+        "pid": 3404125,
+        "microsteps": 2844,
+        "micro_exposures": 19008,
+        "micro_actual_batch_distribution": {
+          "8": 1908,
+          "4": 936
+        },
+        "micro_successful_updates": 132,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 2844,
+        "service_exposures": 19008,
+        "replay_use_count": 2844,
+        "replay_use_exposures": 19008,
+        "optimizer_events": 132,
+        "successful_updates": 132,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 132,
+        "passed": true
+      },
+      {
+        "model": "reward",
+        "rank": 0,
+        "pid": 3404124,
+        "microsteps": 416,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "16": 416
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 416,
+        "service_exposures": 6656,
+        "replay_use_count": 416,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      },
+      {
+        "model": "reward",
+        "rank": 1,
+        "pid": 3404126,
+        "microsteps": 416,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "16": 416
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 416,
+        "service_exposures": 6656,
+        "replay_use_count": 416,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      },
+      {
+        "model": "reward",
+        "rank": 2,
+        "pid": 3404114,
+        "microsteps": 416,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "16": 416
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 416,
+        "service_exposures": 6656,
+        "replay_use_count": 416,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      },
+      {
+        "model": "reward",
+        "rank": 3,
+        "pid": 3404120,
+        "microsteps": 416,
+        "micro_exposures": 6656,
+        "micro_actual_batch_distribution": {
+          "16": 416
+        },
+        "micro_successful_updates": 26,
+        "micro_skipped_updates": 0,
+        "service_micro_count": 416,
+        "service_exposures": 6656,
+        "replay_use_count": 416,
+        "replay_use_exposures": 6656,
+        "optimizer_events": 26,
+        "successful_updates": 26,
+        "skipped_updates": 0,
+        "engine_global_steps_max": 26,
+        "passed": true
+      }
+    ],
+    "global_rank0_successful_updates": {
+      "ctrl": 26,
+      "policy": 132,
+      "reward": 26
+    },
+    "actual_allrank_exposures": {
+      "policy": 76032,
+      "ctrl": 26624,
+      "reward": 26624
+    },
+    "invalid_records": []
+  },
+  "policy_initial_zero2": {
+    "passed": true,
+    "rows": [
+      {
+        "id": 139,
+        "pid": 3404075,
+        "actor_id": "0",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "policy",
+          "rank": 0,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 8,
+          "gradient_accumulation_steps": 18,
+          "global_batch_size": 576,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "name": "policy",
+              "lr": 1e-05,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            },
+            {
+              "name": "value",
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            }
+          ],
+          "parameter_elements": 7554377922,
+          "trainable_parameter_elements": 144474882,
+          "full_parameter_replicas": true,
+          "fsdp_or_dtensor_parameters": false,
+          "no_dtensor_parameters": true,
+          "original_policy_zero2_config_preserved": true
+        }
+      },
+      {
+        "id": 142,
+        "pid": 3404108,
+        "actor_id": "2",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "policy",
+          "rank": 2,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 8,
+          "gradient_accumulation_steps": 18,
+          "global_batch_size": 576,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "name": "policy",
+              "lr": 1e-05,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            },
+            {
+              "name": "value",
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            }
+          ],
+          "parameter_elements": 7554377922,
+          "trainable_parameter_elements": 144474882,
+          "full_parameter_replicas": true,
+          "fsdp_or_dtensor_parameters": false,
+          "no_dtensor_parameters": true,
+          "original_policy_zero2_config_preserved": true
+        }
+      },
+      {
+        "id": 145,
+        "pid": 3404125,
+        "actor_id": "3",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "policy",
+          "rank": 3,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 8,
+          "gradient_accumulation_steps": 18,
+          "global_batch_size": 576,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "name": "policy",
+              "lr": 1e-05,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            },
+            {
+              "name": "value",
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            }
+          ],
+          "parameter_elements": 7554377922,
+          "trainable_parameter_elements": 144474882,
+          "full_parameter_replicas": true,
+          "fsdp_or_dtensor_parameters": false,
+          "no_dtensor_parameters": true,
+          "original_policy_zero2_config_preserved": true
+        }
+      },
+      {
+        "id": 148,
+        "pid": 3404095,
+        "actor_id": "1",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "policy",
+          "rank": 1,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 8,
+          "gradient_accumulation_steps": 18,
+          "global_batch_size": 576,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "name": "policy",
+              "lr": 1e-05,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            },
+            {
+              "name": "value",
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0,
+              "master_parameter_dtypes": [
+                "torch.float32"
+              ]
+            }
+          ],
+          "parameter_elements": 7554377922,
+          "trainable_parameter_elements": 144474882,
+          "full_parameter_replicas": true,
+          "fsdp_or_dtensor_parameters": false,
+          "no_dtensor_parameters": true,
+          "original_policy_zero2_config_preserved": true
+        }
+      }
+    ]
+  },
+  "world_zero2": {
+    "passed": true,
+    "rows": [
+      {
+        "id": 160,
+        "pid": 3404123,
+        "actor_id": "2",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "ctrl",
+          "rank": 2,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 4,
+          "gradient_accumulation_steps": 64,
+          "global_batch_size": 1024,
+          "local_batch_size": 256,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0
+            }
+          ],
+          "no_dtensor_parameters": true,
+          "global_batch_unchanged": true,
+          "micro_and_GAS_changed_from_parent": {
+            "micro_batch_size": 2,
+            "gradient_accumulation_steps": 128
+          },
+          "legacy_world_memory_policy_batch_unchanged_flag_is_not_micro_GAS_evidence": true
+        }
+      },
+      {
+        "id": 166,
+        "pid": 3404127,
+        "actor_id": "3",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "ctrl",
+          "rank": 3,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 4,
+          "gradient_accumulation_steps": 64,
+          "global_batch_size": 1024,
+          "local_batch_size": 256,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0
+            }
+          ],
+          "no_dtensor_parameters": true,
+          "global_batch_unchanged": true,
+          "micro_and_GAS_changed_from_parent": {
+            "micro_batch_size": 2,
+            "gradient_accumulation_steps": 128
+          },
+          "legacy_world_memory_policy_batch_unchanged_flag_is_not_micro_GAS_evidence": true
+        }
+      },
+      {
+        "id": 169,
+        "pid": 3404121,
+        "actor_id": "0",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "ctrl",
+          "rank": 0,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 4,
+          "gradient_accumulation_steps": 64,
+          "global_batch_size": 1024,
+          "local_batch_size": 256,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0
+            }
+          ],
+          "no_dtensor_parameters": true,
+          "global_batch_unchanged": true,
+          "micro_and_GAS_changed_from_parent": {
+            "micro_batch_size": 2,
+            "gradient_accumulation_steps": 128
+          },
+          "legacy_world_memory_policy_batch_unchanged_flag_is_not_micro_GAS_evidence": true
+        }
+      },
+      {
+        "id": 172,
+        "pid": 3404122,
+        "actor_id": "1",
+        "details": {
+          "backend": "deepspeed_zero2",
+          "model": "ctrl",
+          "rank": 1,
+          "zero_stage": 2,
+          "world_size": 4,
+          "micro_batch_size": 4,
+          "gradient_accumulation_steps": 64,
+          "global_batch_size": 1024,
+          "local_batch_size": 256,
+          "bf16_enabled": true,
+          "gradient_clipping": 1.0,
+          "reduce_bucket_size": 500000000,
+          "allgather_bucket_size": 500000000,
+          "optimizer_chain": [
+            "DeepSpeedZeroOptimizer",
+            "FusedAdam"
+          ],
+          "optimizer_param_groups": [
+            {
+              "lr": 0.0001,
+              "betas": [
+                0.9,
+                0.999
+              ],
+              "eps": 1e-08,
+              "weight_decay": 0.0
+            }
+          ],
+          "no_dtensor_parameters": true,
+          "global_batch_unchanged": true,
+          "micro_and_GAS_changed_from_parent": {
+            "micro_batch_size": 2,
+            "gradient_accumulation_steps": 128
+          },
+          "legacy_world_memory_policy_batch_unchanged_flag_is_not_micro_GAS_evidence": true
+        }
+      }
+    ]
+  },
+  "dynamic_policy_modes": {
+    "valid": true,
+    "run_id": "ipcpwmanual_1022_161523_17963ef5",
+    "steps": 132,
+    "ranks": 4,
+    "observed_rank_pids": 4,
+    "mode_receipts": 1056,
+    "micro_steps_per_rank": 2844,
+    "successful_updates_per_rank": 132,
+    "local_exposures_per_rank": 19008,
+    "global_exposures": 76032,
+    "rank_pids": {
+      "1": 3404095,
+      "2": 3404108,
+      "3": 3404125,
+      "0": 3404075
+    },
+    "joint_policy_micro_GAS": [
+      4,
+      36
+    ],
+    "single_policy_micro_GAS": [
+      8,
+      18
+    ],
+    "stopped_before_first_update": false,
+    "validation_scope": "all matching run events, no row cap",
+    "rank_PID_binding": true
+  },
+  "WM_cohorts": {
+    "passed": true,
+    "cohorts": [
+      {
+        "event_id": 436442,
+        "policy_step": 5,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 504376,
+        "policy_step": 10,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 570648,
+        "policy_step": 15,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 637332,
+        "policy_step": 20,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 703336,
+        "policy_step": 25,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 772514,
+        "policy_step": 30,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 838370,
+        "policy_step": 35,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 903618,
+        "policy_step": 40,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 969965,
+        "policy_step": 45,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1034346,
+        "policy_step": 50,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1102223,
+        "policy_step": 55,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1167820,
+        "policy_step": 60,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1235354,
+        "policy_step": 65,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1300825,
+        "policy_step": 70,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1366109,
+        "policy_step": 75,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1436491,
+        "policy_step": 80,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1501687,
+        "policy_step": 85,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1566690,
+        "policy_step": 90,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1633050,
+        "policy_step": 95,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1697190,
+        "policy_step": 100,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1763742,
+        "policy_step": 105,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1829731,
+        "policy_step": 110,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1894608,
+        "policy_step": 115,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 1958154,
+        "policy_step": 120,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 2021282,
+        "policy_step": 125,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      },
+      {
+        "event_id": 2090584,
+        "policy_step": 130,
+        "consumer_count": 8,
+        "same_rank_ordered_hash_and_interval_match": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "passed": true
+      }
+    ]
+  },
+  "replay_ledger": {
+    "policy": {
+      "replay": "policy",
+      "samples": 13081,
+      "resident": 10000,
+      "policy_uses": 76032,
+      "ctrl_uses": 0,
+      "reward_uses": 0
+    },
+    "wm": {
+      "replay": "wm",
+      "samples": 4651,
+      "resident": 4651,
+      "policy_uses": 0,
+      "ctrl_uses": 26624,
+      "reward_uses": 26624
+    },
+    "wm_eval": {
+      "replay": "wm_eval",
+      "samples": 8,
+      "resident": 8,
+      "policy_uses": 0,
+      "ctrl_uses": 0,
+      "reward_uses": 0
+    }
+  },
+  "replay_passed": true,
+  "synchronized_epochs": {
+    "passed": true,
+    "count": 132,
+    "last": {
+      "id": 2113678,
+      "ts_ns": 1792673556679512806,
+      "actor": "driver",
+      "actor_id": "fill_experiment",
+      "pid": 3393202,
+      "details_json": "{\"completed_epochs\":132,\"global_step\":132,\"rank_steps\":[132,132,132,132],\"trained_ctrl\":false,\"trained_reward\":false,\"train_seconds\":68.25157451629639,\"sync_seconds\":1.0331647396087646,\"elapsed_from_rollout_seconds\":16475.946890592575}",
+      "details": {
+        "completed_epochs": 132,
+        "global_step": 132,
+        "rank_steps": [
+          132,
+          132,
+          132,
+          132
+        ],
+        "trained_ctrl": false,
+        "trained_reward": false,
+        "train_seconds": 68.25157451629639,
+        "sync_seconds": 1.0331647396087646,
+        "elapsed_from_rollout_seconds": 16475.946890592575
+      }
+    }
+  },
+  "completion": {
+    "passed": true,
+    "event": [
+      {
+        "id": 2116435,
+        "ts_ns": 1792673570430189375,
+        "actor": "driver",
+        "actor_id": "fill_experiment",
+        "pid": 3393202,
+        "details_json": "{\"global_step\":132,\"completed_epochs\":132,\"run_started_ns\":1792656923066996348,\"threshold_state\":{\"schema_version\":1,\"target\":0.85,\"required_consecutive\":2,\"min_samples\":1000,\"run_started_ns\":1792656923066996348,\"run_started_iso\":\"2026-10-22T08:15:23.066996348Z\",\"streak\":0,\"should_stop\":false,\"first_qualifying\":null,\"consecutive_qualifying\":null,\"latest_evaluation\":{\"evaluation_id\":132,\"rate\":0.782,\"completed_ns\":1792673556680979574,\"completed_iso\":\"2026-10-22T12:52:36.680979574Z\",\"elapsed_ns\":16633613983226,\"elapsed_seconds\":16633.613983226,\"sample_count\":1000,\"policy_step\":132,\"fresh_count\":24,\"evaluation_watermark\":4610,\"evaluation_started_ns\":null,\"evaluation_duration_seconds\":null,\"metadata\":{\"metric_tag\":\"Eval/_Global/Average_Return\",\"scope\":\"original_task0_rolling_window\",\"snapshot_completed_ns\":1792673556680979574,\"latest_episode_completed_ns\":1792673555758632889,\"latest_episode_policy_versions\":[131],\"rolling_window_can_span_policy_versions\":true}},\"last_evaluation_id\":132,\"last_completed_ns\":1792673556680979574,\"last_evaluation_watermark\":4610},\"stop_reason\":\"scheduled_stop\",\"target_reached\":false,\"stop_on_target\":false,\"until_deadline\":false,\"deadline_unix_seconds\":null,\"stop_policy\":{\"stop_on_target\":false,\"configured_stop_on_target\":false,\"until_deadline\":false,\"until_manual_stop\":true,\"deadline_unix_seconds\":null,\"deadline_utc\":null,\"stop_boundary\":\"completed synchronized epoch or pre-update replay-fill boundary; preserve final weights\",\"learning_rate_horizon_unchanged\":true},\"states\":[{\"rank\":0,\"gpu\":{\"physical_gpu\":\"4\",\"uuid\":\"c43d6671-0979-b38d-9eae-4fe0a9d71c8c\",\"cuda_local_device\":0},\"pid\":3404075,\"training_role\":\"policy\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":37055,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":0,\"engines\":{\"policy\":{\"global_steps\":132,\"skipped_steps\":0,\"global_batch\":576}}},{\"rank\":1,\"gpu\":{\"physical_gpu\":\"5\",\"uuid\":\"fe0edfe4-b193-1af7-6a98-cbff40214f74\",\"cuda_local_device\":0},\"pid\":3404095,\"training_role\":\"policy\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":37055,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":0,\"engines\":{\"policy\":{\"global_steps\":132,\"skipped_steps\":0,\"global_batch\":576}}},{\"rank\":2,\"gpu\":{\"physical_gpu\":\"6\",\"uuid\":\"8c9bc264-7f09-989e-1ec7-cecd6cde782c\",\"cuda_local_device\":0},\"pid\":3404108,\"training_role\":\"policy\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":37055,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":0,\"engines\":{\"policy\":{\"global_steps\":132,\"skipped_steps\":0,\"global_batch\":576}}},{\"rank\":3,\"gpu\":{\"physical_gpu\":\"7\",\"uuid\":\"07ae0bbc-8923-bd0c-199e-c726821e655d\",\"cuda_local_device\":0},\"pid\":3404125,\"training_role\":\"policy\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":37055,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":0,\"engines\":{\"policy\":{\"global_steps\":132,\"skipped_steps\":0,\"global_batch\":576}}},{\"rank\":0,\"gpu\":{\"physical_gpu\":\"4\",\"uuid\":\"c43d6671-0979-b38d-9eae-4fe0a9d71c8c\",\"cuda_local_device\":0},\"pid\":3404121,\"training_role\":\"ctrl\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":39535,\"policy_steps\":132,\"ctrl_steps\":26,\"reward_steps\":0,\"engines\":{\"ctrl\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}},{\"rank\":1,\"gpu\":{\"physical_gpu\":\"5\",\"uuid\":\"fe0edfe4-b193-1af7-6a98-cbff40214f74\",\"cuda_local_device\":0},\"pid\":3404122,\"training_role\":\"ctrl\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":39535,\"policy_steps\":132,\"ctrl_steps\":26,\"reward_steps\":0,\"engines\":{\"ctrl\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}},{\"rank\":2,\"gpu\":{\"physical_gpu\":\"6\",\"uuid\":\"8c9bc264-7f09-989e-1ec7-cecd6cde782c\",\"cuda_local_device\":0},\"pid\":3404123,\"training_role\":\"ctrl\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":39535,\"policy_steps\":132,\"ctrl_steps\":26,\"reward_steps\":0,\"engines\":{\"ctrl\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}},{\"rank\":3,\"gpu\":{\"physical_gpu\":\"7\",\"uuid\":\"07ae0bbc-8923-bd0c-199e-c726821e655d\",\"cuda_local_device\":0},\"pid\":3404127,\"training_role\":\"ctrl\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":null,\"distributed_world_size\":4,\"group_port\":39535,\"policy_steps\":132,\"ctrl_steps\":26,\"reward_steps\":0,\"engines\":{\"ctrl\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}},{\"rank\":0,\"gpu\":{\"physical_gpu\":\"4\",\"uuid\":\"c43d6671-0979-b38d-9eae-4fe0a9d71c8c\",\"cuda_local_device\":0},\"pid\":3404124,\"training_role\":\"reward\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":473249745,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0},\"distributed_world_size\":4,\"group_port\":52169,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":26,\"engines\":{\"reward\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}},{\"rank\":1,\"gpu\":{\"physical_gpu\":\"5\",\"uuid\":\"fe0edfe4-b193-1af7-6a98-cbff40214f74\",\"cuda_local_device\":0},\"pid\":3404126,\"training_role\":\"reward\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":472686417,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0},\"distributed_world_size\":4,\"group_port\":52169,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":26,\"engines\":{\"reward\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}},{\"rank\":2,\"gpu\":{\"physical_gpu\":\"6\",\"uuid\":\"8c9bc264-7f09-989e-1ec7-cecd6cde782c\",\"cuda_local_device\":0},\"pid\":3404114,\"training_role\":\"reward\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":472682320,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0},\"distributed_world_size\":4,\"group_port\":52169,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":26,\"engines\":{\"reward\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}},{\"rank\":3,\"gpu\":{\"physical_gpu\":\"7\",\"uuid\":\"07ae0bbc-8923-bd0c-199e-c726821e655d\",\"cuda_local_device\":0},\"pid\":3404120,\"training_role\":\"reward\",\"world_size\":4,\"split_train_serial\":false,\"cpu_replay_prefetch\":true,\"policy_sharding\":null,\"reward_sharding\":{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":472682320,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0},\"distributed_world_size\":4,\"group_port\":52169,\"policy_steps\":132,\"ctrl_steps\":0,\"reward_steps\":26,\"engines\":{\"reward\":{\"global_steps\":26,\"skipped_steps\":0,\"global_batch\":1024}}}]}",
+        "details": {
+          "global_step": 132,
+          "completed_epochs": 132,
+          "run_started_ns": 1792656923066996348,
+          "threshold_state": {
+            "schema_version": 1,
+            "target": 0.85,
+            "required_consecutive": 2,
+            "min_samples": 1000,
+            "run_started_ns": 1792656923066996348,
+            "run_started_iso": "2026-10-22T08:15:23.066996348Z",
+            "streak": 0,
+            "should_stop": false,
+            "first_qualifying": null,
+            "consecutive_qualifying": null,
+            "latest_evaluation": {
+              "evaluation_id": 132,
+              "rate": 0.782,
+              "completed_ns": 1792673556680979574,
+              "completed_iso": "2026-10-22T12:52:36.680979574Z",
+              "elapsed_ns": 16633613983226,
+              "elapsed_seconds": 16633.613983226,
+              "sample_count": 1000,
+              "policy_step": 132,
+              "fresh_count": 24,
+              "evaluation_watermark": 4610,
+              "evaluation_started_ns": null,
+              "evaluation_duration_seconds": null,
+              "metadata": {
+                "metric_tag": "Eval/_Global/Average_Return",
+                "scope": "original_task0_rolling_window",
+                "snapshot_completed_ns": 1792673556680979574,
+                "latest_episode_completed_ns": 1792673555758632889,
+                "latest_episode_policy_versions": [
+                  131
+                ],
+                "rolling_window_can_span_policy_versions": true
+              }
+            },
+            "last_evaluation_id": 132,
+            "last_completed_ns": 1792673556680979574,
+            "last_evaluation_watermark": 4610
+          },
+          "stop_reason": "scheduled_stop",
+          "target_reached": false,
+          "stop_on_target": false,
+          "until_deadline": false,
+          "deadline_unix_seconds": null,
+          "stop_policy": {
+            "stop_on_target": false,
+            "configured_stop_on_target": false,
+            "until_deadline": false,
+            "until_manual_stop": true,
+            "deadline_unix_seconds": null,
+            "deadline_utc": null,
+            "stop_boundary": "completed synchronized epoch or pre-update replay-fill boundary; preserve final weights",
+            "learning_rate_horizon_unchanged": true
+          },
+          "states": [
+            {
+              "rank": 0,
+              "gpu": {
+                "physical_gpu": "4",
+                "uuid": "c43d6671-0979-b38d-9eae-4fe0a9d71c8c",
+                "cuda_local_device": 0
+              },
+              "pid": 3404075,
+              "training_role": "policy",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 37055,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 0,
+              "engines": {
+                "policy": {
+                  "global_steps": 132,
+                  "skipped_steps": 0,
+                  "global_batch": 576
+                }
+              }
+            },
+            {
+              "rank": 1,
+              "gpu": {
+                "physical_gpu": "5",
+                "uuid": "fe0edfe4-b193-1af7-6a98-cbff40214f74",
+                "cuda_local_device": 0
+              },
+              "pid": 3404095,
+              "training_role": "policy",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 37055,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 0,
+              "engines": {
+                "policy": {
+                  "global_steps": 132,
+                  "skipped_steps": 0,
+                  "global_batch": 576
+                }
+              }
+            },
+            {
+              "rank": 2,
+              "gpu": {
+                "physical_gpu": "6",
+                "uuid": "8c9bc264-7f09-989e-1ec7-cecd6cde782c",
+                "cuda_local_device": 0
+              },
+              "pid": 3404108,
+              "training_role": "policy",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 37055,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 0,
+              "engines": {
+                "policy": {
+                  "global_steps": 132,
+                  "skipped_steps": 0,
+                  "global_batch": 576
+                }
+              }
+            },
+            {
+              "rank": 3,
+              "gpu": {
+                "physical_gpu": "7",
+                "uuid": "07ae0bbc-8923-bd0c-199e-c726821e655d",
+                "cuda_local_device": 0
+              },
+              "pid": 3404125,
+              "training_role": "policy",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 37055,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 0,
+              "engines": {
+                "policy": {
+                  "global_steps": 132,
+                  "skipped_steps": 0,
+                  "global_batch": 576
+                }
+              }
+            },
+            {
+              "rank": 0,
+              "gpu": {
+                "physical_gpu": "4",
+                "uuid": "c43d6671-0979-b38d-9eae-4fe0a9d71c8c",
+                "cuda_local_device": 0
+              },
+              "pid": 3404121,
+              "training_role": "ctrl",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 39535,
+              "policy_steps": 132,
+              "ctrl_steps": 26,
+              "reward_steps": 0,
+              "engines": {
+                "ctrl": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            },
+            {
+              "rank": 1,
+              "gpu": {
+                "physical_gpu": "5",
+                "uuid": "fe0edfe4-b193-1af7-6a98-cbff40214f74",
+                "cuda_local_device": 0
+              },
+              "pid": 3404122,
+              "training_role": "ctrl",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 39535,
+              "policy_steps": 132,
+              "ctrl_steps": 26,
+              "reward_steps": 0,
+              "engines": {
+                "ctrl": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            },
+            {
+              "rank": 2,
+              "gpu": {
+                "physical_gpu": "6",
+                "uuid": "8c9bc264-7f09-989e-1ec7-cecd6cde782c",
+                "cuda_local_device": 0
+              },
+              "pid": 3404123,
+              "training_role": "ctrl",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 39535,
+              "policy_steps": 132,
+              "ctrl_steps": 26,
+              "reward_steps": 0,
+              "engines": {
+                "ctrl": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            },
+            {
+              "rank": 3,
+              "gpu": {
+                "physical_gpu": "7",
+                "uuid": "07ae0bbc-8923-bd0c-199e-c726821e655d",
+                "cuda_local_device": 0
+              },
+              "pid": 3404127,
+              "training_role": "ctrl",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": null,
+              "distributed_world_size": 4,
+              "group_port": 39535,
+              "policy_steps": 132,
+              "ctrl_steps": 26,
+              "reward_steps": 0,
+              "engines": {
+                "ctrl": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            },
+            {
+              "rank": 0,
+              "gpu": {
+                "physical_gpu": "4",
+                "uuid": "c43d6671-0979-b38d-9eae-4fe0a9d71c8c",
+                "cuda_local_device": 0
+              },
+              "pid": 3404124,
+              "training_role": "reward",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": {
+                "backend": "fsdp2_full_shard",
+                "model": "reward",
+                "units": [
+                  "vla.vision_backbone.featurizer.blocks.0",
+                  "vla.vision_backbone.featurizer.blocks.1",
+                  "vla.vision_backbone.featurizer.blocks.2",
+                  "vla.vision_backbone.featurizer.blocks.3",
+                  "vla.vision_backbone.featurizer.blocks.4",
+                  "vla.vision_backbone.featurizer.blocks.5",
+                  "vla.vision_backbone.featurizer.blocks.6",
+                  "vla.vision_backbone.featurizer.blocks.7",
+                  "vla.vision_backbone.featurizer.blocks.8",
+                  "vla.vision_backbone.featurizer.blocks.9",
+                  "vla.vision_backbone.featurizer.blocks.10",
+                  "vla.vision_backbone.featurizer.blocks.11",
+                  "vla.vision_backbone.featurizer.blocks.12",
+                  "vla.vision_backbone.featurizer.blocks.13",
+                  "vla.vision_backbone.featurizer.blocks.14",
+                  "vla.vision_backbone.featurizer.blocks.15",
+                  "vla.vision_backbone.featurizer.blocks.16",
+                  "vla.vision_backbone.featurizer.blocks.17",
+                  "vla.vision_backbone.featurizer.blocks.18",
+                  "vla.vision_backbone.featurizer.blocks.19",
+                  "vla.vision_backbone.featurizer.blocks.20",
+                  "vla.vision_backbone.featurizer.blocks.21",
+                  "vla.vision_backbone.featurizer.blocks.22",
+                  "vla.vision_backbone.featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.0",
+                  "vla.vision_backbone.fused_featurizer.blocks.1",
+                  "vla.vision_backbone.fused_featurizer.blocks.2",
+                  "vla.vision_backbone.fused_featurizer.blocks.3",
+                  "vla.vision_backbone.fused_featurizer.blocks.4",
+                  "vla.vision_backbone.fused_featurizer.blocks.5",
+                  "vla.vision_backbone.fused_featurizer.blocks.6",
+                  "vla.vision_backbone.fused_featurizer.blocks.7",
+                  "vla.vision_backbone.fused_featurizer.blocks.8",
+                  "vla.vision_backbone.fused_featurizer.blocks.9",
+                  "vla.vision_backbone.fused_featurizer.blocks.10",
+                  "vla.vision_backbone.fused_featurizer.blocks.11",
+                  "vla.vision_backbone.fused_featurizer.blocks.12",
+                  "vla.vision_backbone.fused_featurizer.blocks.13",
+                  "vla.vision_backbone.fused_featurizer.blocks.14",
+                  "vla.vision_backbone.fused_featurizer.blocks.15",
+                  "vla.vision_backbone.fused_featurizer.blocks.16",
+                  "vla.vision_backbone.fused_featurizer.blocks.17",
+                  "vla.vision_backbone.fused_featurizer.blocks.18",
+                  "vla.vision_backbone.fused_featurizer.blocks.19",
+                  "vla.vision_backbone.fused_featurizer.blocks.20",
+                  "vla.vision_backbone.fused_featurizer.blocks.21",
+                  "vla.vision_backbone.fused_featurizer.blocks.22",
+                  "vla.vision_backbone.fused_featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.24",
+                  "vla.vision_backbone.fused_featurizer.blocks.25",
+                  "vla.vision_backbone.fused_featurizer.blocks.26",
+                  "vla.language_model.model.layers.0",
+                  "vla.language_model.model.layers.1",
+                  "vla.language_model.model.layers.2",
+                  "vla.language_model.model.layers.3"
+                ],
+                "global_parameter_elements": 1891300802,
+                "local_parameter_elements": 473249745,
+                "reshard_after_forward": true,
+                "gradient_sync_every_microstep": true,
+                "optimizer_master_dtype": "float32",
+                "weight_decay": 0.0
+              },
+              "distributed_world_size": 4,
+              "group_port": 52169,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 26,
+              "engines": {
+                "reward": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            },
+            {
+              "rank": 1,
+              "gpu": {
+                "physical_gpu": "5",
+                "uuid": "fe0edfe4-b193-1af7-6a98-cbff40214f74",
+                "cuda_local_device": 0
+              },
+              "pid": 3404126,
+              "training_role": "reward",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": {
+                "backend": "fsdp2_full_shard",
+                "model": "reward",
+                "units": [
+                  "vla.vision_backbone.featurizer.blocks.0",
+                  "vla.vision_backbone.featurizer.blocks.1",
+                  "vla.vision_backbone.featurizer.blocks.2",
+                  "vla.vision_backbone.featurizer.blocks.3",
+                  "vla.vision_backbone.featurizer.blocks.4",
+                  "vla.vision_backbone.featurizer.blocks.5",
+                  "vla.vision_backbone.featurizer.blocks.6",
+                  "vla.vision_backbone.featurizer.blocks.7",
+                  "vla.vision_backbone.featurizer.blocks.8",
+                  "vla.vision_backbone.featurizer.blocks.9",
+                  "vla.vision_backbone.featurizer.blocks.10",
+                  "vla.vision_backbone.featurizer.blocks.11",
+                  "vla.vision_backbone.featurizer.blocks.12",
+                  "vla.vision_backbone.featurizer.blocks.13",
+                  "vla.vision_backbone.featurizer.blocks.14",
+                  "vla.vision_backbone.featurizer.blocks.15",
+                  "vla.vision_backbone.featurizer.blocks.16",
+                  "vla.vision_backbone.featurizer.blocks.17",
+                  "vla.vision_backbone.featurizer.blocks.18",
+                  "vla.vision_backbone.featurizer.blocks.19",
+                  "vla.vision_backbone.featurizer.blocks.20",
+                  "vla.vision_backbone.featurizer.blocks.21",
+                  "vla.vision_backbone.featurizer.blocks.22",
+                  "vla.vision_backbone.featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.0",
+                  "vla.vision_backbone.fused_featurizer.blocks.1",
+                  "vla.vision_backbone.fused_featurizer.blocks.2",
+                  "vla.vision_backbone.fused_featurizer.blocks.3",
+                  "vla.vision_backbone.fused_featurizer.blocks.4",
+                  "vla.vision_backbone.fused_featurizer.blocks.5",
+                  "vla.vision_backbone.fused_featurizer.blocks.6",
+                  "vla.vision_backbone.fused_featurizer.blocks.7",
+                  "vla.vision_backbone.fused_featurizer.blocks.8",
+                  "vla.vision_backbone.fused_featurizer.blocks.9",
+                  "vla.vision_backbone.fused_featurizer.blocks.10",
+                  "vla.vision_backbone.fused_featurizer.blocks.11",
+                  "vla.vision_backbone.fused_featurizer.blocks.12",
+                  "vla.vision_backbone.fused_featurizer.blocks.13",
+                  "vla.vision_backbone.fused_featurizer.blocks.14",
+                  "vla.vision_backbone.fused_featurizer.blocks.15",
+                  "vla.vision_backbone.fused_featurizer.blocks.16",
+                  "vla.vision_backbone.fused_featurizer.blocks.17",
+                  "vla.vision_backbone.fused_featurizer.blocks.18",
+                  "vla.vision_backbone.fused_featurizer.blocks.19",
+                  "vla.vision_backbone.fused_featurizer.blocks.20",
+                  "vla.vision_backbone.fused_featurizer.blocks.21",
+                  "vla.vision_backbone.fused_featurizer.blocks.22",
+                  "vla.vision_backbone.fused_featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.24",
+                  "vla.vision_backbone.fused_featurizer.blocks.25",
+                  "vla.vision_backbone.fused_featurizer.blocks.26",
+                  "vla.language_model.model.layers.0",
+                  "vla.language_model.model.layers.1",
+                  "vla.language_model.model.layers.2",
+                  "vla.language_model.model.layers.3"
+                ],
+                "global_parameter_elements": 1891300802,
+                "local_parameter_elements": 472686417,
+                "reshard_after_forward": true,
+                "gradient_sync_every_microstep": true,
+                "optimizer_master_dtype": "float32",
+                "weight_decay": 0.0
+              },
+              "distributed_world_size": 4,
+              "group_port": 52169,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 26,
+              "engines": {
+                "reward": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            },
+            {
+              "rank": 2,
+              "gpu": {
+                "physical_gpu": "6",
+                "uuid": "8c9bc264-7f09-989e-1ec7-cecd6cde782c",
+                "cuda_local_device": 0
+              },
+              "pid": 3404114,
+              "training_role": "reward",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": {
+                "backend": "fsdp2_full_shard",
+                "model": "reward",
+                "units": [
+                  "vla.vision_backbone.featurizer.blocks.0",
+                  "vla.vision_backbone.featurizer.blocks.1",
+                  "vla.vision_backbone.featurizer.blocks.2",
+                  "vla.vision_backbone.featurizer.blocks.3",
+                  "vla.vision_backbone.featurizer.blocks.4",
+                  "vla.vision_backbone.featurizer.blocks.5",
+                  "vla.vision_backbone.featurizer.blocks.6",
+                  "vla.vision_backbone.featurizer.blocks.7",
+                  "vla.vision_backbone.featurizer.blocks.8",
+                  "vla.vision_backbone.featurizer.blocks.9",
+                  "vla.vision_backbone.featurizer.blocks.10",
+                  "vla.vision_backbone.featurizer.blocks.11",
+                  "vla.vision_backbone.featurizer.blocks.12",
+                  "vla.vision_backbone.featurizer.blocks.13",
+                  "vla.vision_backbone.featurizer.blocks.14",
+                  "vla.vision_backbone.featurizer.blocks.15",
+                  "vla.vision_backbone.featurizer.blocks.16",
+                  "vla.vision_backbone.featurizer.blocks.17",
+                  "vla.vision_backbone.featurizer.blocks.18",
+                  "vla.vision_backbone.featurizer.blocks.19",
+                  "vla.vision_backbone.featurizer.blocks.20",
+                  "vla.vision_backbone.featurizer.blocks.21",
+                  "vla.vision_backbone.featurizer.blocks.22",
+                  "vla.vision_backbone.featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.0",
+                  "vla.vision_backbone.fused_featurizer.blocks.1",
+                  "vla.vision_backbone.fused_featurizer.blocks.2",
+                  "vla.vision_backbone.fused_featurizer.blocks.3",
+                  "vla.vision_backbone.fused_featurizer.blocks.4",
+                  "vla.vision_backbone.fused_featurizer.blocks.5",
+                  "vla.vision_backbone.fused_featurizer.blocks.6",
+                  "vla.vision_backbone.fused_featurizer.blocks.7",
+                  "vla.vision_backbone.fused_featurizer.blocks.8",
+                  "vla.vision_backbone.fused_featurizer.blocks.9",
+                  "vla.vision_backbone.fused_featurizer.blocks.10",
+                  "vla.vision_backbone.fused_featurizer.blocks.11",
+                  "vla.vision_backbone.fused_featurizer.blocks.12",
+                  "vla.vision_backbone.fused_featurizer.blocks.13",
+                  "vla.vision_backbone.fused_featurizer.blocks.14",
+                  "vla.vision_backbone.fused_featurizer.blocks.15",
+                  "vla.vision_backbone.fused_featurizer.blocks.16",
+                  "vla.vision_backbone.fused_featurizer.blocks.17",
+                  "vla.vision_backbone.fused_featurizer.blocks.18",
+                  "vla.vision_backbone.fused_featurizer.blocks.19",
+                  "vla.vision_backbone.fused_featurizer.blocks.20",
+                  "vla.vision_backbone.fused_featurizer.blocks.21",
+                  "vla.vision_backbone.fused_featurizer.blocks.22",
+                  "vla.vision_backbone.fused_featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.24",
+                  "vla.vision_backbone.fused_featurizer.blocks.25",
+                  "vla.vision_backbone.fused_featurizer.blocks.26",
+                  "vla.language_model.model.layers.0",
+                  "vla.language_model.model.layers.1",
+                  "vla.language_model.model.layers.2",
+                  "vla.language_model.model.layers.3"
+                ],
+                "global_parameter_elements": 1891300802,
+                "local_parameter_elements": 472682320,
+                "reshard_after_forward": true,
+                "gradient_sync_every_microstep": true,
+                "optimizer_master_dtype": "float32",
+                "weight_decay": 0.0
+              },
+              "distributed_world_size": 4,
+              "group_port": 52169,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 26,
+              "engines": {
+                "reward": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            },
+            {
+              "rank": 3,
+              "gpu": {
+                "physical_gpu": "7",
+                "uuid": "07ae0bbc-8923-bd0c-199e-c726821e655d",
+                "cuda_local_device": 0
+              },
+              "pid": 3404120,
+              "training_role": "reward",
+              "world_size": 4,
+              "split_train_serial": false,
+              "cpu_replay_prefetch": true,
+              "policy_sharding": null,
+              "reward_sharding": {
+                "backend": "fsdp2_full_shard",
+                "model": "reward",
+                "units": [
+                  "vla.vision_backbone.featurizer.blocks.0",
+                  "vla.vision_backbone.featurizer.blocks.1",
+                  "vla.vision_backbone.featurizer.blocks.2",
+                  "vla.vision_backbone.featurizer.blocks.3",
+                  "vla.vision_backbone.featurizer.blocks.4",
+                  "vla.vision_backbone.featurizer.blocks.5",
+                  "vla.vision_backbone.featurizer.blocks.6",
+                  "vla.vision_backbone.featurizer.blocks.7",
+                  "vla.vision_backbone.featurizer.blocks.8",
+                  "vla.vision_backbone.featurizer.blocks.9",
+                  "vla.vision_backbone.featurizer.blocks.10",
+                  "vla.vision_backbone.featurizer.blocks.11",
+                  "vla.vision_backbone.featurizer.blocks.12",
+                  "vla.vision_backbone.featurizer.blocks.13",
+                  "vla.vision_backbone.featurizer.blocks.14",
+                  "vla.vision_backbone.featurizer.blocks.15",
+                  "vla.vision_backbone.featurizer.blocks.16",
+                  "vla.vision_backbone.featurizer.blocks.17",
+                  "vla.vision_backbone.featurizer.blocks.18",
+                  "vla.vision_backbone.featurizer.blocks.19",
+                  "vla.vision_backbone.featurizer.blocks.20",
+                  "vla.vision_backbone.featurizer.blocks.21",
+                  "vla.vision_backbone.featurizer.blocks.22",
+                  "vla.vision_backbone.featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.0",
+                  "vla.vision_backbone.fused_featurizer.blocks.1",
+                  "vla.vision_backbone.fused_featurizer.blocks.2",
+                  "vla.vision_backbone.fused_featurizer.blocks.3",
+                  "vla.vision_backbone.fused_featurizer.blocks.4",
+                  "vla.vision_backbone.fused_featurizer.blocks.5",
+                  "vla.vision_backbone.fused_featurizer.blocks.6",
+                  "vla.vision_backbone.fused_featurizer.blocks.7",
+                  "vla.vision_backbone.fused_featurizer.blocks.8",
+                  "vla.vision_backbone.fused_featurizer.blocks.9",
+                  "vla.vision_backbone.fused_featurizer.blocks.10",
+                  "vla.vision_backbone.fused_featurizer.blocks.11",
+                  "vla.vision_backbone.fused_featurizer.blocks.12",
+                  "vla.vision_backbone.fused_featurizer.blocks.13",
+                  "vla.vision_backbone.fused_featurizer.blocks.14",
+                  "vla.vision_backbone.fused_featurizer.blocks.15",
+                  "vla.vision_backbone.fused_featurizer.blocks.16",
+                  "vla.vision_backbone.fused_featurizer.blocks.17",
+                  "vla.vision_backbone.fused_featurizer.blocks.18",
+                  "vla.vision_backbone.fused_featurizer.blocks.19",
+                  "vla.vision_backbone.fused_featurizer.blocks.20",
+                  "vla.vision_backbone.fused_featurizer.blocks.21",
+                  "vla.vision_backbone.fused_featurizer.blocks.22",
+                  "vla.vision_backbone.fused_featurizer.blocks.23",
+                  "vla.vision_backbone.fused_featurizer.blocks.24",
+                  "vla.vision_backbone.fused_featurizer.blocks.25",
+                  "vla.vision_backbone.fused_featurizer.blocks.26",
+                  "vla.language_model.model.layers.0",
+                  "vla.language_model.model.layers.1",
+                  "vla.language_model.model.layers.2",
+                  "vla.language_model.model.layers.3"
+                ],
+                "global_parameter_elements": 1891300802,
+                "local_parameter_elements": 472682320,
+                "reshard_after_forward": true,
+                "gradient_sync_every_microstep": true,
+                "optimizer_master_dtype": "float32",
+                "weight_decay": 0.0
+              },
+              "distributed_world_size": 4,
+              "group_port": 52169,
+              "policy_steps": 132,
+              "ctrl_steps": 0,
+              "reward_steps": 26,
+              "engines": {
+                "reward": {
+                  "global_steps": 26,
+                  "skipped_steps": 0,
+                  "global_batch": 1024
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "stop_flag": {
+      "reason": "user_requested_stop",
+      "at": "2026-10-22T20:52:07+08:00",
+      "requested_ns": 1792673527585183106,
+      "run_id": "ipcpwmanual_1022_161523_17963ef5",
+      "uid": 1004
+    },
+    "manual_contract": {
+      "stop_on_target": false,
+      "configured_stop_on_target": false,
+      "until_deadline": false,
+      "until_manual_stop": true,
+      "deadline_unix_seconds": null,
+      "deadline_utc": null,
+      "stop_boundary": "completed synchronized epoch or pre-update replay-fill boundary; preserve final weights",
+      "learning_rate_horizon_unchanged": true
+    },
+    "time_to_85": {
+      "status": "not_reached",
+      "seconds": null,
+      "first_qualifying": null,
+      "consecutive_qualifying": null
+    },
+    "latest_evaluation": {
+      "evaluation_id": 132,
+      "rate": 0.782,
+      "completed_ns": 1792673556680979574,
+      "completed_iso": "2026-10-22T12:52:36.680979574Z",
+      "elapsed_ns": 16633613983226,
+      "elapsed_seconds": 16633.613983226,
+      "sample_count": 1000,
+      "policy_step": 132,
+      "fresh_count": 24,
+      "evaluation_watermark": 4610,
+      "evaluation_started_ns": null,
+      "evaluation_duration_seconds": null,
+      "metadata": {
+        "metric_tag": "Eval/_Global/Average_Return",
+        "scope": "original_task0_rolling_window",
+        "snapshot_completed_ns": 1792673556680979574,
+        "latest_episode_completed_ns": 1792673555758632889,
+        "latest_episode_policy_versions": [
+          131
+        ],
+        "rolling_window_can_span_policy_versions": true
+      }
+    }
+  },
+  "backend_extra": {
+    "fsdp_sharding_verified": {
+      "passed": true,
+      "rows": [
+        {
+          "id": 189,
+          "ts_ns": 1792657034530029727,
+          "actor": "reward_trainer",
+          "actor_id": "2",
+          "pid": 3404114,
+          "details_json": "{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":472682320,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0}",
+          "details": {
+            "backend": "fsdp2_full_shard",
+            "model": "reward",
+            "units": [
+              "vla.vision_backbone.featurizer.blocks.0",
+              "vla.vision_backbone.featurizer.blocks.1",
+              "vla.vision_backbone.featurizer.blocks.2",
+              "vla.vision_backbone.featurizer.blocks.3",
+              "vla.vision_backbone.featurizer.blocks.4",
+              "vla.vision_backbone.featurizer.blocks.5",
+              "vla.vision_backbone.featurizer.blocks.6",
+              "vla.vision_backbone.featurizer.blocks.7",
+              "vla.vision_backbone.featurizer.blocks.8",
+              "vla.vision_backbone.featurizer.blocks.9",
+              "vla.vision_backbone.featurizer.blocks.10",
+              "vla.vision_backbone.featurizer.blocks.11",
+              "vla.vision_backbone.featurizer.blocks.12",
+              "vla.vision_backbone.featurizer.blocks.13",
+              "vla.vision_backbone.featurizer.blocks.14",
+              "vla.vision_backbone.featurizer.blocks.15",
+              "vla.vision_backbone.featurizer.blocks.16",
+              "vla.vision_backbone.featurizer.blocks.17",
+              "vla.vision_backbone.featurizer.blocks.18",
+              "vla.vision_backbone.featurizer.blocks.19",
+              "vla.vision_backbone.featurizer.blocks.20",
+              "vla.vision_backbone.featurizer.blocks.21",
+              "vla.vision_backbone.featurizer.blocks.22",
+              "vla.vision_backbone.featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.0",
+              "vla.vision_backbone.fused_featurizer.blocks.1",
+              "vla.vision_backbone.fused_featurizer.blocks.2",
+              "vla.vision_backbone.fused_featurizer.blocks.3",
+              "vla.vision_backbone.fused_featurizer.blocks.4",
+              "vla.vision_backbone.fused_featurizer.blocks.5",
+              "vla.vision_backbone.fused_featurizer.blocks.6",
+              "vla.vision_backbone.fused_featurizer.blocks.7",
+              "vla.vision_backbone.fused_featurizer.blocks.8",
+              "vla.vision_backbone.fused_featurizer.blocks.9",
+              "vla.vision_backbone.fused_featurizer.blocks.10",
+              "vla.vision_backbone.fused_featurizer.blocks.11",
+              "vla.vision_backbone.fused_featurizer.blocks.12",
+              "vla.vision_backbone.fused_featurizer.blocks.13",
+              "vla.vision_backbone.fused_featurizer.blocks.14",
+              "vla.vision_backbone.fused_featurizer.blocks.15",
+              "vla.vision_backbone.fused_featurizer.blocks.16",
+              "vla.vision_backbone.fused_featurizer.blocks.17",
+              "vla.vision_backbone.fused_featurizer.blocks.18",
+              "vla.vision_backbone.fused_featurizer.blocks.19",
+              "vla.vision_backbone.fused_featurizer.blocks.20",
+              "vla.vision_backbone.fused_featurizer.blocks.21",
+              "vla.vision_backbone.fused_featurizer.blocks.22",
+              "vla.vision_backbone.fused_featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.24",
+              "vla.vision_backbone.fused_featurizer.blocks.25",
+              "vla.vision_backbone.fused_featurizer.blocks.26",
+              "vla.language_model.model.layers.0",
+              "vla.language_model.model.layers.1",
+              "vla.language_model.model.layers.2",
+              "vla.language_model.model.layers.3"
+            ],
+            "global_parameter_elements": 1891300802,
+            "local_parameter_elements": 472682320,
+            "reshard_after_forward": true,
+            "gradient_sync_every_microstep": true,
+            "optimizer_master_dtype": "float32",
+            "weight_decay": 0.0
+          }
+        },
+        {
+          "id": 190,
+          "ts_ns": 1792657034532581492,
+          "actor": "reward_trainer",
+          "actor_id": "1",
+          "pid": 3404126,
+          "details_json": "{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":472686417,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0}",
+          "details": {
+            "backend": "fsdp2_full_shard",
+            "model": "reward",
+            "units": [
+              "vla.vision_backbone.featurizer.blocks.0",
+              "vla.vision_backbone.featurizer.blocks.1",
+              "vla.vision_backbone.featurizer.blocks.2",
+              "vla.vision_backbone.featurizer.blocks.3",
+              "vla.vision_backbone.featurizer.blocks.4",
+              "vla.vision_backbone.featurizer.blocks.5",
+              "vla.vision_backbone.featurizer.blocks.6",
+              "vla.vision_backbone.featurizer.blocks.7",
+              "vla.vision_backbone.featurizer.blocks.8",
+              "vla.vision_backbone.featurizer.blocks.9",
+              "vla.vision_backbone.featurizer.blocks.10",
+              "vla.vision_backbone.featurizer.blocks.11",
+              "vla.vision_backbone.featurizer.blocks.12",
+              "vla.vision_backbone.featurizer.blocks.13",
+              "vla.vision_backbone.featurizer.blocks.14",
+              "vla.vision_backbone.featurizer.blocks.15",
+              "vla.vision_backbone.featurizer.blocks.16",
+              "vla.vision_backbone.featurizer.blocks.17",
+              "vla.vision_backbone.featurizer.blocks.18",
+              "vla.vision_backbone.featurizer.blocks.19",
+              "vla.vision_backbone.featurizer.blocks.20",
+              "vla.vision_backbone.featurizer.blocks.21",
+              "vla.vision_backbone.featurizer.blocks.22",
+              "vla.vision_backbone.featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.0",
+              "vla.vision_backbone.fused_featurizer.blocks.1",
+              "vla.vision_backbone.fused_featurizer.blocks.2",
+              "vla.vision_backbone.fused_featurizer.blocks.3",
+              "vla.vision_backbone.fused_featurizer.blocks.4",
+              "vla.vision_backbone.fused_featurizer.blocks.5",
+              "vla.vision_backbone.fused_featurizer.blocks.6",
+              "vla.vision_backbone.fused_featurizer.blocks.7",
+              "vla.vision_backbone.fused_featurizer.blocks.8",
+              "vla.vision_backbone.fused_featurizer.blocks.9",
+              "vla.vision_backbone.fused_featurizer.blocks.10",
+              "vla.vision_backbone.fused_featurizer.blocks.11",
+              "vla.vision_backbone.fused_featurizer.blocks.12",
+              "vla.vision_backbone.fused_featurizer.blocks.13",
+              "vla.vision_backbone.fused_featurizer.blocks.14",
+              "vla.vision_backbone.fused_featurizer.blocks.15",
+              "vla.vision_backbone.fused_featurizer.blocks.16",
+              "vla.vision_backbone.fused_featurizer.blocks.17",
+              "vla.vision_backbone.fused_featurizer.blocks.18",
+              "vla.vision_backbone.fused_featurizer.blocks.19",
+              "vla.vision_backbone.fused_featurizer.blocks.20",
+              "vla.vision_backbone.fused_featurizer.blocks.21",
+              "vla.vision_backbone.fused_featurizer.blocks.22",
+              "vla.vision_backbone.fused_featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.24",
+              "vla.vision_backbone.fused_featurizer.blocks.25",
+              "vla.vision_backbone.fused_featurizer.blocks.26",
+              "vla.language_model.model.layers.0",
+              "vla.language_model.model.layers.1",
+              "vla.language_model.model.layers.2",
+              "vla.language_model.model.layers.3"
+            ],
+            "global_parameter_elements": 1891300802,
+            "local_parameter_elements": 472686417,
+            "reshard_after_forward": true,
+            "gradient_sync_every_microstep": true,
+            "optimizer_master_dtype": "float32",
+            "weight_decay": 0.0
+          }
+        },
+        {
+          "id": 191,
+          "ts_ns": 1792657034534904513,
+          "actor": "reward_trainer",
+          "actor_id": "3",
+          "pid": 3404120,
+          "details_json": "{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":472682320,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0}",
+          "details": {
+            "backend": "fsdp2_full_shard",
+            "model": "reward",
+            "units": [
+              "vla.vision_backbone.featurizer.blocks.0",
+              "vla.vision_backbone.featurizer.blocks.1",
+              "vla.vision_backbone.featurizer.blocks.2",
+              "vla.vision_backbone.featurizer.blocks.3",
+              "vla.vision_backbone.featurizer.blocks.4",
+              "vla.vision_backbone.featurizer.blocks.5",
+              "vla.vision_backbone.featurizer.blocks.6",
+              "vla.vision_backbone.featurizer.blocks.7",
+              "vla.vision_backbone.featurizer.blocks.8",
+              "vla.vision_backbone.featurizer.blocks.9",
+              "vla.vision_backbone.featurizer.blocks.10",
+              "vla.vision_backbone.featurizer.blocks.11",
+              "vla.vision_backbone.featurizer.blocks.12",
+              "vla.vision_backbone.featurizer.blocks.13",
+              "vla.vision_backbone.featurizer.blocks.14",
+              "vla.vision_backbone.featurizer.blocks.15",
+              "vla.vision_backbone.featurizer.blocks.16",
+              "vla.vision_backbone.featurizer.blocks.17",
+              "vla.vision_backbone.featurizer.blocks.18",
+              "vla.vision_backbone.featurizer.blocks.19",
+              "vla.vision_backbone.featurizer.blocks.20",
+              "vla.vision_backbone.featurizer.blocks.21",
+              "vla.vision_backbone.featurizer.blocks.22",
+              "vla.vision_backbone.featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.0",
+              "vla.vision_backbone.fused_featurizer.blocks.1",
+              "vla.vision_backbone.fused_featurizer.blocks.2",
+              "vla.vision_backbone.fused_featurizer.blocks.3",
+              "vla.vision_backbone.fused_featurizer.blocks.4",
+              "vla.vision_backbone.fused_featurizer.blocks.5",
+              "vla.vision_backbone.fused_featurizer.blocks.6",
+              "vla.vision_backbone.fused_featurizer.blocks.7",
+              "vla.vision_backbone.fused_featurizer.blocks.8",
+              "vla.vision_backbone.fused_featurizer.blocks.9",
+              "vla.vision_backbone.fused_featurizer.blocks.10",
+              "vla.vision_backbone.fused_featurizer.blocks.11",
+              "vla.vision_backbone.fused_featurizer.blocks.12",
+              "vla.vision_backbone.fused_featurizer.blocks.13",
+              "vla.vision_backbone.fused_featurizer.blocks.14",
+              "vla.vision_backbone.fused_featurizer.blocks.15",
+              "vla.vision_backbone.fused_featurizer.blocks.16",
+              "vla.vision_backbone.fused_featurizer.blocks.17",
+              "vla.vision_backbone.fused_featurizer.blocks.18",
+              "vla.vision_backbone.fused_featurizer.blocks.19",
+              "vla.vision_backbone.fused_featurizer.blocks.20",
+              "vla.vision_backbone.fused_featurizer.blocks.21",
+              "vla.vision_backbone.fused_featurizer.blocks.22",
+              "vla.vision_backbone.fused_featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.24",
+              "vla.vision_backbone.fused_featurizer.blocks.25",
+              "vla.vision_backbone.fused_featurizer.blocks.26",
+              "vla.language_model.model.layers.0",
+              "vla.language_model.model.layers.1",
+              "vla.language_model.model.layers.2",
+              "vla.language_model.model.layers.3"
+            ],
+            "global_parameter_elements": 1891300802,
+            "local_parameter_elements": 472682320,
+            "reshard_after_forward": true,
+            "gradient_sync_every_microstep": true,
+            "optimizer_master_dtype": "float32",
+            "weight_decay": 0.0
+          }
+        },
+        {
+          "id": 192,
+          "ts_ns": 1792657034535095643,
+          "actor": "reward_trainer",
+          "actor_id": "0",
+          "pid": 3404124,
+          "details_json": "{\"backend\":\"fsdp2_full_shard\",\"model\":\"reward\",\"units\":[\"vla.vision_backbone.featurizer.blocks.0\",\"vla.vision_backbone.featurizer.blocks.1\",\"vla.vision_backbone.featurizer.blocks.2\",\"vla.vision_backbone.featurizer.blocks.3\",\"vla.vision_backbone.featurizer.blocks.4\",\"vla.vision_backbone.featurizer.blocks.5\",\"vla.vision_backbone.featurizer.blocks.6\",\"vla.vision_backbone.featurizer.blocks.7\",\"vla.vision_backbone.featurizer.blocks.8\",\"vla.vision_backbone.featurizer.blocks.9\",\"vla.vision_backbone.featurizer.blocks.10\",\"vla.vision_backbone.featurizer.blocks.11\",\"vla.vision_backbone.featurizer.blocks.12\",\"vla.vision_backbone.featurizer.blocks.13\",\"vla.vision_backbone.featurizer.blocks.14\",\"vla.vision_backbone.featurizer.blocks.15\",\"vla.vision_backbone.featurizer.blocks.16\",\"vla.vision_backbone.featurizer.blocks.17\",\"vla.vision_backbone.featurizer.blocks.18\",\"vla.vision_backbone.featurizer.blocks.19\",\"vla.vision_backbone.featurizer.blocks.20\",\"vla.vision_backbone.featurizer.blocks.21\",\"vla.vision_backbone.featurizer.blocks.22\",\"vla.vision_backbone.featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.0\",\"vla.vision_backbone.fused_featurizer.blocks.1\",\"vla.vision_backbone.fused_featurizer.blocks.2\",\"vla.vision_backbone.fused_featurizer.blocks.3\",\"vla.vision_backbone.fused_featurizer.blocks.4\",\"vla.vision_backbone.fused_featurizer.blocks.5\",\"vla.vision_backbone.fused_featurizer.blocks.6\",\"vla.vision_backbone.fused_featurizer.blocks.7\",\"vla.vision_backbone.fused_featurizer.blocks.8\",\"vla.vision_backbone.fused_featurizer.blocks.9\",\"vla.vision_backbone.fused_featurizer.blocks.10\",\"vla.vision_backbone.fused_featurizer.blocks.11\",\"vla.vision_backbone.fused_featurizer.blocks.12\",\"vla.vision_backbone.fused_featurizer.blocks.13\",\"vla.vision_backbone.fused_featurizer.blocks.14\",\"vla.vision_backbone.fused_featurizer.blocks.15\",\"vla.vision_backbone.fused_featurizer.blocks.16\",\"vla.vision_backbone.fused_featurizer.blocks.17\",\"vla.vision_backbone.fused_featurizer.blocks.18\",\"vla.vision_backbone.fused_featurizer.blocks.19\",\"vla.vision_backbone.fused_featurizer.blocks.20\",\"vla.vision_backbone.fused_featurizer.blocks.21\",\"vla.vision_backbone.fused_featurizer.blocks.22\",\"vla.vision_backbone.fused_featurizer.blocks.23\",\"vla.vision_backbone.fused_featurizer.blocks.24\",\"vla.vision_backbone.fused_featurizer.blocks.25\",\"vla.vision_backbone.fused_featurizer.blocks.26\",\"vla.language_model.model.layers.0\",\"vla.language_model.model.layers.1\",\"vla.language_model.model.layers.2\",\"vla.language_model.model.layers.3\"],\"global_parameter_elements\":1891300802,\"local_parameter_elements\":473249745,\"reshard_after_forward\":true,\"gradient_sync_every_microstep\":true,\"optimizer_master_dtype\":\"float32\",\"weight_decay\":0.0}",
+          "details": {
+            "backend": "fsdp2_full_shard",
+            "model": "reward",
+            "units": [
+              "vla.vision_backbone.featurizer.blocks.0",
+              "vla.vision_backbone.featurizer.blocks.1",
+              "vla.vision_backbone.featurizer.blocks.2",
+              "vla.vision_backbone.featurizer.blocks.3",
+              "vla.vision_backbone.featurizer.blocks.4",
+              "vla.vision_backbone.featurizer.blocks.5",
+              "vla.vision_backbone.featurizer.blocks.6",
+              "vla.vision_backbone.featurizer.blocks.7",
+              "vla.vision_backbone.featurizer.blocks.8",
+              "vla.vision_backbone.featurizer.blocks.9",
+              "vla.vision_backbone.featurizer.blocks.10",
+              "vla.vision_backbone.featurizer.blocks.11",
+              "vla.vision_backbone.featurizer.blocks.12",
+              "vla.vision_backbone.featurizer.blocks.13",
+              "vla.vision_backbone.featurizer.blocks.14",
+              "vla.vision_backbone.featurizer.blocks.15",
+              "vla.vision_backbone.featurizer.blocks.16",
+              "vla.vision_backbone.featurizer.blocks.17",
+              "vla.vision_backbone.featurizer.blocks.18",
+              "vla.vision_backbone.featurizer.blocks.19",
+              "vla.vision_backbone.featurizer.blocks.20",
+              "vla.vision_backbone.featurizer.blocks.21",
+              "vla.vision_backbone.featurizer.blocks.22",
+              "vla.vision_backbone.featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.0",
+              "vla.vision_backbone.fused_featurizer.blocks.1",
+              "vla.vision_backbone.fused_featurizer.blocks.2",
+              "vla.vision_backbone.fused_featurizer.blocks.3",
+              "vla.vision_backbone.fused_featurizer.blocks.4",
+              "vla.vision_backbone.fused_featurizer.blocks.5",
+              "vla.vision_backbone.fused_featurizer.blocks.6",
+              "vla.vision_backbone.fused_featurizer.blocks.7",
+              "vla.vision_backbone.fused_featurizer.blocks.8",
+              "vla.vision_backbone.fused_featurizer.blocks.9",
+              "vla.vision_backbone.fused_featurizer.blocks.10",
+              "vla.vision_backbone.fused_featurizer.blocks.11",
+              "vla.vision_backbone.fused_featurizer.blocks.12",
+              "vla.vision_backbone.fused_featurizer.blocks.13",
+              "vla.vision_backbone.fused_featurizer.blocks.14",
+              "vla.vision_backbone.fused_featurizer.blocks.15",
+              "vla.vision_backbone.fused_featurizer.blocks.16",
+              "vla.vision_backbone.fused_featurizer.blocks.17",
+              "vla.vision_backbone.fused_featurizer.blocks.18",
+              "vla.vision_backbone.fused_featurizer.blocks.19",
+              "vla.vision_backbone.fused_featurizer.blocks.20",
+              "vla.vision_backbone.fused_featurizer.blocks.21",
+              "vla.vision_backbone.fused_featurizer.blocks.22",
+              "vla.vision_backbone.fused_featurizer.blocks.23",
+              "vla.vision_backbone.fused_featurizer.blocks.24",
+              "vla.vision_backbone.fused_featurizer.blocks.25",
+              "vla.vision_backbone.fused_featurizer.blocks.26",
+              "vla.language_model.model.layers.0",
+              "vla.language_model.model.layers.1",
+              "vla.language_model.model.layers.2",
+              "vla.language_model.model.layers.3"
+            ],
+            "global_parameter_elements": 1891300802,
+            "local_parameter_elements": 473249745,
+            "reshard_after_forward": true,
+            "gradient_sync_every_microstep": true,
+            "optimizer_master_dtype": "float32",
+            "weight_decay": 0.0
+          }
+        }
+      ]
+    },
+    "reward_features_only_enabled": {
+      "passed": true,
+      "rows": [
+        {
+          "id": 181,
+          "ts_ns": 1792657032921287631,
+          "actor": "reward_trainer",
+          "actor_id": "3",
+          "pid": 3404120,
+          "details_json": "{\"scope\":\"this_reward_instance_only\",\"causal_lm\":\"LlamaForCausalLM\",\"decoder\":\"LlamaModel\",\"skip_lm_head\":true,\"use_cache\":false,\"retain_intermediate_hidden_states\":false,\"multimodal_preparation_unchanged\":true,\"decoder_called_with_hooks\":true}",
+          "details": {
+            "scope": "this_reward_instance_only",
+            "causal_lm": "LlamaForCausalLM",
+            "decoder": "LlamaModel",
+            "skip_lm_head": true,
+            "use_cache": false,
+            "retain_intermediate_hidden_states": false,
+            "multimodal_preparation_unchanged": true,
+            "decoder_called_with_hooks": true
+          }
+        },
+        {
+          "id": 183,
+          "ts_ns": 1792657032964743400,
+          "actor": "reward_trainer",
+          "actor_id": "1",
+          "pid": 3404126,
+          "details_json": "{\"scope\":\"this_reward_instance_only\",\"causal_lm\":\"LlamaForCausalLM\",\"decoder\":\"LlamaModel\",\"skip_lm_head\":true,\"use_cache\":false,\"retain_intermediate_hidden_states\":false,\"multimodal_preparation_unchanged\":true,\"decoder_called_with_hooks\":true}",
+          "details": {
+            "scope": "this_reward_instance_only",
+            "causal_lm": "LlamaForCausalLM",
+            "decoder": "LlamaModel",
+            "skip_lm_head": true,
+            "use_cache": false,
+            "retain_intermediate_hidden_states": false,
+            "multimodal_preparation_unchanged": true,
+            "decoder_called_with_hooks": true
+          }
+        },
+        {
+          "id": 185,
+          "ts_ns": 1792657033507219250,
+          "actor": "reward_trainer",
+          "actor_id": "0",
+          "pid": 3404124,
+          "details_json": "{\"scope\":\"this_reward_instance_only\",\"causal_lm\":\"LlamaForCausalLM\",\"decoder\":\"LlamaModel\",\"skip_lm_head\":true,\"use_cache\":false,\"retain_intermediate_hidden_states\":false,\"multimodal_preparation_unchanged\":true,\"decoder_called_with_hooks\":true}",
+          "details": {
+            "scope": "this_reward_instance_only",
+            "causal_lm": "LlamaForCausalLM",
+            "decoder": "LlamaModel",
+            "skip_lm_head": true,
+            "use_cache": false,
+            "retain_intermediate_hidden_states": false,
+            "multimodal_preparation_unchanged": true,
+            "decoder_called_with_hooks": true
+          }
+        },
+        {
+          "id": 187,
+          "ts_ns": 1792657033944402553,
+          "actor": "reward_trainer",
+          "actor_id": "2",
+          "pid": 3404114,
+          "details_json": "{\"scope\":\"this_reward_instance_only\",\"causal_lm\":\"LlamaForCausalLM\",\"decoder\":\"LlamaModel\",\"skip_lm_head\":true,\"use_cache\":false,\"retain_intermediate_hidden_states\":false,\"multimodal_preparation_unchanged\":true,\"decoder_called_with_hooks\":true}",
+          "details": {
+            "scope": "this_reward_instance_only",
+            "causal_lm": "LlamaForCausalLM",
+            "decoder": "LlamaModel",
+            "skip_lm_head": true,
+            "use_cache": false,
+            "retain_intermediate_hidden_states": false,
+            "multimodal_preparation_unchanged": true,
+            "decoder_called_with_hooks": true
+          }
+        }
+      ]
+    },
+    "reward_checkpointing_verified": {
+      "passed": true,
+      "rows": [
+        {
+          "id": 182,
+          "ts_ns": 1792657032922094595,
+          "actor": "reward_trainer",
+          "actor_id": "3",
+          "pid": 3404120,
+          "details_json": "{\"scope\":\"reward_training_instance_only\",\"backend\":\"native_hf_decoder_and_instance_timm_blocks\",\"use_reentrant\":false,\"preserve_rng_state\":true,\"layers\":4,\"vision_blocks\":[\"featurizer.blocks.0\",\"featurizer.blocks.1\",\"featurizer.blocks.2\",\"featurizer.blocks.3\",\"featurizer.blocks.4\",\"featurizer.blocks.5\",\"featurizer.blocks.6\",\"featurizer.blocks.7\",\"featurizer.blocks.8\",\"featurizer.blocks.9\",\"featurizer.blocks.10\",\"featurizer.blocks.11\",\"featurizer.blocks.12\",\"featurizer.blocks.13\",\"featurizer.blocks.14\",\"featurizer.blocks.15\",\"featurizer.blocks.16\",\"featurizer.blocks.17\",\"featurizer.blocks.18\",\"featurizer.blocks.19\",\"featurizer.blocks.20\",\"featurizer.blocks.21\",\"featurizer.blocks.22\",\"featurizer.blocks.23\",\"fused_featurizer.blocks.0\",\"fused_featurizer.blocks.1\",\"fused_featurizer.blocks.2\",\"fused_featurizer.blocks.3\",\"fused_featurizer.blocks.4\",\"fused_featurizer.blocks.5\",\"fused_featurizer.blocks.6\",\"fused_featurizer.blocks.7\",\"fused_featurizer.blocks.8\",\"fused_featurizer.blocks.9\",\"fused_featurizer.blocks.10\",\"fused_featurizer.blocks.11\",\"fused_featurizer.blocks.12\",\"fused_featurizer.blocks.13\",\"fused_featurizer.blocks.14\",\"fused_featurizer.blocks.15\",\"fused_featurizer.blocks.16\",\"fused_featurizer.blocks.17\",\"fused_featurizer.blocks.18\",\"fused_featurizer.blocks.19\",\"fused_featurizer.blocks.20\",\"fused_featurizer.blocks.21\",\"fused_featurizer.blocks.22\",\"fused_featurizer.blocks.23\",\"fused_featurizer.blocks.24\",\"fused_featurizer.blocks.25\",\"fused_featurizer.blocks.26\"],\"vision_block_count\":51,\"module_names_and_state_keys_unchanged\":true}",
+          "details": {
+            "scope": "reward_training_instance_only",
+            "backend": "native_hf_decoder_and_instance_timm_blocks",
+            "use_reentrant": false,
+            "preserve_rng_state": true,
+            "layers": 4,
+            "vision_blocks": [
+              "featurizer.blocks.0",
+              "featurizer.blocks.1",
+              "featurizer.blocks.2",
+              "featurizer.blocks.3",
+              "featurizer.blocks.4",
+              "featurizer.blocks.5",
+              "featurizer.blocks.6",
+              "featurizer.blocks.7",
+              "featurizer.blocks.8",
+              "featurizer.blocks.9",
+              "featurizer.blocks.10",
+              "featurizer.blocks.11",
+              "featurizer.blocks.12",
+              "featurizer.blocks.13",
+              "featurizer.blocks.14",
+              "featurizer.blocks.15",
+              "featurizer.blocks.16",
+              "featurizer.blocks.17",
+              "featurizer.blocks.18",
+              "featurizer.blocks.19",
+              "featurizer.blocks.20",
+              "featurizer.blocks.21",
+              "featurizer.blocks.22",
+              "featurizer.blocks.23",
+              "fused_featurizer.blocks.0",
+              "fused_featurizer.blocks.1",
+              "fused_featurizer.blocks.2",
+              "fused_featurizer.blocks.3",
+              "fused_featurizer.blocks.4",
+              "fused_featurizer.blocks.5",
+              "fused_featurizer.blocks.6",
+              "fused_featurizer.blocks.7",
+              "fused_featurizer.blocks.8",
+              "fused_featurizer.blocks.9",
+              "fused_featurizer.blocks.10",
+              "fused_featurizer.blocks.11",
+              "fused_featurizer.blocks.12",
+              "fused_featurizer.blocks.13",
+              "fused_featurizer.blocks.14",
+              "fused_featurizer.blocks.15",
+              "fused_featurizer.blocks.16",
+              "fused_featurizer.blocks.17",
+              "fused_featurizer.blocks.18",
+              "fused_featurizer.blocks.19",
+              "fused_featurizer.blocks.20",
+              "fused_featurizer.blocks.21",
+              "fused_featurizer.blocks.22",
+              "fused_featurizer.blocks.23",
+              "fused_featurizer.blocks.24",
+              "fused_featurizer.blocks.25",
+              "fused_featurizer.blocks.26"
+            ],
+            "vision_block_count": 51,
+            "module_names_and_state_keys_unchanged": true
+          }
+        },
+        {
+          "id": 184,
+          "ts_ns": 1792657032965512886,
+          "actor": "reward_trainer",
+          "actor_id": "1",
+          "pid": 3404126,
+          "details_json": "{\"scope\":\"reward_training_instance_only\",\"backend\":\"native_hf_decoder_and_instance_timm_blocks\",\"use_reentrant\":false,\"preserve_rng_state\":true,\"layers\":4,\"vision_blocks\":[\"featurizer.blocks.0\",\"featurizer.blocks.1\",\"featurizer.blocks.2\",\"featurizer.blocks.3\",\"featurizer.blocks.4\",\"featurizer.blocks.5\",\"featurizer.blocks.6\",\"featurizer.blocks.7\",\"featurizer.blocks.8\",\"featurizer.blocks.9\",\"featurizer.blocks.10\",\"featurizer.blocks.11\",\"featurizer.blocks.12\",\"featurizer.blocks.13\",\"featurizer.blocks.14\",\"featurizer.blocks.15\",\"featurizer.blocks.16\",\"featurizer.blocks.17\",\"featurizer.blocks.18\",\"featurizer.blocks.19\",\"featurizer.blocks.20\",\"featurizer.blocks.21\",\"featurizer.blocks.22\",\"featurizer.blocks.23\",\"fused_featurizer.blocks.0\",\"fused_featurizer.blocks.1\",\"fused_featurizer.blocks.2\",\"fused_featurizer.blocks.3\",\"fused_featurizer.blocks.4\",\"fused_featurizer.blocks.5\",\"fused_featurizer.blocks.6\",\"fused_featurizer.blocks.7\",\"fused_featurizer.blocks.8\",\"fused_featurizer.blocks.9\",\"fused_featurizer.blocks.10\",\"fused_featurizer.blocks.11\",\"fused_featurizer.blocks.12\",\"fused_featurizer.blocks.13\",\"fused_featurizer.blocks.14\",\"fused_featurizer.blocks.15\",\"fused_featurizer.blocks.16\",\"fused_featurizer.blocks.17\",\"fused_featurizer.blocks.18\",\"fused_featurizer.blocks.19\",\"fused_featurizer.blocks.20\",\"fused_featurizer.blocks.21\",\"fused_featurizer.blocks.22\",\"fused_featurizer.blocks.23\",\"fused_featurizer.blocks.24\",\"fused_featurizer.blocks.25\",\"fused_featurizer.blocks.26\"],\"vision_block_count\":51,\"module_names_and_state_keys_unchanged\":true}",
+          "details": {
+            "scope": "reward_training_instance_only",
+            "backend": "native_hf_decoder_and_instance_timm_blocks",
+            "use_reentrant": false,
+            "preserve_rng_state": true,
+            "layers": 4,
+            "vision_blocks": [
+              "featurizer.blocks.0",
+              "featurizer.blocks.1",
+              "featurizer.blocks.2",
+              "featurizer.blocks.3",
+              "featurizer.blocks.4",
+              "featurizer.blocks.5",
+              "featurizer.blocks.6",
+              "featurizer.blocks.7",
+              "featurizer.blocks.8",
+              "featurizer.blocks.9",
+              "featurizer.blocks.10",
+              "featurizer.blocks.11",
+              "featurizer.blocks.12",
+              "featurizer.blocks.13",
+              "featurizer.blocks.14",
+              "featurizer.blocks.15",
+              "featurizer.blocks.16",
+              "featurizer.blocks.17",
+              "featurizer.blocks.18",
+              "featurizer.blocks.19",
+              "featurizer.blocks.20",
+              "featurizer.blocks.21",
+              "featurizer.blocks.22",
+              "featurizer.blocks.23",
+              "fused_featurizer.blocks.0",
+              "fused_featurizer.blocks.1",
+              "fused_featurizer.blocks.2",
+              "fused_featurizer.blocks.3",
+              "fused_featurizer.blocks.4",
+              "fused_featurizer.blocks.5",
+              "fused_featurizer.blocks.6",
+              "fused_featurizer.blocks.7",
+              "fused_featurizer.blocks.8",
+              "fused_featurizer.blocks.9",
+              "fused_featurizer.blocks.10",
+              "fused_featurizer.blocks.11",
+              "fused_featurizer.blocks.12",
+              "fused_featurizer.blocks.13",
+              "fused_featurizer.blocks.14",
+              "fused_featurizer.blocks.15",
+              "fused_featurizer.blocks.16",
+              "fused_featurizer.blocks.17",
+              "fused_featurizer.blocks.18",
+              "fused_featurizer.blocks.19",
+              "fused_featurizer.blocks.20",
+              "fused_featurizer.blocks.21",
+              "fused_featurizer.blocks.22",
+              "fused_featurizer.blocks.23",
+              "fused_featurizer.blocks.24",
+              "fused_featurizer.blocks.25",
+              "fused_featurizer.blocks.26"
+            ],
+            "vision_block_count": 51,
+            "module_names_and_state_keys_unchanged": true
+          }
+        },
+        {
+          "id": 186,
+          "ts_ns": 1792657033507985945,
+          "actor": "reward_trainer",
+          "actor_id": "0",
+          "pid": 3404124,
+          "details_json": "{\"scope\":\"reward_training_instance_only\",\"backend\":\"native_hf_decoder_and_instance_timm_blocks\",\"use_reentrant\":false,\"preserve_rng_state\":true,\"layers\":4,\"vision_blocks\":[\"featurizer.blocks.0\",\"featurizer.blocks.1\",\"featurizer.blocks.2\",\"featurizer.blocks.3\",\"featurizer.blocks.4\",\"featurizer.blocks.5\",\"featurizer.blocks.6\",\"featurizer.blocks.7\",\"featurizer.blocks.8\",\"featurizer.blocks.9\",\"featurizer.blocks.10\",\"featurizer.blocks.11\",\"featurizer.blocks.12\",\"featurizer.blocks.13\",\"featurizer.blocks.14\",\"featurizer.blocks.15\",\"featurizer.blocks.16\",\"featurizer.blocks.17\",\"featurizer.blocks.18\",\"featurizer.blocks.19\",\"featurizer.blocks.20\",\"featurizer.blocks.21\",\"featurizer.blocks.22\",\"featurizer.blocks.23\",\"fused_featurizer.blocks.0\",\"fused_featurizer.blocks.1\",\"fused_featurizer.blocks.2\",\"fused_featurizer.blocks.3\",\"fused_featurizer.blocks.4\",\"fused_featurizer.blocks.5\",\"fused_featurizer.blocks.6\",\"fused_featurizer.blocks.7\",\"fused_featurizer.blocks.8\",\"fused_featurizer.blocks.9\",\"fused_featurizer.blocks.10\",\"fused_featurizer.blocks.11\",\"fused_featurizer.blocks.12\",\"fused_featurizer.blocks.13\",\"fused_featurizer.blocks.14\",\"fused_featurizer.blocks.15\",\"fused_featurizer.blocks.16\",\"fused_featurizer.blocks.17\",\"fused_featurizer.blocks.18\",\"fused_featurizer.blocks.19\",\"fused_featurizer.blocks.20\",\"fused_featurizer.blocks.21\",\"fused_featurizer.blocks.22\",\"fused_featurizer.blocks.23\",\"fused_featurizer.blocks.24\",\"fused_featurizer.blocks.25\",\"fused_featurizer.blocks.26\"],\"vision_block_count\":51,\"module_names_and_state_keys_unchanged\":true}",
+          "details": {
+            "scope": "reward_training_instance_only",
+            "backend": "native_hf_decoder_and_instance_timm_blocks",
+            "use_reentrant": false,
+            "preserve_rng_state": true,
+            "layers": 4,
+            "vision_blocks": [
+              "featurizer.blocks.0",
+              "featurizer.blocks.1",
+              "featurizer.blocks.2",
+              "featurizer.blocks.3",
+              "featurizer.blocks.4",
+              "featurizer.blocks.5",
+              "featurizer.blocks.6",
+              "featurizer.blocks.7",
+              "featurizer.blocks.8",
+              "featurizer.blocks.9",
+              "featurizer.blocks.10",
+              "featurizer.blocks.11",
+              "featurizer.blocks.12",
+              "featurizer.blocks.13",
+              "featurizer.blocks.14",
+              "featurizer.blocks.15",
+              "featurizer.blocks.16",
+              "featurizer.blocks.17",
+              "featurizer.blocks.18",
+              "featurizer.blocks.19",
+              "featurizer.blocks.20",
+              "featurizer.blocks.21",
+              "featurizer.blocks.22",
+              "featurizer.blocks.23",
+              "fused_featurizer.blocks.0",
+              "fused_featurizer.blocks.1",
+              "fused_featurizer.blocks.2",
+              "fused_featurizer.blocks.3",
+              "fused_featurizer.blocks.4",
+              "fused_featurizer.blocks.5",
+              "fused_featurizer.blocks.6",
+              "fused_featurizer.blocks.7",
+              "fused_featurizer.blocks.8",
+              "fused_featurizer.blocks.9",
+              "fused_featurizer.blocks.10",
+              "fused_featurizer.blocks.11",
+              "fused_featurizer.blocks.12",
+              "fused_featurizer.blocks.13",
+              "fused_featurizer.blocks.14",
+              "fused_featurizer.blocks.15",
+              "fused_featurizer.blocks.16",
+              "fused_featurizer.blocks.17",
+              "fused_featurizer.blocks.18",
+              "fused_featurizer.blocks.19",
+              "fused_featurizer.blocks.20",
+              "fused_featurizer.blocks.21",
+              "fused_featurizer.blocks.22",
+              "fused_featurizer.blocks.23",
+              "fused_featurizer.blocks.24",
+              "fused_featurizer.blocks.25",
+              "fused_featurizer.blocks.26"
+            ],
+            "vision_block_count": 51,
+            "module_names_and_state_keys_unchanged": true
+          }
+        },
+        {
+          "id": 188,
+          "ts_ns": 1792657033944985632,
+          "actor": "reward_trainer",
+          "actor_id": "2",
+          "pid": 3404114,
+          "details_json": "{\"scope\":\"reward_training_instance_only\",\"backend\":\"native_hf_decoder_and_instance_timm_blocks\",\"use_reentrant\":false,\"preserve_rng_state\":true,\"layers\":4,\"vision_blocks\":[\"featurizer.blocks.0\",\"featurizer.blocks.1\",\"featurizer.blocks.2\",\"featurizer.blocks.3\",\"featurizer.blocks.4\",\"featurizer.blocks.5\",\"featurizer.blocks.6\",\"featurizer.blocks.7\",\"featurizer.blocks.8\",\"featurizer.blocks.9\",\"featurizer.blocks.10\",\"featurizer.blocks.11\",\"featurizer.blocks.12\",\"featurizer.blocks.13\",\"featurizer.blocks.14\",\"featurizer.blocks.15\",\"featurizer.blocks.16\",\"featurizer.blocks.17\",\"featurizer.blocks.18\",\"featurizer.blocks.19\",\"featurizer.blocks.20\",\"featurizer.blocks.21\",\"featurizer.blocks.22\",\"featurizer.blocks.23\",\"fused_featurizer.blocks.0\",\"fused_featurizer.blocks.1\",\"fused_featurizer.blocks.2\",\"fused_featurizer.blocks.3\",\"fused_featurizer.blocks.4\",\"fused_featurizer.blocks.5\",\"fused_featurizer.blocks.6\",\"fused_featurizer.blocks.7\",\"fused_featurizer.blocks.8\",\"fused_featurizer.blocks.9\",\"fused_featurizer.blocks.10\",\"fused_featurizer.blocks.11\",\"fused_featurizer.blocks.12\",\"fused_featurizer.blocks.13\",\"fused_featurizer.blocks.14\",\"fused_featurizer.blocks.15\",\"fused_featurizer.blocks.16\",\"fused_featurizer.blocks.17\",\"fused_featurizer.blocks.18\",\"fused_featurizer.blocks.19\",\"fused_featurizer.blocks.20\",\"fused_featurizer.blocks.21\",\"fused_featurizer.blocks.22\",\"fused_featurizer.blocks.23\",\"fused_featurizer.blocks.24\",\"fused_featurizer.blocks.25\",\"fused_featurizer.blocks.26\"],\"vision_block_count\":51,\"module_names_and_state_keys_unchanged\":true}",
+          "details": {
+            "scope": "reward_training_instance_only",
+            "backend": "native_hf_decoder_and_instance_timm_blocks",
+            "use_reentrant": false,
+            "preserve_rng_state": true,
+            "layers": 4,
+            "vision_blocks": [
+              "featurizer.blocks.0",
+              "featurizer.blocks.1",
+              "featurizer.blocks.2",
+              "featurizer.blocks.3",
+              "featurizer.blocks.4",
+              "featurizer.blocks.5",
+              "featurizer.blocks.6",
+              "featurizer.blocks.7",
+              "featurizer.blocks.8",
+              "featurizer.blocks.9",
+              "featurizer.blocks.10",
+              "featurizer.blocks.11",
+              "featurizer.blocks.12",
+              "featurizer.blocks.13",
+              "featurizer.blocks.14",
+              "featurizer.blocks.15",
+              "featurizer.blocks.16",
+              "featurizer.blocks.17",
+              "featurizer.blocks.18",
+              "featurizer.blocks.19",
+              "featurizer.blocks.20",
+              "featurizer.blocks.21",
+              "featurizer.blocks.22",
+              "featurizer.blocks.23",
+              "fused_featurizer.blocks.0",
+              "fused_featurizer.blocks.1",
+              "fused_featurizer.blocks.2",
+              "fused_featurizer.blocks.3",
+              "fused_featurizer.blocks.4",
+              "fused_featurizer.blocks.5",
+              "fused_featurizer.blocks.6",
+              "fused_featurizer.blocks.7",
+              "fused_featurizer.blocks.8",
+              "fused_featurizer.blocks.9",
+              "fused_featurizer.blocks.10",
+              "fused_featurizer.blocks.11",
+              "fused_featurizer.blocks.12",
+              "fused_featurizer.blocks.13",
+              "fused_featurizer.blocks.14",
+              "fused_featurizer.blocks.15",
+              "fused_featurizer.blocks.16",
+              "fused_featurizer.blocks.17",
+              "fused_featurizer.blocks.18",
+              "fused_featurizer.blocks.19",
+              "fused_featurizer.blocks.20",
+              "fused_featurizer.blocks.21",
+              "fused_featurizer.blocks.22",
+              "fused_featurizer.blocks.23",
+              "fused_featurizer.blocks.24",
+              "fused_featurizer.blocks.25",
+              "fused_featurizer.blocks.26"
+            ],
+            "vision_block_count": 51,
+            "module_names_and_state_keys_unchanged": true
+          }
+        }
+      ]
+    },
+    "world_memory_policy_verified": {
+      "passed": true,
+      "rows": [
+        {
+          "id": 157,
+          "ts_ns": 1792657022223135962,
+          "actor": "ctrl_trainer",
+          "actor_id": "2",
+          "pid": 3404123,
+          "details_json": "{\"zero_stage\":2,\"reduce_bucket_size\":500000000,\"allgather_bucket_size\":500000000,\"original_zero_config_preserved\":true,\"batch_and_optimizer_unchanged\":true}",
+          "details": {
+            "zero_stage": 2,
+            "reduce_bucket_size": 500000000,
+            "allgather_bucket_size": 500000000,
+            "original_zero_config_preserved": true,
+            "batch_and_optimizer_unchanged": true
+          }
+        },
+        {
+          "id": 161,
+          "ts_ns": 1792657022338872493,
+          "actor": "ctrl_trainer",
+          "actor_id": "3",
+          "pid": 3404127,
+          "details_json": "{\"zero_stage\":2,\"reduce_bucket_size\":500000000,\"allgather_bucket_size\":500000000,\"original_zero_config_preserved\":true,\"batch_and_optimizer_unchanged\":true}",
+          "details": {
+            "zero_stage": 2,
+            "reduce_bucket_size": 500000000,
+            "allgather_bucket_size": 500000000,
+            "original_zero_config_preserved": true,
+            "batch_and_optimizer_unchanged": true
+          }
+        },
+        {
+          "id": 162,
+          "ts_ns": 1792657022339677256,
+          "actor": "ctrl_trainer",
+          "actor_id": "1",
+          "pid": 3404122,
+          "details_json": "{\"zero_stage\":2,\"reduce_bucket_size\":500000000,\"allgather_bucket_size\":500000000,\"original_zero_config_preserved\":true,\"batch_and_optimizer_unchanged\":true}",
+          "details": {
+            "zero_stage": 2,
+            "reduce_bucket_size": 500000000,
+            "allgather_bucket_size": 500000000,
+            "original_zero_config_preserved": true,
+            "batch_and_optimizer_unchanged": true
+          }
+        },
+        {
+          "id": 163,
+          "ts_ns": 1792657022340792217,
+          "actor": "ctrl_trainer",
+          "actor_id": "0",
+          "pid": 3404121,
+          "details_json": "{\"zero_stage\":2,\"reduce_bucket_size\":500000000,\"allgather_bucket_size\":500000000,\"original_zero_config_preserved\":true,\"batch_and_optimizer_unchanged\":true}",
+          "details": {
+            "zero_stage": 2,
+            "reduce_bucket_size": 500000000,
+            "allgather_bucket_size": 500000000,
+            "original_zero_config_preserved": true,
+            "batch_and_optimizer_unchanged": true
+          }
+        }
+      ]
+    }
+  },
+  "error_events": [],
+  "unresolved_error_events": [],
+  "source": {
+    "passed": true,
+    "manifest_count": 57,
+    "manifest_bound_to_trusted_candidate_map": true,
+    "mismatches": [],
+    "archive_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+    "expected_archive_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878"
+  },
+  "finite_cache_identity_bound": true,
+  "checkpoint_finite_validation_included": true,
+  "stop_gate_sha256": "ba7ef0422497bf79be91e0d24845d0ad0a1877efe23e4505c5889259454c9046",
+  "weights_file_identity": {
+    "bytes": 7126334262,
+    "mtime_ns": 1792673568300025162,
+    "inode": 20407149729,
+    "device": 64512
+  },
+  "checkpoint_manifest": {
+    "format": "accerl_parallel_weights_v1",
+    "saved_at_unix": 1792673563.9822679,
+    "reason": "final",
+    "rank": 0,
+    "world_size": 4,
+    "steps": {
+      "policy": 132,
+      "ctrl": 26,
+      "reward": 26
+    },
+    "weights_only": true,
+    "exact_resume_supported": false,
+    "missing_resume_state": [
+      "optimizer",
+      "Replay",
+      "RNG",
+      "prefetched_batches"
+    ],
+    "restore_method": "Initialize original models, then apply saved state_dict tensors",
+    "metadata": {
+      "args": {
+        "cuda_visible_devices": "4,5,6,7",
+        "gpu_layout": "four_rank_split_train",
+        "validate_only": false,
+        "benchmark": "libero_spatial",
+        "num_trainer_gpus": 4,
+        "num_inference_actors": 4,
+        "num_rollout_workers": 10,
+        "num_eval_workers": 10,
+        "rollout_local_buf": 64,
+        "inference_batch": 8,
+        "inference_timeout_ms": 300,
+        "replay_capacity": 10000,
+        "train_batch_size": 8,
+        "accumulation_steps": 18,
+        "train_iters": 30000,
+        "ckpt_dir": "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/formal_v3/training/checkpoints",
+        "ckpt_every_steps": 500,
+        "gamma": 0.99,
+        "lambda_": 0.95,
+        "clip_eps": 0.2,
+        "vf_coef": 0.5,
+        "ent_coef": 0.0,
+        "kl_coef": 0.1,
+        "reward_scale": 1.0,
+        "value_lr": 0.0001,
+        "policy_lr": 1e-05,
+        "value_warmup_steps": 100,
+        "policy_warmup_steps": 100,
+        "policy_train_start_step": 0,
+        "imagine_horizon": 32,
+        "num_step_cond": 7,
+        "num_reward_inference_actors": 4,
+        "num_ctrl_inference_actors": 4,
+        "agent_config_path": "envs/config/agent.yaml",
+        "trainer_config_path": "envs/config/trainer.yaml",
+        "moving_avg_window": 1000,
+        "log_interval_seconds": 10,
+        "broadcast_group_name": "trainer_to_inference_broadcast",
+        "use_bf16": true,
+        "use_proprio": false,
+        "num_images_in_input": 2,
+        "pretrained_checkpoint": "/mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt",
+        "checkpoint2": "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt",
+        "clip_mode": "gipo",
+        "exp_name": "OpenVLA_IPCPolicyWorld_Ray328GiB_JointPolicy4_World4_RewardFSDP2_gpu47_fresh",
+        "svd_model_path": "/mnt/data/lcx3/checkpoint/ctrl_world/svd/svd_model",
+        "clip_model_path": "/mnt/data/lcx3/checkpoint/ctrl_world/clip/clip_model",
+        "ctrl_world_ckpt": "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-08-07T10-39-47_libero_spatial_newdecoder_fromlastbest/best_val_loss.pt",
+        "vae_decoder_checkpoint": "/mnt/data/lcx3/Ctrl-World/model_ckpt/vae_decoder_libero/deterministic_full_stage2/best_decoder.pt",
+        "condition_stat_path": "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-07-21T16-40-56_libero_vla_delta_finetune/condition_stat.json",
+        "num_cams": 2,
+        "num_history": 6,
+        "num_inference_steps": 10,
+        "target_height": 192,
+        "target_width": 320,
+        "num_frames_pred": 5,
+        "reward_checkpoint": "/mnt/data/lcx3/checkpoint/reward/reward.pt",
+        "reward_batch_size": 16,
+        "reward_accumulation_steps": 16,
+        "reward_lr": 0.0001,
+        "reward_warmup_steps": 20,
+        "wm_replay_capacity": 50000,
+        "real_traj_collect_interval": 1,
+        "reward_train_interval": 5,
+        "ctrl_batch_size": 4,
+        "ctrl_accumulation_steps": 64,
+        "ctrl_lr": 0.0001,
+        "ctrl_warmup_steps": 20,
+        "ctrl_train_interval": 5,
+        "ctrl_eval_interval": 50,
+        "ctrl_eval_batch_size": 64,
+        "ctrl_eval_micro_batch_size": 4,
+        "ctrl_eval_seed": 12345,
+        "ctrl_eval_episode_ratio": 0.05,
+        "ctrl_eval_windows_per_episode": 8,
+        "ctrl_eval_max_horizon": 4,
+        "ctrl_eval_lpips_net": "alex",
+        "ctrl_ema_decay": 0.0,
+        "debug": false,
+        "debug_wait": false
+      },
+      "run_id": "ipcpwmanual_1022_161523_17963ef5",
+      "stop_policy": {
+        "stop_on_target": false,
+        "configured_stop_on_target": false,
+        "until_deadline": false,
+        "until_manual_stop": true,
+        "deadline_unix_seconds": null,
+        "deadline_utc": null,
+        "stop_boundary": "completed synchronized epoch or pre-update replay-fill boundary; preserve final weights",
+        "learning_rate_horizon_unchanged": true
+      },
+      "frozen_weights": "Restore original checkpoints in args before applying snapshot"
+    },
+    "tensor_counts": {
+      "policy": 891,
+      "ctrl": 1434,
+      "reward": 736
+    },
+    "weights_file": "latest_weights.pt",
+    "weights_bytes": 7126334262
+  },
+  "sampler": {
+    "coverage_receipt_valid": true,
+    "health": {
+      "samples": 16645,
+      "process_rows": 415906,
+      "sqlite_dropped_samples": 19,
+      "missed_ticks": 0,
+      "errors": 0,
+      "last_error": "OperationalError('database is locked')",
+      "interval_seconds": 1,
+      "process_interval_seconds": 2,
+      "identity_refresh_seconds": 10,
+      "pid": 3393185,
+      "started_ns": 1792656923236665890,
+      "previous_write_seconds": 0.0004195212386548519,
+      "last_sample_ns": 1792673586237043360,
+      "stopped_ns": 1792673586659778089
+    },
+    "system": {
+      "count": 16645,
+      "first_ns": 1792656923236917558,
+      "last_ns": 1792673586237043360,
+      "max_sample_duration_seconds": 1.1688877451233566,
+      "max_late_seconds": 0.1710182996466756,
+      "sum_row_missed_ticks": 0
+    },
+    "processes": {
+      "count": 415906,
+      "first_ns": 1792656923236917558,
+      "last_ns": 1792673575237173133
+    },
+    "limitation": "Dropped SQLite samples, missed scheduler ticks and errors are separate; post-stop heartbeat age is normal. Sampled peaks do not guarantee instantaneous margins."
+  },
+  "access": "read-only SQLite/file/proc; no runtime-source imports, torch loading, GPU probes, process signals, MPS mutations, remote writes or Nsight reread",
+  "local_correction": {
+    "reason": "The first wrapper manually copied a 62-character expected archive SHA256. Its observed 64-character SHA256 equals both the frozen deployment validation and local source_v3.tar.gz; all 57 remote source-file hashes already matched.",
+    "original_audit_file": "final_training_audit_v3.json",
+    "original_audit_sha256": "6c10398543b1ff5f495bb5c05ef5db0d704b75920b27b01cdefda5b86510ed81",
+    "original_expected_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4f729c971c332b56cfadb85878",
+    "correct_expected_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+    "validation_receipt_sha256": "ef41cfb1459e78c5b51e6f680a0f5ad8e335b8436e9a4d2aabd00c18352cebf4",
+    "remote_scan_repeated": false
+  },
+  "finite_cache_receipt": {
+    "file": "final_weights_finite.json",
+    "sha256": "d2a3bba659fcb4b5952d8f372d75276c4e0c82c29e4075a8a85cb509336113c8",
+    "run_id": "ipcpwmanual_1022_161523_17963ef5",
+    "single_pass": true,
+    "file_identity": {
+      "bytes": 7126334262,
+      "mtime_ns": 1792673568300025162,
+      "inode": 20407149729,
+      "device": 64512
+    },
+    "models": {
+      "policy": {
+        "tensor_count": 891,
+        "elements": 144474882,
+        "tensor_bytes": 288949764,
+        "nonfinite_tensors": [],
+        "all_cpu": true,
+        "passed": true
+      },
+      "ctrl": {
+        "tensor_count": 1434,
+        "elements": 1526730474,
+        "tensor_bytes": 3053460948,
+        "nonfinite_tensors": [],
+        "all_cpu": true,
+        "passed": true
+      },
+      "reward": {
+        "tensor_count": 736,
+        "elements": 1891300802,
+        "tensor_bytes": 3782601604,
+        "nonfinite_tensors": [],
+        "all_cpu": true,
+        "passed": true
+      }
+    },
+    "elapsed_seconds": 15.637927956879139,
+    "reloaded_during_binding": false
+  },
+  "final_checks": {
+    "stop_gate": true,
+    "ledger": true,
+    "policy_initial_zero2": true,
+    "world_zero2": true,
+    "dynamic_policy_modes": true,
+    "mode_rank_PID_binding": true,
+    "WM_cohorts": true,
+    "replay": true,
+    "completion": true,
+    "synchronized_epochs": true,
+    "no_unresolved_error_events": true,
+    "backend_extra": true,
+    "source": true,
+    "finite_same_file": true,
+    "sampler_receipt_consistency": true
+  },
+  "local_binding_completed_ns": 1792674365299652600
+}

@@ -1,0 +1,308 @@
+{
+  "passed": true,
+  "access": "CPU standard-library-only recomputation of compact event projection",
+  "comparison": {
+    "baseline_updates_per_hour": 28.134829320642044,
+    "ipc_updates_per_hour": 32.584050866210305,
+    "throughput_gain_percent": 15.813927622812841,
+    "cycle_seconds_saved": 87.35890401699999,
+    "sync_reduction_percent": 68.08716714452956,
+    "share_of_saved_seconds_from_sync_percent": 84.32440235843647
+  },
+  "runs": {
+    "ipc": {
+      "run_id": "ipcpwmanual_1022_161523_17963ef5",
+      "cycles": [
+        {
+          "start": 31,
+          "end": 35,
+          "wall_ns": 546908717149,
+          "wall_seconds": 546.908717149,
+          "train_seconds": 511.0446493625641,
+          "sync_seconds": 35.8240807056427,
+          "other_seconds": 0.03998708079325297
+        },
+        {
+          "start": 36,
+          "end": 40,
+          "wall_ns": 551042731218,
+          "wall_seconds": 551.042731218,
+          "train_seconds": 516.910293340683,
+          "sync_seconds": 34.09139347076416,
+          "other_seconds": 0.04104440655282815
+        },
+        {
+          "start": 41,
+          "end": 45,
+          "wall_ns": 555475809255,
+          "wall_seconds": 555.475809255,
+          "train_seconds": 521.6705305576324,
+          "sync_seconds": 33.765666246414185,
+          "other_seconds": 0.03961245095331378
+        },
+        {
+          "start": 46,
+          "end": 50,
+          "wall_ns": 544869154287,
+          "wall_seconds": 544.869154287,
+          "train_seconds": 510.58417415618896,
+          "sync_seconds": 34.2453773021698,
+          "other_seconds": 0.0396028286412502
+        },
+        {
+          "start": 51,
+          "end": 55,
+          "wall_ns": 566558873248,
+          "wall_seconds": 566.558873248,
+          "train_seconds": 518.4213206768036,
+          "sync_seconds": 35.10097122192383,
+          "other_seconds": 13.036581349272637
+        },
+        {
+          "start": 56,
+          "end": 60,
+          "wall_ns": 547153187336,
+          "wall_seconds": 547.153187336,
+          "train_seconds": 513.4208302497864,
+          "sync_seconds": 33.665751457214355,
+          "other_seconds": 0.06660562899924116
+        },
+        {
+          "start": 61,
+          "end": 65,
+          "wall_ns": 559769568293,
+          "wall_seconds": 559.769568293,
+          "train_seconds": 524.825644493103,
+          "sync_seconds": 34.90379047393799,
+          "other_seconds": 0.04013332595900465
+        },
+        {
+          "start": 66,
+          "end": 70,
+          "wall_ns": 548515729229,
+          "wall_seconds": 548.515729229,
+          "train_seconds": 513.8519718647003,
+          "sync_seconds": 34.6232373714447,
+          "other_seconds": 0.04051999285502461
+        },
+        {
+          "start": 71,
+          "end": 75,
+          "wall_ns": 550071695811,
+          "wall_seconds": 550.071695811,
+          "train_seconds": 514.5132195949554,
+          "sync_seconds": 35.519551515579224,
+          "other_seconds": 0.03892470046537255
+        },
+        {
+          "start": 76,
+          "end": 80,
+          "wall_ns": 571068480248,
+          "wall_seconds": 571.068480248,
+          "train_seconds": 522.8226215839386,
+          "sync_seconds": 34.642967224121094,
+          "other_seconds": 13.602891439940322
+        },
+        {
+          "start": 81,
+          "end": 85,
+          "wall_ns": 549454119541,
+          "wall_seconds": 549.454119541,
+          "train_seconds": 514.8726506233215,
+          "sync_seconds": 34.542903661727905,
+          "other_seconds": 0.038565255950516075
+        },
+        {
+          "start": 86,
+          "end": 90,
+          "wall_ns": 548443983959,
+          "wall_seconds": 548.443983959,
+          "train_seconds": 515.1734631061554,
+          "sync_seconds": 33.228657960891724,
+          "other_seconds": 0.04186289195286008
+        },
+        {
+          "start": 91,
+          "end": 95,
+          "wall_ns": 555281949258,
+          "wall_seconds": 555.281949258,
+          "train_seconds": 520.0278279781342,
+          "sync_seconds": 35.17057752609253,
+          "other_seconds": 0.08354375377336964
+        },
+        {
+          "start": 96,
+          "end": 100,
+          "wall_ns": 539231035805,
+          "wall_seconds": 539.231035805,
+          "train_seconds": 505.1337962150574,
+          "sync_seconds": 34.054961919784546,
+          "other_seconds": 0.04227767015811423
+        }
+      ],
+      "ncycles": 14,
+      "policy_updates": 70,
+      "world_updates": 14,
+      "reward_updates": 14,
+      "sum_cycle_wall_seconds": 7733.845034637,
+      "policy_updates_per_hour": 32.584050866210305,
+      "mean_cycle_parts_seconds": {
+        "wall_seconds": 552.4175024740714,
+        "train_seconds": 515.9480709859303,
+        "sync_seconds": 34.52713486126491,
+        "other_seconds": 1.942296626876222
+      }
+    },
+    "baseline": {
+      "run_id": "jointp4manual_1022_104329_229b879f",
+      "cycles": [
+        {
+          "start": 31,
+          "end": 35,
+          "wall_ns": 643268692360,
+          "wall_seconds": 643.26869236,
+          "train_seconds": 532.0917360782623,
+          "sync_seconds": 111.13737964630127,
+          "other_seconds": 0.03957663543644685
+        },
+        {
+          "start": 36,
+          "end": 40,
+          "wall_ns": 605542113664,
+          "wall_seconds": 605.542113664,
+          "train_seconds": 524.3797998428345,
+          "sync_seconds": 81.12191557884216,
+          "other_seconds": 0.040398242323362865
+        },
+        {
+          "start": 41,
+          "end": 45,
+          "wall_ns": 671052078630,
+          "wall_seconds": 671.05207863,
+          "train_seconds": 540.4654448032379,
+          "sync_seconds": 130.542053937912,
+          "other_seconds": 0.04457988885008035
+        },
+        {
+          "start": 46,
+          "end": 50,
+          "wall_ns": 628719391674,
+          "wall_seconds": 628.719391674,
+          "train_seconds": 533.528324842453,
+          "sync_seconds": 95.15089797973633,
+          "other_seconds": 0.04016885181067664
+        },
+        {
+          "start": 51,
+          "end": 55,
+          "wall_ns": 663775306358,
+          "wall_seconds": 663.775306358,
+          "train_seconds": 525.7401585578918,
+          "sync_seconds": 118.73179364204407,
+          "other_seconds": 19.303354158064053
+        },
+        {
+          "start": 56,
+          "end": 60,
+          "wall_ns": 626540527976,
+          "wall_seconds": 626.540527976,
+          "train_seconds": 529.8288505077362,
+          "sync_seconds": 96.66601610183716,
+          "other_seconds": 0.04566136642665697
+        },
+        {
+          "start": 61,
+          "end": 65,
+          "wall_ns": 645244178026,
+          "wall_seconds": 645.244178026,
+          "train_seconds": 528.2588975429535,
+          "sync_seconds": 116.90646171569824,
+          "other_seconds": 0.07881876734825255
+        },
+        {
+          "start": 66,
+          "end": 70,
+          "wall_ns": 632342781953,
+          "wall_seconds": 632.342781953,
+          "train_seconds": 525.2191367149353,
+          "sync_seconds": 107.07952165603638,
+          "other_seconds": 0.044123582028305464
+        },
+        {
+          "start": 71,
+          "end": 75,
+          "wall_ns": 619823964087,
+          "wall_seconds": 619.823964087,
+          "train_seconds": 529.7690951824188,
+          "sync_seconds": 90.01296710968018,
+          "other_seconds": 0.04190179490103674
+        },
+        {
+          "start": 76,
+          "end": 80,
+          "wall_ns": 665721403640,
+          "wall_seconds": 665.72140364,
+          "train_seconds": 528.1874730587006,
+          "sync_seconds": 117.50804662704468,
+          "other_seconds": 20.02588395425471
+        },
+        {
+          "start": 81,
+          "end": 85,
+          "wall_ns": 630360614923,
+          "wall_seconds": 630.360614923,
+          "train_seconds": 523.584394454956,
+          "sync_seconds": 106.733731508255,
+          "other_seconds": 0.04248895978889777
+        },
+        {
+          "start": 86,
+          "end": 90,
+          "wall_ns": 658809894104,
+          "wall_seconds": 658.809894104,
+          "train_seconds": 525.3317234516144,
+          "sync_seconds": 133.43674731254578,
+          "other_seconds": 0.04142333983986646
+        },
+        {
+          "start": 91,
+          "end": 95,
+          "wall_ns": 648697352648,
+          "wall_seconds": 648.697352648,
+          "train_seconds": 524.7076556682587,
+          "sync_seconds": 123.91845536231995,
+          "other_seconds": 0.07124161742137858
+        },
+        {
+          "start": 96,
+          "end": 100,
+          "wall_ns": 616971390832,
+          "wall_seconds": 616.971390832,
+          "train_seconds": 531.1831786632538,
+          "sync_seconds": 85.74213194847107,
+          "other_seconds": 0.0460802202751438
+        }
+      ],
+      "ncycles": 14,
+      "policy_updates": 70,
+      "world_updates": 14,
+      "reward_updates": 14,
+      "sum_cycle_wall_seconds": 8956.869690875,
+      "policy_updates_per_hour": 28.134829320642044,
+      "mean_cycle_parts_seconds": {
+        "wall_seconds": 639.7764064910714,
+        "train_seconds": 528.7339906692505,
+        "sync_seconds": 108.1920085804803,
+        "other_seconds": 2.8504072413406334
+      }
+    }
+  },
+  "limitations": [
+    "This compact projection independently reproduces cycle-wall, phase sums and the headline only; it does not include publication timing, inference traces, checkpoint tensors or full-run claims.",
+    "Observed bundle changes include Policy/World IPC, Ray64->328GiB, warmup500->100/20 and lineage telemetry; this is not an isolated IPC causal A/B.",
+    "Train/sync fields are controller host wall durations; not SM Active/Occupancy, GPU kernel time or physical bandwidth.",
+    "Throughput is a completed5:1:1 update rate, not Policy-only speed or learning-quality/time-to-target improvement."
+  ],
+  "input_sha256": "996ec6e1a5444164f2e5f4d7ba7d8ceb7c9bfec2e7ceaf6fbc33755eba608953",
+  "verifier_sha256": "20b2c50c67ad068bd379a0ba70336207441be10ef59272b31bccbfd052df87b6"
+}

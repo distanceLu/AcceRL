@@ -1,0 +1,5 @@
+{
+  "returncode": 0,
+  "stdout": "{\"python\": \"3.11.13 (main, Jun  5 2025, 13:12:00) [GCC 11.2.0]\", \"torch_module_version\": \"2.12.0+cu130\", \"torch_module_file\": \"/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/torch/__init__.py\", \"torch_compiled_cuda\": \"13.0\", \"ray_module_version\": \"2.55.1\", \"cuda_queries_performed\": false}\n",
+  "stderr": ""
+}

@@ -1,0 +1,193 @@
+{
+  "status": "frozen_lineage_instrumented_manual_ready",
+  "created_ns": 1792656830966919676,
+  "source": "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/source_v3",
+  "archive_sha256": "aa5dec65122dd78d0e4e27892c8741b6134c4c4f729c971c332b56cfadb85878",
+  "source_file_count": 57,
+  "source_hashes_verified_after_tests": true,
+  "old_training": {
+    "run_id": "jointp4manual_1022_104329_229b879f",
+    "state": "stopped_by_user",
+    "steps": {
+      "policy": 100,
+      "world": 20,
+      "reward": 20
+    },
+    "final_weights_cpu_finite_and_replay_TB_audit": "passed",
+    "old_policy4_automation": "deleted"
+  },
+  "new_long_training_launched": false,
+  "changes": {
+    "object_store_gib": 328,
+    "object_store_bytes": 352187318272,
+    "weight_transport": {
+      "policy": "cuda_ipc",
+      "world": "cuda_ipc",
+      "reward": "cpu_ray"
+    },
+    "destination": "copy_ into independent inference parameters and buffers",
+    "verification": "unchanged full CPU SHA256 on source/destination, cross-rank inventory match, ACK before release and next train",
+    "learning_core_AST": "five methods unchanged",
+    "recipe": "P ordinary8/18 joint4/36; W4/64; R16/16; globals576/1024/1024, inference2/3/2 unchanged"
+  },
+  "CPU_validation": {
+    "passed": true,
+    "cases": 155,
+    "report": "lineage_v3_CPU_validation.json",
+    "bash_syntax": true,
+    "python_compile_all_sources": true
+  },
+  "GPU_validation": {
+    "small": {
+      "report": "ipc_small_gpu_v3.json",
+      "actors": 8,
+      "GPUs": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "versions_per_kind": 8,
+      "rank_publications": 64,
+      "large_tensor_MiB": 64,
+      "passed": true
+    },
+    "large": {
+      "report": "ipc_large_gpu_v1.json",
+      "actors": 8,
+      "GPUs": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "versions_per_kind": 3,
+      "rank_publications": 24,
+      "large_tensor_MiB": 3072,
+      "actual_payload_bytes": {
+        "policy": 3221225728,
+        "ctrl": 3221225588
+      },
+      "passed": true
+    },
+    "same_CPU_oracle_and_loaded_hashes": true,
+    "parameter_identity_and_no_alias": true,
+    "same_token_no_reimport": true,
+    "rank_UUID_runid_birth_verified": true,
+    "bounded_warm_allocated_growth_bytes": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "Ray_actual_capacity_bytes": 352187318272,
+    "Ray_fallback_mmap_bytes": 0,
+    "spilled_or_restored_in_transport_tests": false,
+    "cleanup_signals": [],
+    "survivors": [],
+    "MPS_clients_after": [],
+    "MPS_preserved": true
+  },
+  "diagnosed_development_failures": [
+    {
+      "report": "v1_stats_reader_diagnosis.json",
+      "stage": "CPU stats reader before actor creation",
+      "candidate_transport_failure": false
+    },
+    {
+      "report": "v2_protocol_diagnosis.json",
+      "stage": "first exporter schema; Torch2.12 tagged66byte/emptyNone protocol",
+      "OOM": false,
+      "fixed_and_regressed": true
+    }
+  ],
+  "limitations": [
+    "Full SHA256 still reads selected GPU bytes onto CPU; the bulk Ray weight-data path is removed, not every D2H copy.",
+    "Standalone synthetic transport tests, including3GiB tensor, do not establish24-model six-service training VRAM margin, throughput or convergence.",
+    "Finite-cycle allocated-memory checks are not indefinite leak/crash-recovery proofs.",
+    "No new Nsight/SM measurements; no new long training was launched."
+  ],
+  "references": [
+    "https://docs.vllm.ai/en/latest/training/weight_transfer/ipc/",
+    "https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/inter-process-communication.html",
+    "https://github.com/pytorch/pytorch/blob/v2.12.0/c10/cuda/CUDACachingAllocator.cpp"
+  ],
+  "source_manifest": {
+    "README.md": "a7b1ba689d95bf87b33df21da6ab3afebc6ae566447a64dd7ef690de5176bff5",
+    "analyze_inference_contention.py": "a253d481688b11bcf8cefa80659a5a5dda5355d4b19c623b73e916f75522d540",
+    "analyze_short_measurements.py": "9bcc9de56e84d1ef6beabb997f82fa34de098e64f82e8126e271e6b2f91e79bb",
+    "capture_hooks.py": "ef51c6f67a058d3ca5d5139d119deb3890347b87e485f921bab79bd1fcf47e0b",
+    "capture_telemetry.py": "2ed62024fc0c26ef3e95370e15dcc7e80a7ffaf7b22461ef688ab4fa0ed64d2a",
+    "capture_training.py": "4cf27b5a1e758cddddb29ac96e1394cba134f3f1ca1afcbeb8d3026b4a9a21ed",
+    "cpu_sampler.py": "ae2b28974199b33271d4fba8cf13ce449e3c2bbba1f28e173bdcc6b4812b14df",
+    "cuda_ipc_weights.py": "0fa026ca8a71fc24e7702fe495aac84d5ddf5241869b382b0c6a5685c8396a3c",
+    "deadline_guard.py": "20cc71d4dfdad83cd6cf93595a74c3ad232e403e364bfd651476d9089ee5d3b9",
+    "evaluation_threshold.py": "1be077524e08846e185fbfcab0ee4904c08423ac6ddfdd2c523814a3c0fec1ee",
+    "fsdp_engine.py": "f0b79ae819550131ec02d2af82468e8662c11c4b0349f73238d3c322e00e55ef",
+    "gpu47_safety.py": "cc259a3090fc372b02be932a30cf961f3dbf4baf94a6363dcf79768a8e3c60d1",
+    "installed_deepspeed_boundary_sources.json": "43bf07108c2c9727079bea014f899385574488bb9066f50371804bc8bd18e704",
+    "lineage_trace.py": "91a7791b453d7f0efa28038eaf34316ef6c7cc9e1838d91f38a8f172dcf0ae01",
+    "memory_policy.py": "7b3ad59d661a092d7427deab8350fd24937fa21e7c7068378586f331b7cdedb8",
+    "nsight_capture.py": "0b76c1af3c6e0e573244b8f98a81e512f1ddf74386db2f61d47f1e59e485ddd3",
+    "observed_cpu_prefetch.py": "d4cc0a0eec239e199cf97074ae0dae53088501bb223c528d89255410255c0c3a",
+    "parallel_checkpoint.py": "983bea482fb473bcdc5983294f7685a0c93ddcf8029d30ddc99a225074153c30",
+    "policy_backend_audit.py": "b2aac854dedc01f03025dd0de49400777812c4d526fc5edcf28952bb81184f89",
+    "policy_batch_receipts.py": "2e612f11dee468fc5dc6400a66f0cc564c388dcad8c96159f9f2c12d7bcbbb3e",
+    "policy_joint_batch_mode.py": "9078eb5a4095e0946d8fcdc71e77c1df97cf3a9f33e6fae3a158db764246a5b9",
+    "profile_plan.py": "72f6a5038c36cb99a142d11513145d9deccaade0dd8eec3b478a3b127d2b7588",
+    "ray_memory_config.py": "021102f28357f73ca807d6c720a0c7d157c868f86c5d6e2bd1ffd1aad7974f70",
+    "request_stop.py": "b515958b4ec0aac92360773eee18c59cc6a7252ab393bc2534d2583690d732c5",
+    "reward_features.py": "e16fb3d886a801f4e9a1e4834b7ef3568bf4675d331f820be9c1d4cf93128e43",
+    "run.sh": "ed133a7da8618d5843e31f90c74ddec9c21b22c78fc487daff2c25afc998ca0d",
+    "runner.py": "de1cfc54cc904965f71b356d48ae49e775a474939d8a67b9084057f7fc0e7cbc",
+    "shared_inference.py": "3fe741ab4f14e66c2742f13cb2d8261fc54f16034e1b63cbaaf6a21367e0e5e6",
+    "split_serial.py": "73c597b5f582f40ab6c11dd8c7864f023ef5a266d46eb4b5cbee0290d4034540",
+    "telemetry.py": "0c8054762173fbd7f085f0298e4df323c6748cabd3984892941bd41d150c35e6",
+    "test_analyze_inference_contention_cpu.py": "80e7d14b759bd5e6b61ca6d3673442dc2bab73d898d7b68418154abad7c7560c",
+    "test_analyze_short_measurements.py": "7c132e1a81834fba57794f83a044f9e2bd29b01453ff63d6fe9116a9ba1615a0",
+    "test_deadline_guard.py": "118331c2f0f395c30a6c2cd1d08fa450594059d3bb7167035c22558231ea9715",
+    "test_joint_candidate_invariants_cpu.py": "1d8e9b6e5608dcd4dd6cf92d44319f8c09fc90ea3264498a9e84633d69bbd07f",
+    "test_lineage_trace_cpu.py": "16f582f107b73242d0887910a68bf2cbca9a61800e7c4dea21b12f162d64b968",
+    "test_manual_controller_cpu.py": "97136c21cf9688e6eb7b6280cfce19369a7bfba2da315819f2eff647e0c9cf22",
+    "test_manual_guard_cpu.py": "046e4d8a6113d06c5ad4f41ceae912aaf093663133c9fd9b8d70ab6c638e2ea3",
+    "test_manual_measurement_independence_cpu.py": "be843ff68d0203d9d32afa3138b8a05dfae98ef6487e93c33a53723afa37f937",
+    "test_manual_stop.py": "8fa866f7d9cff1d55cb9848ae7aa6f7b4b1cfaeb4e3ed729dc85350dc117f194",
+    "test_memory_policy_cpu.py": "ca8ba7c271bb2a0143cdf2afc4cdd9ce076eed9a40cc0ebf466736669636dc48",
+    "test_observed_cpu_prefetch.py": "fee100ad9fbc2ed4b40190458ab9647bd10f289d099745eb57416bc3965badb9",
+    "test_policy_backend_audit_cpu.py": "6422135b9ab622dfb44ab1689765ad1027c21bd7cae58c2bc061fed5060369e4",
+    "test_policy_batch_receipts_cpu.py": "cade22c47eb54e4b56a28c0aaad60f4681b08f123efc8d60dc3409aee7a867db",
+    "test_policy_joint_batch_mode_cpu.py": "b58a135db6febc496afa22355f863550be88d9ea592af1fbfacb1c0e5249ec70",
+    "test_policy_zero2_gpu.py": "0f50925d05033d6c989f38d55f6492d069add2df616ee4aac99668fdaaba0a5b",
+    "test_profile_plan_cpu.py": "19cf718c88a569c358680a7ce8e38ab8a40d5e0a0858f40a1d415412646360b4",
+    "test_profiled_preflight_cpu.py": "c746fc504e31f55db18accf457d76e32ee470ddf1dba8a14672b4ec7f280b368",
+    "test_reward_features_cpu.py": "6fd42f96db40d20ecc734d97f58ef96829d554b40907ccde42169904723adaa2",
+    "test_short_preflight_cpu.py": "87f46281777365a79a137f11d0acab1191f2e4a61557295052d5ff760422427b",
+    "test_snapshot_cpu.py": "b073b82cb241ad5b47a4a8a10d5203890ab95fe4c6c3b451cd91d6df94248356",
+    "test_workflow_metadata_cpu.py": "4c392adc453ca8c1fca64f7f825ac39913e19d8aa1d9592bdc3c64dbec00d82b",
+    "test_world_backend_audit_cpu.py": "cacb6b55d24aac4bd8a6f95e96f12576f905d556615f544eb3b939fb51277653",
+    "train.py": "f7f2599d6f5e5fb02668120918c4617ec0611c99f6f45a3006ee6fc6f5f9f5db",
+    "training_stop_policy.py": "95f2ee2df1b3d247a95c631ff476b3ee9dbfcc324e0dcc987d532ea910df772c",
+    "training_topology.py": "656f89656fea403697a934976fbd412e829d0b923ee8b809fb508a73610c3afd",
+    "workflow_baseline.json": "1a2f3f36ce971abd2fb2f169fe101babd80ee9d8ff7f7808bc5aa30cf701d348",
+    "world_backend_audit.py": "6c0192a7e0657e89095e3bfa5f46cb56b4ca2e51f4c0a29f31fb3719b5653042"
+  },
+  "source_parent_archive_sha256": "3b030ada9172dac7856d7a6fe6ab2d7baf8a86967300049cc8d2c7243ab3a2e7",
+  "warmup_steps": {
+    "policy": 100,
+    "value": 100,
+    "ctrl": 20,
+    "reward": 20
+  },
+  "startup_repair": "original writer/TensorBoard/StatsActor initialization restored; publication writer initialized before first sync; failed v2 preserved",
+  "lineage": {
+    "DAG": "actual successful RPC request IDs; frame prefix / imagined prefix / GAE suffix / bootstrap",
+    "sample_use": "ordered reservation versus actual micro sample IDs / rank / engine update attempt",
+    "updates": "successful attempts only; publisher/receiver version/hash ACK; actual served version",
+    "scope": "direct recorded numerical inputs; does not claim RNG/environment-selection lineage or SM resource share",
+    "bounded_live_recorder": true
+  }
+}

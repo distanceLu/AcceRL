@@ -1,0 +1,63 @@
+{
+  "run_id": "ipcpwmanual_1022_161523_17963ef5",
+  "path": "/mnt/data/lcx1/dong/need_data/cuda_ipc_weight_sync_gpu47_20261022/formal_v3/training/checkpoints/latest_weights.pt",
+  "file_identity_before": {
+    "bytes": 7126334262,
+    "mtime_ns": 1792673568300025162,
+    "inode": 20407149729,
+    "device": 64512
+  },
+  "map_location": "cpu",
+  "weights_only": true,
+  "mmap": true,
+  "single_pass": true,
+  "threads": 1,
+  "wall_time_budget_seconds": 120,
+  "cuda_initialized_before": false,
+  "external_and_embedded_manifest_match": true,
+  "model_keys": [
+    "ctrl",
+    "policy",
+    "reward"
+  ],
+  "models": {
+    "policy": {
+      "tensor_count": 891,
+      "elements": 144474882,
+      "tensor_bytes": 288949764,
+      "nonfinite_tensors": [],
+      "all_cpu": true,
+      "passed": true
+    },
+    "ctrl": {
+      "tensor_count": 1434,
+      "elements": 1526730474,
+      "tensor_bytes": 3053460948,
+      "nonfinite_tensors": [],
+      "all_cpu": true,
+      "passed": true
+    },
+    "reward": {
+      "tensor_count": 736,
+      "elements": 1891300802,
+      "tensor_bytes": 3782601604,
+      "nonfinite_tensors": [],
+      "all_cpu": true,
+      "passed": true
+    }
+  },
+  "cuda_initialized_after": false,
+  "file_identity_after": {
+    "bytes": 7126334262,
+    "mtime_ns": 1792673568300025162,
+    "inode": 20407149729,
+    "device": 64512
+  },
+  "passed": true,
+  "elapsed_seconds": 15.637927956879139,
+  "cpu_analysis_started_ns": 1792673951632427194,
+  "cpu_analysis_ended_ns": 1792673967496517569,
+  "remote_writes": false,
+  "local_cache_required": true,
+  "no_automatic_repeat": true
+}
