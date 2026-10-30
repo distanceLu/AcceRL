@@ -1,0 +1,30 @@
+{
+  "run_id": "weaverintegrated_1029_113256_f897f7dd",
+  "observed_ns": 1793245259220802578,
+  "boot_id": "31dafb78-e50a-4824-a1ba-12f7ddef8741",
+  "server_pid": 351921,
+  "control_pid": 311434,
+  "default_cap": 100.0,
+  "server_cap": 100.0,
+  "client_pids": [
+    719234,
+    719235,
+    719236,
+    719237,
+    719255,
+    719256,
+    719257,
+    719258,
+    729632,
+    730457,
+    730760,
+    730988,
+    731303,
+    731378,
+    731766,
+    731770
+  ],
+  "exact_16_model_clients": true,
+  "commands_read_only": true,
+  "mps_modified": false
+}

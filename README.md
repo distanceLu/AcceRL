@@ -135,3 +135,8 @@ If you use AcceRL or its codebase in your research, please cite our paper:
 ```
 
 
+
+
+## Frozen experiment snapshots
+
+- [Running WEAVER FRESH, 2026-10-29](experiments/weaver/fresh_gpu47_20261029/README.md): exact frozen runtime source, provenance, verification records and a qualified online Eval comparison with the historical CTRL run.

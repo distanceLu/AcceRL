@@ -1,0 +1,208 @@
+{
+  "protocol": "weaver_fresh_cpu_acceptance_v1",
+  "started_ns": 1793239876490005400,
+  "completed_ns": 1793239910484830000,
+  "candidate": "C:\\Users\\27640\\Downloads\\AcceRL\\weaver_fresh_v1",
+  "source_sha256": "6e85d343a6d801309f88f30c0063205b1af69859ec63834a975ac2c9418acc2d",
+  "profiles": [
+    {
+      "profile": "fresh_00_baseline.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": false,
+        "signal_telemetry": false,
+        "refresh_gae": false,
+        "replay_age_limits": false,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": false,
+        "early_seed_context": false,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": false,
+        "real_fraction": 0.25
+      }
+    },
+    {
+      "profile": "fresh_01_dense_signal.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": true,
+        "signal_telemetry": true,
+        "refresh_gae": false,
+        "replay_age_limits": false,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": false,
+        "early_seed_context": false,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": false,
+        "real_fraction": 0.25
+      }
+    },
+    {
+      "profile": "fresh_02_replay.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": true,
+        "signal_telemetry": true,
+        "refresh_gae": true,
+        "replay_age_limits": true,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": false,
+        "early_seed_context": false,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": false,
+        "real_fraction": 0.25
+      }
+    },
+    {
+      "profile": "fresh_03_seeds.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": true,
+        "signal_telemetry": true,
+        "refresh_gae": true,
+        "replay_age_limits": true,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": true,
+        "early_seed_context": true,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": false,
+        "real_fraction": 0.25
+      }
+    },
+    {
+      "profile": "fresh_04_real.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": true,
+        "signal_telemetry": true,
+        "refresh_gae": true,
+        "replay_age_limits": true,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": true,
+        "early_seed_context": true,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": true,
+        "real_fraction": 0.25
+      }
+    },
+    {
+      "profile": "fresh_ablate_real_only.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": false,
+        "signal_telemetry": true,
+        "refresh_gae": false,
+        "replay_age_limits": false,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": false,
+        "early_seed_context": false,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": true,
+        "real_fraction": 0.25
+      }
+    },
+    {
+      "profile": "fresh_ablate_replay_only.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": false,
+        "signal_telemetry": true,
+        "refresh_gae": true,
+        "replay_age_limits": true,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": false,
+        "early_seed_context": false,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": false,
+        "real_fraction": 0.25
+      }
+    },
+    {
+      "profile": "fresh_ablate_seeds_only.json",
+      "switches": {
+        "protocol": "weaver_fresh_v1",
+        "dense_reward": false,
+        "signal_telemetry": true,
+        "refresh_gae": false,
+        "replay_age_limits": false,
+        "max_policy_age": 16,
+        "max_world_age": 3,
+        "max_sample_uses": 4,
+        "seed_balancing": true,
+        "early_seed_context": true,
+        "seed_scheduler_mode": "balanced",
+        "seed_scheduler_seed": 20261028,
+        "real_policy_replay": false,
+        "real_fraction": 0.25
+      }
+    }
+  ],
+  "independent_switch_admissions": [
+    "dense_reward",
+    "signal_telemetry",
+    "refresh_gae",
+    "replay_age_limits",
+    "seed_balancing",
+    "early_seed_context",
+    "real_policy_replay"
+  ],
+  "modules": [
+    "test_fresh_budget_credit_cpu",
+    "test_fresh_checkpoint_cpu",
+    "test_fresh_contracts_cpu",
+    "test_fresh_native_reward_cpu",
+    "test_fresh_padding_backend_cpu",
+    "test_fresh_policy_replay_cpu",
+    "test_fresh_policy_runtime_cpu",
+    "test_fresh_publication_metadata_cpu",
+    "test_fresh_reward_targets_cpu",
+    "test_fresh_seed_scheduler_cpu",
+    "test_pipeline_budget_cpu",
+    "test_pipeline_integration_cpu",
+    "test_initial_state_pipeline_cpu",
+    "test_episode_frame_store_cpu",
+    "test_replay_projection_cpu",
+    "test_pipeline_producers_cpu",
+    "test_weaver_integrated_reward_cpu",
+    "test_weaver_online_engine_cpu",
+    "test_weaver_online_snapshot_cpu",
+    "test_weaver_online_bridge_cpu",
+    "test_online_world_stream_cpu",
+    "test_online_world_controller_cpu",
+    "test_online_controller_acceptance_cpu"
+  ],
+  "tests_run": 178,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "cuda_initialized": false,
+  "torch_version": "2.9.1+cpu",
+  "passed": true,
+  "scope": "local CPU helpers, actual-method AST fixtures, tiny native models and CPU serialization",
+  "production_gpu_verified": false,
+  "actual_ray_ddp_verified": false,
+  "training_deployed": false,
+  "training_submitted": false,
+  "log": "C:\\Users\\27640\\Downloads\\AcceRL\\weaver_fresh_v1\\validation\\cpu_validation_1793239876490005400.log"
+}

@@ -1,0 +1,104 @@
+{
+  "base_commit": "a0a0dfa969a9f1a8f5e85af0bca0b5facab5b5d8",
+  "runtime_control": {
+    "torch": "2.12.0",
+    "ray": "2.55.1",
+    "deepspeed": "0.19.0",
+    "transformers": "4.40.1",
+    "numpy": "1.26.4",
+    "diffusers": "0.29.2",
+    "einops": "0.8.2",
+    "safetensors": "0.8.0rc0",
+    "tensorboard": "2.15.2",
+    "hydra-core": "1.3.2",
+    "omegaconf": "2.3.0"
+  },
+  "runtime_native": {
+    "torch": "2.7.0+cu126",
+    "diffusers": "0.35.2",
+    "transformers": "4.57.3",
+    "numpy": "1.26.4",
+    "einops": "0.8.1",
+    "safetensors": "0.8.0"
+  },
+  "torch_imported": false,
+  "runtime_python": "3.11.13 (main, Jun  5 2025, 13:12:00) [GCC 11.2.0]",
+  "files": {
+    "host_support/mps_target_run_20261014.py": {
+      "sha256": "f004487e410d25a49e9dd3698b963a8b3d0bacaf6ac1310cbe1b154dbcb8475d",
+      "bytes": 43629
+    },
+    "host_support/real_fill_experiment_20261014.py": {
+      "sha256": "57c8704a789e38562ee701eb2c841ac14998de60ea7aed5128c7f5964829969a",
+      "bytes": 55284
+    },
+    "host_support/serial_split_verified_run_20261016.py": {
+      "sha256": "578c62a113c47bed52b5d080f3b8d3b1b8de621c29515fa3becc5ef4667ba8d6",
+      "bytes": 128069
+    },
+    "base_overlay/rl/ctrl_world/capture_hooks.py": {
+      "sha256": "4b2e60471658b50596a9363be4a2b03c439323ce5c16b980376a2f42b87a9ec4",
+      "bytes": 19569
+    },
+    "base_overlay/rl/ctrl_world/capture_telemetry.py": {
+      "sha256": "2ed62024fc0c26ef3e95370e15dcc7e80a7ffaf7b22461ef688ab4fa0ed64d2a",
+      "bytes": 24
+    },
+    "base_overlay/rl/ctrl_world/capture_training.py": {
+      "sha256": "bc36ccc85db44f09ebf3e10c565c0c260103600155c836a3517278fd8a7587bb",
+      "bytes": 16431
+    },
+    "base_overlay/rl/ctrl_world/ds_wm_discrete_ctrl_train_wm.py": {
+      "sha256": "b7696298b17bc3ca26e7950e9f6ccf9ef036aa04384db230f3737a8e2f82414c",
+      "bytes": 219488
+    },
+    "base_overlay/rl/ctrl_world/evaluation_threshold.py": {
+      "sha256": "1be077524e08846e185fbfcab0ee4904c08423ac6ddfdd2c523814a3c0fec1ee",
+      "bytes": 10183
+    },
+    "base_overlay/rl/ctrl_world/nsight_capture.py": {
+      "sha256": "66f24779fcf4194edf08cf7c4d5963085708dcf727b7075ce4edd9c35379bc63",
+      "bytes": 9864
+    },
+    "base_overlay/rl/ctrl_world/parallel_checkpoint.py": {
+      "sha256": "6a0c2aeffe6a5d6b08f1f25b03c6560829db486b79df30684aa181844e25de09",
+      "bytes": 11759
+    },
+    "base_overlay/rl/ctrl_world/resource_controller.py": {
+      "sha256": "b58da08a6f1aa59b0b06b86e9775d7cac2a04f5a85ee1824d0165a0ea07ab1ac",
+      "bytes": 4771
+    },
+    "base_overlay/rl/ctrl_world/resource_governor.py": {
+      "sha256": "14a2a4a7c81f8500db18bd7841fe54c4cdfca7e96eb34ccfbc3550584481c5e6",
+      "bytes": 26789
+    },
+    "base_overlay/rl/ctrl_world/resource_state.py": {
+      "sha256": "67ad0cffb38437297a149f37d4293868a858c2c8f9fd7d94121d42f7509082fb",
+      "bytes": 7057
+    },
+    "base_overlay/rl/ctrl_world/shared_inference.py": {
+      "sha256": "3fe741ab4f14e66c2742f13cb2d8261fc54f16034e1b63cbaaf6a21367e0e5e6",
+      "bytes": 4437
+    },
+    "base_overlay/rl/ctrl_world/split_serial.py": {
+      "sha256": "73c597b5f582f40ab6c11dd8c7864f023ef5a266d46eb4b5cbee0290d4034540",
+      "bytes": 9265
+    },
+    "base_overlay/rl/ctrl_world/telemetry.py": {
+      "sha256": "67c0aa892e3409fb11cceb1ecb658b1d51725dae6aac298bcaefdd9fb3b97761",
+      "bytes": 21586
+    },
+    "base_overlay/rl/ctrl_world/training_stop_policy.py": {
+      "sha256": "8a1229390127e485e07ac8cc41b1f5611a87997f3546a27bbaa66106ff322d83",
+      "bytes": 5814
+    },
+    "base_overlay/rl/ctrl_world/training_topology.py": {
+      "sha256": "6e05fc004e3fa5e1b37d11fde865367fb67e46ed6f22ee6aa9cae115bac71071",
+      "bytes": 16394
+    },
+    "base_overlay/rl/generate_data/generate_actor_critic_discrete_data.py": {
+      "sha256": "11154cd9436c1acc9b9e89a259ac35a6509ed0ebaef0390508abb504e653fb4a",
+      "bytes": 17556
+    }
+  }
+}

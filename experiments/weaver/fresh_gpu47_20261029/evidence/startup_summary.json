@@ -1,0 +1,18 @@
+{
+  "scope": "Extract from the actual startup observation; not a new startup test",
+  "observed_ns": 1793245122450765808,
+  "startup_checks": {
+    "actual_16_models_uid_birth_run_uuid": true,
+    "actual_8_native_child_cpu_bridge_parents": true,
+    "manual_no_deadline": true,
+    "runner_heartbeat_fresh": true,
+    "same_boot_as_mps_admission": true,
+    "protected_mps_uid_birth": true,
+    "native_ddp4_micro4_GAS64_403tensors_921834497parameters": true,
+    "policy_four_trainers_ready": true,
+    "policy_initial_4ACK_4release": true,
+    "world_initial_4ACK_4release": true
+  },
+  "fresh_profile_matches_frozen_config": true,
+  "source_observation_sha256": "a91e69c396ee7f0d37c462053db540ac313594087e7777459ce89767786acf45"
+}

@@ -1,0 +1,200 @@
+{
+  "backend": "weaver",
+  "reward_provider": "world_head",
+  "reward_semantics": "delta_native_score",
+  "terminal_rule": "horizon_only",
+  "critic_mode": "disabled",
+  "schema": {
+    "action_dim": 7,
+    "action_schema_id": "libero_eef_delta_7_v1",
+    "alignment": "action_into_frame",
+    "domain": "libero",
+    "dt_seconds": 0.05,
+    "encoder_id": "weaver_public_48460b66ef174546_sd3_clip_strict",
+    "image_keys": [
+      "full_image",
+      "wrist_image"
+    ],
+    "image_size": [
+      192,
+      320
+    ],
+    "image_value_range": "minus_one_one",
+    "n_history": 2,
+    "n_memory_frames": 6,
+    "normalizer_id": "libero_train_normalizer:dfc1665cfc36022b6f55b16ba4eb89b7803213f309eded24cd223d009191c4b9",
+    "state_dim": 8,
+    "state_schema_id": "libero_eef_pos_axisangle_gripper_v1",
+    "t_memory": 5
+  },
+  "checkpoint_metadata": {
+    "code_revision": "3e41e90738fea9a7b142db6b2fd3d9ae72b7a82e",
+    "schema": {
+      "action_dim": 7,
+      "action_schema_id": "libero_eef_delta_7_v1",
+      "alignment": "action_into_frame",
+      "domain": "libero",
+      "dt_seconds": 0.05,
+      "encoder_id": "weaver_public_48460b66ef174546_sd3_clip_strict",
+      "image_keys": [
+        "full_image",
+        "wrist_image"
+      ],
+      "image_size": [
+        192,
+        320
+      ],
+      "image_value_range": "minus_one_one",
+      "n_history": 2,
+      "n_memory_frames": 6,
+      "normalizer_id": "libero_train_normalizer:dfc1665cfc36022b6f55b16ba4eb89b7803213f309eded24cd223d009191c4b9",
+      "state_dim": 8,
+      "state_schema_id": "libero_eef_pos_axisangle_gripper_v1",
+      "t_memory": 5
+    },
+    "initialization": {
+      "kind": "pretrained_transfer",
+      "seed": 20261022,
+      "source_checkpoint_sha256": "48460b66ef1745469783ec6d4b246c00227629f353bff7e80ad9cc4451c09b6d",
+      "source_weights": "model",
+      "source_domain": "droid",
+      "target_domain": "libero"
+    },
+    "admission_kind": "serialized_native_checkpoint",
+    "success_head": {
+      "calibrated": false,
+      "trained": false
+    },
+    "terminal_head": {
+      "calibrated": false,
+      "trained": false
+    },
+    "test_fixture": false,
+    "checkpoint_id": "libero-weaver-6b45705115034914",
+    "load_report": {
+      "missing_keys": [],
+      "unexpected_keys": [],
+      "shape_mismatches": [],
+      "strict": true,
+      "tensor_count": 866,
+      "evidence_id": "sha256:6b45705115034914803224c3653533e30236fffdac544b46400b5af68bfd3443:strict_native_reload_v1",
+      "checkpoint_sha256": "6b45705115034914803224c3653533e30236fffdac544b46400b5af68bfd3443",
+      "validation": "torch.load(weights_only=True) and native load_state_dict(strict=True)",
+      "validation_scope": "current native model architecture"
+    },
+    "training_provenance": {
+      "run_id": "weaverpretrain_20261023_102831_f8c86281b8",
+      "training_manifest_sha256": "1bc6ebda4277604f5c3ee385ecf212b3a5f4c1d922d33bb6c92c5db8ddea8dc3",
+      "successful_updates": 3200,
+      "optimizer_steps": 3200,
+      "resume_checkpoint": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/micro8_formal_v1/checkpoints/update_00003200.pt",
+      "validation": {
+        "successful_updates": 3200,
+        "loss": 0.2824968472123146,
+        "batches_per_rank": 1,
+        "seed": 20361022,
+        "objective": "native_world_loss",
+        "held_out_episodes": true
+      },
+      "initialization": "pretrained_transfer"
+    },
+    "reward_provider": "external_vlm",
+    "critic_mode": "disabled",
+    "normalization_sha256": "4eb48833c551c744bf35100d7296b399c22187375674822804cba715f6e6d23b",
+    "encoder_paths": {
+      "image": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/image",
+      "task": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/task"
+    }
+  },
+  "backend_options": {
+    "source_path": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/upstream_3e41e907",
+    "checkpoint_dir": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/micro8_formal_v1/inference_bundle",
+    "encoder_paths": {
+      "image": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/image",
+      "task": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/task"
+    },
+    "checkpoint_file": "checkpoint.pt",
+    "train_reward_head": true,
+    "publication_weights": "online",
+    "allow_untested_dependency_versions": false,
+    "inference_python": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+    "master_dtype": "float32",
+    "autocast_dtype": "bfloat16",
+    "horizon": 8,
+    "decode_chunk_size": 2,
+    "encode_chunk_size": 4,
+    "initial_checkpoint_sha256": "6b45705115034914803224c3653533e30236fffdac544b46400b5af68bfd3443",
+    "training_python": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+    "online_training": {
+      "backend": "torch_ddp",
+      "world_size": 4,
+      "trainable_scope": "wm+rm",
+      "micro_batch_size": 4,
+      "gradient_accumulation_steps": 64,
+      "global_batch_size": 1024,
+      "optimizer": "adamw",
+      "betas": [
+        0.9,
+        0.99
+      ],
+      "lr": 1e-05,
+      "warmup_steps": 20,
+      "schedule": "constant_after_linear_warmup",
+      "weight_decay": 0.01,
+      "gradient_clip": 1.0,
+      "parameter_dtype": "float32",
+      "autocast_dtype": "bfloat16",
+      "ema": false
+    },
+    "transport": "isolated_online_ddp",
+    "native_reward_head": {
+      "mode": "libero_discounted_success_value_v1",
+      "link": "sigmoid",
+      "loss": "masked_half_mse",
+      "label_source": "libero_env_step",
+      "calibrated": false,
+      "terminal": "horizon_only",
+      "balance": "none",
+      "loss_coefficient": 1.0,
+      "gamma_per_action": 0.9987444968227265,
+      "discount_unit": "action_steps",
+      "target_semantics": "discounted_observed_episode_success"
+    },
+    "reward_head_initialization": {
+      "source_label": "robometer_progress",
+      "libero_adaptation_updates": 0,
+      "trained_on_libero": false,
+      "calibrated": false,
+      "initial_only": true
+    },
+    "optimizations": {
+      "selected_frame_encoding": true,
+      "kv_cache": true,
+      "decode_mode": "last",
+      "feature_cache_max_bytes": 67108864,
+      "resident_rollout_state": true,
+      "resident_max_sessions": 8,
+      "resident_max_bytes": 67108864,
+      "validate_on_cpu": true,
+      "task_cache_entries": 64,
+      "safety_checks": "batched"
+    },
+    "fresh": {
+      "protocol": "weaver_fresh_v1",
+      "dense_reward": true,
+      "signal_telemetry": true,
+      "refresh_gae": true,
+      "replay_age_limits": true,
+      "max_policy_age": 16,
+      "max_world_age": 3,
+      "max_sample_uses": 4,
+      "seed_balancing": true,
+      "early_seed_context": true,
+      "seed_scheduler_mode": "balanced",
+      "seed_scheduler_seed": 20261028,
+      "real_policy_replay": false,
+      "real_fraction": 0.25
+    }
+  },
+  "world_trainable": true
+}

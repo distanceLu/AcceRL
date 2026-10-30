@@ -1,0 +1,16 @@
+{
+  "run_id": "weaverintegrated_1029_113256_f897f7dd",
+  "job_id": "3e5b6a28361c4b64a846d868c7630f5c",
+  "submission_id": "weaver-fresh4-3200-r1-i4-1M-manual-20261029-v1",
+  "started_bjt": "2026-10-29T11:32:56+08:00",
+  "tensorboard_run": "1793244803_OpenVLA_IntegratedWEAVER_PolicyWorldRM_Real1_Imag4_Budget1M_Manual_gpu47_fresh",
+  "source_path_at_runtime": "/mnt/data/lcx1/dong/need_data/weaver_fresh_20261029/source_v2/weaver_integrated_v1",
+  "source_sha256": "2b21e8f707c2f5a02415ede5e73db3162bfc6b4e67ca4089717c2cc58df8d706",
+  "source_manifest_sha256": "8fc7cad70ede2a08eb8615bd5faa106e43cac1569c5c9869cb9524a9fe4ba605",
+  "profile": "examples/fresh_04_real.json",
+  "verified_frozen_files": 187,
+  "manual_stop": true,
+  "deadline": null,
+  "cost_scheduler_deployed": false,
+  "publication_scope": "Source and small evidence; no checkpoints, optimizer, replay, raw frames, databases or event files"
+}

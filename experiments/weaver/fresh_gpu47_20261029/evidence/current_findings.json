@@ -1,0 +1,2803 @@
+{
+  "run_id": "weaverintegrated_1029_113256_f897f7dd",
+  "export_observed_bjt": "2026-10-30T10:23:30.954491+08:00",
+  "runner_started_bjt": "2026-10-29T11:32:56.148237+08:00",
+  "tensorboard_first_event_bjt": "2026-10-29T11:33:23.836735+08:00",
+  "scope": "Saved snapshot through the common scalar export at Policy454; later aux counters exist but do not extend the success curve.",
+  "float32_threshold_tolerance": 1e-07,
+  "eval": {
+    "tag": "Eval/_Global/Average_Return",
+    "first_crossings": {
+      "0.85": {
+        "wall_time": 1793264328.6629548,
+        "bjt": "2026-10-29T16:58:48.662955+08:00",
+        "policy_step": 107,
+        "success_rate_float32": 0.8519999980926514,
+        "hours_from_runner_start": 5.431254088150131,
+        "hours_from_first_tb_event": 5.423562838832537,
+        "window": {
+          "n": 1000,
+          "successes": 852.0,
+          "success_rate": 0.852,
+          "wilson_95_iid_reference_only": [
+            0.828644950702635,
+            0.8726610113235342
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 4301,
+          "earliest_completed_bjt": "2026-10-29T15:46:06.527225+08:00",
+          "latest_completed_bjt": "2026-10-29T16:58:48.072680+08:00",
+          "window_span_minutes": 72.69242424966667,
+          "min_policy_version": 82,
+          "max_policy_version": 106,
+          "episodes_spanning_policy_versions": 189
+        },
+        "completed_real_episodes": 423,
+        "completed_real_action_steps": 42958,
+        "completed_eval_episodes": 4301,
+        "completed_eval_action_steps": 466146,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 42906.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 5552.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 11748.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 3006.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 2937.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 42738.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 4220.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 422.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 422.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 43160.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 26702.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 25330.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 1308.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 5531.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 11748.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 11748.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6790751445086706,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.2738078590406936,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 106.0,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 19536.179579805,
+            "at_policy_step": 106,
+            "lag_seconds": 16.335137605667114
+          }
+        }
+      },
+      "0.9": {
+        "wall_time": 1793282400.103887,
+        "bjt": "2026-10-29T22:00:00.103887+08:00",
+        "policy_step": 205,
+        "success_rate_float32": 0.9039999842643738,
+        "hours_from_runner_start": 10.451098791559538,
+        "hours_from_first_tb_event": 10.443407542241944,
+        "window": {
+          "n": 1000,
+          "successes": 904.0,
+          "success_rate": 0.904,
+          "wilson_95_iid_reference_only": [
+            0.8841648792420682,
+            0.9207430999016033
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 8672,
+          "earliest_completed_bjt": "2026-10-29T20:53:43.813013+08:00",
+          "latest_completed_bjt": "2026-10-29T21:59:54.632731+08:00",
+          "window_span_minutes": 66.18032862603333,
+          "min_policy_version": 183,
+          "max_policy_version": 205,
+          "episodes_spanning_policy_versions": 171
+        },
+        "completed_real_episodes": 833,
+        "completed_real_action_steps": 82752,
+        "completed_eval_episodes": 8672,
+        "completed_eval_action_steps": 893494,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 82695.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 10724.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 22368.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 5714.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 5592.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 82680.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 8320.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 832.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 832.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 83512.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 51064.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 48616.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 2384.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 10723.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 22368.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 22368.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6759337604254805,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.27048793760203155,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 204.0,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 37596.217776161,
+            "at_policy_step": 204,
+            "lag_seconds": 27.737873315811157
+          }
+        }
+      },
+      "0.94": {
+        "wall_time": 1793306143.3260078,
+        "bjt": "2026-10-30T04:35:43.326008+08:00",
+        "policy_step": 337,
+        "success_rate_float32": 0.9399999976158142,
+        "hours_from_runner_start": 17.046438269548947,
+        "hours_from_first_tb_event": 17.03874702023135,
+        "window": {
+          "n": 1000,
+          "successes": 940.0,
+          "success_rate": 0.94,
+          "wilson_95_iid_reference_only": [
+            0.9235289252086434,
+            0.953103527324068
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 14981,
+          "earliest_completed_bjt": "2026-10-30T03:33:41.249457+08:00",
+          "latest_completed_bjt": "2026-10-30T04:35:40.416059+08:00",
+          "window_span_minutes": 61.98611001843334,
+          "min_policy_version": 315,
+          "max_policy_version": 336,
+          "episodes_spanning_policy_versions": 167
+        },
+        "completed_real_episodes": 1425,
+        "completed_real_action_steps": 133549,
+        "completed_eval_episodes": 14981,
+        "completed_eval_action_steps": 1441937,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 133510.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 17344.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 36596.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 9359.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 9149.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 133475.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 14240.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1424.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1424.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 134899.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 79363.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 75429.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 3870.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 17340.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 36596.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 36596.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6784575454208379,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.2741068084787656,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 336.0,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 61356.267862235,
+            "at_policy_step": 336,
+            "lag_seconds": 10.909908294677734
+          }
+        }
+      },
+      "0.95": {
+        "wall_time": 1793308229.75107,
+        "bjt": "2026-10-30T05:10:29.751070+08:00",
+        "policy_step": 349,
+        "success_rate_float32": 0.949999988079071,
+        "hours_from_runner_start": 17.62600078682105,
+        "hours_from_first_tb_event": 17.618309537503453,
+        "window": {
+          "n": 1000,
+          "successes": 950.0,
+          "success_rate": 0.95,
+          "wilson_95_iid_reference_only": [
+            0.9346861797557492,
+            0.9618697376072513
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 15560,
+          "earliest_completed_bjt": "2026-10-30T04:10:01.995803+08:00",
+          "latest_completed_bjt": "2026-10-30T05:10:20.444605+08:00",
+          "window_span_minutes": 60.30748003191667,
+          "min_policy_version": 328,
+          "max_policy_version": 348,
+          "episodes_spanning_policy_versions": 151
+        },
+        "completed_real_episodes": 1479,
+        "completed_real_action_steps": 138032,
+        "completed_eval_episodes": 15560,
+        "completed_eval_action_steps": 1489526,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 137968.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 17926.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 37884.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 9687.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 9471.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 137960.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 14780.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1478.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1478.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 139438.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 81796.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 77728.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 4004.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 17925.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 37884.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 37884.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6788030818849669,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.27458541110982254,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 348.0,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 63426.271772414,
+            "at_policy_step": 348,
+            "lag_seconds": 27.33105993270874
+          }
+        }
+      }
+    },
+    "at_twenty_hours_nearest_record": {
+      "wall_time": 1793316807.742788,
+      "bjt": "2026-10-30T07:33:27.742788+08:00",
+      "policy_step": 397,
+      "success_rate_float32": 0.9509999752044678,
+      "hours_from_runner_start": 20.00877626405822,
+      "hours_from_first_tb_event": 20.001085014740625,
+      "window": {
+        "n": 1000,
+        "successes": 951.0,
+        "success_rate": 0.951,
+        "wilson_95_iid_reference_only": [
+          0.9358092984933898,
+          0.9627389653526394
+        ],
+        "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+        "cumulative_episodes": 17912,
+        "earliest_completed_bjt": "2026-10-30T06:32:05.809198+08:00",
+        "latest_completed_bjt": "2026-10-30T07:33:26.098249+08:00",
+        "window_span_minutes": 61.338150844716665,
+        "min_policy_version": 375,
+        "max_policy_version": 396,
+        "episodes_spanning_policy_versions": 166
+      },
+      "completed_real_episodes": 1702,
+      "completed_real_action_steps": 155721,
+      "completed_eval_episodes": 17912,
+      "completed_eval_action_steps": 1683822,
+      "data_before": {
+        "Data/Real/Action_Steps": {
+          "value": 155677.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Chunks/Real_Executed": {
+          "value": 20240.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Chunks/Imagined_Admitted": {
+          "value": 43060.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Imagined/Seeds_Completed": {
+          "value": 11007.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Imagined/Seeds_With_Positive_Output": {
+          "value": 10765.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Real/Action_Steps_Completed_Episodes": {
+          "value": 155501.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Real/Reset_Settling_Steps_Completed": {
+          "value": 17010.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Real/Episodes_Completed": {
+          "value": 1701.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Real/Episodes_Completed_Uncensored": {
+          "value": 1701.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Real/Episodes_Budget_Censored": {
+          "value": 0.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Real/Frames_Ingested": {
+          "value": 157202.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Real/Window_Candidates_Produced": {
+          "value": 90863.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/WorldReplay/Train_Windows_Admitted": {
+          "value": 86616.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/WorldReplay/Eval_Windows_Admitted": {
+          "value": 64.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+          "value": 4183.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/PolicyReplay/Real_Chunks_Admitted": {
+          "value": 20218.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Imagined/Replay_Chunks_Admitted": {
+          "value": 43060.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+          "value": 43060.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Chunks/Imagined_Share": {
+          "value": 0.6802527646129541,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+          "value": 0.2765983414377204,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Context/Policy_Updates": {
+          "value": 396.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        },
+        "Data/Context/Elapsed_Seconds": {
+          "value": 72006.290176414,
+          "at_policy_step": 396,
+          "lag_seconds": 25.30437421798706
+        }
+      }
+    },
+    "latest_common_export": {
+      "wall_time": 1793326944.0244057,
+      "bjt": "2026-10-30T10:22:24.024406+08:00",
+      "policy_step": 454,
+      "success_rate_float32": 0.9399999976158142,
+      "hours_from_runner_start": 22.8244100467364,
+      "hours_from_first_tb_event": 22.816718797418805,
+      "window": {
+        "n": 1000,
+        "successes": 940.0,
+        "success_rate": 0.94,
+        "wilson_95_iid_reference_only": [
+          0.9235289252086434,
+          0.953103527324068
+        ],
+        "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+        "cumulative_episodes": 20682,
+        "earliest_completed_bjt": "2026-10-30T09:20:18.694050+08:00",
+        "latest_completed_bjt": "2026-10-30T10:22:23.853199+08:00",
+        "window_span_minutes": 62.0859858183,
+        "min_policy_version": 432,
+        "max_policy_version": 453,
+        "episodes_spanning_policy_versions": 163
+      },
+      "completed_real_episodes": 1962,
+      "completed_real_action_steps": 176944,
+      "completed_eval_episodes": 20682,
+      "completed_eval_action_steps": 1915114,
+      "data_before": {
+        "Data/Real/Action_Steps": {
+          "value": 176874.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Chunks/Real_Executed": {
+          "value": 22999.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Chunks/Imagined_Admitted": {
+          "value": 49224.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Imagined/Seeds_Completed": {
+          "value": 12578.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Imagined/Seeds_With_Positive_Output": {
+          "value": 12306.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Real/Action_Steps_Completed_Episodes": {
+          "value": 176858.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Real/Reset_Settling_Steps_Completed": {
+          "value": 19610.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Real/Episodes_Completed": {
+          "value": 1961.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Real/Episodes_Completed_Uncensored": {
+          "value": 1961.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Real/Episodes_Budget_Censored": {
+          "value": 0.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Real/Frames_Ingested": {
+          "value": 178819.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Real/Window_Candidates_Produced": {
+          "value": 102340.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/WorldReplay/Train_Windows_Admitted": {
+          "value": 97681.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/WorldReplay/Eval_Windows_Admitted": {
+          "value": 64.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+          "value": 4595.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/PolicyReplay/Real_Chunks_Admitted": {
+          "value": 22997.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Imagined/Replay_Chunks_Admitted": {
+          "value": 49224.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+          "value": 49224.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Chunks/Imagined_Share": {
+          "value": 0.6815557370920621,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+          "value": 0.27829980664201637,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Context/Policy_Updates": {
+          "value": 453.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        },
+        "Data/Context/Elapsed_Seconds": {
+          "value": 82146.311514253,
+          "at_policy_step": 453,
+          "lag_seconds": 21.564654111862183
+        }
+      }
+    },
+    "peak": {
+      "wall_time": 1793315938.6009488,
+      "bjt": "2026-10-30T07:18:58.600949+08:00",
+      "policy_step": 392,
+      "success_rate_float32": 0.9599999785423279,
+      "hours_from_runner_start": 19.76734797537327,
+      "hours_from_first_tb_event": 19.759656726055674,
+      "window": {
+        "n": 1000,
+        "successes": 960.0,
+        "success_rate": 0.96,
+        "wilson_95_iid_reference_only": [
+          0.945990355878742,
+          0.9704890263145473
+        ],
+        "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+        "cumulative_episodes": 17679,
+        "earliest_completed_bjt": "2026-10-30T06:18:58.189975+08:00",
+        "latest_completed_bjt": "2026-10-30T07:18:52.852124+08:00",
+        "window_span_minutes": 59.911035809433336,
+        "min_policy_version": 371,
+        "max_policy_version": 391,
+        "episodes_spanning_policy_versions": 160
+      },
+      "completed_real_episodes": 1681,
+      "completed_real_action_steps": 153931,
+      "completed_eval_episodes": 17679,
+      "completed_eval_action_steps": 1664065,
+      "data_before": {
+        "Data/Real/Action_Steps": {
+          "value": 153863.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Chunks/Real_Executed": {
+          "value": 20005.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Chunks/Imagined_Admitted": {
+          "value": 42544.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Imagined/Seeds_Completed": {
+          "value": 10876.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Imagined/Seeds_With_Positive_Output": {
+          "value": 10636.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Real/Action_Steps_Completed_Episodes": {
+          "value": 153863.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Real/Reset_Settling_Steps_Completed": {
+          "value": 16800.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Real/Episodes_Completed": {
+          "value": 1680.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Real/Episodes_Completed_Uncensored": {
+          "value": 1680.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Real/Episodes_Budget_Censored": {
+          "value": 0.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Real/Frames_Ingested": {
+          "value": 155543.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Real/Window_Candidates_Produced": {
+          "value": 90023.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/WorldReplay/Train_Windows_Admitted": {
+          "value": 85811.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/WorldReplay/Eval_Windows_Admitted": {
+          "value": 64.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+          "value": 4148.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/PolicyReplay/Real_Chunks_Admitted": {
+          "value": 20005.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Imagined/Replay_Chunks_Admitted": {
+          "value": 42544.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+          "value": 42544.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Chunks/Imagined_Share": {
+          "value": 0.6801707461350301,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+          "value": 0.27650572262337275,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Context/Policy_Updates": {
+          "value": 391.0,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        },
+        "Data/Context/Elapsed_Seconds": {
+          "value": 71136.28813693,
+          "at_policy_step": 391,
+          "lag_seconds": 26.16457462310791
+        }
+      }
+    },
+    "num_records_at_or_above_95": 64,
+    "first_ten_consecutive_records_at_or_above_95": {
+      "start": {
+        "wall_time": 1793311214.690703,
+        "bjt": "2026-10-30T06:00:14.690703+08:00",
+        "policy_step": 365,
+        "success_rate_float32": 0.949999988079071,
+        "hours_from_runner_start": 18.45515068484677,
+        "hours_from_first_tb_event": 18.44745943552918,
+        "window": {
+          "n": 1000,
+          "successes": 950.0,
+          "success_rate": 0.95,
+          "wilson_95_iid_reference_only": [
+            0.9346861797557492,
+            0.9618697376072513
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 16369,
+          "earliest_completed_bjt": "2026-10-30T04:59:40.882830+08:00",
+          "latest_completed_bjt": "2026-10-30T06:00:12.174230+08:00",
+          "window_span_minutes": 60.52152333551667,
+          "min_policy_version": 344,
+          "max_policy_version": 365,
+          "episodes_spanning_policy_versions": 157
+        },
+        "completed_real_episodes": 1558,
+        "completed_real_action_steps": 144100,
+        "completed_eval_episodes": 16369,
+        "completed_eval_action_steps": 1556134,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 144077.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 18724.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 39660.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 10138.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 9913.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 144024.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 15570.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1557.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1557.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 145581.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 84858.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 80678.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 4116.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 18718.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 39660.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 39660.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6792956974513565,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.2752694739618399,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 364.0,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 66426.278945373,
+            "at_policy_step": 364,
+            "lag_seconds": 12.263520002365112
+          }
+        }
+      },
+      "end": {
+        "wall_time": 1793312675.7495208,
+        "bjt": "2026-10-30T06:24:35.749521+08:00",
+        "policy_step": 374,
+        "success_rate_float32": 0.953000009059906,
+        "hours_from_runner_start": 18.86100035647551,
+        "hours_from_first_tb_event": 18.85330910715792,
+        "window": {
+          "n": 1000,
+          "successes": 953.0,
+          "success_rate": 0.953,
+          "wilson_95_iid_reference_only": [
+            0.9380600619184716,
+            0.9644728948936154
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 16789,
+          "earliest_completed_bjt": "2026-10-30T05:24:16.645016+08:00",
+          "latest_completed_bjt": "2026-10-30T06:24:34.401625+08:00",
+          "window_span_minutes": 60.29594348425,
+          "min_policy_version": 353,
+          "max_policy_version": 373,
+          "episodes_spanning_policy_versions": 158
+        },
+        "completed_real_episodes": 1598,
+        "completed_real_action_steps": 147228,
+        "completed_eval_episodes": 16789,
+        "completed_eval_action_steps": 1590864,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 147228.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 19140.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 40604.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 10380.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 10151.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 147228.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 15980.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1598.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1598.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 148826.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 86504.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 82324.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 4116.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 19140.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 40604.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 40604.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6796331012319229,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.27578993126307494,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 373.0,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 67896.281161239,
+            "at_policy_step": 373,
+            "lag_seconds": 3.320122003555298
+          }
+        }
+      },
+      "new_completed_episodes_between_endpoints": 420,
+      "independent_replications": false
+    },
+    "longest_consecutive_records_at_or_above_95": 33,
+    "last100_logged_window_rates": {
+      "mean": 0.9498599964380264,
+      "min": 0.9369999766349792,
+      "max": 0.9599999785423279,
+      "from_policy_step": 355,
+      "to_policy_step": 454,
+      "warning": "These are overlapping moving windows, not100 independent tests."
+    },
+    "consecutive_windows_are_not_independent": true
+  },
+  "real_rollout": {
+    "tag": "Rollout/_Global/Average_Return",
+    "first_crossings": {
+      "0.85": {
+        "wall_time": 1793283585.4761288,
+        "bjt": "2026-10-29T22:19:45.476129+08:00",
+        "policy_step": 212,
+        "success_rate_float32": 0.8501741886138916,
+        "hours_from_runner_start": 10.780368858708275,
+        "hours_from_first_tb_event": 10.772677609390684,
+        "window": {
+          "n": 861,
+          "successes": 732,
+          "success_rate": 0.8501742160278746,
+          "wilson_95_iid_reference_only": [
+            0.8247816987943843,
+            0.872455920713654
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 861,
+          "earliest_completed_bjt": "2026-10-29T11:35:27.850483+08:00",
+          "latest_completed_bjt": "2026-10-29T22:19:00.777050+08:00",
+          "window_span_minutes": 643.5487761174667,
+          "min_policy_version": 0,
+          "max_policy_version": 211,
+          "episodes_spanning_policy_versions": 165
+        },
+        "completed_real_episodes": 861,
+        "completed_real_action_steps": 85307,
+        "completed_eval_episodes": 8986,
+        "completed_eval_action_steps": 921705,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 85387.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 11072.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 23104.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 5905.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 5776.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 85307.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 8610.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 861.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 861.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 86168.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 52589.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 49852.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 2673.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 11062.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 23104.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 23104.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6760299625468165,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.27057983065337815,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 211.0,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 38796.220207605,
+            "at_policy_step": 211,
+            "lag_seconds": 13.107683658599854
+          }
+        }
+      },
+      "0.9": {
+        "wall_time": 1793302889.166319,
+        "bjt": "2026-10-30T03:41:29.166319+08:00",
+        "policy_step": 319,
+        "success_rate_float32": 0.9010000228881836,
+        "hours_from_runner_start": 16.142505022618504,
+        "hours_from_first_tb_event": 16.134813773300912,
+        "window": {
+          "n": 1000,
+          "successes": 901,
+          "success_rate": 0.901,
+          "wilson_95_iid_reference_only": [
+            0.8809263810632503,
+            0.9180045586313347
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 1342,
+          "earliest_completed_bjt": "2026-10-29T15:57:52.105536+08:00",
+          "latest_completed_bjt": "2026-10-30T03:41:06.790885+08:00",
+          "window_span_minutes": 703.24475580785,
+          "min_policy_version": 86,
+          "max_policy_version": 318,
+          "episodes_spanning_policy_versions": 179
+        },
+        "completed_real_episodes": 1342,
+        "completed_real_action_steps": 126813,
+        "completed_eval_episodes": 14113,
+        "completed_eval_action_steps": 1368623,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 126801.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 16466.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 34660.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 8861.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 8665.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 126729.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 13410.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1341.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1341.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 128070.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 75771.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 71908.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 3799.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 16457.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 34660.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 34660.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6779329499667488,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.27334169288885735,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 318.0,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 58086.260223333,
+            "at_policy_step": 318,
+            "lag_seconds": 26.75785803794861
+          }
+        }
+      },
+      "0.94": {
+        "wall_time": 1793315797.5945315,
+        "bjt": "2026-10-30T07:16:37.594532+08:00",
+        "policy_step": 391,
+        "success_rate_float32": 0.9399999976158142,
+        "hours_from_runner_start": 19.728179526130358,
+        "hours_from_first_tb_event": 19.720488276812766,
+        "window": {
+          "n": 1000,
+          "successes": 940,
+          "success_rate": 0.94,
+          "wilson_95_iid_reference_only": [
+            0.9235289252086434,
+            0.953103527324068
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 1676,
+          "earliest_completed_bjt": "2026-10-29T20:09:46.172112+08:00",
+          "latest_completed_bjt": "2026-10-30T07:16:13.678674+08:00",
+          "window_span_minutes": 666.4584427087833,
+          "min_policy_version": 168,
+          "max_policy_version": 390,
+          "episodes_spanning_policy_versions": 173
+        },
+        "completed_real_episodes": 1676,
+        "completed_real_action_steps": 153577,
+        "completed_eval_episodes": 17641,
+        "completed_eval_action_steps": 1660862,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 153609.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 19972.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 42460.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 10855.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 10615.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 153577.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 16760.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1676.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1676.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 155253.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 89889.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 85677.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 4148.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 19968.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 42460.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 42460.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6800999487442337,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.2764160954110762,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 390.0,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 71016.287912384,
+            "at_policy_step": 390,
+            "lag_seconds": 5.158381700515747
+          }
+        }
+      },
+      "0.95": {
+        "wall_time": 1793324738.527961,
+        "bjt": "2026-10-30T09:45:38.527961+08:00",
+        "policy_step": 441,
+        "success_rate_float32": 0.949999988079071,
+        "hours_from_runner_start": 22.211772145430245,
+        "hours_from_first_tb_event": 22.204080896112654,
+        "window": {
+          "n": 1000,
+          "successes": 950,
+          "success_rate": 0.95,
+          "wilson_95_iid_reference_only": [
+            0.9346861797557492,
+            0.9618697376072513
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 1903,
+          "earliest_completed_bjt": "2026-10-29T22:50:20.115068+08:00",
+          "latest_completed_bjt": "2026-10-30T09:45:36.632609+08:00",
+          "window_span_minutes": 655.27529234705,
+          "min_policy_version": 222,
+          "max_policy_version": 440,
+          "episodes_spanning_policy_versions": 169
+        },
+        "completed_real_episodes": 1903,
+        "completed_real_action_steps": 172314,
+        "completed_eval_episodes": 20100,
+        "completed_eval_action_steps": 1865171,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 172299.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 22401.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 47848.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 12231.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 11962.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 172241.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 19020.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1902.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1902.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 174143.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 99965.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 95306.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 4595.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 22394.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 47848.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 47848.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6811200159432874,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.2777032948537136,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 440.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 79956.311333492,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          }
+        }
+      }
+    },
+    "at_twenty_hours_nearest_record": {
+      "wall_time": 1793316807.7478158,
+      "bjt": "2026-10-30T07:33:27.747816+08:00",
+      "policy_step": 397,
+      "success_rate_float32": 0.9409999847412109,
+      "hours_from_runner_start": 20.008777660661274,
+      "hours_from_first_tb_event": 20.00108641134368,
+      "window": {
+        "n": 1000,
+        "successes": 941,
+        "success_rate": 0.941,
+        "wilson_95_iid_reference_only": [
+          0.9246390972285408,
+          0.9539857017871995
+        ],
+        "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+        "cumulative_episodes": 1702,
+        "earliest_completed_bjt": "2026-10-29T20:29:52.254086+08:00",
+        "latest_completed_bjt": "2026-10-30T07:33:14.498242+08:00",
+        "window_span_minutes": 663.3707359275166,
+        "min_policy_version": 174,
+        "max_policy_version": 396,
+        "episodes_spanning_policy_versions": 173
+      },
+      "completed_real_episodes": 1702,
+      "completed_real_action_steps": 155721,
+      "completed_eval_episodes": 17912,
+      "completed_eval_action_steps": 1683822,
+      "data_before": {
+        "Data/Real/Action_Steps": {
+          "value": 155677.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Chunks/Real_Executed": {
+          "value": 20240.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Chunks/Imagined_Admitted": {
+          "value": 43060.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Imagined/Seeds_Completed": {
+          "value": 11007.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Imagined/Seeds_With_Positive_Output": {
+          "value": 10765.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Real/Action_Steps_Completed_Episodes": {
+          "value": 155501.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Real/Reset_Settling_Steps_Completed": {
+          "value": 17010.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Real/Episodes_Completed": {
+          "value": 1701.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Real/Episodes_Completed_Uncensored": {
+          "value": 1701.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Real/Episodes_Budget_Censored": {
+          "value": 0.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Real/Frames_Ingested": {
+          "value": 157202.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Real/Window_Candidates_Produced": {
+          "value": 90863.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/WorldReplay/Train_Windows_Admitted": {
+          "value": 86616.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/WorldReplay/Eval_Windows_Admitted": {
+          "value": 64.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+          "value": 4183.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/PolicyReplay/Real_Chunks_Admitted": {
+          "value": 20218.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Imagined/Replay_Chunks_Admitted": {
+          "value": 43060.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+          "value": 43060.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Chunks/Imagined_Share": {
+          "value": 0.6802527646129541,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+          "value": 0.2765983414377204,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Context/Policy_Updates": {
+          "value": 396.0,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        },
+        "Data/Context/Elapsed_Seconds": {
+          "value": 72006.290176414,
+          "at_policy_step": 396,
+          "lag_seconds": 25.309401988983154
+        }
+      }
+    },
+    "latest_common_export": {
+      "wall_time": 1793326944.029482,
+      "bjt": "2026-10-30T10:22:24.029482+08:00",
+      "policy_step": 454,
+      "success_rate_float32": 0.9509999752044678,
+      "hours_from_runner_start": 22.82441145678361,
+      "hours_from_first_tb_event": 22.81672020746602,
+      "window": {
+        "n": 1000,
+        "successes": 951,
+        "success_rate": 0.951,
+        "wilson_95_iid_reference_only": [
+          0.9358092984933898,
+          0.9627389653526394
+        ],
+        "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+        "cumulative_episodes": 1962,
+        "earliest_completed_bjt": "2026-10-29T23:29:23.468894+08:00",
+        "latest_completed_bjt": "2026-10-30T10:22:22.945769+08:00",
+        "window_span_minutes": 652.9912812597667,
+        "min_policy_version": 234,
+        "max_policy_version": 453,
+        "episodes_spanning_policy_versions": 168
+      },
+      "completed_real_episodes": 1962,
+      "completed_real_action_steps": 176944,
+      "completed_eval_episodes": 20682,
+      "completed_eval_action_steps": 1915114,
+      "data_before": {
+        "Data/Real/Action_Steps": {
+          "value": 176874.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Chunks/Real_Executed": {
+          "value": 22999.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Chunks/Imagined_Admitted": {
+          "value": 49224.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Imagined/Seeds_Completed": {
+          "value": 12578.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Imagined/Seeds_With_Positive_Output": {
+          "value": 12306.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Real/Action_Steps_Completed_Episodes": {
+          "value": 176858.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Real/Reset_Settling_Steps_Completed": {
+          "value": 19610.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Real/Episodes_Completed": {
+          "value": 1961.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Real/Episodes_Completed_Uncensored": {
+          "value": 1961.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Real/Episodes_Budget_Censored": {
+          "value": 0.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Real/Frames_Ingested": {
+          "value": 178819.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Real/Window_Candidates_Produced": {
+          "value": 102340.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/WorldReplay/Train_Windows_Admitted": {
+          "value": 97681.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/WorldReplay/Eval_Windows_Admitted": {
+          "value": 64.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+          "value": 4595.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/PolicyReplay/Real_Chunks_Admitted": {
+          "value": 22997.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Imagined/Replay_Chunks_Admitted": {
+          "value": 49224.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+          "value": 49224.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Chunks/Imagined_Share": {
+          "value": 0.6815557370920621,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+          "value": 0.27829980664201637,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Context/Policy_Updates": {
+          "value": 453.0,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        },
+        "Data/Context/Elapsed_Seconds": {
+          "value": 82146.311514253,
+          "at_policy_step": 453,
+          "lag_seconds": 21.569730281829834
+        }
+      }
+    },
+    "peak": {
+      "wall_time": 1793325496.540785,
+      "bjt": "2026-10-30T09:58:16.540785+08:00",
+      "policy_step": 445,
+      "success_rate_float32": 0.9509999752044678,
+      "hours_from_runner_start": 22.422331263224283,
+      "hours_from_first_tb_event": 22.41464001390669,
+      "window": {
+        "n": 1000,
+        "successes": 951,
+        "success_rate": 0.951,
+        "wilson_95_iid_reference_only": [
+          0.9358092984933898,
+          0.9627389653526394
+        ],
+        "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+        "cumulative_episodes": 1922,
+        "earliest_completed_bjt": "2026-10-29T23:03:19.757680+08:00",
+        "latest_completed_bjt": "2026-10-30T09:58:02.853761+08:00",
+        "window_span_minutes": 654.71826802445,
+        "min_policy_version": 226,
+        "max_policy_version": 444,
+        "episodes_spanning_policy_versions": 167
+      },
+      "completed_real_episodes": 1922,
+      "completed_real_action_steps": 173790,
+      "completed_eval_episodes": 20288,
+      "completed_eval_action_steps": 1882212,
+      "data_before": {
+        "Data/Real/Action_Steps": {
+          "value": 173784.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Chunks/Real_Executed": {
+          "value": 22594.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Chunks/Imagined_Admitted": {
+          "value": 48300.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Imagined/Seeds_Completed": {
+          "value": 12344.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Imagined/Seeds_With_Positive_Output": {
+          "value": 12075.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Real/Action_Steps_Completed_Episodes": {
+          "value": 173720.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Real/Reset_Settling_Steps_Completed": {
+          "value": 19210.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Real/Episodes_Completed": {
+          "value": 1921.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Real/Episodes_Completed_Uncensored": {
+          "value": 1921.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Real/Episodes_Budget_Censored": {
+          "value": 0.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Real/Frames_Ingested": {
+          "value": 175641.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Real/Window_Candidates_Produced": {
+          "value": 100722.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/WorldReplay/Train_Windows_Admitted": {
+          "value": 96063.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/WorldReplay/Eval_Windows_Admitted": {
+          "value": 64.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+          "value": 4595.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/PolicyReplay/Real_Chunks_Admitted": {
+          "value": 22586.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Imagined/Replay_Chunks_Admitted": {
+          "value": 48300.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+          "value": 48300.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Chunks/Imagined_Share": {
+          "value": 0.6812988405224701,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+          "value": 0.27793122496892697,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Context/Policy_Updates": {
+          "value": 444.0,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        },
+        "Data/Context/Elapsed_Seconds": {
+          "value": 80706.309060631,
+          "at_policy_step": 444,
+          "lag_seconds": 14.083486795425415
+        }
+      }
+    },
+    "num_records_at_or_above_95": 14,
+    "first_ten_consecutive_records_at_or_above_95": {
+      "start": {
+        "wall_time": 1793324738.527961,
+        "bjt": "2026-10-30T09:45:38.527961+08:00",
+        "policy_step": 441,
+        "success_rate_float32": 0.949999988079071,
+        "hours_from_runner_start": 22.211772145430245,
+        "hours_from_first_tb_event": 22.204080896112654,
+        "window": {
+          "n": 1000,
+          "successes": 950,
+          "success_rate": 0.95,
+          "wilson_95_iid_reference_only": [
+            0.9346861797557492,
+            0.9618697376072513
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 1903,
+          "earliest_completed_bjt": "2026-10-29T22:50:20.115068+08:00",
+          "latest_completed_bjt": "2026-10-30T09:45:36.632609+08:00",
+          "window_span_minutes": 655.27529234705,
+          "min_policy_version": 222,
+          "max_policy_version": 440,
+          "episodes_spanning_policy_versions": 169
+        },
+        "completed_real_episodes": 1903,
+        "completed_real_action_steps": 172314,
+        "completed_eval_episodes": 20100,
+        "completed_eval_action_steps": 1865171,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 172299.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 22401.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 47848.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 12231.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 11962.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 172241.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 19020.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1902.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1902.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 174143.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 99965.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 95306.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 4595.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 22394.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 47848.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 47848.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.6811200159432874,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.2777032948537136,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 440.0,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 79956.311333492,
+            "at_policy_step": 440,
+            "lag_seconds": 6.068390130996704
+          }
+        }
+      },
+      "end": {
+        "wall_time": 1793326391.5186067,
+        "bjt": "2026-10-30T10:13:11.518607+08:00",
+        "policy_step": 450,
+        "success_rate_float32": 0.9509999752044678,
+        "hours_from_runner_start": 22.670936213665538,
+        "hours_from_first_tb_event": 22.663244964347946,
+        "window": {
+          "n": 1000,
+          "successes": 951,
+          "success_rate": 0.951,
+          "wilson_95_iid_reference_only": [
+            0.9358092984933898,
+            0.9627389653526394
+          ],
+          "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+          "cumulative_episodes": 1944,
+          "earliest_completed_bjt": "2026-10-29T23:17:13.404285+08:00",
+          "latest_completed_bjt": "2026-10-30T10:12:38.173087+08:00",
+          "window_span_minutes": 655.4128133738167,
+          "min_policy_version": 230,
+          "max_policy_version": 449,
+          "episodes_spanning_policy_versions": 168
+        },
+        "completed_real_episodes": 1944,
+        "completed_real_action_steps": 175610,
+        "completed_eval_episodes": 20523,
+        "completed_eval_action_steps": 1901785,
+        "data_before": {
+          "Data/Real/Action_Steps": {
+            "value": 175684.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Chunks/Real_Executed": {
+            "value": 22843.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Chunks/Imagined_Admitted": {
+            "value": 48844.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Imagined/Seeds_Completed": {
+            "value": 12483.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Imagined/Seeds_With_Positive_Output": {
+            "value": 12211.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Real/Action_Steps_Completed_Episodes": {
+            "value": 175686.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Real/Reset_Settling_Steps_Completed": {
+            "value": 19450.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Real/Episodes_Completed": {
+            "value": 1945.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Real/Episodes_Completed_Uncensored": {
+            "value": 1945.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Real/Episodes_Budget_Censored": {
+            "value": 0.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Real/Frames_Ingested": {
+            "value": 177631.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Real/Window_Candidates_Produced": {
+            "value": 101776.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/WorldReplay/Train_Windows_Admitted": {
+            "value": 97117.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/WorldReplay/Eval_Windows_Admitted": {
+            "value": 64.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/WorldReplay/Holdout_Windows_Not_Retained": {
+            "value": 4595.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/PolicyReplay/Real_Chunks_Admitted": {
+            "value": 22844.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Imagined/Replay_Chunks_Admitted": {
+            "value": 48844.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/PolicyReplay/Imagined_Chunks_Admitted": {
+            "value": 48844.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Chunks/Imagined_Share": {
+            "value": 0.681350872543139,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Ratios/Imagined_Chunks_Per_Real_Action_Step": {
+            "value": 0.2780219029621366,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Context/Policy_Updates": {
+            "value": 450.0,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          },
+          "Data/Context/Elapsed_Seconds": {
+            "value": 81606.315117964,
+            "at_policy_step": 450,
+            "lag_seconds": 9.055251359939575
+          }
+        }
+      },
+      "new_completed_episodes_between_endpoints": 41,
+      "independent_replications": false
+    },
+    "longest_consecutive_records_at_or_above_95": 14,
+    "last100_logged_window_rates": {
+      "mean": 0.9399699980020523,
+      "min": 0.921999990940094,
+      "max": 0.9509999752044678,
+      "from_policy_step": 355,
+      "to_policy_step": 454,
+      "warning": "These are overlapping moving windows, not100 independent tests."
+    },
+    "consecutive_windows_are_not_independent": true
+  },
+  "success_metric_reconstruction": {
+    "method": "Sum binary environment-success events for the last min(cumulative_count,1000) episodes at every TensorBoard cumulative-count watermark.",
+    "tb_points": 454,
+    "max_absolute_difference": 2.95639037695139e-08,
+    "mismatches_over_1e_6": 0,
+    "result": "Every logged Eval average return matches actual binary episode success to float32 precision; no reward-model score substitution was found."
+  },
+  "real_success_metric_reconstruction": {
+    "method": "The same cumulative-count watermark reconstruction using initial_state_completed.completion.success.",
+    "tb_points": 454,
+    "max_absolute_difference": 2.95639037695139e-08,
+    "mismatches_over_1e_6": 0
+  },
+  "initial_policy_zero": {
+    "n": 190,
+    "successes": 160.0,
+    "success_rate": 0.8421052631578947,
+    "wilson_95_iid_reference_only": [
+      0.7835473834899592,
+      0.8871037805639167
+    ],
+    "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+    "warning": "Online prefix, not a balanced fixed-policy test over all50 initial states; initial-state IDs are not in these eval completion events."
+  },
+  "initial_real_policy_zero": {
+    "n": 18,
+    "successes": 14,
+    "success_rate": 0.7777777777777778,
+    "wilson_95_iid_reference_only": [
+      0.5478541568378739,
+      0.9099907189139831
+    ],
+    "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation."
+  },
+  "eval_actual_version_bins": [
+    {
+      "group": "0..99",
+      "assignment": "highest actual policy version used within episode",
+      "n": 4018,
+      "successes": 3158.0,
+      "success_rate": 0.7859631657541065,
+      "wilson_95_iid_reference_only": [
+        0.7730111225387514,
+        0.7983689339674621
+      ],
+      "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+      "episodes_spanning_versions": 812
+    },
+    {
+      "group": "100..199",
+      "assignment": "highest actual policy version used within episode",
+      "n": 4418,
+      "successes": 3827.0,
+      "success_rate": 0.8662290629244002,
+      "wilson_95_iid_reference_only": [
+        0.8558725602248672,
+        0.8759492452685939
+      ],
+      "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+      "episodes_spanning_versions": 803
+    },
+    {
+      "group": "200..299",
+      "assignment": "highest actual policy version used within episode",
+      "n": 4796,
+      "successes": 4412.0,
+      "success_rate": 0.9199332777314428,
+      "wilson_95_iid_reference_only": [
+        0.9119120040409485,
+        0.9272823807230988
+      ],
+      "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+      "episodes_spanning_versions": 768
+    },
+    {
+      "group": "300..399",
+      "assignment": "highest actual policy version used within episode",
+      "n": 4853,
+      "successes": 4585.0,
+      "success_rate": 0.9447764269524006,
+      "wilson_95_iid_reference_only": [
+        0.9379911240592707,
+        0.9508581489924022
+      ],
+      "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+      "episodes_spanning_versions": 781
+    },
+    {
+      "group": "400..latest",
+      "assignment": "highest actual policy version used within episode",
+      "n": 2647,
+      "successes": 2495.0,
+      "success_rate": 0.9425765017000378,
+      "wilson_95_iid_reference_only": [
+        0.9330555078072795,
+        0.9508147788157288
+      ],
+      "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation.",
+      "episodes_spanning_versions": 425
+    }
+  ],
+  "eval_single_version_episodes": {
+    "n": 17143,
+    "successes": 15863.0,
+    "success_rate": 0.9253339555503705,
+    "wilson_95_iid_reference_only": [
+      0.921303218587297,
+      0.9291741148050988
+    ],
+    "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation."
+  },
+  "eval_cross_version_episodes": {
+    "n": 3589,
+    "successes": 2614.0,
+    "success_rate": 0.7283365840066871,
+    "wilson_95_iid_reference_only": [
+      0.7135454993590232,
+      0.7426393946268032
+    ],
+    "ci_caution": "Repeated initial states, changing policies and overlapping windows invalidate an iid trial interpretation."
+  },
+  "cross_version_selection_warning": "Do not remove cross-version episodes: longer failures have greater probability of crossing a policy publication.",
+  "protocol": {
+    "task": "libero_spatial task0 only: pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+    "eval": "online greedy (deterministic=True),10 evaluator workers,per-task1000-completed-episode moving window; model publications can occur inside an episode",
+    "rollout": "stochastic real environment collection; separate1000-completed-episode moving window",
+    "success": "environment info.is_success; LiberoEnvWrapper uses environment done as success and independent horizon220 truncation",
+    "eval_frames_feed_replay": false,
+    "initial_states": "same benchmark task0 initial_states asset as training; eval workers each cycle sequentially from index0 modulo pool size50; real collection globally shuffles the same50 states without replacement per cycle",
+    "seed_limit": "Eval passes a distinct seed to wrapper.reset, but wrapper invokes underlying env.reset() without passing that seed. No exact per-episode underlying RNG-state audit was performed.",
+    "not_yet_tested": "A fixed final checkpoint on a balanced paired initial-state plan or unseen tasks/states; current .95 is not such an estimate.",
+    "metric_source_lines": {
+      "train.py": [
+        559,
+        575,
+        591,
+        629,
+        631,
+        660,
+        911,
+        1322,
+        1333,
+        1341,
+        1350,
+        1351,
+        1358
+      ],
+      "rl/libero_env.py": [
+        "reset: initial_states[episode_idx%len(initial_states)], episode_idx+=1",
+        "step: info['is_success']=terminated"
+      ]
+    }
+  },
+  "learning_recipe": {
+    "protocol": "weaver_fresh_v1",
+    "dense_reward": true,
+    "signal_telemetry": true,
+    "refresh_gae": true,
+    "replay_age_limits": true,
+    "max_policy_age": 16,
+    "max_world_age": 3,
+    "max_sample_uses": 4,
+    "seed_balancing": true,
+    "early_seed_context": true,
+    "seed_scheduler_mode": "balanced",
+    "seed_scheduler_seed": 20261028,
+    "real_policy_replay": true,
+    "real_fraction": 0.25,
+    "policy_global_batch": 576,
+    "policy_warmup_updates": 100,
+    "world_joint_ratio": "5:1",
+    "world_initialization_pretrained_updates": 3200,
+    "online_clock_excludes_world_pretraining": true,
+    "reward_relabel_in_replay": false,
+    "bootstrap_refreshed": "current critic values and GAE, original behavior policy logits retained"
+  },
+  "kl": {
+    "first": [
+      1793245460.4253368,
+      1,
+      0.0013606044230982661
+    ],
+    "latest": [
+      1793326944.0289545,
+      454,
+      0.006477291230112314
+    ],
+    "peak": [
+      1793326506.0761378,
+      451,
+      0.006780030205845833
+    ]
+  },
+  "causality_limits": [
+    "Four FRESH changes were enabled together; no per-feature causal attribution is available.",
+    "The historical seven-day baseline differs in World/Reward architecture and pretrained assets, training placement and warmup; wall-clock ratio is an observed run comparison.",
+    "Fewer policy updates do not imply fewer true environment samples; compare completed real action counters separately.",
+    "Continuous evaluation consumes compute but its frames do not enter Policy Replay in EvaluationWorkerActor.run.",
+    "Task0 repeated-state success is not all-task LIBERO performance or held-out-state generalization."
+  ],
+  "read_only_cost": {
+    "tb_read_seconds": 2.235018019011477,
+    "sqlite_query_seconds": 0.1584075780119747,
+    "gpu_or_model_rpc_used": false,
+    "production_mutations": false
+  },
+  "inputs_sha256": {
+    "current_scalars.json": "d7ff25e3c246777a445d7b8e01022817892f3213bbe57987e352794bfd1884af",
+    "current_episodes.json": "72eb60aa8b936ce1ed09a13bbac795f75a444efcddf5b781958a83fd4b2d1d2e",
+    "current_aux.json": "ee52d31a5272bd3dbcdba106c3c98328c18f0fcb51ac72a007175e7875bb078a"
+  },
+  "initial_policy_assets": {
+    "pretrained_checkpoint": "/mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt",
+    "checkpoint2": "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt",
+    "source": "fresh_startup_latest.json exact running command; identifiers, not a newly computed weight SHA",
+    "old_run_asset_equality": "requires the separately collected historical baseline launch evidence"
+  }
+}

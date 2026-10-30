@@ -1,0 +1,19 @@
+{
+  "read_seconds": 0.6862786730052903,
+  "observed_ns": 1793327769546509098,
+  "event_records": 255360,
+  "partial": false,
+  "global_count": 4694,
+  "success_tags": {
+    "Eval/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Success_Rate": {
+      "count": 4694,
+      "matched_steps": 4694,
+      "max_absolute_difference": 0.0,
+      "first95": {
+        "step": 2410,
+        "wall_time": 1791889273.3296473,
+        "value": 0.953000009059906
+      }
+    }
+  }
+}

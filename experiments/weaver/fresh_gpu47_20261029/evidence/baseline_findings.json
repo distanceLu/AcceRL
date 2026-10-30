@@ -1,0 +1,397 @@
+{
+  "run": "1791343661_OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_same_param",
+  "scope": "Historical TensorBoard bytes read over pinned original SSH; all analysis local CPU. No GPU, model RPC, training or server-source mutation.",
+  "data_provenance": {
+    "scope": "historical TensorBoard protobuf scalar read, no CUDA/model/RPC",
+    "observed_ns": 1793327349781692759,
+    "uid": 1004,
+    "boot": "31dafb78-e50a-4824-a1ba-12f7ddef8741",
+    "host": "h20-xyff52ab-0001",
+    "directory": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1791343661_OpenVLA_DS_gipo_DISCRETE_task0_ctrl_wm_same_param",
+    "inventory": [
+      {
+        "name": "events.out.tfevents.1791343661.h20-xyff52ab-0001.1120314.0",
+        "size": 20105984,
+        "mtime_ns": 1792403217558510946
+      }
+    ],
+    "event_records": 255360,
+    "partial": false,
+    "first_event_wall_time": 1791343661.242002,
+    "last_event_wall_time": 1792403177.077278,
+    "read_seconds": 0.6949645619897638
+  },
+  "clock": {
+    "origin": "first Event record in historical TensorBoard file, not first Eval scalar and not an independently preserved runner start",
+    "origin_wall_time": 1791343661.242002,
+    "origin_time_bjt": "2026-10-07T11:27:41.242002+08:00",
+    "directory_epoch": 1791343661,
+    "origin_minus_directory_epoch_seconds": 0.24200201034545898
+  },
+  "threshold_float_tolerance": 1e-06,
+  "curves": {
+    "Eval/_Global/Average_Return": {
+      "points": 4694,
+      "first": {
+        "step": 1,
+        "wall_time": 1791348701.753958,
+        "value": 0.7699999809265137,
+        "elapsed_hours": 1.4001422099934684,
+        "time_bjt": "2026-10-07T12:51:41.753958+08:00",
+        "System/Total_Episodes_Processed": 19.0,
+        "System/Total_Env_Steps": 1539.0,
+        "System/Eval_Total_Episodes_Processed": 1677.0,
+        "System/Eval_Total_Env_Steps": 186930.0,
+        "Train/Learning_Rate/Policy": 0.0,
+        "Performance/train_time_total": 142.45462036132812
+      },
+      "last": {
+        "step": 4694,
+        "wall_time": 1792403177.0768533,
+        "value": 0.9829999804496765,
+        "elapsed_hours": 294.3099541253514,
+        "time_bjt": "2026-10-19T17:46:17.076853+08:00",
+        "System/Total_Episodes_Processed": 1945.0,
+        "System/Total_Env_Steps": 155256.0,
+        "System/Eval_Total_Episodes_Processed": 376687.0,
+        "System/Eval_Total_Env_Steps": 30896282.0,
+        "Train/Learning_Rate/Policy": 9.509750270808581e-06,
+        "Performance/train_time_total": 106.56778717041016
+      },
+      "min": 0.734000027179718,
+      "max": 0.9919999837875366,
+      "first_thresholds": {
+        "0.85": {
+          "step": 311,
+          "wall_time": 1791418036.016588,
+          "value": 0.8500000238418579,
+          "elapsed_hours": 20.659659607211747,
+          "time_bjt": "2026-10-08T08:07:16.016588+08:00",
+          "System/Total_Episodes_Processed": 141.0,
+          "System/Total_Env_Steps": 14173.0,
+          "System/Eval_Total_Episodes_Processed": 24875.0,
+          "System/Eval_Total_Env_Steps": 2725981.0,
+          "Train/Learning_Rate/Policy": 6.199999916134402e-06,
+          "Performance/train_time_total": 145.71627807617188
+        },
+        "0.9": {
+          "step": 695,
+          "wall_time": 1791504632.7546465,
+          "value": 0.8999999761581421,
+          "elapsed_hours": 44.714309067924816,
+          "time_bjt": "2026-10-09T08:10:32.754647+08:00",
+          "System/Total_Episodes_Processed": 275.0,
+          "System/Total_Env_Steps": 25047.0,
+          "System/Eval_Total_Episodes_Processed": 57111.0,
+          "System/Eval_Total_Env_Steps": 5747840.0,
+          "Train/Learning_Rate/Policy": 9.998932910093572e-06,
+          "Performance/train_time_total": 654.2567749023438
+        },
+        "0.95": {
+          "step": 2410,
+          "wall_time": 1791889273.32928,
+          "value": 0.953000009059906,
+          "elapsed_hours": 151.55891313274702,
+          "time_bjt": "2026-10-13T19:01:13.329280+08:00",
+          "System/Total_Episodes_Processed": 936.0,
+          "System/Total_Env_Steps": 79960.0,
+          "System/Eval_Total_Episodes_Processed": 200874.0,
+          "System/Eval_Total_Env_Steps": 17682680.0,
+          "Train/Learning_Rate/Policy": 9.897029485728126e-06,
+          "Performance/train_time_total": 653.0478515625
+        },
+        "0.96": {
+          "step": 2995,
+          "wall_time": 1792020816.6142287,
+          "value": 0.9620000123977661,
+          "elapsed_hours": 188.09871450742085,
+          "time_bjt": "2026-10-15T07:33:36.614229+08:00",
+          "System/Total_Episodes_Processed": 1174.0,
+          "System/Total_Env_Steps": 99418.0,
+          "System/Eval_Total_Episodes_Processed": 246535.0,
+          "System/Eval_Total_Env_Steps": 21342996.0,
+          "Train/Learning_Rate/Policy": 9.82467918220209e-06,
+          "Performance/train_time_total": 658.225830078125
+        },
+        "0.97": {
+          "step": 3170,
+          "wall_time": 1792060189.4675205,
+          "value": 0.9700000286102295,
+          "elapsed_hours": 199.03561819957363,
+          "time_bjt": "2026-10-15T18:29:49.467520+08:00",
+          "System/Total_Episodes_Processed": 1255.0,
+          "System/Total_Env_Steps": 105467.0,
+          "System/Eval_Total_Episodes_Processed": 260343.0,
+          "System/Eval_Total_Env_Steps": 22394952.0,
+          "Train/Learning_Rate/Policy": 9.799383406061679e-06,
+          "Performance/train_time_total": 657.4039916992188
+        }
+      }
+    },
+    "Rollout/_Global/Average_Return": {
+      "points": 4694,
+      "first": {
+        "step": 1,
+        "wall_time": 1791348701.753941,
+        "value": 0.9473684430122375,
+        "elapsed_hours": 1.4001422052913242,
+        "time_bjt": "2026-10-07T12:51:41.753941+08:00",
+        "System/Total_Episodes_Processed": 19.0,
+        "System/Total_Env_Steps": 1539.0,
+        "System/Eval_Total_Episodes_Processed": 1677.0,
+        "System/Eval_Total_Env_Steps": 186930.0,
+        "Train/Learning_Rate/Policy": 0.0,
+        "Performance/train_time_total": 142.45462036132812
+      },
+      "last": {
+        "step": 4694,
+        "wall_time": 1792403177.0768297,
+        "value": 0.9670000076293945,
+        "elapsed_hours": 294.30995411879485,
+        "time_bjt": "2026-10-19T17:46:17.076830+08:00",
+        "System/Total_Episodes_Processed": 1945.0,
+        "System/Total_Env_Steps": 155256.0,
+        "System/Eval_Total_Episodes_Processed": 376687.0,
+        "System/Eval_Total_Env_Steps": 30896282.0,
+        "Train/Learning_Rate/Policy": 9.509750270808581e-06,
+        "Performance/train_time_total": 106.56778717041016
+      },
+      "min": 0.8449612259864807,
+      "max": 0.9795918464660645,
+      "first_thresholds": {
+        "0.85": {
+          "step": 1,
+          "wall_time": 1791348701.753941,
+          "value": 0.9473684430122375,
+          "elapsed_hours": 1.4001422052913242,
+          "time_bjt": "2026-10-07T12:51:41.753941+08:00",
+          "System/Total_Episodes_Processed": 19.0,
+          "System/Total_Env_Steps": 1539.0,
+          "System/Eval_Total_Episodes_Processed": 1677.0,
+          "System/Eval_Total_Env_Steps": 186930.0,
+          "Train/Learning_Rate/Policy": 0.0,
+          "Performance/train_time_total": 142.45462036132812
+        },
+        "0.9": {
+          "step": 1,
+          "wall_time": 1791348701.753941,
+          "value": 0.9473684430122375,
+          "elapsed_hours": 1.4001422052913242,
+          "time_bjt": "2026-10-07T12:51:41.753941+08:00",
+          "System/Total_Episodes_Processed": 19.0,
+          "System/Total_Env_Steps": 1539.0,
+          "System/Eval_Total_Episodes_Processed": 1677.0,
+          "System/Eval_Total_Env_Steps": 186930.0,
+          "Train/Learning_Rate/Policy": 0.0,
+          "Performance/train_time_total": 142.45462036132812
+        },
+        "0.95": {
+          "step": 5,
+          "wall_time": 1791349659.3731797,
+          "value": 0.949999988079071,
+          "elapsed_hours": 1.6661475493510565,
+          "time_bjt": "2026-10-07T13:07:39.373180+08:00",
+          "System/Total_Episodes_Processed": 20.0,
+          "System/Total_Env_Steps": 1756.0,
+          "System/Eval_Total_Episodes_Processed": 1987.0,
+          "System/Eval_Total_Env_Steps": 223038.0,
+          "Train/Learning_Rate/Policy": 7.999999951380232e-08,
+          "Performance/train_time_total": 644.3575439453125
+        },
+        "0.96": {
+          "step": 25,
+          "wall_time": 1791354043.2077894,
+          "value": 0.9615384340286255,
+          "elapsed_hours": 2.883879385391871,
+          "time_bjt": "2026-10-07T14:20:43.207789+08:00",
+          "System/Total_Episodes_Processed": 26.0,
+          "System/Total_Env_Steps": 2216.0,
+          "System/Eval_Total_Episodes_Processed": 3470.0,
+          "System/Eval_Total_Env_Steps": 388705.0,
+          "Train/Learning_Rate/Policy": 4.799999828719592e-07,
+          "Performance/train_time_total": 644.369873046875
+        },
+        "0.97": {
+          "step": 46,
+          "wall_time": 1791358609.7849746,
+          "value": 0.970588207244873,
+          "elapsed_hours": 4.152373047934638,
+          "time_bjt": "2026-10-07T15:36:49.784975+08:00",
+          "System/Total_Episodes_Processed": 34.0,
+          "System/Total_Env_Steps": 2851.0,
+          "System/Eval_Total_Episodes_Processed": 4986.0,
+          "System/Eval_Total_Env_Steps": 559248.0,
+          "Train/Learning_Rate/Policy": 8.999999749903509e-07,
+          "Performance/train_time_total": 143.82582092285156
+        }
+      },
+      "first_1000_completed_episodes": {
+        "step": 2561,
+        "wall_time": 1791923011.1241324,
+        "value": 0.9190000295639038,
+        "elapsed_hours": 160.93052281399568,
+        "time_bjt": "2026-10-14T04:23:31.124132+08:00",
+        "System/Total_Episodes_Processed": 1000.0,
+        "System/Total_Env_Steps": 85190.0,
+        "System/Eval_Total_Episodes_Processed": 212808.0,
+        "System/Eval_Total_Env_Steps": 18645908.0,
+        "Train/Learning_Rate/Policy": 9.880163815978449e-06,
+        "Performance/train_time_total": 145.65496826171875
+      },
+      "first_95_after_1000_completed_episodes": {
+        "step": 4006,
+        "wall_time": 1792248239.6832523,
+        "value": 0.949999988079071,
+        "elapsed_hours": 251.2717892362012,
+        "time_bjt": "2026-10-17T22:43:59.683252+08:00",
+        "System/Total_Episodes_Processed": 1619.0,
+        "System/Total_Env_Steps": 132193.0,
+        "System/Eval_Total_Episodes_Processed": 325154.0,
+        "System/Eval_Total_Env_Steps": 27195380.0,
+        "Train/Learning_Rate/Policy": 9.65571052802261e-06,
+        "Performance/train_time_total": 149.95730590820312
+      }
+    }
+  },
+  "eval_success_semantics_crosscheck": {
+    "evidence_file": "C:\\Users\\27640\\Downloads\\AcceRL\\analysis\\weaver_fresh_github_20261030\\baseline_success_crosscheck.json",
+    "results": {
+      "read_seconds": 0.6862786730052903,
+      "observed_ns": 1793327769546509098,
+      "event_records": 255360,
+      "partial": false,
+      "global_count": 4694,
+      "success_tags": {
+        "Eval/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate (ID: 0)/Success_Rate": {
+          "count": 4694,
+          "matched_steps": 4694,
+          "max_absolute_difference": 0.0,
+          "first95": {
+            "step": 2410,
+            "wall_time": 1791889273.3296473,
+            "value": 0.953000009059906
+          }
+        }
+      }
+    },
+    "interpretation": "A separate bounded CPU read of the actual historical event file confirms all 4694 task0 Success_Rate points exactly equal the Global Average_Return value at the same step, maximum absolute difference zero. Thus the Eval threshold is a measured real-environment success rate, not only a return proxy."
+  },
+  "not_seven_full_days": {
+    "first_eval_95_elapsed_hours": 151.55891313274702,
+    "first_eval_95_elapsed_days": 6.314954713864459,
+    "explanation": "The seven-day description is broadly close, but the actual first crossing on the same Eval/_Global/Average_Return tag is 6.315 days. It is a first crossing, not sustained convergence."
+  },
+  "wallclock_integrity": {
+    "last_elapsed_hours": 294.3099541253514,
+    "sum_logged_train_time_total_hours": 292.9487704870436,
+    "maximum_consecutive_eval_scalar_gap_seconds": 746.3433322906494,
+    "all_logged_steps_contiguous": true,
+    "interpretation": "No multi-hour or multi-day gap appears in this logged update series. The reported per-update loop wall time nearly accounts for total elapsed wall time; the slow historical curve is not explained by a week of idle downtime."
+  },
+  "old_logged_iteration_cost_before_first_95": {
+    "ordinary": {
+      "count": 1928,
+      "median_seconds": 106.89895629882812,
+      "mean_seconds": 115.47854051154678
+    },
+    "joint": {
+      "count": 482,
+      "median_seconds": 652.6189575195312,
+      "mean_seconds": 659.8968331111417
+    }
+  },
+  "historical_source_provenance": {
+    "path": "C:\\Users\\27640\\Downloads\\AcceRL\\analysis\\ctrl_world_train_wm_20261009\\source",
+    "file_sha256": {
+      "run_oft_ctrl_world_train_wm.sh": "a2096c30bd87c6c286865f4e8998cbb2cf20390cf9440be656db4c4709086585",
+      "ds_wm_discrete_ctrl_train_wm.py": "fd205e4099376ae266201bb30b988597d33edd06d470996f50a6469bce1abd48",
+      "rl/libero_env.py": "4188294366874e3bcd1a6f520c31a4962bac240df63cd96eec76ce56f30db112",
+      "experiments/robot/libero/libero_utils.py": "254506a00bf46c729bb487fd3597c0739a4cfe23f5e8f85cdcf33f9274f4f7ca",
+      "rl/actor_critic_model_discrete.py": "8684a7a068d58ec26cee42f79f8f2a52e86131f2569db464e3a4a46b280dc3b3"
+    },
+    "binding_limit": "This is a 2026-10-09 same-experiment-name source snapshot. The target run began 2026-10-07, and its TensorBoard directory contains only an event file. No launch-time source/config/checkpoint SHA binding for target run has been recovered. Source behavior must not be presented as a byte-identical target-runtime proof.",
+    "runtime_corroboration": [
+      "Target run records ten active rollout actors.",
+      "Target Policy LR is zero at P1, 2e-8 at P2, 9.98e-6 at P500 and 1e-5 at P501, corroborating 500-update warmup.",
+      "Target Eval values lie on 0.001 increments while completed Eval count already exceeds 1000 at the first point, consistent with the saved moving-window-1000 configuration. This does not replace an episode-level reconstruction."
+    ]
+  },
+  "same_name_snapshot_protocol": {
+    "task": {
+      "benchmark": "libero_spatial",
+      "task_ids": [
+        0
+      ],
+      "source": "ds_wm_discrete_ctrl_train_wm.py:684-692"
+    },
+    "evaluation": {
+      "policy_sampling": "deterministic=True (greedy)",
+      "num_workers": 10,
+      "moving_window": 1000,
+      "continuous_online": true,
+      "snapshot_limit": "Each action request may use newly published weights. The historical run lacks episode-level served-version records, so a rolling window cannot be assigned to one fixed checkpoint.",
+      "source": "run_oft_ctrl_world_train_wm.sh:34,80; ds_wm_discrete_ctrl_train_wm.py:455-549,1039-1073"
+    },
+    "environment": {
+      "max_action_steps": 220,
+      "initial_states": "Each worker cycles initial_states[episode_idx % len(initial_states)] independently; episode_idx starts zero.",
+      "env_rng": "env.seed(0) at construction; reset(seed=...) is not forwarded into simulator reset or initial-state selection.",
+      "source": "rl/libero_env.py:32,110-111,134-160; experiments/robot/libero/libero_utils.py:90-96",
+      "coverage_limit": "Neither exact initial-state file hashes nor target-runtime episode identities are present in the historical TB file. Same LIBERO task/pool family is supported; identical randomized evaluation schedules are not."
+    },
+    "real_rollouts": {
+      "policy_sampling": "deterministic=False",
+      "num_workers": 10,
+      "loop": "One real episode followed by imagination from every eligible position in a randomly selected worker-local historical episode, then next real episode.",
+      "source": "ds_wm_discrete_ctrl_train_wm.py:752-862,869-920"
+    },
+    "policy_training": {
+      "trainer_ranks": 1,
+      "microbatch": 8,
+      "gradient_accumulation": 72,
+      "global_batch": 576,
+      "warmup_updates": 500,
+      "learning_rate": 1e-05,
+      "replay": "Uniform 10000-slot imagined-only Replay; stored advantage, value_target and behaviour_logits read without critic refresh or version/use caps.",
+      "source": "run_oft_ctrl_world_train_wm.sh:31,38-39,49-52,77; ds_wm_discrete_ctrl_train_wm.py:562-580,2245-2280"
+    },
+    "policy_initialization": {
+      "pretrained_checkpoint": "/mnt/data/lcx3/checkpoint/dsj/openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r32+dropout-0.0--image_aug--parallel_dec--8_acts_chunk--discrete_acts--proprio_state--100000_chkpt",
+      "checkpoint2": "/mnt/data/lcx3/checkpoint/dsj/20251225_113851_distill_checkpoint_latest.pt",
+      "load_checkpoint2_strict": true,
+      "source": "run_oft_ctrl_world_train_wm.sh:17-18; rl/actor_critic_model_discrete.py:334-340",
+      "limit": "These paths match the stated FRESH initialization, but historical loaded bytes/SHA have not been verified. This supports nominal initialization parity, not certified weight identity."
+    },
+    "world_and_reward": {
+      "world": "Ctrl-World, pretrained best_val_loss.pt with separate VAE decoder and condition normalizer",
+      "world_checkpoint": "/mnt/data/lcx3/Ctrl-World/model_ckpt/libero_spatial/2026-08-07T10-39-47_libero_spatial_newdecoder_fromlastbest/best_val_loss.pt",
+      "reward_checkpoint": "/mnt/data/lcx3/checkpoint/reward/reward.pt",
+      "separate_reward": true,
+      "joint_interval": 5,
+      "world_and_reward_learning_rate": 0.0001,
+      "world_and_reward_warmup": 500,
+      "source": "run_oft_ctrl_world_train_wm.sh:21-25,58-67,83",
+      "comparison": "FRESH uses a different WEAVER native3200 World with built-in dense-success RM, different architecture/initialization/supervision/LR/warmup. This is not an infrastructure-only experiment."
+    },
+    "eval_data_leak_review": {
+      "finding": "No direct insertion of EvaluationWorker trajectories into Policy or World Replay appears in this saved source.",
+      "evidence": "EvaluationWorker passes replay=None; run performs real env.step and sends only eval_ StatsActor records. Real RolloutWorker alone calls _process_episode_for_wm and produces Policy imagination.",
+      "sources": [
+        "ds_wm_discrete_ctrl_train_wm.py:1039-1073",
+        "ds_wm_discrete_ctrl_train_wm.py:869-919"
+      ],
+      "limit": "Training and online evaluation reuse the same benchmark task initial-state pool. This is in-distribution repeated-task evaluation, not a held-out-task or held-out-initial-state generalization claim. Target source is not launch-hash-bound."
+    }
+  },
+  "comparison_constraints": [
+    "Compare Eval with Eval, not the small early Rollout window. Old Rollout first reaches nominal 95% at only 20 completed episodes.",
+    "Historical first95 is from the same Eval/_Global/Average_Return tag, independently confirmed exactly equal at all 4694 steps to the explicit task0 Eval Success_Rate tag.",
+    "A rolling online first threshold crossing is not fixed-checkpoint convergence; many adjacent points overlap and should not be treated as independent trials.",
+    "Different real-data amounts, model/reward families, replay rules, warmup and rank allocation preclude a causal infrastructure speedup or sample-efficiency claim.",
+    "Offline World and Policy pretraining costs are outside both online TensorBoard clocks and differ between the two systems."
+  ],
+  "outputs": {
+    "raw": "C:\\Users\\27640\\Downloads\\AcceRL\\analysis\\weaver_fresh_github_20261030\\baseline_tensorboard_raw.json",
+    "csv": "C:\\Users\\27640\\Downloads\\AcceRL\\analysis\\weaver_fresh_github_20261030\\baseline_curves.csv"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "modules": [
+    "test_fresh_budget_credit_cpu",
+    "test_fresh_checkpoint_cpu",
+    "test_fresh_contracts_cpu",
+    "test_fresh_native_reward_cpu",
+    "test_fresh_padding_backend_cpu",
+    "test_fresh_policy_replay_cpu",
+    "test_fresh_policy_runtime_cpu",
+    "test_fresh_reward_targets_cpu",
+    "test_fresh_seed_scheduler_cpu"
+  ],
+  "results": {
+    "control": {
+      "tests_run": 57,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "torch_version": "2.12.0+cu130",
+      "cuda_initialized": false,
+      "passed": true,
+      "python": "/mnt/data/lcx3/envs/merged-env/bin/python",
+      "started_ns": 1793239278174017527,
+      "completed_ns": 1793239281937667811
+    },
+    "native": {
+      "tests_run": 57,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "torch_version": "2.7.0+cu126",
+      "cuda_initialized": false,
+      "passed": true,
+      "python": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+      "started_ns": 1793239281937886524,
+      "completed_ns": 1793239285556147638
+    }
+  },
+  "all_passed": true,
+  "gpu_access_performed": false
+}

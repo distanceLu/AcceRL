@@ -1,0 +1,40 @@
+{
+  "configuration": "C:\\Users\\27640\\Downloads\\AcceRL\\world_backends_v1\\examples\\weaver_integrated.template.json",
+  "service_plan": {
+    "backend": "weaver",
+    "reward_provider": "world_head",
+    "world_kind": "ctrl",
+    "world_size": 4,
+    "trainer_kinds": [
+      "policy",
+      "ctrl"
+    ],
+    "inference_kinds": [
+      "policy",
+      "ctrl"
+    ],
+    "wm_consumers": [
+      "ctrl"
+    ],
+    "expected_wm_consumers": 4,
+    "gpu_model_processes_per_card": 4,
+    "expected_gpu_model_processes": 16,
+    "logical_update_ratio": "5:1",
+    "checkpoint_kinds": [
+      "policy",
+      "ctrl"
+    ],
+    "publication_kinds": [
+      "policy",
+      "ctrl"
+    ]
+  },
+  "configuration_admitted": false,
+  "assets_checked": false,
+  "real_model_loaded": false,
+  "gpu_validated": false,
+  "errors": [
+    "schema.encoder_id must be a nonempty string"
+  ],
+  "status": "blocked"
+}

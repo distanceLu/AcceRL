@@ -1,0 +1,373 @@
+{
+  "protocol": "fresh_first_closed_loop_observation_v2",
+  "observed_ns": 1793246471695905914,
+  "run_id": "weaverintegrated_1029_113256_f897f7dd",
+  "complete": true,
+  "read_only": true,
+  "gpu_or_model_calls": false,
+  "sql_budget_seconds": 2.0,
+  "queries": [
+    {
+      "kind": "optimizer_update",
+      "workload": "policy_train",
+      "limit": 8,
+      "rows": 8,
+      "prefix_truncated": false,
+      "seconds": 0.00029336000443436205,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "optimizer_update_replica",
+      "workload": "policy_train",
+      "limit": 24,
+      "rows": 24,
+      "prefix_truncated": false,
+      "seconds": 0.00013743399176746607,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "optimizer_update",
+      "workload": "ctrl_train",
+      "limit": 8,
+      "rows": 1,
+      "prefix_truncated": false,
+      "seconds": 3.50019836332649e-05,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "optimizer_update_replica",
+      "workload": "ctrl_train",
+      "limit": 24,
+      "rows": 3,
+      "prefix_truncated": false,
+      "seconds": 3.368098987266421e-05,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "replay_use",
+      "workload": "policy_train",
+      "limit": 520,
+      "rows": 520,
+      "prefix_truncated": true,
+      "seconds": 0.002853115991456434,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "replay_use",
+      "workload": "ctrl_train",
+      "limit": 260,
+      "rows": 256,
+      "prefix_truncated": false,
+      "seconds": 0.001176939986180514,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "policy_batch_mode",
+      "workload": null,
+      "limit": 64,
+      "rows": 64,
+      "prefix_truncated": true,
+      "seconds": 0.000284797977656126,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "fresh_policy_signal",
+      "workload": null,
+      "limit": 20000,
+      "rows": 10878,
+      "prefix_truncated": false,
+      "seconds": 0.03095880401087925,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "fresh_critic_refresh",
+      "workload": null,
+      "limit": 28,
+      "rows": 28,
+      "prefix_truncated": true,
+      "seconds": 0.00024721899535506964,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "world_backend_losses",
+      "workload": null,
+      "limit": 260,
+      "rows": 256,
+      "prefix_truncated": false,
+      "seconds": 0.001002364995656535,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "weaver_online_publication_released",
+      "workload": null,
+      "limit": 32,
+      "rows": 8,
+      "prefix_truncated": false,
+      "seconds": 0.00016844100900925696,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "ipc_weight_publish_released",
+      "workload": null,
+      "limit": 32,
+      "rows": 32,
+      "prefix_truncated": true,
+      "seconds": 0.00015779200475662947,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "weight_publication_committed",
+      "workload": null,
+      "limit": 16,
+      "rows": 11,
+      "prefix_truncated": false,
+      "seconds": 0.00016151697491295636,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "model_version",
+      "workload": null,
+      "limit": 64,
+      "rows": 44,
+      "prefix_truncated": false,
+      "seconds": 0.0002905990113504231,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "service",
+      "workload": "policy_infer",
+      "limit": 256,
+      "rows": 256,
+      "prefix_truncated": true,
+      "seconds": 0.0010284709860570729,
+      "index": "events_run_workload"
+    },
+    {
+      "kind": "service",
+      "workload": "ctrl_infer",
+      "limit": 256,
+      "rows": 256,
+      "prefix_truncated": true,
+      "seconds": 0.0012647840194404125,
+      "index": "events_run_workload"
+    }
+  ],
+  "checks": {
+    "P1_optimizer_four_ranks": {
+      "status": "verified",
+      "event_ids": [
+        55159,
+        55155,
+        55167,
+        55163
+      ]
+    },
+    "P1_actual_576_cohort": {
+      "status": "verified",
+      "rank_micro_counts": {
+        "1": 18,
+        "3": 18,
+        "2": 18,
+        "0": 18
+      },
+      "unique_samples": 576,
+      "sample_set_sha256": "2b446d26dc8f4e2dd25eb5282229bd7995377e8e3e8342daf018264ddd32cd90",
+      "meaning": "actual micro exposure, paired with separate four-rank successful optimizer evidence"
+    },
+    "P1_mixed_144_432": {
+      "status": "verified",
+      "sources": {
+        "real": 144,
+        "imagined": 432
+      },
+      "meaning": "successful commit signal joined to actual P1 micro identities"
+    },
+    "P1_current_critic": {
+      "status": "verified",
+      "endpoint_event_ids": [
+        48410,
+        48390,
+        49086,
+        49074
+      ],
+      "consumed_version": 0,
+      "rewards_relabelled": false,
+      "linkage_limit": "same exact reported version; endpoint events do not carry per-sample IDs"
+    },
+    "W1_optimizer_four_ranks": {
+      "status": "verified",
+      "event_ids": [
+        86917,
+        86922,
+        86928,
+        86933
+      ]
+    },
+    "W1_actual_1024_cohort": {
+      "status": "verified",
+      "rank_micro_counts": {
+        "1": 64,
+        "0": 64,
+        "2": 64,
+        "3": 64
+      },
+      "unique_samples": 1024,
+      "sample_set_sha256": "a771702641a3c2fcb6bec46c7484d83adf9c393b46b8adf5a7cabd950ccf6d7b",
+      "meaning": "actual micro exposure, paired with separate four-rank successful optimizer evidence"
+    },
+    "W1_dense_loss_and_masks": {
+      "status": "verified",
+      "cohort": {
+        "protocol": "weaver_discounted_success_value_cohort_v1",
+        "mode": "libero_discounted_success_value_v1",
+        "gamma_per_action": 0.9987444968227265,
+        "discount_unit": "action_steps",
+        "label_source": "libero_env_step",
+        "window_count": 1024,
+        "frame_slice": [
+          30,
+          40
+        ],
+        "label_frames_per_window": 10,
+        "global_selected_frames": 10240,
+        "valid_count": 10240,
+        "masked_count": 0,
+        "target_sum": 3308.21689504385,
+        "target_square_sum": 3219.7068990966172,
+        "success_episode_valid_count": 3400,
+        "failure_episode_valid_count": 6840,
+        "rm_active": true,
+        "normalization": "global_valid_frames",
+        "balance": "none"
+      },
+      "micro_records": 256,
+      "native_augmented_valid_occurrences": 20480,
+      "native_augmented_masked_occurrences": 0,
+      "meaning": "all recorded micro losses finite; duplicate native branches are not independent data"
+    },
+    "W1_released_engine_state": {
+      "status": "verified",
+      "rm_updates": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "rm_disabled_updates": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "event_ids": [
+        92351,
+        92352,
+        92353,
+        92354
+      ]
+    },
+    "P5_P6_batch_modes": {
+      "status": "verified",
+      "event_ids": [
+        90555,
+        90549,
+        90553,
+        90551,
+        99399,
+        99397,
+        99395,
+        99401
+      ]
+    },
+    "policy1_publication_and_service": {
+      "status": "verified",
+      "publication_event_id": 55992,
+      "hash": "66189b9b0835c77296f8866e2634663588d41ef1b86dcc5c380522c9a84e1520",
+      "source_release_count": 4,
+      "receiver_count": 4,
+      "service_event_id": 56154,
+      "service_request_ids": [
+        "request:86b05968f6ca49d88c1f31cba2d68134",
+        "request:cb2a2b9b4a384f8b967b317e31d5de33"
+      ],
+      "service_start_ns": 1793245460560902073,
+      "all_rank_release_ready_ns": 1793245460413488702,
+      "meaning": "one later service after all-rank release; no claim about earliest per-receiver visibility"
+    },
+    "world1_publication_and_service": {
+      "status": "verified",
+      "publication_event_id": 92355,
+      "hash": "5d6856dc97fe852bc64bfec255677f277809c1a0773fee828aabef72929f4c36",
+      "source_release_count": 4,
+      "receiver_count": 4,
+      "service_event_id": 92769,
+      "service_request_ids": [
+        "request:7c1cc38de9484951b969896e5f64db98"
+      ],
+      "service_start_ns": 1793246031738591918,
+      "all_rank_release_ready_ns": 1793246031465325347,
+      "meaning": "one later service after all-rank release; no claim about earliest per-receiver visibility"
+    },
+    "first_six_age_and_use_caps": {
+      "status": "verified",
+      "cohort_records": {
+        "0": 576,
+        "1": 576,
+        "2": 576,
+        "3": 576,
+        "4": 576,
+        "5": 576
+      },
+      "actual_successful_records": 3456,
+      "observed_max_uses": 4,
+      "policy_age_range": [
+        0,
+        5
+      ],
+      "world_rm_age_range": [
+        0,
+        1
+      ],
+      "scope": "first six complete consumed cohorts only"
+    }
+  },
+  "limits": [
+    "Bounded event prefixes, not a full-history audit or a learning-effect result.",
+    "GAE refresh is inferred from actual consumed refresh_version and endpoint events; no tensor recomputation.",
+    "Recorded native losses are micro losses; no invented update-average loss.",
+    "Policy optimizer skip counters are observed; this stream has no independent Policy scalar-loss finite check.",
+    "10240 dense labels are overlapping window occurrences; two native branches are duplicate supervision.",
+    "Use-cap check covers the first six complete successful cohorts, not all future history.",
+    "Startup process/UUID identity and current liveness belong to the separate startup/status observer.",
+    "Early-context tensor masks and partial-action gradient masks are not recoverable from these events."
+  ],
+  "database": "/mnt/data/lcx1/dong/need_data/weaver_fresh_gpu47_20261029_v1/formal_v3/training/collection.sqlite",
+  "sql_seconds": 0.040094322932418436,
+  "wall_seconds": 0.16028831101721153,
+  "prefix_limits_hit": [
+    {
+      "kind": "replay_use",
+      "workload": "policy_train"
+    },
+    {
+      "kind": "policy_batch_mode",
+      "workload": null
+    },
+    {
+      "kind": "fresh_critic_refresh",
+      "workload": null
+    },
+    {
+      "kind": "ipc_weight_publish_released",
+      "workload": null
+    },
+    {
+      "kind": "service",
+      "workload": "policy_infer"
+    },
+    {
+      "kind": "service",
+      "workload": "ctrl_infer"
+    }
+  ]
+}
