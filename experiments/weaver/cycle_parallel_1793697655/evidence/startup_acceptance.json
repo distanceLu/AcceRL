@@ -1,0 +1,31 @@
+{
+  "run_id": "weaverintegrated_1103_172031_a7557d7d",
+  "job_id": "ed10ac94daba48fe87102040a4463940",
+  "observed_ns": 1793766794604540091,
+  "checks": {
+    "observations_close_in_time": true,
+    "exact_run": true,
+    "exact_job": true,
+    "source_unchanged": true,
+    "actual16_gpu_actors": true,
+    "policy_zero2_four_ranks": true,
+    "world_four_ranks": true,
+    "actual_trajectory": true,
+    "actual_jit_ema": true,
+    "h2_active": true,
+    "adaptive_active": true,
+    "combined_parallel": true,
+    "actual_cycle_feedback": true,
+    "parent_policy_budget": true,
+    "authoritative_production": true,
+    "manual_no_deadline": true,
+    "native_gpu_transport_smoke": true,
+    "running_without_error": true
+  },
+  "passed": true,
+  "training": {
+    "policy": 429,
+    "ctrl": 85
+  },
+  "scope": "Actual model placements/configuration/startup. Does not certify first optimizer or 5:1 closed loop."
+}

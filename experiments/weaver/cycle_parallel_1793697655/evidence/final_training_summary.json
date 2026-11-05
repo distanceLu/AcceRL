@@ -1,0 +1,57 @@
+{
+  "source_artifact_sha256": "7245f605fbe0ff44b889dd009a171c8d0a5fdebe978c709330a35d5796b22143",
+  "source_artifact": "final_training_p451_w90/user_skipped_final_evaluation.json",
+  "observed_ns": 1793771139108362742,
+  "run_id": "weaverintegrated_1103_172031_a7557d7d",
+  "job_id": "ed10ac94daba48fe87102040a4463940",
+  "training_saved_and_audited": true,
+  "evaluation_skipped_by_user": true,
+  "completed_evaluation_episodes": 37,
+  "remaining_owned_processes": [],
+  "queue_state": "failed",
+  "training_acceptance": {
+    "passed": true,
+    "reasons": [],
+    "observed_steps": {
+      "policy": 451,
+      "ctrl": 90
+    },
+    "stopped_before_first_update": false,
+    "scope": "manual boundary checkpoint and cleanup; no minimum update or model-quality claim"
+  },
+  "evaluation_acceptance": {
+    "passed": false,
+    "reasons": [
+      "evaluator_exit_nonzero",
+      "paired_full_pool_evaluation_incomplete",
+      "paired_pool_or_episode_counts_mismatch"
+    ],
+    "completion_receipt": {
+      "checkpoint_sha256": {
+        "baseline": "c9e2c2df1f1414d9f5c55eb26f8b43f88d290cfaf96e64615cec385dda115b9b",
+        "final": "c9d5de2dfc21d24c1da1998a9f4a9811a9aa77aabc40205937ef98a527331a80"
+      },
+      "complete": false,
+      "completed_episode_records": 37,
+      "errors": [
+        {
+          "error": "Evaluation stopped by supervisor signal 15",
+          "traceback": "Traceback (most recent call last):\n  File \"/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1/frozen_policy_eval.py\", line 489, in main\n    row = run_episode(model, cfg, dtype, env, case, checkpoint, plan, deadline)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1/frozen_policy_eval.py\", line 382, in run_episode\n    observation, reward, terminated, truncated, info = env.step(action)\n                                                       ^^^^^^^^^^^^^^^^\n  File \"/mnt/data/lcx1/dong/AcceRL-scheduler/rl/libero_env.py\", line 153, in step\n    obs, reward, done, info = self.env.step(processed_action.tolist())\n                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/data/lcx3/LIBERO/libero/libero/envs/env_wrapper.py\", line 88, in step\n    return self.env.step(action)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/data/lcx3/LIBERO/libero/libero/envs/bddl_base_domain.py\", line 806, in step\n    obs, reward, done, info = super().step(action)\n                              ^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/robosuite/environments/base.py\", line 395, in step\n    self._update_observables()\n  File \"/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/robosuite/environments/base.py\", line 324, in _update_observables\n    observable.update(timestep=self.model_timestep, obs_cache=self._obs_cache, force=force)\n  File \"/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/robosuite/utils/observables.py\", line 234, in update\n    obs = np.array(self._filter(self._corrupter(self._sensor(obs_cache))))\n                                                ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/robosuite/environments/robot_env.py\", line 404, in camera_rgb\n    img = self.sim.render(\n          ^^^^^^^^^^^^^^^^\n  File \"/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/robosuite/utils/binding_utils.py\", line 1128, in render\n    self._render_context_offscreen.render(\n  File \"/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/robosuite/utils/binding_utils.py\", line 158, in render\n    mujoco.mjr_render(viewport=viewport, scn=self.scn, con=self.con)\n  File \"/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1/frozen_policy_eval.py\", line 461, in interrupted\n    raise InterruptedError(\"Evaluation stopped by supervisor signal \" + str(number))\nInterruptedError: Evaluation stopped by supervisor signal 15\n",
+          "type": "InterruptedError"
+        }
+      ],
+      "expected_episode_records": 200,
+      "finished_ns": 1793771094165295222,
+      "initial_state_count": 50,
+      "modes": [
+        "greedy",
+        "stochastic"
+      ],
+      "plan_sha256": "e40d1a08ce20d7984ab5eddc25704bf89912173c4987e60e14f5416fecf34096",
+      "protocol": "accerl_frozen_policy_paired_v1"
+    },
+    "exit_code": 2,
+    "scope": "frozen checkpoints, paired complete 50-state pool; not an assertion of model improvement"
+  },
+  "statement": "Queue evaluation failure/partial artifacts preserved; user explicitly cancelled final evaluation; no final score claim"
+}

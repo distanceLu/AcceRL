@@ -1,0 +1,19 @@
+{
+  "tensorboard_run": "1793697655_OpenVLA_IntegratedWEAVER_PolicyWorldRM_Real1_Imag4_Budget1M_Manual_gpu47_fresh",
+  "run_id": "weaverintegrated_1103_172031_a7557d7d",
+  "job_id": "ed10ac94daba48fe87102040a4463940",
+  "submission_id": "weaver-cycle-feedback-parallel-manual-gpu47-20261103-v1",
+  "started_bjt": "2026-11-03T17:20:31+08:00",
+  "source_path_at_runtime": "/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1",
+  "experiment_root": "/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_gpu47_20261103_v1",
+  "source_files": 267,
+  "source_sha256": "9a0d2a8247fc055760fa5076f4d1e7278586eb8f3c09a87581794a7e4a56b91b",
+  "source_manifest_sha256": "61457284c45cee58fca368cbfc05524e9db2bcc3fdff4dcf66841d78c39ca90c",
+  "scheduler_profile": "examples/cycle_03_feedback_parallel.json",
+  "eval_workers_at_runtime": 10,
+  "final_training_policy_updates": 451,
+  "final_training_world_updates": 90,
+  "final_evaluation_complete": false,
+  "evaluation_user_cancelled_after": 37,
+  "publication_scope": "Exact frozen source, queue wrapper, compact historical evidence; no weights, replay, datasets, event files or databases"
+}

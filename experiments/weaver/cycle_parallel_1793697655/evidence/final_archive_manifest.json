@@ -1,0 +1,14 @@
+{
+  "run": "weaverintegrated_1103_172031_a7557d7d",
+  "policy": 451,
+  "world": 90,
+  "files": {
+    "comparison_latest.json": "0565c095886755d1c5cca0be67507faeb091c9f20b97f65c78848b1d7547453d",
+    "measurement_raw_latest.json": "82d179a6aa3e7e563a5de784df45b70bd0009bfe5bc951a80284b6ec0ecbc623",
+    "pipeline_efficiency_switch_stop_receipt.json": "70b6047abc52ed97e74884e2cc751e24e5258921ce067b1b205696bd3073fb9b",
+    "status_latest.json": "2d3b5c35cf5d302e07e7ae0d6c2457ff2ee206156d677f05071ad8ba58d9e3b5",
+    "user_skipped_final_evaluation.json": "7245f605fbe0ff44b889dd009a171c8d0a5fdebe978c709330a35d5796b22143"
+  },
+  "complete_performance_cycles": "P21-450; 86 cycles; P451 excluded",
+  "evaluation": "user skipped; 37/200 incomplete"
+}

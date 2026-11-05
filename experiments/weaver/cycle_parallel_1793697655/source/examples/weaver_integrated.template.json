@@ -1,0 +1,34 @@
+{
+  "backend": "weaver",
+  "reward_provider": "world_head",
+  "reward_semantics": "delta_success",
+  "terminal_rule": "argmax",
+  "critic_mode": "disabled",
+  "schema": {
+    "domain": "libero",
+    "action_schema_id": "libero_eef_delta_7_v1",
+    "state_schema_id": "libero_eef_pos_axisangle_gripper_v1",
+    "encoder_id": "",
+    "normalizer_id": "",
+    "action_dim": 7,
+    "state_dim": 8,
+    "alignment": "action_into_frame",
+    "image_keys": ["full_image", "wrist_image"],
+    "image_size": [192, 320],
+    "image_value_range": "minus_one_one",
+    "dt_seconds": 0.05,
+    "n_history": 2,
+    "n_memory_frames": 0,
+    "t_memory": 1
+  },
+  "checkpoint_metadata": {},
+  "backend_options": {
+    "source_path": "REPLACE_WITH_AUDITED_WEAVER_SOURCE_DIRECTORY",
+    "checkpoint_dir": "REPLACE_WITH_ADAPTED_AND_CALIBRATED_LIBERO_CHECKPOINT_DIRECTORY",
+    "metadata_file": "backend_metadata.json",
+    "encoder_paths": {"image": "REPLACE_WITH_LOCAL_IMAGE_ENCODER", "task": "REPLACE_WITH_LOCAL_TASK_ENCODER"},
+    "horizon": 8,
+    "publication_weights": "online",
+    "train_reward_head": true
+  }
+}

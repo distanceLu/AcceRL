@@ -1,0 +1,24 @@
+{
+  "local_source": "C:\\Users\\27640\\Downloads\\AcceRL\\output\\weaver_cycle_parallel_scheduler_20261103\\source_v1\\weaver_integrated_v1",
+  "source_sha256": "9a0d2a8247fc055760fa5076f4d1e7278586eb8f3c09a87581794a7e4a56b91b",
+  "manifest_sha256": "61457284c45cee58fca368cbfc05524e9db2bcc3fdff4dcf66841d78c39ca90c",
+  "wrapper_sha256": {
+    "historical_stop_control_checks.py": "61102fd6a179f0b0d4f91ef0987054becb7921169911c39879db8c37128faf19",
+    "mps_authorization.json": "8364fc5cff5b91360baa40c401fbbcc2a88ac7411754dc24aa9119e64ce1ed07",
+    "queue_entry.py": "cccf4352f117c318a9c7742950a812faf424ac7c137834e31100417f8f34e057",
+    "README.md": "06f4679e80089d1bc31431518966ac42b8736f0ffe9fe94f63650ea84bd5972d",
+    "stop_control.py": "03ef3dfb756ef3dcae37e9f9886a264b17e732cd706fb30b05a1674e40f687bc",
+    "test_cost_deployment_cpu.py": "55da41908f0413bfe00045f48bd8c579c9162974b957418092324f2b5b0be9c3",
+    "test_cycle_deployment_cpu.py": "0774dc4be63eeda8c3ccf17b333c87df3c052c944b4890d740cc5a8c389fa4c1",
+    "test_error_stop_wrapper_cpu.py": "2bed283bb1e917bd8dcb0559defd00abf6a2d7ed72b7e9c9644923159b5d5bf4",
+    "test_fresh_wrapper_cpu.py": "a11d2c658c5dcf9ae0a65093e8a9ae5673c5746cd34e2557d0a9f79bec5cd89a",
+    "test_inventory_deployment_cpu.py": "d09caa87010b65eb41eff59404036233bf078aa74fdd34b8320a7101a139feb4",
+    "test_jit_deployment_cpu.py": "ed0a5ed78d7d7557415a2c3ba7408ad78e57f67a6eb4099e6720efa28bdb78c8",
+    "test_manual_wrapper.py": "5c001c65cdbd3e6b556440e84c4af7314a41903e3127eca843d3439ff63c50d4",
+    "test_manual_wrapper_process.py": "b96ffa3c00ca87ea4c0409254d199bbf9e9cb56edf1603ae11b6b5923a943399",
+    "test_optimized_wrapper_cpu.py": "121d6d0a2df6434a61126a3c62f882409f47c629fc88042d4e5857c2ddc260de",
+    "test_trajectory_deployment_cpu.py": "04e9179d934699eae1e47f41151f2428424f2e37872ec9ea0051316937665e11",
+    "training_entry.py": "baaef574eeaaf04d0bca2d4012b9bd257625a7e24acc4d89e67bbfa9fdd4f068",
+    "validate_error_stop_wrapper.py": "79632344393b92677722b4f1ac6e913e30782cd12a99668f6d90dc987532d362"
+  }
+}

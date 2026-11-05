@@ -1,0 +1,21 @@
+{
+  "source_artifact": "final_training_p451_w90/measurement_raw_latest.json",
+  "source_artifact_sha256": "82d179a6aa3e7e563a5de784df45b70bd0009bfe5bc951a80284b6ec0ecbc623",
+  "run_id": "weaverintegrated_1103_172031_a7557d7d",
+  "observed_ns": 1793771727629067049,
+  "tensorboard_started": [
+    [
+      1793697655631945357,
+      {
+        "log_dir": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1793697655_OpenVLA_IntegratedWEAVER_PolicyWorldRM_Real1_Imag4_Budget1M_Manual_gpu47_fresh",
+        "run_started_ns": 1793697631153401300,
+        "metric_tag": "Eval/_Global/Average_Return",
+        "window_size": 1000,
+        "target": 0.85,
+        "mps_enabled": true
+      }
+    ]
+  ],
+  "tensorboard_path": "/mnt/data/lcx1/dong/AcceRL-scheduler/runs/Libero/libero_spatial/1793697655_OpenVLA_IntegratedWEAVER_PolicyWorldRM_Real1_Imag4_Budget1M_Manual_gpu47_fresh",
+  "scope": "Historical event extracted without launching a new observation; target in logging metadata is not a stop deadline."
+}

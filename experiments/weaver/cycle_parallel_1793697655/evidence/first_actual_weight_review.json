@@ -1,0 +1,170 @@
+{
+  "run_id": "weaverintegrated_1103_172031_a7557d7d",
+  "first_application": {
+    "ts_ns": 1793702863552183381,
+    "details": {
+      "previous": {
+        "policy_train": 1.0,
+        "world_train": 1.0,
+        "policy_infer": 1.0,
+        "world_infer": 1.0
+      },
+      "weights": {
+        "policy_train": 1.0,
+        "world_train": 0.75,
+        "policy_infer": 1.0,
+        "world_infer": 1.25
+      },
+      "reason": "complete_cycle_bounded_probe",
+      "policy_version": 30,
+      "world_version": 6,
+      "scope": "future cooperative admission; submitted grants keep their dispatch weight"
+    }
+  },
+  "first_probe_result": {
+    "ts_ns": 1793704530715074080,
+    "details": {
+      "accepted": false,
+      "baseline_seconds": 822.1738761219895,
+      "candidate_seconds": 833.5813826005324,
+      "penalty_seconds": 2.5,
+      "threshold_seconds": 16.44347752243979,
+      "inventory_reserve_preserved": true,
+      "baseline_weights": {
+        "policy_train": 1.0,
+        "world_train": 1.0,
+        "policy_infer": 1.0,
+        "world_infer": 1.0
+      },
+      "candidate_weights": {
+        "policy_train": 1.0,
+        "world_train": 0.75,
+        "policy_infer": 1.0,
+        "world_infer": 1.25
+      },
+      "baseline_cycles": [
+        {
+          "start_policy": 20,
+          "end_policy": 25,
+          "started_at": 607367.267848808,
+          "finished_at": 608189.145653388,
+          "seconds": 821.8778045800282,
+          "weights": {
+            "policy_train": 1.0,
+            "world_train": 1.0,
+            "policy_infer": 1.0,
+            "world_infer": 1.0
+          },
+          "successful_policy_updates": 5,
+          "successful_world_updates": 1,
+          "new_chunks": {
+            "real": 266,
+            "imagined": 560
+          },
+          "start_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "end_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "scope": "complete synchronized cycle wall time, including production backpressure"
+        },
+        {
+          "start_policy": 25,
+          "end_policy": 30,
+          "started_at": 608189.145653388,
+          "finished_at": 609011.615601052,
+          "seconds": 822.4699476639507,
+          "weights": {
+            "policy_train": 1.0,
+            "world_train": 1.0,
+            "policy_infer": 1.0,
+            "world_infer": 1.0
+          },
+          "successful_policy_updates": 5,
+          "successful_world_updates": 1,
+          "new_chunks": {
+            "real": 276,
+            "imagined": 568
+          },
+          "start_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "end_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "scope": "complete synchronized cycle wall time, including production backpressure"
+        }
+      ],
+      "candidate_cycles": [
+        {
+          "start_policy": 30,
+          "end_policy": 35,
+          "started_at": 609011.615601052,
+          "finished_at": 609841.571629294,
+          "seconds": 829.9560282420134,
+          "weights": {
+            "policy_train": 1.0,
+            "world_train": 0.75,
+            "policy_infer": 1.0,
+            "world_infer": 1.25
+          },
+          "successful_policy_updates": 5,
+          "successful_world_updates": 1,
+          "new_chunks": {
+            "real": 269,
+            "imagined": 564
+          },
+          "start_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "end_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "scope": "complete synchronized cycle wall time, including production backpressure"
+        },
+        {
+          "start_policy": 35,
+          "end_policy": 40,
+          "started_at": 609841.571629294,
+          "finished_at": 610678.778366253,
+          "seconds": 837.2067369590513,
+          "weights": {
+            "policy_train": 1.0,
+            "world_train": 0.75,
+            "policy_infer": 1.0,
+            "world_infer": 1.25
+          },
+          "successful_policy_updates": 5,
+          "successful_world_updates": 1,
+          "new_chunks": {
+            "real": 254,
+            "imagined": 572
+          },
+          "start_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "end_coverage": {
+            "real": 1.0,
+            "imagined": 1.0
+          },
+          "scope": "complete synchronized cycle wall time, including production backpressure"
+        }
+      ],
+      "complete_observation_window": true,
+      "completed_at": 610678.778366253,
+      "reason": "cycle_probe_rollback",
+      "scope": "within-run sequential probe; not randomized causal evidence"
+    }
+  },
+  "observed_ns": 1793749625722565164,
+  "full_evidence": "review_20261104_p320/scheduler_audit_raw_latest.json",
+  "notification_status": "reported_in_20261104_0743_heartbeat"
+}

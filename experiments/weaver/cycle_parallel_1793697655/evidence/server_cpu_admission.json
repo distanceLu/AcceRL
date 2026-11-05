@@ -1,0 +1,434 @@
+{
+  "cycle_cpu_tests": "....................\n----------------------------------------------------------------------\nRan 20 tests in 0.085s\n\nOK\n",
+  "trajectory_cpu_tests": "............Executing <Task finished name='Task-2' coro=<ActorTests.test_actual_replay_and_coordinator_shards_keep_trajectories_and_credit_units() done, defined at /mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1/test_trajectory_sampling_cpu.py:206> result=None created at /mnt/data/lcx3/envs/merged-env/lib/python3.11/asyncio/runners.py:100> took 0.117 seconds\n.\n----------------------------------------------------------------------\nRan 13 tests in 1.290s\n\nOK\n",
+  "passed": true,
+  "observed_ns": 1793697532144104163,
+  "source_admission": {
+    "manifest_sha256": "61457284c45cee58fca368cbfc05524e9db2bcc3fdff4dcf66841d78c39ca90c",
+    "verified_files": 267,
+    "source": "/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1",
+    "experiment_root": "/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_gpu47_20261103_v1",
+    "backend": {
+      "backend": "weaver",
+      "reward_provider": "world_head",
+      "reward_semantics": "delta_native_score",
+      "terminal_rule": "horizon_only",
+      "critic_mode": "disabled",
+      "schema": {
+        "action_dim": 7,
+        "action_schema_id": "libero_eef_delta_7_v1",
+        "alignment": "action_into_frame",
+        "domain": "libero",
+        "dt_seconds": 0.05,
+        "encoder_id": "weaver_public_48460b66ef174546_sd3_clip_strict",
+        "image_keys": [
+          "full_image",
+          "wrist_image"
+        ],
+        "image_size": [
+          192,
+          320
+        ],
+        "image_value_range": "minus_one_one",
+        "n_history": 2,
+        "n_memory_frames": 6,
+        "normalizer_id": "libero_train_normalizer:dfc1665cfc36022b6f55b16ba4eb89b7803213f309eded24cd223d009191c4b9",
+        "state_dim": 8,
+        "state_schema_id": "libero_eef_pos_axisangle_gripper_v1",
+        "t_memory": 5
+      },
+      "checkpoint_metadata": {
+        "code_revision": "3e41e90738fea9a7b142db6b2fd3d9ae72b7a82e",
+        "schema": {
+          "action_dim": 7,
+          "action_schema_id": "libero_eef_delta_7_v1",
+          "alignment": "action_into_frame",
+          "domain": "libero",
+          "dt_seconds": 0.05,
+          "encoder_id": "weaver_public_48460b66ef174546_sd3_clip_strict",
+          "image_keys": [
+            "full_image",
+            "wrist_image"
+          ],
+          "image_size": [
+            192,
+            320
+          ],
+          "image_value_range": "minus_one_one",
+          "n_history": 2,
+          "n_memory_frames": 6,
+          "normalizer_id": "libero_train_normalizer:dfc1665cfc36022b6f55b16ba4eb89b7803213f309eded24cd223d009191c4b9",
+          "state_dim": 8,
+          "state_schema_id": "libero_eef_pos_axisangle_gripper_v1",
+          "t_memory": 5
+        },
+        "initialization": {
+          "kind": "pretrained_transfer",
+          "seed": 20261022,
+          "source_checkpoint_sha256": "48460b66ef1745469783ec6d4b246c00227629f353bff7e80ad9cc4451c09b6d",
+          "source_weights": "model",
+          "source_domain": "droid",
+          "target_domain": "libero"
+        },
+        "admission_kind": "serialized_native_checkpoint",
+        "success_head": {
+          "calibrated": false,
+          "trained": false
+        },
+        "terminal_head": {
+          "calibrated": false,
+          "trained": false
+        },
+        "test_fixture": false,
+        "checkpoint_id": "libero-weaver-6b45705115034914",
+        "load_report": {
+          "missing_keys": [],
+          "unexpected_keys": [],
+          "shape_mismatches": [],
+          "strict": true,
+          "tensor_count": 866,
+          "evidence_id": "sha256:6b45705115034914803224c3653533e30236fffdac544b46400b5af68bfd3443:strict_native_reload_v1",
+          "checkpoint_sha256": "6b45705115034914803224c3653533e30236fffdac544b46400b5af68bfd3443",
+          "validation": "torch.load(weights_only=True) and native load_state_dict(strict=True)",
+          "validation_scope": "current native model architecture"
+        },
+        "training_provenance": {
+          "run_id": "weaverpretrain_20261023_102831_f8c86281b8",
+          "training_manifest_sha256": "1bc6ebda4277604f5c3ee385ecf212b3a5f4c1d922d33bb6c92c5db8ddea8dc3",
+          "successful_updates": 3200,
+          "optimizer_steps": 3200,
+          "resume_checkpoint": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/micro8_formal_v1/checkpoints/update_00003200.pt",
+          "validation": {
+            "successful_updates": 3200,
+            "loss": 0.2824968472123146,
+            "batches_per_rank": 1,
+            "seed": 20361022,
+            "objective": "native_world_loss",
+            "held_out_episodes": true
+          },
+          "initialization": "pretrained_transfer"
+        },
+        "reward_provider": "external_vlm",
+        "critic_mode": "disabled",
+        "normalization_sha256": "4eb48833c551c744bf35100d7296b399c22187375674822804cba715f6e6d23b",
+        "encoder_paths": {
+          "image": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/image",
+          "task": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/task"
+        }
+      },
+      "backend_options": {
+        "source_path": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/upstream_3e41e907",
+        "checkpoint_dir": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/micro8_formal_v1/inference_bundle",
+        "encoder_paths": {
+          "image": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/image",
+          "task": "/mnt/data/lcx1/dong/checkpoints/weaver_public_20261022/bundled_encoders/task"
+        },
+        "checkpoint_file": "checkpoint.pt",
+        "train_reward_head": true,
+        "publication_weights": "online",
+        "allow_untested_dependency_versions": false,
+        "inference_python": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+        "master_dtype": "float32",
+        "autocast_dtype": "bfloat16",
+        "horizon": 8,
+        "decode_chunk_size": 2,
+        "encode_chunk_size": 4,
+        "initial_checkpoint_sha256": "6b45705115034914803224c3653533e30236fffdac544b46400b5af68bfd3443",
+        "training_python": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+        "online_training": {
+          "backend": "torch_ddp",
+          "world_size": 4,
+          "trainable_scope": "wm+rm",
+          "micro_batch_size": 4,
+          "gradient_accumulation_steps": 64,
+          "global_batch_size": 1024,
+          "optimizer": "adamw",
+          "betas": [
+            0.9,
+            0.99
+          ],
+          "lr": 1e-05,
+          "warmup_steps": 20,
+          "schedule": "constant_after_linear_warmup",
+          "weight_decay": 0.01,
+          "gradient_clip": 1.0,
+          "parameter_dtype": "float32",
+          "autocast_dtype": "bfloat16",
+          "ema": false
+        },
+        "transport": "isolated_online_ddp",
+        "native_reward_head": {
+          "mode": "libero_discounted_success_value_v1",
+          "link": "sigmoid",
+          "loss": "masked_half_mse",
+          "label_source": "libero_env_step",
+          "calibrated": false,
+          "terminal": "horizon_only",
+          "balance": "none",
+          "loss_coefficient": 1.0,
+          "gamma_per_action": 0.9987444968227265,
+          "discount_unit": "action_steps",
+          "target_semantics": "discounted_observed_episode_success"
+        },
+        "reward_head_initialization": {
+          "source_label": "robometer_progress",
+          "libero_adaptation_updates": 0,
+          "trained_on_libero": false,
+          "calibrated": false,
+          "initial_only": true
+        },
+        "optimizations": {
+          "selected_frame_encoding": true,
+          "kv_cache": true,
+          "decode_mode": "last",
+          "feature_cache_max_bytes": 67108864,
+          "resident_rollout_state": true,
+          "resident_max_sessions": 8,
+          "resident_max_bytes": 67108864,
+          "validate_on_cpu": true,
+          "task_cache_entries": 64,
+          "safety_checks": "batched"
+        },
+        "fresh": {
+          "protocol": "weaver_fresh_v1",
+          "dense_reward": true,
+          "signal_telemetry": true,
+          "refresh_gae": true,
+          "replay_age_limits": true,
+          "max_policy_age": 16,
+          "max_world_age": 3,
+          "max_sample_uses": 4,
+          "seed_balancing": true,
+          "early_seed_context": true,
+          "seed_scheduler_mode": "balanced",
+          "seed_scheduler_seed": 20261028,
+          "real_policy_replay": true,
+          "real_fraction": 0.25,
+          "jit_gae_mode": "fused",
+          "advantage_norm": "ema_zscore",
+          "advantage_ema_beta": 0.9,
+          "advantage_scale_floor": 0.001,
+          "jit_context_micro": 2,
+          "policy_sampling": "imagined_trajectories"
+        }
+      },
+      "world_trainable": true
+    },
+    "mps_receipt_sha256": "220144d2ea82e79b99d4259a78a4175f900563f0ed58eb9bbea0bb8a11ef1a59",
+    "world_admission": {
+      "configuration": "/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1/examples/trajectory_01_imagined.json",
+      "service_plan": {
+        "backend": "weaver",
+        "reward_provider": "world_head",
+        "world_trainable": true,
+        "world_kind": "ctrl",
+        "world_size": 4,
+        "trainer_kinds": [
+          "policy",
+          "ctrl"
+        ],
+        "inference_kinds": [
+          "policy",
+          "ctrl"
+        ],
+        "wm_consumers": [
+          "ctrl"
+        ],
+        "expected_wm_consumers": 4,
+        "gpu_model_processes_per_card": 4,
+        "expected_gpu_model_processes": 16,
+        "logical_update_ratio": "5:1",
+        "checkpoint_kinds": [
+          "policy",
+          "ctrl"
+        ],
+        "publication_kinds": [
+          "policy",
+          "ctrl"
+        ]
+      },
+      "configuration_admitted": true,
+      "assets_checked": true,
+      "real_model_loaded": false,
+      "gpu_validated": false,
+      "errors": [],
+      "controller_environment": {
+        "versions": {
+          "torch": "2.12.0",
+          "torchvision": "0.27.0",
+          "diffusers": "0.29.2",
+          "transformers": "4.40.1",
+          "einops": "0.8.2",
+          "PyYAML": "6.0.3",
+          "numpy": "1.26.4",
+          "imageio": "2.37.3"
+        },
+        "missing": [],
+        "incompatible": [
+          "torch=2.12.0; upstream requires ==2.7.0",
+          "diffusers=0.29.2; upstream requires >=0.35.2",
+          "transformers=4.40.1; upstream requires >=4.57.3"
+        ],
+        "compatible": false,
+        "environment_modified": false
+      },
+      "environment": {
+        "versions": {
+          "torch": "2.7.0+cu126",
+          "torchvision": "0.22.0+cu126",
+          "diffusers": "0.35.2",
+          "transformers": "4.57.3",
+          "einops": "0.8.1",
+          "PyYAML": "6.0.3",
+          "numpy": "1.26.4",
+          "imageio": "2.37.2"
+        },
+        "missing": [],
+        "incompatible": [],
+        "compatible": true,
+        "environment_modified": false
+      },
+      "inference_python": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+      "controller_python_entry": "/mnt/data/lcx3/envs/merged-env/bin/python",
+      "inference_python_entry": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+      "separate_inference_interpreter": true,
+      "source_path": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/upstream_3e41e907",
+      "checkpoint_file": "/mnt/data/lcx1/dong/need_data/weaver_libero_offline_20261022/micro8_formal_v1/inference_bundle/checkpoint.pt",
+      "online_training_environment": {
+        "versions": {
+          "torch": "2.7.0+cu126",
+          "torchvision": "0.22.0+cu126",
+          "diffusers": "0.35.2",
+          "transformers": "4.57.3",
+          "einops": "0.8.1",
+          "PyYAML": "6.0.3",
+          "numpy": "1.26.4",
+          "imageio": "2.37.2"
+        },
+        "missing": [],
+        "incompatible": [],
+        "compatible": true,
+        "environment_modified": false,
+        "python": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022/bin/python",
+        "torch": "2.7.0+cu126",
+        "sys_prefix": "/mnt/data/lcx1/dong/envs/weaver-libero-20261022",
+        "distributed_available": true,
+        "nccl_available": true,
+        "cuda_initialized": false,
+        "gpu_access_performed": false
+      },
+      "status": "cpu_configuration_checked_only"
+    },
+    "cost_scheduler": {
+      "profile": "03_feedback_parallel",
+      "source_path": "/mnt/data/lcx1/dong/need_data/weaver_cycle_parallel_scheduler_20261103/source_v1/weaver_integrated_v1/examples/cycle_03_feedback_parallel.json",
+      "source_sha256": "9655468c096d33c420d0691aab3330221f9b13398c8bce12f6768ee58ff125fd",
+      "settings": {
+        "schema": 1,
+        "enabled": true,
+        "weights": {
+          "policy_train": 1.0,
+          "world_train": 1.0,
+          "policy_infer": 1.0,
+          "world_infer": 1.0
+        },
+        "class_weights": {
+          "real": 1.0,
+          "imagined": 1.0,
+          "refresh": 1.0,
+          "eval": 1.0
+        },
+        "refresh_micro": 2,
+        "action_micro": 2,
+        "max_pending": 4096,
+        "card_inflight": 3,
+        "training_gangs": 2,
+        "macro_enabled": true,
+        "allow_probe": true,
+        "controller": {
+          "cooldown_seconds": 60.0,
+          "max_l1_change": 0.5,
+          "search_step": 0.25,
+          "beta_seconds_per_weight": 5.0,
+          "min_response_samples": 2,
+          "response_max_age_seconds": 3600.0
+        },
+        "initial_unit_costs": {
+          "policy_train:policy_zero2:micro8:gas18:global576": 262.0,
+          "policy_train:policy_zero2:micro4:gas36:global576": 340.0,
+          "world_train:native_ddp:micro4:gas64:global1024": 806.0,
+          "world_infer:generate_chunk": 4.0,
+          "policy_infer:real:batch1": 0.3,
+          "policy_infer:real:batch2": 0.3,
+          "policy_infer:imagined:batch1": 0.3,
+          "policy_infer:imagined:batch2": 0.3,
+          "policy_infer:refresh:batch1": 0.3,
+          "policy_infer:refresh:batch2": 0.3,
+          "policy_infer:eval:batch1": 0.3,
+          "policy_infer:eval:batch2": 0.3,
+          "world_infer:init_context": 0.4,
+          "policy_infer:refresh:batch3": 0.25,
+          "policy_infer:refresh:batch4": 0.25,
+          "policy_infer:refresh:batch5": 0.25,
+          "policy_infer:refresh:batch6": 0.25,
+          "policy_infer:refresh:batch7": 0.25,
+          "policy_infer:refresh:batch8": 0.25
+        },
+        "probe_min_cycles": 2,
+        "execution": {
+          "parent_policy_budget": true,
+          "authoritative_production": true,
+          "refresh_lease_micros": 4,
+          "refresh_lease_seconds": 0.8,
+          "refresh_trim": "legacy",
+          "dependency_priority": false,
+          "action_wait_seconds": 1.0
+        },
+        "cycle_feedback": {
+          "enabled": true,
+          "warmup_policy_updates": 20,
+          "observation_cycles": 2,
+          "timeout_seconds": 7200.0,
+          "inventory_tolerance": 0.1,
+          "max_cycle_spread": 0.5
+        }
+      }
+    },
+    "mps_boot_id": "31dafb78-e50a-4824-a1ba-12f7ddef8741",
+    "gpu_access_performed": false
+  },
+  "execution_cpu_tests": "............\n----------------------------------------------------------------------\nRan 12 tests in 0.452s\n\nOK\n",
+  "serializer": {
+    "protocol": "cost_scheduler_cpu_serialization_v1",
+    "observed_ns": 1793697529247242593,
+    "cloudpickle_version": "3.1.2",
+    "cloudpickle_source": "/mnt/data/lcx3/envs/merged-env/lib/python3.11/site-packages/cloudpickle/cloudpickle.py",
+    "cloudpickle_sha256": "29c2c0fee031a762ae3096fdbda4d5bdeec52c5510bbb998903ddd0ac7317917",
+    "checks": {
+      "rejects_captured_contextvar": true,
+      "actual_dynamic_request_wrapper_roundtrip": true,
+      "restored_wrapper_preserves_workflow_and_id": true,
+      "context_reset_after_return": true,
+      "dynamic_broker_class_roundtrip": true,
+      "actual_actor_method_export:configure_cost_scheduler": true,
+      "actual_actor_method_export:scheduled_evaluate_values": true,
+      "actual_actor_method_export:_scheduled_policy_step": true,
+      "actual_actor_method_export:request": true,
+      "actual_actor_method_export:apply_rank_weights": true
+    },
+    "passed": true,
+    "actual_ray_started": false,
+    "gpu_used": false,
+    "scope": "actual dynamic function/class CPU serialization, not Ray actor execution"
+  },
+  "wrapper_tests": "...................................................\n----------------------------------------------------------------------\nRan 51 tests in 0.252s\n\nOK\n",
+  "native_inventory_tests": "...............................\n----------------------------------------------------------------------\nRan 31 tests in 1.308s\n\nOK\n",
+  "serialization_bytes": {
+    "configure_inventory_lookahead": 1550,
+    "stop_inventory_lookahead": 758,
+    "sample": 8469,
+    "LookaheadPump": 52
+  },
+  "cuda_initialized": false,
+  "actual_ray_gpu_executed": false
+}

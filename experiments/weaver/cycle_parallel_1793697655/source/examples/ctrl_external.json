@@ -1,0 +1,7 @@
+{
+  "backend": "ctrl",
+  "reward_provider": "external_vlm",
+  "reward_semantics": "delta_success",
+  "terminal_rule": "argmax",
+  "critic_mode": "disabled"
+}

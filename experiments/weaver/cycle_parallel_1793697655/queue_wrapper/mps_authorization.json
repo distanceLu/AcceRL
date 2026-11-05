@@ -1,0 +1,28 @@
+{
+  "protocol": "gpu47_mps_authorization_v1",
+  "boot_id": "31dafb78-e50a-4824-a1ba-12f7ddef8741",
+  "uid": 1004,
+  "pipe": "/dev/shm/mps_lcx1_gpu47_pzero2_20261020/pipe",
+  "scope": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "gpu_uuids": [
+    "GPU-c43d6671-0979-b38d-9eae-4fe0a9d71c8c",
+    "GPU-fe0edfe4-b193-1af7-6a98-cbff40214f74",
+    "GPU-8c9bc264-7f09-989e-1ec7-cecd6cde782c",
+    "GPU-07ae0bbc-8923-bd0c-199e-c726821e655d"
+  ],
+  "server": {
+    "pid": 351921,
+    "uid": 1004,
+    "birth_ticks": 145734
+  },
+  "control": {
+    "pid": 311434,
+    "uid": 1004,
+    "birth_ticks": 131077
+  }
+}

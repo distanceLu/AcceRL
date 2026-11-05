@@ -1,0 +1,31 @@
+{
+  "audit": {
+    "run_id": "weaverintegrated_1103_172031_a7557d7d",
+    "observed_ns": 1793698616534419592,
+    "synchronized_epochs": 3,
+    "complete_jit_updates": [
+      1,
+      2,
+      3
+    ],
+    "checks": {
+      "actual_trajectory_config": true,
+      "actual_fused_ema_first_two_updates": true,
+      "p5_p6_synchronized": false,
+      "source_unchanged": true,
+      "world_publication_committed": false,
+      "policy_publication_committed": true,
+      "published_models_served_by_all_replicas": false,
+      "world_release_receipts": false,
+      "no_shared_critic_refresh": true,
+      "no_detected_jit_contract_violation": true,
+      "policy_ranks_match_skip0": true,
+      "ctrl_ranks_match_skip0": true
+    },
+    "violations": [],
+    "first_closed_loop_passed": false,
+    "scope": "Actual full OpenVLA/ZeRO2/Ray/NCCL run contracts, not numerical equivalence or performance/learning proof"
+  },
+  "raw_audit_sha256": "01ee555b7885a4dfbd00f0ee1218c5c6460cd81d9442f8edfeb0181ac9cb4542",
+  "scope": "First Policy/EMA/sampling and publication evidence; World joint update remains pending until P5/P6."
+}

@@ -1,0 +1,29 @@
+{
+  "repository": "https://github.com/distanceLu/AcceRL-Agent",
+  "upstream_commit_resolved": false,
+  "files": [
+    {
+      "file": "accerl_agent/agent_textworld.py",
+      "url": "https://raw.githubusercontent.com/distanceLu/AcceRL-Agent/main/accerl_agent/agent_textworld.py",
+      "bytes": 226417,
+      "sha256": "0d60b026365eaa6e93a13eed2864f1e95ae7592ce002cb785364856a6ea70215",
+      "retrieved_ns": 1793612687504041500
+    },
+    {
+      "file": "accerl_agent/rl_data.py",
+      "url": "https://raw.githubusercontent.com/distanceLu/AcceRL-Agent/main/accerl_agent/rl_data.py",
+      "bytes": 13730,
+      "sha256": "3cc05127e00f22ea43a243bfc558b3f3d302b24e2db622a349819675f645152f",
+      "retrieved_ns": 1793612686943133600
+    },
+    {
+      "file": "accerl_agent/ppo_value.py",
+      "url": "https://raw.githubusercontent.com/distanceLu/AcceRL-Agent/main/accerl_agent/ppo_value.py",
+      "bytes": 8235,
+      "sha256": "8a4055397f59dec140cb0d1b69ca3911ad4326255c47df65368f73d0310f4617",
+      "retrieved_ns": 1793612686932589900
+    }
+  ],
+  "local_snapshot": "../analysis/jit_gae_review_20261102/reference",
+  "implementation_origin": "Independent adaptation of the saved reference semantics; no claim of source-level or numerical equivalence"
+}
