@@ -104,11 +104,10 @@ def load_settings(path=None):
 
 
 def source_fingerprint(root):
-    """Only used for a new candidate launch, never for periodic monitoring."""
-    root = Path(root)
-    files = {str(p.relative_to(root)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in root.rglob('*.py') if 'validation' not in p.parts and '__pycache__' not in p.parts}
-    return hashlib.sha256(json.dumps(files,sort_keys=True).encode()).hexdigest()
+    """Use the Git revision as the shared identity in the 64-hex rank protocol."""
+    import subprocess
+    commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    return hashlib.sha256(("git-commit:" + commit).encode("ascii")).hexdigest()
 
 
 class CostAdmissionBroker:

@@ -41,6 +41,10 @@ cp .weaver.env.example .weaver.env
 
 本分支对应 `weaverintegrated_1106_142611_cafe8ae1` 使用的 original95 配方及其历史参照 `weaverintegrated_1103_172031_a7557d7d`。每个 Policy batch 有 144 个真实 chunk 和 432 个想象 chunk，Policy/World 的 global batch 为 576/1024，每 5 次 Policy 更新配 1 次 World 更新。完整想象轨迹、fused JIT GAE、全局 EMA、双训练组并行、反馈调权和 Eval10 的 1000-episode 滚动窗口均来自该配方。历史约 17 小时到达的 95% 是跨多个 Policy 版本的滚动观测；新实验应按实际评估记录判断。
 
-`weaver_run/recipe/` 保存从运行进程提取的命令、82 个解析参数及资源清单。`weaver_run/reference-source.json` 记录原始 267 个引擎文件的 SHA-256；可移植版本在三个文件中适配物理 GPU 编号和 DeepSpeed 安装位置，另外 264 个逐文件一致。`weaver_run/vendor/` 附所需第三方源码及许可证。`weaver_run/reference_site/` 保存原站点调度入口的参考代码，其他服务器只需根入口。
+## 代码和实验版本
+
+在 `codex/weaver-original95-runnable` 分支直接修改训练代码和配置，测试后只提交本次变更。训练入口和原站队列共用 `weaver_run/recipe/` 下的参数与配置。历史 original95 的首个可移植提交是 `87a65a2c336877cc8877dd56a21c7208ea41e8d5`。
+
+原站的开发目录是 `/mnt/data/lcx1/dong/WEAVER/code`。在 `/mnt/data/lcx1/dong/WEAVER` 运行 `./run.sh`，每次新的默认训练入队前会执行普通 Git push，并核对 GitHub 的分支提交。未提交改动或远端分叉会阻止新启动。队列从一个重复使用的独立 Git worktree 执行该提交，长训期间可在开发目录准备下一次修改。实验的 `experiment.json` 记录 `git_branch` 和 `git_commit`，`./run.sh status --id 实验名` 也可查看提交。其他服务器上的启动入口校验已发布的提交，使用者可用只读仓库权限运行。
 
 仓库提供同一训练配方及启动前的 CPU 校验。异步采集、抽样和 GPU 执行顺序可能改变后续学习轨迹。保存的权重可用于推理；精确续训还需要 optimizer、Replay 和随机数状态。

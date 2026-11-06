@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 ENGINE = HERE / "engine"
 RECIPE = HERE / "recipe"
+from git_version import BRANCH, published
 REFERENCE_SERVER = "h20-xyff52ab-0001"
 SITE_ENTRY = Path("/mnt/data/lcx1/dong/WEAVER/run.sh")
 NATIVE_DIR = Path("/mnt/data/lcx1/dong/envs/weaver-libero-20261022")
@@ -129,6 +130,19 @@ def expand(data, values):
     return data
 
 
+def exec_managed_driver():
+    """Start the real trainer after the site supervisor has set its run identity and paths."""
+    values=dict(settings(), ids="4,5,6,7", world=os.environ["ACCERL_WORLD_BACKEND_CONFIG"],
+                pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
+                agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
+    argv=expand(read(RECIPE/"argv.json"),values)
+    env=dict(os.environ)
+    env.update(read(RECIPE/"env.json"))
+    # TensorBoard consumers on this host already watch the original runs directory.
+    os.chdir(SITE_ENTRY.parent.parent/"AcceRL-scheduler")
+    os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
+
+
 def prepare(work, ids, run_id):
     host=settings()
     missing=[k+"="+v for k,v in host.items() if not Path(v).exists()]
@@ -171,8 +185,6 @@ def prepare(work, ids, run_id):
 
 def check(work, cmd, env, host):
     safe=dict(env,CUDA_VISIBLE_DEVICES="")
-    for path,expected in read(ENGINE/"source_manifest.json")["files"].items():
-        require(checksum(ENGINE/path)==expected,"Engine SHA mismatch: "+path)
     for name,h in read(RECIPE/"bundle-checksums.json").items():
         require(checksum(Path(host["bundle"])/name)==h,"native3200 bundle mismatch: "+name)
     for name,h in read(RECIPE/"policy-checksums.json").items():
@@ -253,10 +265,9 @@ def main():
     args=parser.parse_args()
     host=socket.gethostname()==REFERENCE_SERVER
     if host and args.action!="check":
-        require(SITE_ENTRY.is_file() and checksum(SITE_ENTRY)=="4a026678bcc8af17961ebbdeb03235112d722e6ba20fcc04fa78465442351a16",
-                "Reference server requires its verified reservation entry; contact its operator.")
         op="original" if args.action in ("original","restore","start") else args.action
-        os.execv(str(SITE_ENTRY),[str(SITE_ENTRY),op,*(["--id",args.id] if args.id else [])])
+        cli=HERE/"reference_site/cli.py"
+        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else [])])
     if args.action=="check":
         with tempfile.TemporaryDirectory(prefix="weaver-check-") as d:
             ids,_=allocated(True)
@@ -278,6 +289,7 @@ def main():
     if args.action in ("status","stop"):
         print(json.dumps(status(work) if args.action=="status" else stop(work),indent=2))
         return 0
+    git_commit=published(ROOT)
     ids,cards=allocated(False)
     work.mkdir(mode=0o700)
     run_id="weaverintegrated_"+label
@@ -294,7 +306,8 @@ def main():
                 fcntl.flock(file,fcntl.LOCK_EX|fcntl.LOCK_NB)
             mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
             env["CUDA_VISIBLE_DEVICES"]=",".join(cards)
-            put(work/"command.json",dict(argv=cmd,gpus=cards,run_id=run_id,recipe="original95",weights_only=True))
+            require(published(ROOT)==git_commit,"Revision changed during admission")
+            put(work/"command.json",dict(git_branch=BRANCH,git_commit=git_commit,argv=cmd,gpus=cards,run_id=run_id,recipe="original95",weights_only=True))
             put(outputs/"last.json",label)
             print(f"Starting {run_id}; log: {work/'train.log'}",flush=True)
             with (work/"train.log").open("xb") as log:

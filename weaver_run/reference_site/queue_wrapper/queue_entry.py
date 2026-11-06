@@ -90,7 +90,7 @@ def run(args):
         if os.path.lexists(args.root / relative):
             raise ValueError('Existing evaluation output cannot be reused: ' + relative)
     if args.validate_only:
-        verified = training.validate(args.source, args.root, args.manifest_sha256)
+        verified = training.validate(args.source, args.root, args.git_commit)
         training.log(validation=verified, budgets=budgets,
                      evaluation_argv=evaluation_command(args, args.evaluation_seconds),
                      native_preflight_argv=training.native_preflight_command(args, 'weaverintegrated_preflight_plan_only', plan_only=True),
@@ -208,7 +208,7 @@ def main():
     parser.add_argument('--skip-final-evaluation',action='store_true')
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--root', '--experiment-root', dest='root', type=Path, required=True)
-    parser.add_argument('--manifest-sha256', required=True)
+    parser.add_argument('--git-commit', required=True)
     parser.add_argument('--post-stop-grace-seconds', type=int, default=1800)
     parser.add_argument('--native-gpu-preflight', action='store_true')
     parser.add_argument('--evaluation-seconds', type=int, default=DEFAULT_EVAL_SECONDS)

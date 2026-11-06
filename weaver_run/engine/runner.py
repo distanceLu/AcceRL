@@ -12,7 +12,9 @@ import sys
 import time
 import uuid
 
-ROOT = Path('/mnt/data/lcx1/dong/AcceRL-scheduler')
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT/'weaver_run'))
+from git_version import revision
 SOURCE = Path(__file__).resolve().parent
 import gpu47_safety as safe
 from deadline_guard import guard_decision
@@ -44,7 +46,7 @@ def measurement_configuration(active_kinds=('policy', 'ctrl', 'reward')):
 
 
 COST_SCHEDULER_PROFILE = '03_feedback_parallel'
-COST_SCHEDULER_RELATIVE = 'examples/cycle_03_feedback_parallel.json'
+COST_SCHEDULER_RELATIVE = '../recipe/cost_scheduler_config.json'
 
 
 def cost_scheduler_launch_configuration(path=None):
@@ -52,14 +54,11 @@ def cost_scheduler_launch_configuration(path=None):
     if path is None:
         return None  # Preserve the legacy caller's disabled scheduler behavior.
     candidate = Path(path)
-    expected = SOURCE / COST_SCHEDULER_RELATIVE
+    expected = (SOURCE / COST_SCHEDULER_RELATIVE).resolve()
     if (not candidate.is_absolute() or candidate != expected or candidate.is_symlink()
             or candidate.resolve() != expected or expected.is_symlink()):
         raise ValueError('Cost scheduler requires the exact frozen adaptive profile path')
-    manifest = json.loads((SOURCE / 'source_manifest.json').read_text(encoding='utf-8'))
     digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-    if manifest.get('files', {}).get(COST_SCHEDULER_RELATIVE) != digest:
-        raise ValueError('Cost scheduler profile SHA256 differs from the frozen manifest')
     from cost_scheduler_runtime import load_settings
     settings = load_settings(candidate)
     if any(settings.get(key) is not True for key in ('enabled', 'macro_enabled', 'allow_probe')):
@@ -357,8 +356,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
              'stop_on_target':False,'deadline_unix':None,'until_manual_stop':True,'no_resume':True,
              'automatic_restart':False,'mps_active_thread_caps':None,'physical_gpus':[4,5,6,7],
              'gpu_save_grace_seconds':900,'error_grace_seconds':120,
-             'base_frozen_archive_sha256':'3b030ada9172dac7856d7a6fe6ab2d7baf8a86967300049cc8d2c7243ab3a2e7',
-             'source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in SOURCE.glob('*.py')}}
+             'git_commit':revision(ROOT)}
     state.update(candidate='weaver_integrated_v1', experiment_root=str(safe.MASTER), source_path=str(SOURCE))
     state['cost_scheduler'] = freeze_cost_scheduler_configuration(data, cost_configuration)
     state['policy_batch_schedule']={'ordinary_micro_GAS':[8,18],'joint_micro_GAS':[4,36],
@@ -377,7 +375,6 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     state['warmup_steps'] = {kind: value for kind, value in state['warmup_steps'].items()
                              if kind == 'value' or kind in plan.active_kinds}
     state.update(measurement_configuration(plan.active_kinds))
-    state['source_sha256']['run.sh']=hashlib.sha256((SOURCE/'run.sh').read_bytes()).hexdigest()
     safe.atomic_json(data/'runnerstatus.json',state)
     env = formal_environment(state,data,pre)
     processes=[]

@@ -24,6 +24,11 @@ AGENT = QUEUE / "source_v4_postreboot/agent.py"
 PYTHON = "/mnt/data/lcx3/envs/merged-env/bin/python"
 PARENT = DATA / "weaver_cycle_restore_gpu47_20261105_v1"
 PROFILES = json.loads((HERE / "profiles.json").read_bytes())
+CHECKOUT = HERE.parents[1]
+RUNTIME = HOME / ".git-runtime"
+LEGACY_CLI = HOME / ".launcher/8daa6667c03361e298fc81233978f2fd9b76ee9ed3803726e8af7d218a1aef14/cli.py"
+sys.path.insert(0, str(CHECKOUT / "weaver_run"))
+from git_version import BRANCH, published, revision, pin_worktree
 LABEL = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}\Z")
 
 
@@ -68,7 +73,7 @@ def lookup(sid):
 
 
 def active_jobs():
-    return queue_rows("select id,state,submission_id from jobs where state in ('queued','running')")
+    return queue_rows("select id,state,submission_id from jobs where state in ('queued','running','blocked')")
 
 
 def ready():
@@ -91,86 +96,35 @@ def handoff_verified():
                 "前序训练或 P0 回放队列记录不匹配")
 
 
-def paths(profile):
-    spec=PROFILES[profile]
-    source=Path(spec["source"])
-    wrapper=Path(spec["wrapper"]) if spec.get("wrapper") else HERE/"wrappers"/profile
-    require(source.resolve(strict=True)==source and digest((source/"source_manifest.json").read_bytes())==spec["manifest"],
-            "冻结源码路径或清单不匹配")
-    for name,expected in spec.get("wrapper_hashes",{}).items():
-        asset=wrapper/name
-        require(asset.resolve(strict=True)==asset and digest(asset.read_bytes())==expected,
-                f"启动包装器文件变化: {asset}")
-    return spec,source,wrapper
-
-
-def replay_program(bundle, root, sid):
-    """Only rebind the replay's physical bundle, new output and queue identity."""
-    original=(bundle/"model_replay.py").read_bytes()
-    index=(bundle/"bundle.json").read_bytes()
-    require(digest(index)==bundle.name and digest(original)==json.loads(index)["model_replay.py"], "P0 程序指纹不符")
-    text=original.decode("utf8")
-    for old,new in [
-        ("HERE = Path(__file__).resolve().parent", f"HERE = Path({str(bundle)!r})"),
-        ("ROOT = Path('/mnt/data/lcx1/dong/need_data/weaver_p0_replay_gpu47_20261106_v1')", f"ROOT = Path({str(root)!r})"),
-        ("queue=ROOT.parent/'experiment_queue_gpu47_20261023/queue.sqlite'", f"queue=Path({str(QUEUE/'queue.sqlite')!r})"),
-        ("'weaver-p0-request-replay-17-gpu47-20261106-v1'",repr(sid)),
-    ]:
-        require(text.count(old)==1, f"P0 绑定位置不唯一: {old}")
-        text=text.replace(old,new)
-    compile(text,"replay.py","exec")
-    return text.encode()
-
-
-def make_spec(profile, label, root, stage):
-    spec,source,wrapper=paths(profile)
-    sid="weaver-run-"+label
-    require(root.is_absolute() and root.resolve()==root, "输出必须使用独立实路径")
+def make_spec(profile, label, root, stage, checkout=RUNTIME):
+    require(profile=="restore", "This branch manages the original training profile")
+    commit=revision(checkout)
+    source=checkout/"weaver_run/engine"
+    wrapper=checkout/"weaver_run/reference_site/queue_wrapper/queue_entry.py"
+    from launch import expand, settings
+    template=json.loads((checkout/"weaver_run/recipe/world_backend_config.json").read_bytes())
+    config=expand(template,dict(settings(),weaver=str(checkout/"weaver_run/vendor/weaver")))
+    json_write(stage/"git-world.json",config)
     mps=(PARENT/"mps.json").read_bytes()
-    require(digest(mps)==spec["mps_receipt"], "MPS 回执有变化")
+    require(digest(mps)==PROFILES[profile]["mps_receipt"], "MPS receipt differs")
     (stage/"mps.json").write_bytes(mps)
-    if profile=="p0":
-        program=replay_program(source.parent,root,sid)
-        (stage/"replay.py").write_bytes(program)
-        argv=[PYTHON,str(root/"replay.py")]
-    else:
-        entry="profile_queue_entry.py" if profile=="efficiency" else "queue_entry.py"
-        argv=[PYTHON,str(wrapper/entry),"--source",str(source),"--root",str(root),"--manifest-sha256",spec["manifest"]]
-        if profile!="efficiency":
-            argv+=["--native-gpu-preflight","--skip-final-evaluation"]
-    argv=["/usr/bin/env","PYTHONNOUSERSITE=1","PYTHONDONTWRITEBYTECODE=1",*argv]
-    job=dict(name="WEAVER "+profile+" "+label,submission_id=sid,cwd=str(source),argv=argv,
-             manual=profile!="p0",timeout_seconds=3900 if profile=="p0" else 0)
-    record=dict(schema=1,profile=profile,label=label,root=str(root),source=str(source),manifest_sha256=spec["manifest"],
-                release=str(HERE),job=job)
-    if profile=="p0":
-        record["replay_sha256"]=digest(program)
+    argv=["/usr/bin/env","PYTHONNOUSERSITE=1","PYTHONDONTWRITEBYTECODE=1",PYTHON,str(wrapper),
+          "--source",str(source),"--root",str(root),"--git-commit",commit,
+          "--native-gpu-preflight","--skip-final-evaluation"]
+    job=dict(name="WEAVER "+profile+" "+label,submission_id="weaver-run-"+label,
+             cwd=str(source),argv=argv,manual=True,timeout_seconds=0)
+    record=dict(schema=2,profile=profile,label=label,root=str(root),source=str(source),
+                git_branch=BRANCH,git_commit=commit,job=job)
     json_write(stage/"experiment.json",record)
     return record
 
 
 def check_record(record):
-    argv=record["job"]["argv"]
-    profile=record["profile"]
-    if profile=="p0":
-        require(digest((Path(record["root"])/"replay.py").read_bytes())==record["replay_sha256"],"P0 回放程序校验失败")
-    if profile=="efficiency":
-        # The private collector has no validate-only switch. Build its real
-        # target command without starting Nsight, then validate its inner job.
-        spec,source,wrapper=paths(profile)
-        root=Path(record["root"])
-        check="import json,sys;from pathlib import Path;import cycle_profile as p;print(json.dumps(p.profile_command(Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4])))"
-        command=json.loads(cpu([PYTHON,"-c",check,str(source),str(root),str(wrapper),spec["manifest"]],cwd=source))
-        target=command.index(str(wrapper/"profile_target_entry.py"))
-        require(os.access(command[0],os.X_OK) and "--capture-range=nvtx" in command and "--skip-final-evaluation" in command,
-                "Nsight 采样计划不匹配")
-        argv=[PYTHON,str(wrapper/"queue_entry.py"),*command[target+1:]]
-    out=cpu([*argv,"--cpu-check" if profile=="p0" else "--validate-only"],cwd=record["source"])
+    out=cpu([*record["job"]["argv"],"--validate-only"],cwd=record["source"])
     result=json.loads(out.strip().splitlines()[-1])
-    if profile=="p0":
-        require(result["cases"]==17 and result["arms_admitted"] and result["cuda_initialized"] is False,"P0 CPU 准入失败")
-    else:
-        require(result.get("valid") and result["validation"]["gpu_access_performed"] is False,"训练 CPU 准入失败")
+    validation=result["validation"]
+    require(result.get("valid") and validation["gpu_access_performed"] is False
+            and validation["git_commit"]==record["git_commit"], "Queue CPU admission failed")
 
 
 def create(job, queue):
@@ -200,6 +154,8 @@ def latest():
 def summary(record, job):
     result=dict(id=record["label"],profile=record["profile"],output=record["root"],
                 job=job["id"] if job else None,state=job["state"] if job else "prepared")
+    if record.get("git_commit"):
+        result["git_commit"]=record["git_commit"]
     p=Path(record["root"])/"formal_v3/runnerstatus.json"
     if p.is_file():
         state=json.loads(p.read_bytes())
@@ -240,15 +196,21 @@ def start(profile,label):
     else:
         require(lookup("weaver-run-"+label) is None,"该提交编号已有其他记录")
         ready()
+        pin_worktree(CHECKOUT, RUNTIME, revision(CHECKOUT))
         with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".staging-") as staging:
             staged=Path(staging)/"output"
             staged.mkdir(mode=0o700)
             r=make_spec(profile,label,root,staged)
             staged.rename(root)
-    require(r["release"]==str(HERE), "未提交的准备记录属于先前启动器版本，请使用新实验名")
+    if not r.get("git_commit"):
+        raise ValueError("Use a new label for a Git-backed experiment")
+    ready()
+    require(revision(CHECKOUT)==revision(RUNTIME,r["git_commit"]),
+            "Prepared experiment belongs to another commit; use a fresh label")
     with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".verify-") as temp:
         expected=make_spec(profile,label,root,Path(temp))
-        require(r==expected and digest((root/"mps.json").read_bytes())==PROFILES[profile]["mps_receipt"],
+        require(r==expected and (root/"git-world.json").read_bytes()==(Path(temp)/"git-world.json").read_bytes()
+                and digest((root/"mps.json").read_bytes())==PROFILES[profile]["mps_receipt"],
                 "准备记录与冻结配置不一致")
     json_write(EXPERIMENTS/".last.json",label)
     ready()
@@ -256,6 +218,8 @@ def start(profile,label):
     print(f"正在校验 {profile}，实验名 {label}，输出 {root}",file=sys.stderr,flush=True)
     check_record(r)
     ready()
+    require(published(CHECKOUT, push=True)==r["git_commit"], "Published branch moved during admission")
+    revision(RUNTIME,r["git_commit"])
     item=create(r["job"],QUEUE)
     save_submission(root,item)
     return summary(r,item)
@@ -266,7 +230,7 @@ def offline_check(profile):
         temp=Path(d)
         root=temp/"output"
         root.mkdir()
-        r=make_spec(profile,"validation-"+profile,root,root)
+        r=make_spec(profile,"validation-"+profile,root,root,checkout=CHECKOUT)
         check_record(r)
         # Production agent.py is pinned to its live root. Exercise the same
         # QueueStore.create used by the create API in a private workerless DB.
@@ -294,10 +258,9 @@ def stop(record,job):
         stat=(proc/"stat").read_text().rsplit(")",1)[1].split()
         require(proc.stat().st_uid==ident["uid"]==1004 and int(stat[19])==ident["birth_ticks"] and stat[0] not in ("X","Z"),"PID/UID/启动标识不符")
     require(all(receipt["supervisor"][k]==state["supervisor"][k] for k in ("pid","uid","birth_ticks")),"主管身份不符")
-    spec,source,_=paths(record["profile"])
-    members=json.loads((source/"source_manifest.json").read_bytes())["files"]
-    require(source==Path(record["source"]) and spec["manifest"]==record["manifest_sha256"] and
-            digest((source/"request_stop.py").read_bytes())==members["request_stop.py"],"停止程序校验失败")
+    source=RUNTIME/"weaver_run/engine"
+    require(str(source)==record["source"] and revision(RUNTIME,record["git_commit"])==state["git_commit"],
+            "Running Git revision differs from the stop request")
     return json.loads(cpu([PYTHON,str(source/"request_stop.py"),"--data",str(root/"formal_v3"),"--run-id",state["run_id"]],
                           cwd=source,env={"ACCERL_EXPERIMENT_ROOT":str(root)}))
 
@@ -312,6 +275,8 @@ def main():
     action=args.pop(0) if args and args[0] in ("list","check","start","status","stop") else "start"
     profile=args.pop(0) if args else "restore"
     profile="restore" if profile=="original" else profile
+    if profile not in PROFILES or action=="list" or profile=="all":
+        os.execv(PYTHON,[PYTHON,"-I","-B",str(LEGACY_CLI),*sys.argv[1:]])
     if args or (profile not in PROFILES and not (action=="check" and profile=="all")):
         p.error("未知配置或多余参数，使用 ./run.sh list")
     if action in ("list","status","stop") and len(opts.args)>1:
@@ -341,6 +306,12 @@ def main():
         else:
             require(bool(label),"没有可停止的训练")
             r=recorded(label)
+            if not r.get("git_commit"):
+                os.execv(PYTHON,[PYTHON,"-I","-B",str(LEGACY_CLI),action,"--id",label])
+            if action=="stop" and CHECKOUT!=RUNTIME:
+                pinned=RUNTIME/"weaver_run/reference_site/cli.py"
+                revision(RUNTIME,r["git_commit"])
+                os.execv(PYTHON,[PYTHON,"-I","-B",str(pinned),action,"--id",label])
             j=lookup(r["job"]["submission_id"])
             result=stop(r,j) if action=="stop" else summary(r,j)
     print(json.dumps(result,indent=2,ensure_ascii=False))

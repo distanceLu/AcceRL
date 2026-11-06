@@ -27,12 +27,12 @@ GPUS = ('GPU-c43d6671-0979-b38d-9eae-4fe0a9d71c8c',
         'GPU-07ae0bbc-8923-bd0c-199e-c726821e655d')
 PIPE = '/dev/shm/mps_lcx1_gpu47_pzero2_20261020/pipe'
 FRESH_PROFILE = '04_real'
-BACKEND_CONFIG = 'examples/trajectory_01_imagined.json'
+BACKEND_CONFIG = 'git-world.json'
 COST_SCHEDULER_PROFILE = '03_feedback_parallel'
-COST_SCHEDULER_CONFIG = 'examples/cycle_03_feedback_parallel.json'
+COST_SCHEDULER_CONFIG = '../recipe/cost_scheduler_config.json'
 CYCLE_FEEDBACK = {'enabled': True, 'warmup_policy_updates': 20, 'observation_cycles': 2,
                   'timeout_seconds': 7200.0, 'inventory_tolerance': 0.1, 'max_cycle_spread': 0.5}
-PIPELINE_CONFIG = 'examples/pipeline_lookahead_01_two_updates.json'
+PIPELINE_CONFIG = '../recipe/pipeline_config.json'
 EXECUTION_CONFIG = {'parent_policy_budget': True, 'authoritative_production': True,
                     'refresh_lease_micros': 4, 'refresh_lease_seconds': 0.8,
                     'refresh_trim': 'legacy', 'dependency_priority': False,
@@ -124,7 +124,7 @@ def read_json(path):
 
 def mps_authorization(*, check_live=True):
     """Frozen per-boot identity; no PID discovery or mutation is an authorization."""
-    path = Path(__file__).resolve().parent / 'mps_authorization.json'
+    path = Path('/mnt/data/lcx1/dong/need_data/weaver_cycle_restore_20261105_v1/queue_wrapper_v1/mps_authorization.json')
     if path.is_symlink():
         raise ValueError('MPS authorization may not redirect through a symlink')
     value = read_json(path)
@@ -184,42 +184,19 @@ def log(**fields):
     print(json.dumps({'at_ns': time.time_ns(), **fields}, ensure_ascii=False), flush=True)
 
 
-def verify_manifest(source, expected):
-    if not re.fullmatch('[0-9a-f]{64}', expected):
-        raise ValueError('A pinned lowercase manifest SHA256 is required')
-    path = source / 'source_manifest.json'
-    if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-        raise ValueError('Frozen source manifest SHA256 mismatch')
-    manifest = read_json(path)
-    files = manifest.get('files', {})
-    required = {'runner.py', 'request_stop.py', 'candidate_paths.py',
-                'pipeline_default.json', BACKEND_CONFIG, 'frozen_policy_eval.py',
-                'inspect_world_backend.py', 'world_backend_audit.py', 'world_backend_runtime.py',
-                'weaver_online_bridge.py', 'weaver_online_engine.py', 'weaver_online_gpu_worker.py',
-                'weaver_online_smoke.py', 'world_backends/weaver.py', 'run_fresh.sh',
-                'fresh_config.py', 'fresh_reward_targets.py', 'fresh_policy_replay.py',
-                'fresh_seed_scheduler.py', 'fresh_context.py', 'fresh_signal.py',
-                'cost_scheduler.py', 'cost_scheduler_runtime.py', 'collective_phase_gate.py',
-                'cycle_service_controller.py', 'policy_service_dispatch.py', COST_SCHEDULER_CONFIG,
-                PIPELINE_CONFIG, 'inventory_lookahead.py', 'execution_control.py', 'execution_gpu_probe.py'}
-    if manifest.get('candidate') != 'weaver_integrated_v1' or not required <= set(files):
-        raise ValueError('Wrong candidate or incomplete frozen manifest')
-    for relative, digest in files.items():
-        member = Path(relative)
-        path = source / member
-        if member.is_absolute() or '..' in member.parts or path.resolve() != path:
-            raise ValueError('Manifest member escapes frozen source: ' + relative)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise ValueError('Frozen source file SHA256 mismatch: ' + relative)
-    return {'manifest_sha256': expected, 'verified_files': len(files)}
+def verify_git(source, expected):
+    package = Path(__file__).resolve().parents[2]
+    if source != package/"engine" or not re.fullmatch("[0-9a-f]{40}", expected):
+        raise ValueError("Expected the engine and commit from the queued Git checkout")
+    sys.path.insert(0,str(package))
+    from git_version import revision
+    return {"git_commit":revision(package.parent, expected)}
 
 
 def validate_cost_scheduler_admission(source):
-    path = source / COST_SCHEDULER_CONFIG
-    manifest = read_json(source / 'source_manifest.json')
+    path = (source / COST_SCHEDULER_CONFIG).resolve()
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if (path.is_symlink() or path.resolve() != path
-            or manifest.get('files', {}).get(COST_SCHEDULER_CONFIG) != digest):
+    if path.parent != source.parent/"recipe" or (source.parent/"recipe"/path.name).is_symlink():
         raise ValueError('Adaptive scheduler config path/SHA differs from frozen source')
     settings = read_json(path)
     if (settings.get('schema') != 1
@@ -271,12 +248,12 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, manifest_sha256):
+def validate(source, root, git_commit):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
         raise ValueError('Source/root paths must be canonical and not symlinks')
-    evidence = verify_manifest(source, manifest_sha256)
+    evidence = verify_git(source, git_commit)
     scheduler = validate_cost_scheduler_admission(source)
     # This module is CPU-only, and its bytes have just been verified.
     paths = runpy.run_path(str(source / 'candidate_paths.py'))
@@ -285,13 +262,13 @@ def validate(source, root, manifest_sha256):
     for name in ('formal_v3', 'queue_receipt.json', 'queue_entry.lock'):
         if os.path.lexists(root / name):
             raise ValueError('Existing output cannot be reused: ' + str(root / name))
-    backend = read_json(source / BACKEND_CONFIG)
+    backend = read_json(root / BACKEND_CONFIG)
     # Probe the distinct pinned WEAVER interpreter without constructing a CUDA
     # model. The merged controller environment need not import WEAVER itself.
     cpu_env = launch_environment(root, source, os.environ)
     cpu_env['CUDA_VISIBLE_DEVICES'] = ''
     inspected = subprocess.run([sys.executable, str(source / 'inspect_world_backend.py'),
-                               '--config', str(source / BACKEND_CONFIG),
+                               '--config', str(root / BACKEND_CONFIG),
                                '--check-local'], cwd=source, env=cpu_env,
                               capture_output=True, text=True, timeout=90, check=True)
     admission = json.loads(inspected.stdout)
@@ -319,7 +296,7 @@ def launch_environment(root, source, environ):
         env.pop(name, None)
     env.update(ACCERL_EXPERIMENT_ROOT=str(root),
                ACCERL_FRESH_PROFILE=FRESH_PROFILE,
-               ACCERL_WORLD_BACKEND_CONFIG=str(source / BACKEND_CONFIG),
+               ACCERL_WORLD_BACKEND_CONFIG=str(root / BACKEND_CONFIG),
                ACCERL_PIPELINE_CONFIG=str(source / PIPELINE_CONFIG),
                PYTHONUNBUFFERED='1', PYTHONDONTWRITEBYTECODE='1',
                OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
@@ -573,7 +550,7 @@ def scoped_cleanup(job_id, known=(), *, marker_name='EXPERIMENT_QUEUE_JOB_ID'):
 
 
 def native_preflight_plan(args, run_id):
-    backend = read_json(args.source / BACKEND_CONFIG)
+    backend = read_json(args.root / BACKEND_CONFIG)
     mps = read_json(args.root / 'mps.json')
     authorization = validate_mps_receipt(mps)
     return {'protocol': 'weaver_online_tiny_smoke_v1', 'run_id': run_id,
@@ -587,7 +564,7 @@ def native_preflight_plan(args, run_id):
 
 
 def native_preflight_command(args, run_id, *, plan_only=False):
-    backend = read_json(args.source / BACKEND_CONFIG)
+    backend = read_json(args.root / BACKEND_CONFIG)
     command = [backend['backend_options']['training_python'], str(args.source/'weaver_online_smoke.py'),
         '--plan', str(args.root / 'native_preflight_plan.json')]
     return command + (['--plan-only'] if plan_only else [])
@@ -818,8 +795,8 @@ def runner_command(args):
     return [sys.executable, str(args.source / 'runner.py'), '--mode', 'manual',
             '--data', str(args.root / 'formal_v3'),
             '--pipeline-config', str(args.source / PIPELINE_CONFIG),
-            '--world-backend-config', str(args.source / BACKEND_CONFIG),
-            '--cost-scheduler-config', str(args.source / COST_SCHEDULER_CONFIG)]
+            '--world-backend-config', str(args.root / BACKEND_CONFIG),
+            '--cost-scheduler-config', str((args.source / COST_SCHEDULER_CONFIG).resolve())]
 
 
 def run(args):
@@ -829,7 +806,7 @@ def run(args):
     if getattr(args, 'native_gpu_preflight', False) is not True:
         raise ValueError('This online candidate requires explicit --native-gpu-preflight once after queue admission')
     source, root = args.source, args.root
-    verified = validate(source, root, args.manifest_sha256)
+    verified = validate(source, root, args.git_commit)
     if args.validate_only:
         log(validation=verified, budgets=budgets, valid=True, outputs_created=False,
             native_preflight_argv=native_preflight_command(args, 'weaverintegrated_preflight_plan_only', plan_only=True),
@@ -1005,7 +982,7 @@ def run(args):
                        runner_exit_code=child.returncode if child is not None else None,
                        all_owned_exited=not remaining)
         try:
-            receipt['final_source_validation'] = verify_manifest(source, args.manifest_sha256)
+            receipt['final_source_validation'] = verify_git(source, args.git_commit)
             state = read_json(data / 'runnerstatus.json')
             check_state(state, source, root, receipt['run_id'], receipt.get('supervisor'))
             receipt['runner_final_state'] = state.get('state')
@@ -1033,7 +1010,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--root', '--experiment-root', dest='root', type=Path, required=True)
-    parser.add_argument('--manifest-sha256', required=True)
+    parser.add_argument('--git-commit', required=True)
     parser.add_argument('--post-stop-grace-seconds', type=int, default=1800)
     parser.add_argument('--native-gpu-preflight', action='store_true')
     parser.add_argument('--validate-only', action='store_true')
