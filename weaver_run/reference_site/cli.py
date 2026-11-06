@@ -213,7 +213,6 @@ def start(profile,label):
         require(r==expected and (root/"git-world.json").read_bytes()==(Path(temp)/"git-world.json").read_bytes()
                 and digest((root/"mps.json").read_bytes())==PROFILES[profile]["mps_receipt"],
                 "准备记录与冻结配置不一致")
-    json_write(EXPERIMENTS/".last.json",label)
     ready()
     handoff_verified()
     print(f"正在校验 {profile}，实验名 {label}，输出 {root}",file=sys.stderr,flush=True)
@@ -221,6 +220,8 @@ def start(profile,label):
     ready()
     require(published(CHECKOUT, push=True)==r["git_commit"], "Published branch moved during admission")
     revision(RUNTIME,r["git_commit"])
+    ready()
+    json_write(EXPERIMENTS/".last.json",label)
     item=create(r["job"],QUEUE)
     save_submission(root,item)
     return summary(r,item)
