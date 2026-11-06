@@ -1,0 +1,51 @@
+{
+  "worker_method_AST_sha256": {
+    "RolloutWorkerActor.run": "98e27f520a40c81107e913be487cdbc8f9bcfe7a8504c738fb5c15c479f8d79f",
+    "RolloutWorkerActor.get_one_episode": "43ea89ea2028132664dac103c79d92b66c0d3c605b1e823690db2c80f9475e11",
+    "RolloutWorkerActor.predict_next_chunk": "80477104e5a2c112516e3a0f0c91b352e00ac6172dba656abb388e9f13a701d7",
+    "RolloutWorkerActor.predict_rew_end": "f3cf78f5a2d201dedfc91b6c81a4c4904cb1a879e1906331f4ee61f57ba3c317",
+    "EvaluationWorkerActor.run": "021958718ab448a09dec211277bb4c957063cf98757909574ae64f94e6d2da80"
+  },
+  "hook_calls": {
+    "batch_begin": {
+      "len": 3,
+      "getattr": 3,
+      "range": 1,
+      "_version": 1,
+      "MODEL_KEY.get": 1,
+      "now_ns": 2,
+      "sorted": 1,
+      "_writer(owner).event": 1,
+      "_writer(owner).span": 1,
+      "span.__enter__": 1,
+      "_role": 4,
+      "metadata.append": 2,
+      "max": 3,
+      "_writer": 2,
+      "pending.popleft": 1,
+      "sum": 1,
+      "new_id": 1,
+      "int": 1
+    },
+    "profile_rpc": {
+      "now_ns": 3,
+      "time.perf_counter_ns": 3,
+      "new_id": 1,
+      "_writer": 1,
+      "writer.event": 3,
+      "kwargs.pop": 1,
+      "_role": 1,
+      "str": 1,
+      "getattr": 6,
+      "ray.get": 1,
+      "existing.update": 1,
+      "MODEL_KEY.get": 1,
+      "getattr(actor, method).remote": 1,
+      "isinstance": 1,
+      "dict": 1,
+      "result.get": 1,
+      "json.dumps": 1,
+      "repr": 1
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "real_workers": 1,
+  "imagination_workers": 4,
+  "max_real_in_flight": 1,
+  "max_imagine_in_flight": 4,
+  "max_pending_episodes": 32,
+  "seeds_per_episode": 16,
+  "max_episode_frames": 1025,
+  "bytes_per_frame": 301056,
+  "max_resident_frame_bytes": 8589934592,
+  "policy_high_watermark": 4096,
+  "policy_low_watermark": 2048,
+  "generation_per_sample": 0.25,
+  "poll_seconds": 0.25,
+  "lease_timeout_seconds": 3600.0,
+  "replace_old_pending": true,
+  "initial_state_enabled": true,
+  "initial_state_count": 50,
+  "initial_state_seed": 20261026,
+  "real_env_step_budget": 1000000,
+  "fresh_lookahead_updates": 0
+}

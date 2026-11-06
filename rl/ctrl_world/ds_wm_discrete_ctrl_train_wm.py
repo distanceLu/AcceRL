@@ -6,12 +6,15 @@ os.environ["TMPDIR"] = "/dev/shm"
 
 import sys
 import time
+os.environ.setdefault("ACCERL_TELEMETRY_DB", "/mnt/data/lcx1/dong/need_data/collection.sqlite")
+os.environ.setdefault("ACCERL_RUN_ID", f"manual_{os.getpid()}_{time.time_ns()}")
 import random
 import asyncio
 import json
 from collections import deque, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Tuple, List, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import math
 from hydra.utils import instantiate
@@ -19,15 +22,30 @@ from omegaconf import OmegaConf
 import numpy as np
 import ray
 import torch
+from capture_telemetry import Telemetry, now_ns, new_id
+from capture_hooks import install_hooks, profile_rpc, batch_begin, batch_end, stage_begin, stage_end
+from capture_training import install_training_hooks, micro_begin, micro_end
 import torch.nn as nn
 import torch.distributions
 from torch.distributions import kl
 import deepspeed
+from training_topology import (
+    DUAL_LAYOUT, FOUR_LAYOUT, SPLIT_LAYOUT, parse_gpu_ids, build_bindings, ray_init_options, actor_options,
+    verify_bound_gpu, successful_updates, GlobalBatchCoordinator, combine_wm_metrics,
+    export_cpu_weights, apply_cpu_weights,
+)
+from shared_inference import PolicyRewardInferenceActor, RewardInferenceHandle
+from parallel_checkpoint import stop_requested, save_parallel_weights, export_split_component, save_split_weights
+from evaluation_threshold import ThresholdTracker
+from nsight_capture import NsightCaptureWindows
+from training_stop_policy import TrainingStopPolicy, EvaluationMilestones
+from split_serial import (CpuReplayPrefetch, SerialPhase, epoch_groups, finish_preparation,
+                          serial_enabled, validate_sample_group, validate_shared_wm_samples)
 import torch.distributed as distributed
 from torch.utils.tensorboard import SummaryWriter
 
 # ---- AcceRL sys.path 设置 ----
-ACCE_RL_ROOT = Path(__file__).resolve().parent.parent
+ACCE_RL_ROOT = Path(__file__).resolve().parents[2]
 if str(ACCE_RL_ROOT) not in sys.path:
     sys.path.insert(0, str(ACCE_RL_ROOT))
 
@@ -228,8 +246,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description='OpenVLA RL Training with Ctrl-World World Model')
 
     # 环境变量
-    parser.add_argument('--cuda-visible-devices', type=str, default='0,1,2,3',
-                        help='CUDA devices; defaults cover trainer, policy, reward and Ctrl-World actors')
+    parser.add_argument('--cuda-visible-devices', type=str, default='4,5,6,7',
+                        help='Physical CUDA devices; this workspace is restricted to GPU4-7')
+
+    parser.add_argument('--gpu-layout', choices=['dedicated', DUAL_LAYOUT, FOUR_LAYOUT, SPLIT_LAYOUT], default='dedicated',
+                        help='dual_train_policy_reward: two training ranks, shared Policy/Reward, dedicated World')
+    parser.add_argument('--validate-only', action='store_true',
+                        help='Load all real models, verify bindings and initial broadcasts, then exit without collecting/training')
 
     # Libero benchmark
     parser.add_argument('--benchmark', type=str, default='libero_spatial',
@@ -393,20 +416,41 @@ def parse_args():
         raise ValueError("The current Ctrl-World checkpoint protocol requires num_frames_pred=5")
     if args.num_step_cond < args.num_history + 1:
         raise ValueError("num_step_cond must provide num_history previous frames plus current")
-    required_gpu_actors = (
-        args.num_trainer_gpus
-        + args.num_inference_actors
-        + args.num_reward_inference_actors
-        + args.num_ctrl_inference_actors
-    )
-    visible_gpus = [x for x in args.cuda_visible_devices.split(",") if x.strip()]
-    if len(visible_gpus) < required_gpu_actors:
-        raise ValueError(
-            f"{required_gpu_actors} one-GPU Ray actors requested but only "
-            f"{len(visible_gpus)} CUDA devices are visible"
-        )
+    visible_gpus = [x.strip() for x in args.cuda_visible_devices.split(",") if x.strip()]
+    if (not visible_gpus or len(visible_gpus) != len(set(visible_gpus))
+            or any(gpu not in ('4', '5', '6', '7') for gpu in visible_gpus)):
+        raise ValueError("This workspace is restricted to distinct physical GPUs 4,5,6,7")
+    if args.gpu_layout == SPLIT_LAYOUT and os.environ.get('ACCERL_USE_MPS') != '1':
+        raise ValueError('The six-process-per-card layout requires the existing MPS service')
+    if args.gpu_layout in (DUAL_LAYOUT, FOUR_LAYOUT, SPLIT_LAYOUT):
+        visible_gpus = parse_gpu_ids(args.cuda_visible_devices)
+        expected = (2, 1, 1, 1) if args.gpu_layout == DUAL_LAYOUT else (4, 4, 4, 4)
+        if (args.num_trainer_gpus, args.num_inference_actors,
+                args.num_reward_inference_actors, args.num_ctrl_inference_actors) != expected:
+            raise ValueError(f"{args.gpu_layout} requires actor counts {expected}")
+        if args.gpu_layout in (FOUR_LAYOUT, SPLIT_LAYOUT):
+            batches = (args.train_batch_size * args.accumulation_steps * 4,
+                       args.ctrl_batch_size * args.ctrl_accumulation_steps * 4,
+                       args.reward_batch_size * args.reward_accumulation_steps * 4)
+            if batches != (576, 1024, 1024) or args.ctrl_ema_decay != 0:
+                raise ValueError("Four-rank fill experiment preserves batches 576/1024/1024 and Ctrl EMA=0")
+        if args.num_rollout_workers < 1:
+            raise ValueError("At least one rollout worker is required")
+    else:
+        required_gpu_actors = (args.num_trainer_gpus + args.num_inference_actors
+                               + args.num_reward_inference_actors + args.num_ctrl_inference_actors)
+        if len(visible_gpus) < required_gpu_actors:
+            raise ValueError(f"{required_gpu_actors} GPU actors requested, only {len(visible_gpus)} visible")
+    for name in ('train_batch_size', 'accumulation_steps', 'ctrl_batch_size',
+                 'ctrl_accumulation_steps', 'reward_batch_size', 'reward_accumulation_steps'):
+        if getattr(args, name) < 1:
+            raise ValueError(f"{name} must be positive; batch/accumulation are per rank")
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+    if os.environ.get("ACCERL_USE_MPS") == "1":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+            binding["uuid"] for binding in build_bindings(parse_gpu_ids(args.cuda_visible_devices)))
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
 
     # 确保 Python 环境的 bin 目录在 PATH 中（Ray worker 需要 ninja 等工具）
     conda_bin = os.path.dirname(sys.executable)
@@ -435,6 +479,10 @@ class Experience:
     advantage: float
     behaviour_logits: np.ndarray
     value_target: float
+    sample_id: str = field(default_factory=lambda: new_id("policy"))
+    episode_id: str = ""
+    sample_index: int = -1
+    model_versions: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -445,6 +493,9 @@ class WMExperience:
     rew: float
     instruction: str
     episode_id: str
+    sample_id: str = ""
+    sample_index: int = -1
+    model_versions: dict = field(default_factory=dict)
 
 
 # ================================================================
@@ -468,8 +519,11 @@ class StatsActor:
         self.active_window_seconds = 600
         self.total_samples_produced = 0
         self.total_imagine_samples = 0
+        self.last_eval_completed_ns = 0
+        self.last_eval_versions = None
 
-    def add_episode_return(self, env_name, ep_return, step_time, ep_length, success, actor_id=None, step_num=0):
+    def add_episode_return(self, env_name, ep_return, step_time, ep_length, success,
+                           actor_id=None, step_num=0, completed_ns=None, evaluation_versions=None):
         env_stats = self.stats[env_name]
         env_stats["episode_returns"].append(ep_return)
         env_stats["step_times"].append(step_time)
@@ -477,6 +531,17 @@ class StatsActor:
         env_stats["successes"].append(success)
         env_stats["total_episodes_processed"] += 1
         env_stats["total_env_steps"] += ep_length
+        if env_name.startswith("eval_"):
+            done_ns = int(completed_ns if completed_ns is not None else now_ns())
+            if done_ns > self.last_eval_completed_ns:
+                self.last_eval_completed_ns = done_ns
+                self.last_eval_versions = evaluation_versions
+            telemetry = getattr(self, "telemetry", None)
+            if telemetry is not None:
+                telemetry.event("eval_episode_completed", ts_ns=done_ns,
+                                details={"env_name": env_name, "success": float(success),
+                                         "episode_return": float(ep_return),
+                                         "policy_versions": evaluation_versions})
         if not env_name.startswith("eval_"):
             self.total_samples_produced += step_num
             if actor_id is not None:
@@ -546,12 +611,16 @@ class StatsActor:
             "avg_ep_len": np.mean(eval_lengths) if eval_lengths else 0.0,
             "avg_step_time": np.mean(eval_step_times) if eval_step_times else 0.0,
             "total_episodes_processed": eval_total_episodes_processed,
-            "total_env_steps": eval_total_env_steps
+            "total_env_steps": eval_total_env_steps,
+            "window_episodes": len(eval_returns),
+            "latest_episode_completed_ns": self.last_eval_completed_ns,
+            "latest_episode_policy_versions": self.last_eval_versions,
         }
         timing_stats = {}
         for name, deq in self.timings.items():
             timing_stats[name] = np.mean(deq) if deq else 0.0
         per_env_stats["_timings_"] = timing_stats
+        per_env_stats["_global_eval_"]["snapshot_completed_ns"] = now_ns()
         return per_env_stats
 
 
@@ -725,10 +794,10 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.reward_infer = reward_infer
         self.ctrl_world_infer = ctrl_world_infer  # ★ 替换 denoiser_infer
         self.ctrl_world_num_history = int(
-            ray.get(self.ctrl_world_infer.get_num_history.remote())
+            profile_rpc(self, 'ctrl_infer', self.ctrl_world_infer, 'get_num_history')
         )
         self.ctrl_world_infer_stride = int(
-            ray.get(self.ctrl_world_infer.get_stride.remote())
+            profile_rpc(self, 'ctrl_infer', self.ctrl_world_infer, 'get_stride')
         )
         # Offline Ctrl-World windows are [num_history + num_frames] frames.
         self.ctrl_wm_frames = self.ctrl_world_num_history + self.ctrl_world_infer_stride + 1
@@ -763,9 +832,13 @@ class RolloutWorkerActor(BaseWorkerActor):
                     done_list,
                     action_env_list,
                     task_description,
+                    source_episode_id,
                 ) = experience
-                num_imagine_samples = 0
+                self.capture_episode_id = source_episode_id
                 for i in range(len(obs_list) - self.num_step_cond):
+                    # Per start: add_imagine_reward() below accumulates this
+                    # count, so carrying it across starts over-counts.
+                    num_imagine_samples = 0
                     obs_list_sub = obs_list[i:i + self.num_step_cond]
                     obs_tensor = torch.stack(
                         [self._obs_to_views(obs) for obs in obs_list_sub], dim=0
@@ -785,15 +858,12 @@ class RolloutWorkerActor(BaseWorkerActor):
                     )  # frame-aligned actions for the observation window
                     last_succ_prob = self.predict_rew_end(obs_tensor[-1], task_description)[0]
 
-                    latent_history, current_latent = ray.get(
-                        self.ctrl_world_infer.init_latent_state.remote(obs_tensor)
-                    )
+                    latent_history, current_latent = profile_rpc(self, 'ctrl_infer', self.ctrl_world_infer, 'init_latent_state', obs_tensor)
 
                     end = False
                     for j in range(self.num_policy_chunks):
                         inputs_t = self.obs2inp(obs_tensor[-1], task_description)
-                        act_norm, action_env, action_token, logits, value = ray.get(
-                            self.infer.request.remote(inputs_t, deterministic=False))
+                        act_norm, action_env, action_token, logits, value = profile_rpc(self, 'policy_infer', self.infer, 'request', inputs_t, deterministic=False)
                         num_imagine_samples += 1
                         chunk_reward = 0.0
                         action_env = torch.from_numpy(
@@ -846,7 +916,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                                     break
                             if end:
                                 break
-                        self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value))
+                        self.local_buffer.append((inputs_t, action_token, chunk_reward, logits, value, dict(getattr(self,"capture_last_versions",{}))))
                         if end:
                             break
                     if self.local_buffer:
@@ -854,8 +924,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                             self._process_traj(self.local_buffer, 0.0)
                         else:
                             inputs_t = self.obs2inp(obs_tensor[-1], task_description)
-                            _, _, _, _, bootstrap_val = ray.get(
-                                self.infer.request.remote(inputs_t, deterministic=False))
+                            _, _, _, _, bootstrap_val = profile_rpc(self, 'policy_infer', self.infer, 'request', inputs_t, deterministic=False)
                             self._process_traj(self.local_buffer, bootstrap_val)
                         imagine_rewards = [exp[2] for exp in self.local_buffer]
                         avg_imagine_reward = sum(imagine_rewards) / len(imagine_rewards)
@@ -869,15 +938,16 @@ class RolloutWorkerActor(BaseWorkerActor):
     def get_one_episode(self):
         obs_list, reward_list, done_list = [], [], []
         action_env_list = []
-        current_seed = int(time.time() * 1000) + self.wid + os.getpid()
+        self.capture_episode_count = getattr(self,"capture_episode_count",0)+1
+        current_seed = (int(os.environ["ACCERL_SEED"])+self.wid*1000000+self.capture_episode_count) if os.environ.get("ACCERL_SEED") else int(time.time()*1000)+self.wid+os.getpid()
+        self.capture_episode_id = f"worker{self.wid}:seed{current_seed}"
         obs, info = self._reset_and_select_env(seed=current_seed)
         obs_list.append(obs)
         step_count = 0
         reward_sum, time_start, step_count_total = 0.0, time.time(), 0
         while True:
             inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
-            act_norm, action_env, action_token, logits, value = ray.get(
-                self.infer.request.remote(inputs_t, deterministic=False))
+            act_norm, action_env, action_token, logits, value = profile_rpc(self, 'policy_infer', self.infer, 'request', inputs_t, deterministic=False)
             step_count += 1
             chunk_reward, done = 0.0, False
             for i in range(len(action_env)):
@@ -907,6 +977,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                         done_list,
                         action_env_list,
                         self.task_description,
+                        self.capture_episode_id,
                     )
                 )
                 self._process_episode_for_wm(
@@ -972,6 +1043,9 @@ class RolloutWorkerActor(BaseWorkerActor):
                 rew=float(window_rew),
                 instruction=task_description,
                 episode_id=str(episode_id),
+                sample_id=f"{episode_id}:window{window_idx}",
+                sample_index=window_idx,
+                model_versions=dict(getattr(self,"capture_last_versions",{})),
             ))
         if wm_batch:
             self.wm_replay_buffer.add_batch.remote(wm_batch)
@@ -980,7 +1054,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         rets, advs = [], []
         gae = 0.0
         for i in reversed(range(len(traj_segment))):
-            _, _, r, _, v = traj_segment[i]
+            _, _, r, _, v, _ = traj_segment[i]
             nv = bootstrap_val if i == len(traj_segment) - 1 else traj_segment[i+1][4]
             delta = r + self.gamma * nv - v
             gae = delta + self.gamma * self.lambda_ * gae
@@ -989,22 +1063,23 @@ class RolloutWorkerActor(BaseWorkerActor):
         advs.reverse(); rets.reverse()
         advs_np = np.array(advs, dtype=np.float32)
         batch = []
-        for i, (s, a_token, _, logits, _) in enumerate(traj_segment):
+        for i, (s, a_token, _, logits, _, capture_versions) in enumerate(traj_segment):
             batch.append(Experience(
                 obs=s,
                 action_token=a_token.astype(np.int64),
                 advantage=float(advs_np[i]),
                 behaviour_logits=logits.astype(np.float32),
                 value_target=float(rets[i]),
+                episode_id=str(getattr(self,"capture_episode_id","")),
+                sample_index=i,
+                model_versions=capture_versions,
             ))
         self.replay.add_batch.remote(batch)
 
     def predict_next_chunk(
         self, current_latent, latent_history, action_condition, task_description
     ):
-        future_obs, future_latents = ray.get(self.ctrl_world_infer.request.remote(
-            current_latent, latent_history, action_condition.float(), task_description
-        ))
+        future_obs, future_latents = profile_rpc(self, 'ctrl_infer', self.ctrl_world_infer, 'request', current_latent, latent_history, action_condition.float(), task_description)
         return future_obs, future_latents
 
     def predict_rew_end(self, next_obs, task_description):
@@ -1014,7 +1089,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         inputs = prepare_one_obs(
             self.cfg, self.processor, reward_obs, task_description, self.torch_dtype
         )
-        logits = ray.get(self.reward_infer.request.remote(inputs))
+        logits = profile_rpc(self, 'reward_infer', self.reward_infer, 'request', inputs)
         probs = torch.softmax(logits, dim=-1)
         succ_prob = probs[1].item()
         end = logits.argmax().item()
@@ -1052,24 +1127,32 @@ class EvaluationWorkerActor(BaseWorkerActor):
 
     def run(self):
         try:
-            current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
+            self.capture_episode_count = getattr(self,"capture_episode_count",0)+1
+            current_seed = (int(os.environ["ACCERL_SEED"])+50000000+self.wid*1000000+self.capture_episode_count) if os.environ.get("ACCERL_SEED") else int(time.time()*1000)+os.getpid()+random.randint(0,10000)
+            self.capture_episode_id = f"eval{self.wid}:seed{current_seed}"
             obs, info = self._reset_and_select_env(seed=current_seed)
             while True:
                 reward_sum, time_start, step_count_total, done = 0.0, time.time(), 0, False
+                episode_policy_versions = set()
                 while not done:
                     inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
-                    _, action_env, _, _, _ = ray.get(self.infer.request.remote(inputs_t, deterministic=True))
+                    _, action_env, _, _, _ = profile_rpc(self, 'policy_infer', self.infer, 'request', inputs_t, deterministic=True)
+                    episode_policy_versions.add(int(self.capture_last_versions.get("policy", -1)))
                     for i in range(len(action_env)):
                         single_action = action_env[i]
                         obs, r, term, trunc, info = self.env.step(single_action)
                         reward_sum += r; step_count_total += 1
                         if term or trunc: done = True; break
+                completed_ns = now_ns()
                 step_time = (time.time() - time_start) / max(step_count_total, 1)
                 success = float(info.get('is_success', 0.0))
                 self.stats_actor.add_episode_return.remote(
                     f"eval_{self.current_env_name}", reward_sum, step_time,
-                    step_count_total, success, actor_id=None, step_num=step_count_total)
-                current_seed = int(time.time() * 1000) + os.getpid() + random.randint(0, 10000)
+                    step_count_total, success, actor_id=None, step_num=step_count_total,
+                    completed_ns=completed_ns, evaluation_versions=sorted(episode_policy_versions))
+                self.capture_episode_count = getattr(self,"capture_episode_count",0)+1
+                current_seed = (int(os.environ["ACCERL_SEED"])+50000000+self.wid*1000000+self.capture_episode_count) if os.environ.get("ACCERL_SEED") else int(time.time()*1000)+os.getpid()+random.randint(0,10000)
+                self.capture_episode_id = f"eval{self.wid}:seed{current_seed}"
                 obs, info = self._reset_and_select_env(seed=current_seed)
         except Exception as e:
             import traceback
@@ -1080,11 +1163,56 @@ class EvaluationWorkerActor(BaseWorkerActor):
 # ================================================================
 # 3. 推理器 (InferenceActor) — 与原版完全一致
 # ================================================================
+class ColocatedInferenceMixin:
+    """Bounded queues and CPU weight transport for same-card model roles."""
+    def _fail_pending_requests(self, error):
+        self.inference_fatal_error = error
+        for promise in self.promises:
+            if not promise.done():
+                promise.set_exception(error)
+        self.requests, self.promises = [], []
+
+    def _check_inference_health(self):
+        error = getattr(self, "inference_fatal_error", None)
+        if error is not None:
+            raise RuntimeError("Inference background loop failed") from error
+
+    def set_training_batch_limit(self, maximum):
+        maximum = int(maximum)
+        if maximum < 1:
+            raise ValueError("Inference batch limit must be positive")
+        self.training_batch_limit = maximum
+        return maximum
+
+    def apply_rank_weights(self, payload, kind):
+        if kind == "ctrl" and self.ema_decay != 0:
+            raise ValueError("Same-card Ctrl transport requires the unchanged EMA=0 recipe")
+        with self.telemetry.span("broadcast_receive", cuda=True,
+                                 model_version=payload["version"], transport="cpu_ray", kind=kind):
+            result = apply_cpu_weights(self.model, payload, kind)
+        self.capture_model_version = int(result["version"])
+        self.model_version = self.capture_model_version
+        if kind == "ctrl":
+            self.ema_initialized = True
+            self.ema_updates += 1
+        self.model.eval()
+        self.telemetry.event("model_version", model_version=self.capture_model_version,
+                             details={"meaning": "successful_source_optimizer_updates", **result})
+        _trim_cuda_cache("idle")
+        return result
+
+
+def _trim_cuda_cache(phase):
+    if os.environ.get("ACCERL_TRIM_" + phase.upper() + "_CACHE") == "1":
+        torch.cuda.empty_cache()
+
+
 @ray.remote(num_gpus=1)
-class InferenceActor(InferenceActorCom):
+class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
     def __init__(self, actor_id, cfg, stats_actor, torch_dtype, inference_batch, inference_timeout_ms):
         super().__init__()
         setup_debugger("inference", actor_id)
+        self.gpu_binding = verify_bound_gpu()
         self.actor_id = actor_id
         print(f"InferenceActor {actor_id}: 正在加载 OpenVLA ActorCritic...")
         self.model = ActorCritic(cfg, torch_dtype=torch_dtype)
@@ -1118,8 +1246,10 @@ class InferenceActor(InferenceActorCom):
             import traceback
             print(f"[ERROR] InferenceActor {self.actor_id} 后台任务异常: {e}", flush=True)
             traceback.print_exc()
+            self._fail_pending_requests(e)
 
     async def request(self, inputs_t, deterministic=False):
+        self._check_inference_health()
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self.requests.append((inputs_t, deterministic))
@@ -1136,16 +1266,20 @@ class InferenceActor(InferenceActorCom):
                 await asyncio.sleep(0.0005)
                 continue
 
-            requests_to_process = self.requests
-            promises_to_process = self.promises
-            self.requests, self.promises = [], []
+            count = min(len(self.requests), getattr(self, "training_batch_limit", len(self.requests)))
+            requests_to_process, self.requests = self.requests[:count], self.requests[count:]
+            promises_to_process, self.promises = self.promises[:count], self.promises[count:]
+            capture_batch = batch_begin(self, requests_to_process, promises_to_process)
             self.last_process_time = time.time()
 
             inputs_list = [r[0] for r in requests_to_process]
             deterministic_flags = [r[1] for r in requests_to_process]
             t_loop_start = time.time()
             try:
+                capture_stage = stage_begin(self, "input_prepare", actual_batch=len(inputs_list))
                 inputs_batch = self.model.prepare_inputs_batch(inputs_list)
+                stage_end(self, capture_stage)
+                capture_core = stage_begin(self, "gpu_forward_and_copy", actual_batch=len(inputs_list), cuda=True)
                 with torch.inference_mode():
                     action_logits, value = self.model(inputs_batch)
                     _, action_tokens_all, normalized_actions_all = self.model.post_process(
@@ -1156,6 +1290,7 @@ class InferenceActor(InferenceActorCom):
                         -1, NUM_ACTIONS_CHUNK, ACTION_DIM, action_logits.shape[-1]
                     ).float().cpu().numpy()
                     values = value.to(torch.float32).cpu().numpy()
+                stage_end(self, capture_core)
 
                 actions_env = []
                 for i in range(normalized_actions_all.shape[0]):
@@ -1171,12 +1306,15 @@ class InferenceActor(InferenceActorCom):
                         logits[i],
                         values[i]
                     ))
+                batch_end(self, capture_batch)
+                _trim_cuda_cache("idle")
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/loop_time_s", loop_duration)
             except Exception as e:
                 import traceback
                 print(f"[ERROR] InferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
                 traceback.print_exc()
+                batch_end(self, capture_batch, error=e)
                 for p in promises_to_process:
                     if not p.done():
                         p.set_exception(e)
@@ -1190,10 +1328,11 @@ class InferenceActor(InferenceActorCom):
 # RewardInferenceActor — 与原版完全一致
 # ================================================================
 @ray.remote(num_gpus=1)
-class RewardInferenceActor(InferenceActorCom):
+class RewardInferenceActor(ColocatedInferenceMixin, InferenceActorCom):
     def __init__(self, actor_id, stats_actor, agent_config_path, inference_batch, inference_timeout_ms, reward_checkpoint=None):
         super().__init__()
         setup_debugger("reward_inference", actor_id)
+        self.gpu_binding = verify_bound_gpu()
         self.actor_id = actor_id
         self.stats_actor = stats_actor
         agent_cfg = OmegaConf.load(agent_config_path)
@@ -1224,8 +1363,10 @@ class RewardInferenceActor(InferenceActorCom):
             import traceback
             print(f"[ERROR] RewardInferenceActor {self.actor_id} 后台任务异常: {e}", flush=True)
             traceback.print_exc()
+            self._fail_pending_requests(e)
 
     async def request(self, inputs_t):
+        self._check_inference_health()
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self.requests.append(inputs_t)
@@ -1298,25 +1439,33 @@ class RewardInferenceActor(InferenceActorCom):
                 await asyncio.sleep(0.0005)
                 continue
 
-            requests_to_process = self.requests
-            promises_to_process = self.promises
-            self.requests, self.promises = [], []
+            count = min(len(self.requests), getattr(self, "training_batch_limit", len(self.requests)))
+            requests_to_process, self.requests = self.requests[:count], self.requests[count:]
+            promises_to_process, self.promises = self.promises[:count], self.promises[count:]
+            capture_batch = batch_begin(self, requests_to_process, promises_to_process)
             self.last_process_time = time.time()
 
             inputs_list = requests_to_process
             t_loop_start = time.time()
             try:
+                capture_stage = stage_begin(self, "input_prepare", actual_batch=len(inputs_list))
                 inputs_batch = self.reward_model.prepare_inputs_batch(inputs_list)
+                stage_end(self, capture_stage)
+                capture_core = stage_begin(self, "gpu_forward_and_copy", actual_batch=len(inputs_list), cuda=True)
                 with torch.inference_mode():
                     logits = self.reward_model.forward(inputs_batch).cpu()
+                stage_end(self, capture_core)
                 for i in range(len(promises_to_process)):
                     promises_to_process[i].set_result(logits[i])
+                batch_end(self, capture_batch)
+                _trim_cuda_cache("idle")
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/reward_loop_time_s", loop_duration)
             except Exception as e:
                 import traceback
                 print(f"[ERROR] RewardInferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
                 traceback.print_exc()
+                batch_end(self, capture_batch, error=e)
                 for p in promises_to_process:
                     if not p.done():
                         p.set_exception(e)
@@ -1328,10 +1477,11 @@ class RewardInferenceActor(InferenceActorCom):
 #   使用 CtrlWorldEnvBatch 的无状态接口，Worker 端维护 latent_history
 # ================================================================
 @ray.remote(num_gpus=1)
-class CtrlWorldInferenceActor(InferenceActorCom):
+class CtrlWorldInferenceActor(ColocatedInferenceMixin, InferenceActorCom):
     def __init__(self, actor_id, stats_actor, args, inference_batch, inference_timeout_ms):
         super().__init__()
         setup_debugger("ctrl_world_inference", actor_id)
+        self.gpu_binding = verify_bound_gpu()
         self.actor_id = actor_id
         self.stats_actor = stats_actor
         self.ema_decay = float(args.ctrl_ema_decay)
@@ -1479,6 +1629,7 @@ class CtrlWorldInferenceActor(InferenceActorCom):
             import traceback
             print(f"[ERROR] CtrlWorldInferenceActor {self.actor_id} 后台任务异常: {e}", flush=True)
             traceback.print_exc()
+            self._fail_pending_requests(e)
 
     # ★ 无状态接口：Worker 传入完整状态
     async def request(self, current_latent, latent_history, action_condition, instruction):
@@ -1491,6 +1642,7 @@ class CtrlWorldInferenceActor(InferenceActorCom):
         Returns:
             future observations/latents for frames 1: of the generated chunk
         """
+        self._check_inference_health()
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self.requests.append((current_latent, latent_history, action_condition, instruction))
@@ -1696,9 +1848,10 @@ class CtrlWorldInferenceActor(InferenceActorCom):
                 await asyncio.sleep(0.0005)
                 continue
 
-            requests_to_process = self.requests
-            promises_to_process = self.promises
-            self.requests, self.promises = [], []
+            count = min(len(self.requests), getattr(self, "training_batch_limit", len(self.requests)))
+            requests_to_process, self.requests = self.requests[:count], self.requests[count:]
+            promises_to_process, self.promises = self.promises[:count], self.promises[count:]
+            capture_batch = batch_begin(self, requests_to_process, promises_to_process)
             self.last_process_time = time.time()
 
             # 拆分请求
@@ -1707,10 +1860,13 @@ class CtrlWorldInferenceActor(InferenceActorCom):
             action_condition_list = [req[2] for req in requests_to_process]
             instructions = [req[3] for req in requests_to_process]
 
+            capture_stage = stage_begin(self, "input_prepare", actual_batch=len(requests_to_process))
             # Stack into batch
             current_latent_batch = torch.stack(current_latent_list, dim=0).to(self.device)
             latent_history_batch = torch.stack(latent_history_list, dim=0).to(self.device)  # [B, num_history, 4, ...]
             action_condition_batch = torch.stack(action_condition_list, dim=0).to(self.device)
+            stage_end(self, capture_stage)
+            capture_core = stage_begin(self, "gpu_forward_and_copy", actual_batch=len(requests_to_process), cuda=True)
 
             t_loop_start = time.time()
             try:
@@ -1724,16 +1880,20 @@ class CtrlWorldInferenceActor(InferenceActorCom):
                     )
                     future_obs = future_obs.float().cpu()
                     future_latents = future_latents.cpu()
+                stage_end(self, capture_core)
 
                 for i, promise in enumerate(promises_to_process):
                     promise.set_result((future_obs[i], future_latents[i]))
 
+                batch_end(self, capture_batch)
+                _trim_cuda_cache("idle")
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/ctrl_world_loop_time_s", loop_duration)
             except Exception as e:
                 import traceback
                 print(f"[ERROR] CtrlWorldInferenceActor {self.actor_id} 批处理失败: {e}", flush=True)
                 traceback.print_exc()
+                batch_end(self, capture_batch, error=e)
                 for p in promises_to_process:
                     if not p.done():
                         p.set_exception(e)
@@ -1745,6 +1905,17 @@ class CtrlWorldInferenceActor(InferenceActorCom):
 # ================================================================
 @ray.remote(num_gpus=1)
 class TrainerActor(TrainerActorCom):
+    def export_snapshot_component(self, kind):
+        return export_split_component(self, kind)
+
+    async def save_parallel_snapshot(self, checkpoint_dir, reason="periodic", metadata=None):
+        # Driver calls only rank 0 after both ranks finish the synchronized epoch.
+        result = save_parallel_weights(self, checkpoint_dir, reason=reason, metadata=metadata)
+        self.telemetry.event("checkpoint", reason=reason, steps=result["steps"],
+                             path=str(checkpoint_dir), weights_only=True)
+        self.telemetry.flush()
+        return result
+
     def __init__(self, rank, world_size, replay_buffer, cfg, train_batch_size, accumulation_steps,
                  use_bf16, torch_dtype, policy_lr, value_lr, gamma, lambda_, clip_eps, vf_coef,
                  ent_coef, kl_coef, reward_scale, value_warmup_steps, policy_warmup_steps,
@@ -1757,12 +1928,23 @@ class TrainerActor(TrainerActorCom):
                  # Ctrl-World train/broadcast
                  ctrl_world_args=None,
                  ctrl_batch_size=1, ctrl_accumulation_steps=8, ctrl_lr=1e-5,
-                 ctrl_warmup_steps=500, ctrl_train_interval=10):
+                 ctrl_warmup_steps=500, ctrl_train_interval=10, batch_coordinator=None,
+                 training_role='combined', split_train_serial=False):
         super().__init__()
+        if training_role not in ('combined', 'policy', 'ctrl', 'reward'):
+            raise ValueError('Unknown training process role: ' + str(training_role))
+        self.training_role = training_role
+        if split_train_serial and training_role == 'combined':
+            raise ValueError('Serial split training requires an independent model owner')
+        self.split_train_serial = bool(split_train_serial)
+        self._serial_phase = SerialPhase(training_role, rank, world_size) if self.split_train_serial else None
+        self._serial_prefetch = None
         setup_debugger("trainer", rank)
+        self.gpu_binding = verify_bound_gpu()
         self.rank = rank
         self.world_size = world_size
         self.replay_buffer = replay_buffer
+        self.batch_coordinator = batch_coordinator
         self.cfg = cfg
         self.model = None
         self.optimizer = None
@@ -1770,6 +1952,7 @@ class TrainerActor(TrainerActorCom):
         self.data_dtype = None
         self.next_ready_batch = None
         self.data_fetching_task = None
+        self.data_fetch_error = None
 
         self.reward_checkpoint = reward_checkpoint
 
@@ -1838,6 +2021,16 @@ class TrainerActor(TrainerActorCom):
         self.next_ready_wm_batch = None
         self.wm_data_fetching_task = None
 
+        # Batch preparation runs in worker threads (created in setup_deepspeed_group);
+        # the events wake each fetch loop as soon as its batch slot is consumed.
+        self._prep_executor = None
+        self._policy_slot_freed = None
+        self._wm_slot_freed = None
+        self._policy_replay_ready = False
+        self._wm_replay_ready = False
+        self.last_wm_batch_info = {"sample_time": 0.0, "prep_time": 0.0,
+                                   "unique_episodes": 0, "fresh_episode_ratio": 0.0}
+
         print(f"TrainerActor Rank {self.rank} 初始化于 GPU: {ray.get_gpu_ids()}")
 
     def get_model_keys(self):
@@ -1849,155 +2042,217 @@ class TrainerActor(TrainerActorCom):
         res = {k: float(v.abs().sum().item()) for k, v in sd.items()}
         return res
 
+    def get_training_state(self):
+        return {"rank": self.rank, "gpu": self.gpu_binding, "pid": os.getpid(),
+                "training_role": self.training_role, "world_size": self.world_size,
+                "split_train_serial": self.split_train_serial,
+                "distributed_world_size": distributed.get_world_size(),
+                "group_port": self.deepspeed_group_port,
+                "policy_steps": self.global_step, "ctrl_steps": self.ctrl_step,
+                "reward_steps": self.reward_step,
+                "engines": {name: {"global_steps": int(engine.global_steps),
+                                     "skipped_steps": int(engine.skipped_steps),
+                                     "global_batch": int(engine.train_batch_size())}
+                            for name, engine in (("policy", self.model), ("ctrl", self.ctrl_world_engine),
+                                                  ("reward", self.reward_engine)) if engine is not None}}
+
+    def export_rank_weights(self, kind):
+        if self.training_role not in ('combined', kind):
+            raise ValueError('A training process may export only its owned model')
+        engine, version = {"policy": (self.model, self.global_step),
+                           "ctrl": (self.ctrl_world_engine, self.ctrl_step),
+                           "reward": (self.reward_engine, self.reward_step)}[kind]
+        with self.telemetry.span("broadcast_send", cuda=True, model_version=version,
+                                 transport="cpu_ray", model=kind, rank=self.rank):
+            payload = export_cpu_weights(engine.module, kind, version)
+        _trim_cuda_cache("idle")
+        return payload
+
+    def describe_rank_weights(self, payload):
+        return {key: payload[key] for key in ("kind", "version", "hash", "bytes", "tensor_count")}
+
+    def _verify_optimizer_update(self, engine, name, before_steps, before_skips):
+        state = torch.tensor([int(engine.global_steps) - before_steps,
+                              int(engine.skipped_steps) - before_skips], device="cuda", dtype=torch.int64)
+        states = [torch.empty_like(state) for _ in range(self.world_size)]
+        distributed.all_gather(states, state)
+        counts = [value.cpu().tolist() for value in states]
+        if any(value != [1, 0] for value in counts):
+            raise RuntimeError(f"{name}: expected one successful synchronized update per rank, got {counts}")
+
     def get_node_ip(self):
         return ray.util.get_node_ip_address()
 
     def setup_deepspeed_group(self, master_addr, master_port):
+        self.deepspeed_group_port = int(master_port)
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(self.world_size)
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(master_port)
         os.environ["LOCAL_RANK"] = "0"
+        torch.cuda.set_device(0)
         deepspeed.init_distributed(dist_backend="nccl")
 
-        # ============ 1. 初始化 Actor Engine (bf16) ============
-        print(f"Trainer {self.rank}: 正在加载 OpenVLA ActorCritic...")
-        model = ActorCritic(self.cfg, torch_dtype=self.torch_dtype)
-        self.base_model = model
+        if self.training_role in ("combined", "policy"):
+            # ============ 1. 初始化 Actor Engine (bf16) ============
+            print(f"Trainer {self.rank}: 正在加载 OpenVLA ActorCritic...")
+            model = ActorCritic(self.cfg, torch_dtype=self.torch_dtype)
+            self.base_model = model
 
-        param_groups = self.base_model.get_parameter_groups()
-        optimizer_params = [
-            {"params": pg["params"], "name": pg["name"],
-             "lr": self.policy_lr if pg["name"] == "policy" else self.value_lr}
-            for pg in param_groups
-        ]
+            param_groups = self.base_model.get_parameter_groups()
+            optimizer_params = [
+                {"params": pg["params"], "name": pg["name"],
+                 "lr": self.policy_lr if pg["name"] == "policy" else self.value_lr}
+                for pg in param_groups
+            ]
 
-        actor_ds_config = {
-            "train_micro_batch_size_per_gpu": self.train_batch_size,
-            "gradient_accumulation_steps": self.accumulation_steps,
-            "optimizer": {"type": "AdamW", "params": {}},
-            "bf16": {"enabled": self.use_bf16},
-            "zero_optimization": {
-                "stage": 2, "allgather_partitions": True, "allgather_bucket_size": 5e8,
-                "reduce_scatter": True, "reduce_bucket_size": 5e8, "overlap_comm": True,
-                "contiguous_gradients": True
-            },
-            "gradient_clipping": 1.0,
-        }
+            actor_ds_config = {
+                "train_micro_batch_size_per_gpu": self.train_batch_size,
+                "gradient_accumulation_steps": self.accumulation_steps,
+                "optimizer": {"type": "AdamW", "params": {}},
+                "bf16": {"enabled": self.use_bf16},
+                "zero_optimization": {
+                    "stage": 2, "allgather_partitions": True, "allgather_bucket_size": 5e8,
+                    "reduce_scatter": True, "reduce_bucket_size": 5e8, "overlap_comm": True,
+                    "contiguous_gradients": True
+                },
+                "gradient_clipping": 1.0,
+            }
 
-        if actor_ds_config.get("bf16", {}).get("enabled", False):
-            self.data_dtype = torch.bfloat16
-        else:
-            self.data_dtype = torch.float32
+            if actor_ds_config.get("bf16", {}).get("enabled", False):
+                self.data_dtype = torch.bfloat16
+            else:
+                self.data_dtype = torch.float32
 
-        self.model, self.optimizer, _, _ = deepspeed.initialize(
-            model=model, config=actor_ds_config, model_parameters=optimizer_params
-        )
-        print(f"TrainerActor Rank {self.rank}: Actor DeepSpeed engine (bf16) 初始化完成。")
+            self.model, self.optimizer, _, _ = deepspeed.initialize(
+                model=model, config=actor_ds_config, model_parameters=optimizer_params
+            )
+            print(f"TrainerActor Rank {self.rank}: Actor DeepSpeed engine (bf16) 初始化完成。")
 
-        n_total = sum(p.numel() for p in model.parameters())
-        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Actor 总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
+            n_total = sum(p.numel() for p in model.parameters())
+            n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Actor 总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")
 
-        # ============ 2. 初始化 Ctrl-World Engine (bf16, trainable unet/action_encoder) ============
-        print(f"Trainer {self.rank}: 正在加载可训练 Ctrl-World...")
-        if self.ctrl_world_args is None:
-            raise ValueError("ctrl_world_args is required for trainable Ctrl-World trainer")
-        cw_args = self.ctrl_world_args
-        ctrl_cfg = wm_args()
-        ctrl_cfg.svd_model_path = cw_args["svd_model_path"]
-        ctrl_cfg.clip_model_path = cw_args["clip_model_path"]
-        ctrl_cfg.num_cams = cw_args["num_cams"]
-        ctrl_cfg.num_history = cw_args["num_history"]
-        ctrl_cfg.num_frames = cw_args["num_frames_pred"]
-        ctrl_cfg.action_dim = ACTION_DIM
-        ctrl_cfg.text_cond = True
-        ctrl_cfg.frame_level_cond = True
-        ctrl_cfg.his_cond_zero = False
-        self.ctrl_target_height = cw_args["target_height"]
-        self.ctrl_target_width = cw_args["target_width"]
-        self.ctrl_num_history = cw_args["num_history"]
-        self.ctrl_num_frames = cw_args["num_frames_pred"]
 
-        self.ctrl_world_model = AcceRLCtrlWorld(ctrl_cfg).cuda().to(torch.bfloat16)
-        ckpt_path = cw_args["ctrl_world_ckpt"]
-        print(f"Trainer {self.rank}: 加载 Ctrl-World checkpoint from {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
-        state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
-        self.ctrl_world_model.load_state_dict(state_dict, strict=True)
-        _load_vae_decoder_checkpoint(
-            self.ctrl_world_model, cw_args.get("vae_decoder_checkpoint")
-        )
+        if self.training_role in ("combined", "ctrl"):
+            # ============ 2. 初始化 Ctrl-World Engine (bf16, trainable unet/action_encoder) ============
+            print(f"Trainer {self.rank}: 正在加载可训练 Ctrl-World...")
+            if self.ctrl_world_args is None:
+                raise ValueError("ctrl_world_args is required for trainable Ctrl-World trainer")
+            cw_args = self.ctrl_world_args
+            ctrl_cfg = wm_args()
+            ctrl_cfg.svd_model_path = cw_args["svd_model_path"]
+            ctrl_cfg.clip_model_path = cw_args["clip_model_path"]
+            ctrl_cfg.num_cams = cw_args["num_cams"]
+            ctrl_cfg.num_history = cw_args["num_history"]
+            ctrl_cfg.num_frames = cw_args["num_frames_pred"]
+            ctrl_cfg.action_dim = ACTION_DIM
+            ctrl_cfg.text_cond = True
+            ctrl_cfg.frame_level_cond = True
+            ctrl_cfg.his_cond_zero = False
+            self.ctrl_target_height = cw_args["target_height"]
+            self.ctrl_target_width = cw_args["target_width"]
+            self.ctrl_num_history = cw_args["num_history"]
+            self.ctrl_num_frames = cw_args["num_frames_pred"]
 
-        stat_path = cw_args.get("condition_stat_path")
-        if not stat_path:
-            stat_path = str(Path(ckpt_path).resolve().parent / "condition_stat.json")
-        with open(stat_path, "r", encoding="utf-8") as f:
-            condition_stats = json.load(f)
-        self.condition_low = torch.tensor(condition_stats["condition_p01"], dtype=torch.float32, device="cuda")
-        self.condition_high = torch.tensor(condition_stats["condition_p99"], dtype=torch.float32, device="cuda")
+            self.ctrl_world_model = AcceRLCtrlWorld(ctrl_cfg).cuda().to(torch.bfloat16)
+            ckpt_path = cw_args["ctrl_world_ckpt"]
+            print(f"Trainer {self.rank}: 加载 Ctrl-World checkpoint from {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
+            state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
+            self.ctrl_world_model.load_state_dict(state_dict, strict=True)
+            _load_vae_decoder_checkpoint(
+                self.ctrl_world_model, cw_args.get("vae_decoder_checkpoint")
+            )
 
-        ctrl_params = [p for p in self.ctrl_world_model.parameters() if p.requires_grad]
-        n_ctrl_train = sum(p.numel() for p in ctrl_params)
-        n_ctrl_total = sum(p.numel() for p in self.ctrl_world_model.parameters())
-        print(f"Trainer {self.rank}: Ctrl-World params total={n_ctrl_total:,}, trainable={n_ctrl_train:,}")
+            stat_path = cw_args.get("condition_stat_path")
+            if not stat_path:
+                stat_path = str(Path(ckpt_path).resolve().parent / "condition_stat.json")
+            with open(stat_path, "r", encoding="utf-8") as f:
+                condition_stats = json.load(f)
+            self.condition_low = torch.tensor(condition_stats["condition_p01"], dtype=torch.float32, device="cuda")
+            self.condition_high = torch.tensor(condition_stats["condition_p99"], dtype=torch.float32, device="cuda")
 
-        ctrl_ds_config = {
-            "train_micro_batch_size_per_gpu": self.ctrl_batch_size,
-            "gradient_accumulation_steps": self.ctrl_accumulation_steps,
-            "optimizer": {"type": "AdamW", "params": {"lr": self.ctrl_lr}},
-            "bf16": {"enabled": True},
-            "zero_optimization": {"stage": 2},
-            "gradient_clipping": 1.0,
-        }
-        self.ctrl_world_engine, _, _, _ = deepspeed.initialize(
-            model=self.ctrl_world_model,
-            config=ctrl_ds_config,
-            model_parameters=ctrl_params,
-        )
-        print(f"TrainerActor Rank {self.rank}: Ctrl-World DeepSpeed engine (bf16) 初始化完成。")
+            ctrl_params = [p for p in self.ctrl_world_model.parameters() if p.requires_grad]
+            n_ctrl_train = sum(p.numel() for p in ctrl_params)
+            n_ctrl_total = sum(p.numel() for p in self.ctrl_world_model.parameters())
+            print(f"Trainer {self.rank}: Ctrl-World params total={n_ctrl_total:,}, trainable={n_ctrl_train:,}")
 
-        # ============ 3. 初始化 Reward Model Engine (bf16) ============
-        print(f"Trainer {self.rank}: 正在加载 Reward Model...")
-        from envs.utils import load_reward_model
+            ctrl_ds_config = {
+                "train_micro_batch_size_per_gpu": self.ctrl_batch_size,
+                "gradient_accumulation_steps": self.ctrl_accumulation_steps,
+                "optimizer": {"type": "AdamW", "params": {"lr": self.ctrl_lr}},
+                "bf16": {"enabled": True},
+                "zero_optimization": {"stage": 2},
+                "gradient_clipping": 1.0,
+            }
+            self.ctrl_world_engine, _, _, _ = deepspeed.initialize(
+                model=self.ctrl_world_model,
+                config=ctrl_ds_config,
+                model_parameters=ctrl_params,
+            )
+            print(f"TrainerActor Rank {self.rank}: Ctrl-World DeepSpeed engine (bf16) 初始化完成。")
 
-        agent_cfg = OmegaConf.load(self.agent_config_path)
-        reward_ckpt_path = self.reward_checkpoint if self.reward_checkpoint else agent_cfg.reward_model_path
-        print(f"Trainer {self.rank}: 加载 Reward Model checkpoint from {reward_ckpt_path}")
-        self.reward_model, self.reward_cfg = load_reward_model(
-            model_path=reward_ckpt_path,
-            device="cuda",
-            pretrained_checkpoint=agent_cfg.openvla_path,
-            focal_alpha=agent_cfg.reward_model.focal_alpha,
-        )
-        self.processor = get_processor(self.reward_cfg)
 
-        reward_ds_config = {
-            "train_micro_batch_size_per_gpu": self.reward_batch_size,
-            "gradient_accumulation_steps": self.reward_accumulation_steps,
-            "optimizer": {"type": "AdamW", "params": {"lr": self.reward_lr}},
-            "bf16": {"enabled": True},
-            "zero_optimization": {"stage": 2},
-            "gradient_clipping": 1.0,
-        }
+        if self.training_role in ("combined", "reward"):
+            # ============ 3. 初始化 Reward Model Engine (bf16) ============
+            print(f"Trainer {self.rank}: 正在加载 Reward Model...")
+            from envs.utils import load_reward_model
 
-        self.reward_engine, _, _, _ = deepspeed.initialize(
-            model=self.reward_model,
-            config=reward_ds_config,
-            model_parameters=self.reward_model.parameters(),
-        )
-        print(f"TrainerActor Rank {self.rank}: Reward Model DeepSpeed engine (bf16) 初始化完成。")
+            agent_cfg = OmegaConf.load(self.agent_config_path)
+            reward_ckpt_path = self.reward_checkpoint if self.reward_checkpoint else agent_cfg.reward_model_path
+            print(f"Trainer {self.rank}: 加载 Reward Model checkpoint from {reward_ckpt_path}")
+            self.reward_model, self.reward_cfg = load_reward_model(
+                model_path=reward_ckpt_path,
+                device="cuda",
+                pretrained_checkpoint=agent_cfg.openvla_path,
+                focal_alpha=agent_cfg.reward_model.focal_alpha,
+            )
+            self.processor = get_processor(self.reward_cfg)
 
-        n_reward = sum(p.numel() for p in self.reward_model.parameters())
-        print(f"Reward Model 总参数量: {n_reward:,}")
+            reward_ds_config = {
+                "train_micro_batch_size_per_gpu": self.reward_batch_size,
+                "gradient_accumulation_steps": self.reward_accumulation_steps,
+                "optimizer": {"type": "AdamW", "params": {"lr": self.reward_lr}},
+                "bf16": {"enabled": True},
+                "zero_optimization": {"stage": 2},
+                "gradient_clipping": 1.0,
+            }
 
-        print(f"TrainerActor Rank {self.rank}: 所有 DeepSpeed engines 初始化完成 (Actor + Ctrl-World + Reward Model)。")
+            self.reward_engine, _, _, _ = deepspeed.initialize(
+                model=self.reward_model,
+                config=reward_ds_config,
+                model_parameters=self.reward_model.parameters(),
+            )
+            print(f"TrainerActor Rank {self.rank}: Reward Model DeepSpeed engine (bf16) 初始化完成。")
 
-        # 启动数据获取循环
-        self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
-        self.wm_data_fetching_task = asyncio.get_event_loop().create_task(self._wm_data_fetching_loop())
+            n_reward = sum(p.numel() for p in self.reward_model.parameters())
+            print(f"Reward Model 总参数量: {n_reward:,}")
 
+
+            # 启动数据获取循环。The training body below is synchronous and occupies
+
+        # Each split actor owns one model and one bounded preparation slot.
+        self._prep_executor = ThreadPoolExecutor(
+            max_workers=2 if self.training_role == "combined" else 1,
+            thread_name_prefix="trainer-" + self.training_role + "-prep")
+        self._policy_slot_freed = asyncio.Event()
+        self._wm_slot_freed = asyncio.Event()
+        if self.split_train_serial:
+            self._serial_prefetch = CpuReplayPrefetch(self._serial_fetch_cpu_batch)
+            task = self._serial_prefetch.start()
+            if self.training_role == "policy":
+                self.data_fetching_task = task
+            else:
+                self.wm_data_fetching_task = task
+        elif self.training_role in ("combined", "policy"):
+            self.data_fetching_task = asyncio.get_event_loop().create_task(self._data_fetching_loop())
+        if not self.split_train_serial and self.training_role in ("combined", "ctrl", "reward"):
+            self.wm_data_fetching_task = asyncio.get_event_loop().create_task(self._wm_data_fetching_loop())
+        print(f"[Trainer owner] role={self.training_role} rank={self.rank} pid={os.getpid()} "
+              f"group_port={self.deepspeed_group_port} engines={list(self.get_training_state()['engines'])}",
+              flush=True)
     async def save_agent(self, ckpt_dir, step):
         os.makedirs(ckpt_dir, exist_ok=True)
         self.base_model.save_model(ckpt_dir, epoch=step)
@@ -2016,6 +2271,7 @@ class TrainerActor(TrainerActorCom):
         """Policy 训练（包含 Value 网络）— 与原版完全一致"""
         epoch_losses, epoch_p_losses, epoch_v_losses, epoch_e_losses, epoch_kl_losses = [], [], [], [], []
         epoch_ent, epoch_kl_divs = [], []
+        before_steps, before_skips = int(self.model.global_steps), int(self.model.skipped_steps)
 
         num_updates_in_epoch = self.super_batch_size // self.train_batch_size
         t_policy_train_start = time.time()
@@ -2031,6 +2287,7 @@ class TrainerActor(TrainerActorCom):
             mini_v_targ = v_targ_t[start:end]
 
             normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
+            capture_micro = micro_begin(self, "policy_train", self.model, len(mini_adv), start, end)
             action_logits, value = self.model.forward(mini_inputs)
             value = value.to(torch.float32)
 
@@ -2093,6 +2350,7 @@ class TrainerActor(TrainerActorCom):
                 loss = policy_loss + value_loss + ent_loss + kl_loss
 
             self.model.backward(loss)
+            micro_steps_before, micro_skips_before = int(self.model.global_steps), int(self.model.skipped_steps)
             self.model.step()
             epoch_losses.append(loss.item())
             epoch_p_losses.append(policy_loss.item())
@@ -2101,9 +2359,12 @@ class TrainerActor(TrainerActorCom):
             epoch_kl_losses.append(kl_loss.item())
             epoch_ent.append(ent.item())
             epoch_kl_divs.append(kl_div)
-            if self.model.is_gradient_accumulation_boundary():
-                self.global_step += 1
+            micro_end(self, capture_micro, self.model)
+            _trim_cuda_cache("micro")
+            self.global_step += successful_updates(micro_steps_before, micro_skips_before, self.model)
 
+        self._verify_optimizer_update(self.model, "policy", before_steps, before_skips)
+        _trim_cuda_cache("idle")
         policy_train_time = time.time() - t_policy_train_start
 
         return {
@@ -2137,6 +2398,7 @@ class TrainerActor(TrainerActorCom):
             pg['lr'] = ctrl_lr
         current_lrs['ctrl'] = ctrl_lr
 
+        before_steps, before_skips = int(self.ctrl_world_engine.global_steps), int(self.ctrl_world_engine.skipped_steps)
         self.ctrl_world_engine.train()
         num_updates = self.ctrl_super_batch_size // self.ctrl_batch_size
         grad_norms = []
@@ -2154,6 +2416,7 @@ class TrainerActor(TrainerActorCom):
                 'action': action[start:end],
                 'text': text[start:end],
             }
+            capture_micro = micro_begin(self, "ctrl_train", self.ctrl_world_engine, end-start, start, end)
             ctrl_loss, _ = self.ctrl_world_engine(batch)
             self.ctrl_world_engine.backward(ctrl_loss)
             if self.ctrl_world_engine.is_gradient_accumulation_boundary():
@@ -2162,9 +2425,13 @@ class TrainerActor(TrainerActorCom):
                     grad_norms.append(float(grad_norm))
             self.ctrl_world_engine.step()
             epoch_losses.append(float(ctrl_loss.detach().item()))
+            micro_end(self, capture_micro, self.ctrl_world_engine)
+            _trim_cuda_cache("micro")
 
         train_time = time.time() - t0
-        self.ctrl_step += 1
+        self._verify_optimizer_update(self.ctrl_world_engine, "ctrl", before_steps, before_skips)
+        self.ctrl_step += successful_updates(before_steps, before_skips, self.ctrl_world_engine)
+        _trim_cuda_cache("idle")
         return {
             'should_train': True,
             'epoch_ctrl_losses': epoch_losses,
@@ -2202,6 +2469,7 @@ class TrainerActor(TrainerActorCom):
             pg['lr'] = reward_lr
         current_lrs['reward'] = reward_lr
 
+        before_steps, before_skips = int(self.reward_engine.global_steps), int(self.reward_engine.skipped_steps)
         self.reward_engine.train()
         num_reward_updates = self.reward_super_batch_size // self.reward_batch_size
         grad_norms = []
@@ -2213,7 +2481,16 @@ class TrainerActor(TrainerActorCom):
             mini_inputs = {k: v[start:end] for k, v in wm_reward_inputs.items()}
             mini_labels = wm_labels[start:end]
 
-            reward_loss, metrics = self.reward_engine.module.compute_loss_and_metrics(mini_inputs, mini_labels)
+            capture_micro = micro_begin(self, "reward_train", self.reward_engine, len(mini_labels), start, end)
+            # Engine.forward installs ZeRO accumulation cleanup and GAS scaling hooks.
+            logits = self.reward_engine(mini_inputs)
+            reward_loss = self.reward_model.focal_loss(logits, mini_labels)
+            with torch.no_grad():
+                preds_bool, labels_bool = logits.argmax(dim=-1).bool(), mini_labels.bool()
+                metrics = {"tp": (preds_bool & labels_bool).sum(),
+                           "tn": (~preds_bool & ~labels_bool).sum(),
+                           "fp": (preds_bool & ~labels_bool).sum(),
+                           "fn": (~preds_bool & labels_bool).sum()}
             self.reward_engine.backward(reward_loss)
             if self.reward_engine.is_gradient_accumulation_boundary():
                 grad_norm = self.reward_engine.get_global_grad_norm()
@@ -2226,9 +2503,13 @@ class TrainerActor(TrainerActorCom):
             epoch_reward_tn += metrics["tn"].item()
             epoch_reward_fp += metrics["fp"].item()
             epoch_reward_fn += metrics["fn"].item()
+            micro_end(self, capture_micro, self.reward_engine)
+            _trim_cuda_cache("micro")
 
         reward_train_time = time.time() - t_reward_train_start
-        self.reward_step += 1
+        self._verify_optimizer_update(self.reward_engine, "reward", before_steps, before_skips)
+        self.reward_step += successful_updates(before_steps, before_skips, self.reward_engine)
+        _trim_cuda_cache("idle")
 
         return {
             'should_train': True,
@@ -2242,33 +2523,53 @@ class TrainerActor(TrainerActorCom):
             'reward_clip_ratio': float(np.mean(np.asarray(grad_norms) > 1.0)) if grad_norms else float('nan'),
         }
 
+    def _prepare_policy_batch(self, obs_list, action_token_np, adv_np, logits_old_np, v_targ_np):
+        """Policy batch preparation; runs in a worker thread, off the event loop."""
+        inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
+        device = next(self.model.parameters()).device
+        act_token_t = torch.tensor(action_token_np, dtype=torch.long, device=device)
+        adv_t = torch.tensor(adv_np, dtype=torch.float32, device=device)
+        logits_old_t = torch.tensor(logits_old_np, dtype=torch.float32, device=device)
+        v_targ_t = torch.tensor(v_targ_np, dtype=torch.float32, device=device)
+        return inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t
+
     async def _data_fetching_loop(self):
         """Actor 数据获取循环 — 与原版一致"""
         print(f"Trainer {self.rank}: 后台数据准备循环已启动 (超级批次大小: {self.super_batch_size})。")
+        loop = asyncio.get_running_loop()
         while True:
             try:
                 if self.next_ready_batch is not None:
-                    await asyncio.sleep(0.1)
+                    # run_training_epoch sets this right after taking the batch,
+                    # allowing the next Replay request to be submitted. Its reply
+                    # and CPU preparation dispatch may still wait for training.
+                    self._policy_slot_freed.clear()
+                    await self._policy_slot_freed.wait()
                     continue
 
-                while await self.replay_buffer.size.remote() < self.super_batch_size:
-                    print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size}...")
-                    await asyncio.sleep(3)
+                if not self._policy_replay_ready:
+                    required = self.super_batch_size * (self.world_size if self.batch_coordinator else 1)
+                    while await self.replay_buffer.size.remote() < required:
+                        print(f"Trainer {self.rank} (BG): 等待 ReplayBuffer 填充至 {self.super_batch_size}...")
+                        await asyncio.sleep(3)
+                    # The replay is a bounded deque, so its size never drops again.
+                    self._policy_replay_ready = True
 
+                # sample_time spans submission to resumption; resumption waits for
+                # the synchronous training body, so it includes that overlap.
                 t_sample_start = time.time()
-                obs_list, action_token_np, adv_np, logits_old_np, v_targ_np = \
-                    await self.replay_buffer.sample.remote(self.super_batch_size)
+                obs_list, action_token_np, adv_np, logits_old_np, v_targ_np, capture_meta = \
+                    await (self.batch_coordinator.sample_policy.remote(self.rank, self.super_batch_size)
+                           if self.batch_coordinator else self.replay_buffer.sample.remote(self.super_batch_size))
                 sample_time = time.time() - t_sample_start
+                self.telemetry.event("data_fetch", start_ns=int(t_sample_start*1e9), end_ns=now_ns(), duration_ns=int(sample_time*1e9), replay="policy")
 
                 t_prep_start = time.time()
-                inputs_batch = self.base_model.prepare_inputs_batch(obs_list)
-
-                device = next(self.model.parameters()).device
-                act_token_t = torch.tensor(action_token_np, dtype=torch.long, device=device)
-                adv_t = torch.tensor(adv_np, dtype=torch.float32, device=device)
-                logits_old_t = torch.tensor(logits_old_np, dtype=torch.float32, device=device)
-                v_targ_t = torch.tensor(v_targ_np, dtype=torch.float32, device=device)
+                inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t = await loop.run_in_executor(
+                    self._prep_executor, self._prepare_policy_batch,
+                    obs_list, action_token_np, adv_np, logits_old_np, v_targ_np)
                 prep_time = time.time() - t_prep_start
+                self.telemetry.event("data_prepare", start_ns=int(t_prep_start*1e9), end_ns=now_ns(), duration_ns=int(prep_time*1e9), replay="policy")
 
                 self.next_ready_batch = {
                     'inputs_batch': inputs_batch,
@@ -2277,13 +2578,93 @@ class TrainerActor(TrainerActorCom):
                     'logits_old': logits_old_t,
                     'value_target': v_targ_t,
                     'sample_time': sample_time,
-                    'prep_time': prep_time
+                    'prep_time': prep_time,
+                    'capture_meta': capture_meta,
                 }
 
             except Exception as e:
+                if self.batch_coordinator:
+                    # The other rank may already hold this global batch's half.
+                    self.data_fetch_error = RuntimeError(f"Policy batch preparation failed on rank {self.rank}: {e}")
+                    self.telemetry.event("data_prepare_failed", replay="policy", status="error", error=repr(e))
+                    return
                 print(f"Trainer {self.rank}: 数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
 
+    def _prepare_wm_batch(self, obs_np, act_np, rew_np, instructions):
+        """Prepare only the owning model's inputs from the shared CPU shard."""
+        prepared = {}
+        if self.training_role in ("combined", "ctrl"):
+            prepared.update(self._prepare_ctrl_batch(obs_np, act_np, rew_np, instructions))
+        if self.training_role in ("combined", "reward"):
+            prepared.update(self._prepare_reward_batch(obs_np, rew_np, instructions))
+        return prepared
+
+    def _prepare_ctrl_batch(self, obs_np, act_np, rew_np, instructions):
+        device = next(self.ctrl_world_engine.parameters()).device
+        # ---- Ctrl-World batch: resize multi-view pixels + bounds-normalize actions ----
+        # obs_np: [B,F,M,C,H,W] in [-1,1]
+        obs_t = torch.as_tensor(obs_np, dtype=torch.float32)
+        B, nF, M, C, H, W = obs_t.shape
+        flat = obs_t.reshape(B * nF * M, C, H, W)
+        flat = torch.nn.functional.interpolate(
+            flat,
+            size=(self.ctrl_target_height, self.ctrl_target_width),
+            mode="bilinear",
+            align_corners=False,
+        )
+        pixel = flat.reshape(B, nF, M, C, self.ctrl_target_height, self.ctrl_target_width)
+        # Convert pixels to bf16 on the CPU before transfer; the destination
+        # tensor is bf16. This alone does not establish overlap with training.
+        pixel = pixel.to(dtype=torch.bfloat16).to(device=device)
+
+        act_t = torch.as_tensor(act_np, dtype=torch.float32, device=device)
+        if act_t.shape[1] != nF:
+            raise ValueError(
+                f"Ctrl-World expects frame-aligned actions [B,{nF},A], got {tuple(act_t.shape)}"
+            )
+        action = _normalize_actions_bounds(act_t, self.condition_low, self.condition_high)
+        action = action.to(dtype=torch.bfloat16)
+
+
+        ctrl_n = min(self.ctrl_super_batch_size, B)
+        return {'pixel': pixel[:ctrl_n], 'action': action[:ctrl_n],
+                'text': list(instructions[:ctrl_n]),
+                'rew': torch.tensor(rew_np[:ctrl_n], dtype=torch.float32, device=device)}
+
+    def _prepare_reward_batch(self, obs_np, rew_np, instructions):
+        device = next(self.reward_engine.parameters()).device
+        # Diamond-aligned reward: last primary-cam frame + sparse window reward.
+        # obs_np[:, -1, 0] -> [B, C, H, W]
+        last_primary = obs_np[:, -1, 0]
+        reward_n = min(self.reward_super_batch_size, len(last_primary))
+        inputs_list = []
+        for i in range(reward_n):
+            obs_tensor = last_primary[i]
+            obs_np_hwc = np.transpose(obs_tensor, (1, 2, 0))
+            obs_img = ((obs_np_hwc + 1) / 2 * 255).astype(np.uint8)
+            inputs = prepare_one_obs(
+                self.reward_cfg,
+                self.processor,
+                {"full_image": obs_img},
+                instructions[i],
+                torch.bfloat16,
+            )
+            inputs_list.append(inputs)
+
+        reward_inputs_batch = self.reward_model.prepare_inputs_batch(inputs_list)
+        labels = torch.tensor(
+            (rew_np[:reward_n] > 0).astype(np.int64),
+            dtype=torch.long,
+            device=device,
+        )
+        reward_pos_ratio_batch = (
+            float(labels.float().mean().item()) if labels.numel() else 0.0
+        )
+
+
+        return {'reward_inputs_batch': reward_inputs_batch, 'labels': labels,
+                'reward_pos_ratio_batch': reward_pos_ratio_batch}
     async def _wm_data_fetching_loop(self):
         """Prepare Ctrl-World windows + Diamond-style reward batches from WM windows."""
         wm_super_batch_size = max(self.ctrl_super_batch_size, self.reward_super_batch_size)
@@ -2294,95 +2675,52 @@ class TrainerActor(TrainerActorCom):
             f"reward_super={self.reward_super_batch_size})."
         )
 
+        loop = asyncio.get_running_loop()
         while True:
             try:
                 if self.next_ready_wm_batch is not None:
-                    await asyncio.sleep(0.1)
+                    # Set by run_training_epoch once a WM-training epoch takes the batch.
+                    self._wm_slot_freed.clear()
+                    await self._wm_slot_freed.wait()
                     continue
 
-                while await self.wm_replay_buffer.size.remote() < wm_super_batch_size:
-                    ctrl_size = await self.wm_replay_buffer.size.remote()
-                    print(
-                        f"Trainer {self.rank} (BG-WM): 等待 WM ReplayBuffer "
-                        f"填充至 {wm_super_batch_size} (当前: {ctrl_size})..."
-                    )
-                    await asyncio.sleep(3)
+                if not self._wm_replay_ready:
+                    required = wm_super_batch_size * (self.world_size if self.batch_coordinator else 1)
+                    while await self.wm_replay_buffer.size.remote() < required:
+                        ctrl_size = await self.wm_replay_buffer.size.remote()
+                        print(
+                            f"Trainer {self.rank} (BG-WM): 等待 WM ReplayBuffer "
+                            f"填充至 {wm_super_batch_size} (当前: {ctrl_size})..."
+                        )
+                        await asyncio.sleep(3)
+                    # The WM replay is a bounded deque, so its size never drops again.
+                    self._wm_replay_ready = True
 
                 t_sample_start = time.time()
                 obs_np, act_np, rew_np, instructions, ctrl_sample_stats = \
-                    await self.wm_replay_buffer.sample.remote(wm_super_batch_size)
+                    await (self.batch_coordinator.sample_wm.remote(
+                               self.rank, wm_super_batch_size,
+                               self.training_role if self.training_role in ("ctrl", "reward") else "combined")
+                           if self.batch_coordinator else self.wm_replay_buffer.sample.remote(wm_super_batch_size))
                 sample_time = time.time() - t_sample_start
+                self.telemetry.event("data_fetch", start_ns=int(t_sample_start*1e9), end_ns=now_ns(), duration_ns=int(sample_time*1e9), replay="wm")
 
                 t_prep_start = time.time()
-                device = next(self.model.parameters()).device
-
-                # ---- Ctrl-World batch: resize multi-view pixels + bounds-normalize actions ----
-                # obs_np: [B,F,M,C,H,W] in [-1,1]
-                obs_t = torch.as_tensor(obs_np, dtype=torch.float32)
-                B, nF, M, C, H, W = obs_t.shape
-                flat = obs_t.reshape(B * nF * M, C, H, W)
-                flat = torch.nn.functional.interpolate(
-                    flat,
-                    size=(self.ctrl_target_height, self.ctrl_target_width),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                pixel = flat.reshape(B, nF, M, C, self.ctrl_target_height, self.ctrl_target_width)
-                pixel = pixel.to(device=device, dtype=torch.bfloat16)
-
-                act_t = torch.as_tensor(act_np, dtype=torch.float32, device=device)
-                if act_t.shape[1] != nF:
-                    raise ValueError(
-                        f"Ctrl-World expects frame-aligned actions [B,{nF},A], got {tuple(act_t.shape)}"
-                    )
-                action = _normalize_actions_bounds(act_t, self.condition_low, self.condition_high)
-                action = action.to(dtype=torch.bfloat16)
-
-                # Diamond-aligned reward: last primary-cam frame + sparse window reward.
-                # obs_np[:, -1, 0] -> [B, C, H, W]
-                last_primary = obs_np[:, -1, 0]
-                reward_n = min(self.reward_super_batch_size, len(last_primary))
-                inputs_list = []
-                for i in range(reward_n):
-                    obs_tensor = last_primary[i]
-                    obs_np_hwc = np.transpose(obs_tensor, (1, 2, 0))
-                    obs_img = ((obs_np_hwc + 1) / 2 * 255).astype(np.uint8)
-                    inputs = prepare_one_obs(
-                        self.reward_cfg,
-                        self.processor,
-                        {"full_image": obs_img},
-                        instructions[i],
-                        torch.bfloat16,
-                    )
-                    inputs_list.append(inputs)
-
-                reward_inputs_batch = self.reward_model.prepare_inputs_batch(inputs_list)
-                labels = torch.tensor(
-                    (rew_np[:reward_n] > 0).astype(np.int64),
-                    dtype=torch.long,
-                    device=device,
-                )
-                reward_pos_ratio_batch = (
-                    float(labels.float().mean().item()) if labels.numel() else 0.0
-                )
-
-                # Ctrl train uses only ctrl_super_batch_size micros from the front.
-                ctrl_n = min(self.ctrl_super_batch_size, B)
-                pixel = pixel[:ctrl_n]
-                action = action[:ctrl_n]
-                text = list(instructions[:ctrl_n])
-
+                prepared = await loop.run_in_executor(
+                    self._prep_executor, self._prepare_wm_batch, obs_np, act_np, rew_np, instructions)
                 prep_time = time.time() - t_prep_start
+                self.telemetry.event("data_prepare", start_ns=int(t_prep_start*1e9), end_ns=now_ns(), duration_ns=int(prep_time*1e9), replay="wm")
 
+                self.last_wm_batch_info = {
+                    "sample_time": sample_time,
+                    "prep_time": prep_time,
+                    "unique_episodes": int(ctrl_sample_stats['unique_episodes']),
+                    "fresh_episode_ratio": float(ctrl_sample_stats['fresh_episode_ratio']),
+                }
                 self.next_ready_wm_batch = {
-                    'pixel': pixel,
-                    'action': action,
-                    'text': text,
-                    'rew': torch.tensor(rew_np[:ctrl_n], dtype=torch.float32, device=device),
-                    'reward_inputs_batch': reward_inputs_batch,
-                    'labels': labels,
-                    'reward_pos_ratio_batch': reward_pos_ratio_batch,
+                    **prepared,
                     'instructions': instructions,
+                    'capture_meta': ctrl_sample_stats['capture_meta'],
                     'ctrl_sample_unique_episodes': int(ctrl_sample_stats['unique_episodes']),
                     'ctrl_sample_fresh_episode_ratio': float(ctrl_sample_stats['fresh_episode_ratio']),
                     'sample_time': sample_time,
@@ -2391,25 +2729,37 @@ class TrainerActor(TrainerActorCom):
 
             except Exception as e:
                 import traceback
-                print(f"Trainer {self.rank}: WM 数据采样失败: {e}。将在3秒后重试。")
                 traceback.print_exc()
+                if self.batch_coordinator:
+                    self.data_fetch_error = RuntimeError(f"WM batch preparation failed on rank {self.rank}: {e}")
+                    self.telemetry.event("data_prepare_failed", replay="wm", status="error", error=repr(e))
+                    return
+                print(f"Trainer {self.rank}: WM 数据采样失败: {e}。将在3秒后重试。")
                 await asyncio.sleep(3)
 
-    async def run_training_epoch(self):
-        # ============ 等待数据准备 ============
-        if self.next_ready_batch is None:
-            print(f"Trainer {self.rank}: 等待初始 Actor 超级批次...")
-            while self.next_ready_batch is None:
-                await asyncio.sleep(0.2)
-            print(f"Trainer {self.rank}: Actor 初始数据已收到。")
+    async def _wait_for_batch(self, attr, label):
+        """Yield to the event loop until the fetch loop publishes a batch; returns seconds waited."""
+        t_wait_start = time.time()
+        if self.data_fetch_error is not None:
+            raise self.data_fetch_error
+        if getattr(self, attr) is None and self.global_step == 0:
+            print(f"Trainer {self.rank}: 等待初始 {label} 超级批次...")
+        while getattr(self, attr) is None:
+            if self.data_fetch_error is not None:
+                raise self.data_fetch_error
+            await asyncio.sleep(0.05)
+        if self.data_fetch_error is not None:
+            raise self.data_fetch_error
+        return time.time() - t_wait_start
 
-        if self.next_ready_wm_batch is None:
-            print(f"Trainer {self.rank}: 等待初始 WM 超级批次...")
-            while self.next_ready_wm_batch is None:
-                await asyncio.sleep(0.2)
-            print(f"Trainer {self.rank}: WM 初始数据已收到，开始训练。")
+    async def _run_policy_epoch(self):
+        # ============ 等待数据准备 ============
+        # The WM batch is awaited only in epochs that train Ctrl-World/Reward (below).
+        policy_wait_time = await self._wait_for_batch("next_ready_batch", "Actor")
 
         current_lrs = {}
+        if self.data_fetch_error:
+            raise self.data_fetch_error
         value_lr = self._get_current_lr(self.global_step, self.value_lr, self.value_warmup_steps, self.train_iters)
         policy_lr = self._get_current_lr(self.global_step, self.policy_lr, self.policy_warmup_steps, self.train_iters, start_step=self.policy_train_start_step)
 
@@ -2420,7 +2770,300 @@ class TrainerActor(TrainerActorCom):
                 param_group['lr'] = policy_lr; current_lrs['policy'] = policy_lr
 
         current_batch = self.next_ready_batch
+        self.capture_policy_metadata = current_batch['capture_meta']
         self.next_ready_batch = None
+        # Yield once to let the fetch loop submit the next Replay request. If its
+        # reply arrives later, CPU preparation dispatch still waits until the
+        # synchronous training body releases the event loop.
+        self._policy_slot_freed.set()
+        await asyncio.sleep(0)
+        if self.data_fetch_error is not None:
+            raise self.data_fetch_error
+
+        inputs_batch = current_batch['inputs_batch']
+        act_token_t = current_batch['act_token']
+        adv_t = current_batch['advantage']
+        logits_old_t = current_batch['logits_old']
+        v_targ_t = current_batch['value_target']
+        policy_sample_time = current_batch['sample_time']
+        policy_prep_time = current_batch['prep_time']
+
+        # 修正std 归一化
+        local_sum = adv_t.sum()
+        local_sq_sum = (adv_t * adv_t).sum()
+        local_count = torch.tensor([adv_t.numel()], device=adv_t.device, dtype=torch.float32)
+
+        stats_tensor = torch.stack([local_sum, local_sq_sum, local_count.squeeze(0)])
+        distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
+
+        global_sum, global_sq_sum, global_count = stats_tensor[0], stats_tensor[1], stats_tensor[2]
+        global_mean = global_sum / torch.clamp(global_count, min=1.0)
+        global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
+        global_std = torch.sqrt(global_var)
+
+        policy_result = self._train_policy(inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs)
+
+
+        perf_metrics = {
+            "policy_sample_time": policy_sample_time, "policy_prep_time": policy_prep_time,
+            "policy_train_time": policy_result["policy_train_time"],
+            "policy_batch_wait_time": policy_wait_time,
+            "wm_sample_time": 0.0, "wm_prep_time": 0.0, "wm_batch_wait_time": 0.0,
+        }
+        return (np.mean(policy_result["epoch_losses"]), np.mean(policy_result["epoch_p_losses"]),
+                np.mean(policy_result["epoch_v_losses"]), np.mean(policy_result["epoch_e_losses"]),
+                np.mean(policy_result["epoch_kl_losses"]), current_lrs, self.global_step,
+                np.mean(policy_result["epoch_ent"]), np.mean(policy_result["epoch_kl_divs"]),
+                perf_metrics, {"trained_ctrl": False, "trained_reward": False})
+
+    async def _run_auxiliary_epoch(self, policy_step):
+        if (isinstance(policy_step, bool) or not isinstance(policy_step, int)
+                or policy_step != self.global_step + 1):
+            raise ValueError("Auxiliary trainer requires the next shared Policy boundary")
+        self.global_step = policy_step
+        ctrl_due = policy_step % self.ctrl_train_interval == 0
+        reward_due = policy_step % self.reward_train_interval == 0
+        wm_batch, wm_wait_time, cohort = None, 0.0, None
+        # Both consumers advance the same Replay cohort at the union of schedules.
+        # Off-schedule owners claim/discard a prepared shard without recording use.
+        if ctrl_due or reward_due:
+            wm_wait_time = await self._wait_for_batch("next_ready_wm_batch", "WM")
+            wm_batch = self.next_ready_wm_batch
+            self.capture_wm_metadata = wm_batch["capture_meta"]
+            self.next_ready_wm_batch = None
+            self._wm_slot_freed.set()
+            await asyncio.sleep(0)
+            if self.data_fetch_error is not None:
+                raise self.data_fetch_error
+            import hashlib
+            meta = self.capture_wm_metadata
+            cohort = {
+                "reservation_id": meta["reservation_id"],
+                "shard_start": meta["shard_start"], "shard_end": meta["shard_end"],
+                "sample_ids_sha256": hashlib.sha256(
+                    json.dumps(meta["sample_ids"], separators=(",", ":")).encode()).hexdigest(),
+            }
+        current_lrs = {}
+        wm_info = self.last_wm_batch_info
+        metrics = {"trained_ctrl": False, "trained_reward": False,
+                   "ctrl_sample_unique_episodes": wm_info["unique_episodes"],
+                   "ctrl_sample_fresh_episode_ratio": wm_info["fresh_episode_ratio"]}
+        performance = {"wm_sample_time": wm_info["sample_time"],
+                       "wm_prep_time": wm_info["prep_time"],
+                       "wm_batch_wait_time": wm_wait_time}
+        if self.training_role == "ctrl":
+            result = self._train_ctrl_world(
+                wm_batch["pixel"] if wm_batch else None,
+                wm_batch["action"] if wm_batch else None,
+                wm_batch["text"] if wm_batch else None, current_lrs)
+            metrics["trained_ctrl"] = result["should_train"]
+            if result["should_train"]:
+                metrics.update(ctrl_loss=float(np.mean(result["epoch_ctrl_losses"])),
+                               ctrl_grad_norm=result["ctrl_grad_norm"], ctrl_clip_ratio=result["ctrl_clip_ratio"])
+                performance["ctrl_train_time"] = result["ctrl_train_time"]
+            model_step = self.ctrl_step
+        elif self.training_role == "reward":
+            result = self._train_reward_model(
+                wm_batch["reward_inputs_batch"] if wm_batch else None,
+                wm_batch["labels"] if wm_batch else None, current_lrs)
+            metrics["trained_reward"] = result["should_train"]
+            if result["should_train"]:
+                metrics.update(reward_loss=float(np.mean(result["epoch_reward_losses"])),
+                               reward_grad_norm=result["reward_grad_norm"],
+                               reward_clip_ratio=result["reward_clip_ratio"],
+                               reward_pos_ratio_batch=float(wm_batch["reward_pos_ratio_batch"]))
+                for key in ("reward_tp", "reward_tn", "reward_fp", "reward_fn"):
+                    metrics[key] = result[key]
+                performance["reward_train_time"] = result["reward_train_time"]
+            model_step = self.reward_step
+        else:
+            raise RuntimeError("Auxiliary epoch dispatched to a non-auxiliary owner")
+        return {"kind": self.training_role, "rank": self.rank, "policy_step": policy_step,
+                "model_step": model_step, "learning_rates": current_lrs,
+                "metrics": metrics, "performance": performance, "wm_cohort": cohort}
+
+    async def _serial_fetch_cpu_batch(self):
+        """Reserve the next raw shard before permission; never prepare GPU inputs."""
+        policy = self.training_role == "policy"
+        local_size = self.super_batch_size if policy else max(self.ctrl_super_batch_size, self.reward_super_batch_size)
+        replay = self.replay_buffer if policy else self.wm_replay_buffer
+        ready_attr = "_policy_replay_ready" if policy else "_wm_replay_ready"
+        if not getattr(self, ready_attr):
+            required = local_size * (self.world_size if self.batch_coordinator else 1)
+            while await replay.size.remote() < required:
+                await asyncio.sleep(3)
+            setattr(self, ready_attr, True)
+        started = time.time()
+        if self.batch_coordinator:
+            raw = await (self.batch_coordinator.sample_policy.remote(self.rank, local_size) if policy
+                         else self.batch_coordinator.sample_wm.remote(self.rank, local_size, self.training_role))
+        else:
+            raw = await replay.sample.remote(local_size)
+        elapsed = time.time() - started
+        self.telemetry.event("data_fetch", start_ns=int(started * 1e9), end_ns=now_ns(),
+                             duration_ns=int(elapsed * 1e9), replay="policy" if policy else "wm",
+                             serial_cpu_prefetch=True, gpu_prepared=False)
+        return {"raw": raw, "sample_time": elapsed}
+
+    async def _serial_publish_batch(self, policy_step):
+        """Only the active owner transfers/prepares its raw CPU shard on GPU.
+
+        This helper returns no GPU values. Its preparation Future and locals
+        disappear before the learning RPC returns and before the final trim.
+        The background producer only ever sees raw CPU Replay data.
+        """
+        key = (policy_step, self.training_role)
+        if self._serial_phase.active != key:
+            raise RuntimeError("GPU preparation attempted without its serial stage")
+        policy = self.training_role == "policy"
+        union_due = policy_step % self.ctrl_train_interval == 0 or policy_step % self.reward_train_interval == 0
+        if not policy and not union_due:
+            return
+        record = await self._serial_prefetch.take()
+        raw = record["raw"]
+        loop = asyncio.get_running_loop()
+        started = time.time()
+        if policy:
+            future = loop.run_in_executor(self._prep_executor, self._prepare_policy_batch, *raw[:-1])
+            prepared = await finish_preparation(future)
+            future = None
+            inputs, actions, advantage, old_logits, target = prepared
+            self.next_ready_batch = {"inputs_batch": inputs, "act_token": actions,
+                                     "advantage": advantage, "logits_old": old_logits,
+                                     "value_target": target, "capture_meta": raw[-1],
+                                     "sample_time": record["sample_time"], "prep_time": time.time() - started}
+        else:
+            stats = raw[-1]
+            interval = self.ctrl_train_interval if self.training_role == "ctrl" else self.reward_train_interval
+            if policy_step % interval == 0:
+                future = loop.run_in_executor(self._prep_executor, self._prepare_wm_batch, *raw[:-1])
+                prepared = await finish_preparation(future)
+                future = None
+            else:
+                # An off-schedule owner still claims the shared cohort, but
+                # never allocates GPU inputs for a model that will not update.
+                prepared = {"pixel": None, "action": None, "text": None,
+                            "reward_inputs_batch": None, "labels": None}
+            self.last_wm_batch_info = {"sample_time": record["sample_time"], "prep_time": time.time() - started,
+                                       "unique_episodes": int(stats["unique_episodes"]),
+                                       "fresh_episode_ratio": float(stats["fresh_episode_ratio"])}
+            self.next_ready_wm_batch = {**prepared, "capture_meta": stats["capture_meta"],
+                                        "sample_time": record["sample_time"], "prep_time": time.time() - started}
+        self.telemetry.event("data_prepare", start_ns=int(started * 1e9), end_ns=now_ns(),
+                             duration_ns=int((time.time() - started) * 1e9),
+                             replay="policy" if policy else "wm", serial_phase_key=list(key))
+
+    def _serial_key_barrier(self, key, boundary):
+        """All four ranks agree on the same step/model/boundary before ACK."""
+        model_id = ("policy", "ctrl", "reward").index(key[1])
+        token = torch.tensor([key[0], model_id, boundary], dtype=torch.int64, device="cuda")
+        tokens = [torch.empty_like(token) for _ in range(self.world_size)]
+        distributed.all_gather(tokens, token)
+        values = [item.cpu().tolist() for item in tokens]
+        if any(value != [key[0], model_id, boundary] for value in values):
+            raise RuntimeError(f"Serial four-rank phase keys disagree: {values}")
+
+    def _serial_memory(self):
+        free, total = torch.cuda.mem_get_info()
+        return {"allocated_bytes": torch.cuda.memory_allocated(), "reserved_bytes": torch.cuda.memory_reserved(),
+                "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+                "peak_reserved_bytes": torch.cuda.max_memory_reserved(), "free_bytes": free, "total_bytes": total}
+
+    async def _run_serial_epoch(self, policy_step):
+        key = self._serial_phase.begin(policy_step)
+        try:
+            self._serial_key_barrier(key, 0)
+            torch.cuda.reset_peak_memory_stats()
+            self.telemetry.event("split_serial_phase_begin", details={
+                "policy_step": policy_step, "model": self.training_role, "rank": self.rank,
+                "phase_key": list(key), "cpu_prefetch_only": True, **self._serial_memory()})
+            await self._serial_publish_batch(policy_step)
+            # The unchanged epoch bodies own all learning/LR/update accounting.
+            # Their local GPU inputs have gone out of scope before handoff.
+            result = await (self._run_policy_epoch() if self.training_role == "policy"
+                            else self._run_auxiliary_epoch(policy_step))
+            self.next_ready_batch = self.next_ready_wm_batch = None
+            import gc
+            gc.collect()
+            torch.cuda.synchronize()
+            self.telemetry.flush(force_gpu=True)
+            torch.cuda.empty_cache()
+            self._serial_key_barrier(key, 1)
+            # The key collective's temporary tensors are now also unreferenced.
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            self._serial_phase.complete(key)
+            trained = self.training_role == "policy" or result["metrics"]["trained_" + self.training_role]
+            self.telemetry.event("split_serial_phase_end", details={
+                "policy_step": policy_step, "model": self.training_role, "rank": self.rank,
+                "phase_key": list(key), "cpu_prefetch_only": True, "trained": bool(trained),
+                "cohort": None if self.training_role == "policy" else result["wm_cohort"],
+                "gpu_batch_refs_released": True, "completion": "cuda_sync_and_empty_cache",
+                **self._serial_memory()})
+            self.telemetry.flush()
+            return result
+        except BaseException as error:
+            self._serial_phase.fail(error)
+            self.next_ready_batch = self.next_ready_wm_batch = None
+            await self._serial_prefetch.close()
+            self.telemetry.event("split_serial_phase_failed", status="error", details={
+                "phase_key": list(key), "rank": self.rank, "error": repr(error), "acknowledged": False})
+            raise
+
+    def serial_sample_identity(self, policy_step):
+        if (not self.split_train_serial or self._serial_phase.active is not None
+                or self._serial_phase.completed_step != policy_step):
+            raise RuntimeError("Sample identity requested before its complete serial phase ACK")
+        needed = (self.training_role == "policy" or policy_step % self.ctrl_train_interval == 0
+                  or policy_step % self.reward_train_interval == 0)
+        metadata = (getattr(self, "capture_policy_metadata", None) if self.training_role == "policy"
+                    else getattr(self, "capture_wm_metadata", None))
+        cohort = ({key: metadata[key] for key in ("reservation_id", "shard_start", "shard_end", "sample_ids")}
+                  if needed and metadata else None)
+        return {"model": self.training_role, "rank": self.rank, "policy_step": policy_step,
+                "cohort": cohort}
+
+    async def run_training_epoch(self, policy_step=None):
+        if self.split_train_serial:
+            return await self._run_serial_epoch(policy_step)
+        if self.training_role == "combined":
+            if policy_step is not None:
+                raise ValueError("Combined trainers own their Policy clock")
+            return await self._run_combined_epoch()
+        if self.training_role == "policy":
+            if (isinstance(policy_step, bool) or not isinstance(policy_step, int)
+                    or policy_step != self.global_step + 1):
+                raise ValueError("Policy trainer requires its next shared boundary")
+            return await self._run_policy_epoch()
+        return await self._run_auxiliary_epoch(policy_step)
+
+    async def _run_combined_epoch(self):
+        # ============ 等待数据准备 ============
+        # The WM batch is awaited only in epochs that train Ctrl-World/Reward (below).
+        policy_wait_time = await self._wait_for_batch("next_ready_batch", "Actor")
+
+        current_lrs = {}
+        if self.data_fetch_error:
+            raise self.data_fetch_error
+        value_lr = self._get_current_lr(self.global_step, self.value_lr, self.value_warmup_steps, self.train_iters)
+        policy_lr = self._get_current_lr(self.global_step, self.policy_lr, self.policy_warmup_steps, self.train_iters, start_step=self.policy_train_start_step)
+
+        for param_group in self.optimizer.param_groups:
+            if param_group['name'] == 'value':
+                param_group['lr'] = value_lr; current_lrs['value'] = value_lr
+            elif param_group['name'] == 'policy':
+                param_group['lr'] = policy_lr; current_lrs['policy'] = policy_lr
+
+        current_batch = self.next_ready_batch
+        self.capture_policy_metadata = current_batch['capture_meta']
+        self.next_ready_batch = None
+        # Yield once to let the fetch loop submit the next Replay request. If its
+        # reply arrives later, CPU preparation dispatch still waits until the
+        # synchronous training body releases the event loop.
+        self._policy_slot_freed.set()
+        await asyncio.sleep(0)
+        if self.data_fetch_error is not None:
+            raise self.data_fetch_error
 
         inputs_batch = current_batch['inputs_batch']
         act_token_t = current_batch['act_token']
@@ -2446,21 +3089,31 @@ class TrainerActor(TrainerActorCom):
         policy_result = self._train_policy(inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs)
 
         # ============ 2. World Model 训练（Ctrl-World + Reward）============
-        wm_batch = self.next_ready_wm_batch
         ctrl_should_train = (self.global_step % self.ctrl_train_interval == 0)
         reward_should_train = (self.global_step % self.reward_train_interval == 0)
+        wm_batch = None
+        wm_wait_time = 0.0
         if ctrl_should_train or reward_should_train:
+            wm_wait_time = await self._wait_for_batch("next_ready_wm_batch", "WM")
+            wm_batch = self.next_ready_wm_batch
+            self.capture_wm_metadata = wm_batch['capture_meta']
             self.next_ready_wm_batch = None
-        wm_reward_inputs = wm_batch['reward_inputs_batch']
-        wm_labels = wm_batch['labels']
-        wm_sample_time = wm_batch['sample_time']
-        wm_prep_time = wm_batch['prep_time']
+            self._wm_slot_freed.set()
+            await asyncio.sleep(0)
+            if self.data_fetch_error is not None:
+                raise self.data_fetch_error
 
+        # Off-schedule epochs pass None; both trainers return before reading inputs.
         ctrl_result = self._train_ctrl_world(
-            wm_batch['pixel'], wm_batch['action'], wm_batch['text'], current_lrs
+            wm_batch['pixel'] if wm_batch else None,
+            wm_batch['action'] if wm_batch else None,
+            wm_batch['text'] if wm_batch else None,
+            current_lrs,
         )
         reward_result = self._train_reward_model(
-            wm_reward_inputs, wm_labels, current_lrs
+            wm_batch['reward_inputs_batch'] if wm_batch else None,
+            wm_batch['labels'] if wm_batch else None,
+            current_lrs,
         )
 
         # ============ 汇总结果 ============
@@ -2472,12 +3125,16 @@ class TrainerActor(TrainerActorCom):
         avg_ent = np.mean(policy_result['epoch_ent'])
         avg_kl_div = np.mean(policy_result['epoch_kl_divs'])
 
+        wm_info = self.last_wm_batch_info
         perf_metrics = {
             "policy_sample_time": policy_sample_time,
             "policy_prep_time": policy_prep_time,
             "policy_train_time": policy_result['policy_train_time'],
-            "wm_sample_time": wm_sample_time,
-            "wm_prep_time": wm_prep_time,
+            "wm_sample_time": wm_info["sample_time"],
+            "wm_prep_time": wm_info["prep_time"],
+            # Time this epoch actually stalled waiting for a prefetched batch.
+            "policy_batch_wait_time": policy_wait_time,
+            "wm_batch_wait_time": wm_wait_time,
         }
 
         if ctrl_result['should_train']:
@@ -2488,8 +3145,8 @@ class TrainerActor(TrainerActorCom):
         wm_metrics = {
             "trained_reward": reward_result['should_train'],
             "trained_ctrl": ctrl_result['should_train'],
-            "ctrl_sample_unique_episodes": wm_batch.get('ctrl_sample_unique_episodes', 0),
-            "ctrl_sample_fresh_episode_ratio": wm_batch.get('ctrl_sample_fresh_episode_ratio', 0.0),
+            "ctrl_sample_unique_episodes": wm_info["unique_episodes"],
+            "ctrl_sample_fresh_episode_ratio": wm_info["fresh_episode_ratio"],
         }
 
         if ctrl_result['should_train']:
@@ -2579,8 +3236,83 @@ def build_openvla_cfg(args):
     return cfg
 
 
+def validate_split_owners(states, bindings):
+    """Prove one physical-card owner per model/rank and three independent worlds."""
+    kinds = ("policy", "ctrl", "reward")
+    expected = {(kind, rank) for kind in kinds for rank in range(4)}
+    if (len(states) != 12 or len({state["pid"] for state in states}) != 12
+            or {(state["training_role"], state["rank"]) for state in states} != expected):
+        raise RuntimeError("Split training requires twelve distinct model/rank processes")
+    ports = {}
+    for state in states:
+        kind, rank = state["training_role"], state["rank"]
+        if (set(state["engines"]) != {kind} or state["world_size"] != 4
+                or state["distributed_world_size"] != 4
+                or state["gpu"]["physical_gpu"] != bindings[rank]["index"]):
+            raise RuntimeError("Split trainer engine, process group or physical GPU identity differs")
+        ports.setdefault(kind, set()).add(state["group_port"])
+    if any(len(values) != 1 for values in ports.values()) or len(set.union(*ports.values())) != 3:
+        raise RuntimeError("Each model needs its own four-rank DeepSpeed rendezvous")
+
+
+def merge_split_epoch_results(epoch_results, world_size, policy_step, ctrl_interval, reward_interval):
+    """Join completed role groups at the original Policy publication boundary."""
+    if len(epoch_results) != 3 * world_size:
+        raise RuntimeError("Incomplete split training epoch")
+    policy = epoch_results[:world_size]
+    auxiliaries = {"ctrl": epoch_results[world_size:2 * world_size],
+                   "reward": epoch_results[2 * world_size:]}
+    union_due = policy_step % ctrl_interval == 0 or policy_step % reward_interval == 0
+    for rank, result in enumerate(policy):
+        if len(result) != 11 or result[6] != policy_step:
+            raise RuntimeError("Policy group did not complete its common next update")
+        for kind, interval in (("ctrl", ctrl_interval), ("reward", reward_interval)):
+            item = auxiliaries[kind][rank]
+            due = policy_step % interval == 0
+            if (item["kind"] != kind or item["rank"] != rank
+                    or item["policy_step"] != policy_step
+                    or item["model_step"] != policy_step // interval
+                    or bool(item["metrics"]["trained_" + kind]) != due
+                    or (item["wm_cohort"] is not None) != union_due):
+                raise RuntimeError(f"{kind}: split trainer counters or schedule diverged")
+        if auxiliaries["ctrl"][rank]["wm_cohort"] != auxiliaries["reward"][rank]["wm_cohort"]:
+            raise RuntimeError("World and Reward did not consume the same global Replay draw")
+    merged = []
+    for rank, result in enumerate(policy):
+        item = list(result)
+        item[5], item[9], item[10] = dict(result[5]), dict(result[9]), {}
+        ctrl, reward = auxiliaries["ctrl"][rank], auxiliaries["reward"][rank]
+        for auxiliary in (ctrl, reward):
+            item[5].update(auxiliary["learning_rates"])
+            item[10].update({key: value for key, value in auxiliary["metrics"].items()
+                             if not key.startswith(("ctrl_sample_", "trained_"))})
+            item[9].update({key: value for key, value in auxiliary["performance"].items()
+                            if key not in ("wm_sample_time", "wm_prep_time", "wm_batch_wait_time")})
+        item[10].update(trained_ctrl=ctrl["metrics"]["trained_ctrl"],
+                        trained_reward=reward["metrics"]["trained_reward"])
+        for key in ("ctrl_sample_unique_episodes", "ctrl_sample_fresh_episode_ratio"):
+            item[10][key] = ctrl["metrics"][key]
+        # The preparation owners now run concurrently; retain role timings too.
+        for key in ("wm_sample_time", "wm_prep_time", "wm_batch_wait_time"):
+            item[9][key] = max(ctrl["performance"][key], reward["performance"][key])
+        item[9]["ctrl_batch_prep_time"] = ctrl["performance"]["wm_prep_time"]
+        item[9]["reward_batch_prep_time"] = reward["performance"]["wm_prep_time"]
+        merged.append(tuple(item))
+    return merged
+
+
 def main(args):
-    """主函数"""
+    """Run the original training recipe with optional evaluation-based stop."""
+    run_policy = TrainingStopPolicy.from_environment(os.environ)
+    evaluation_milestones = EvaluationMilestones()
+    run_started_ns = int(os.environ.get("ACCERL_RUN_STARTED_NS", now_ns()))
+    eval_target = os.environ.get("ACCERL_EVAL_TARGET")
+    threshold_tracker = (ThresholdTracker(
+        target=float(eval_target), run_started_ns=run_started_ns,
+        required_consecutive=int(os.environ.get("ACCERL_EVAL_CONSECUTIVE", "2")),
+        min_samples=int(os.environ.get("ACCERL_EVAL_MIN_EPISODES", str(args.moving_avg_window))))
+        if eval_target is not None else None)
+    target_reached = False
     benchmark = args.benchmark
     torch_dtype = torch.bfloat16 if args.use_bf16 else torch.float32
     agent_config_path = Path.cwd() / args.agent_config_path
@@ -2625,26 +3357,53 @@ def main(args):
         )
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
-    object_store_size_gb = 256
+    split_training = args.gpu_layout == SPLIT_LAYOUT
+    split_train_serial = serial_enabled(args.gpu_layout, environment=os.environ)
+    four_layout = args.gpu_layout in (FOUR_LAYOUT, SPLIT_LAYOUT)
+    fixed_layout = args.gpu_layout in (DUAL_LAYOUT, FOUR_LAYOUT, SPLIT_LAYOUT)
+    bindings = build_bindings(parse_gpu_ids(args.cuda_visible_devices)) if fixed_layout else None
+    topology = ray_init_options(bindings, args.gpu_layout) if fixed_layout else {"num_gpus": len(args.cuda_visible_devices.split(","))}
+    object_store_size_gb = 64
     object_store_memory_bytes = int(object_store_size_gb * 1024 * 1024 * 1024)
     print(f"正在初始化 Ray，并为对象存储分配 {object_store_size_gb} GB 内存...")
     ray.init(
+        address="local",
+        num_cpus=32,
+        **topology,
+        include_dashboard=False,
         ignore_reinit_error=True,
-        _temp_dir='/dev/shm',
+        _temp_dir=os.environ.get("ACCERL_RAY_TMP", "/dev/shm/arlcap"),
         object_store_memory=64 * 1024**3,
-        object_spilling_directory="/mnt/data/lcx3/ray_spill",
+        object_spilling_directory=os.environ.get("ACCERL_RAY_SPILL", "/mnt/data/lcx1/dong/ray_profile_spill"),
     )
+    # ray.init(
+    #     ignore_reinit_error=True,
+    #     _temp_dir='/dev/shm',
+    #     object_store_memory=64 * 1024**3,
+    #     object_spilling_directory="/mnt/data/lcx3/ray_spill",
+    # )
     print(f"Ray 初始化完成，对象存储分配 {object_store_size_gb} GB 内存。")
     log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
-    writer = SummaryWriter(log_dir)
+    writer = CaptureSummaryWriter(log_dir, tensorboard=(
+        os.environ.get("ACCERL_CAPTURE_ONLY") != "1" or os.environ.get("ACCERL_TENSORBOARD") == "1"))
+    if writer.tensorboard is not None:
+        writer.telemetry.event("tensorboard_started", details={
+            "log_dir": str(Path(log_dir).resolve()), "run_started_ns": run_started_ns,
+            "metric_tag": "Eval/_Global/Average_Return", "window_size": args.moving_avg_window,
+            "target": float(eval_target) if eval_target is not None else None,
+            "mps_enabled": os.environ.get("ACCERL_USE_MPS") == "1"})
+        writer.add_scalar("System/MPS_Enabled", int(os.environ.get("ACCERL_USE_MPS") == "1"), 0)
+        writer.flush()
     stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
     cfg = build_openvla_cfg(args)
 
     print("--- 步骤 1: 创建 Actors ---")
+    replay_count = 1 if fixed_layout else args.num_trainer_gpus
+    # One shared Replay per model; draw each global batch once, then shard by rank.
     # Actor Replay Buffer (imagination rollout 数据)
-    replay_buffers = [ReplayBufferActor.remote(capacity=args.replay_capacity) for _ in range(args.num_trainer_gpus)]
+    replay_buffers = [ReplayBufferActor.remote(capacity=args.replay_capacity) for _ in range(replay_count)]
     # World Model Replay Buffer (真实轨迹数据)
     wm_replay_buffers = [
         WMReplayBufferActor.remote(
@@ -2653,8 +3412,11 @@ def main(args):
             ctrl_eval_episode_ratio=args.ctrl_eval_episode_ratio,
             ctrl_eval_windows_per_episode=args.ctrl_eval_windows_per_episode,
         )
-        for _ in range(args.num_trainer_gpus)
+        for _ in range(replay_count)
     ]
+    batch_coordinator = (ray.remote(GlobalBatchCoordinator).remote(
+        replay_buffers[0], wm_replay_buffers[0], args.num_trainer_gpus,
+        wm_consumers=("ctrl", "reward") if split_training else ("combined",)) if fixed_layout else None)
 
     ctrl_world_args = {
         "svd_model_path": args.svd_model_path,
@@ -2668,9 +3430,10 @@ def main(args):
         "target_height": args.target_height,
         "target_width": args.target_width,
     }
-    trainer_group = [
-        TrainerActor.remote(
-            rank=i, world_size=args.num_trainer_gpus, replay_buffer=replay_buffers[i], cfg=cfg,
+    def create_trainer(i, training_role):
+        placement_role = training_role + "_trainer" if split_training else "trainer"
+        return TrainerActor.options(**(actor_options(bindings, placement_role, i, layout=args.gpu_layout) if fixed_layout else {})).remote(
+            rank=i, world_size=args.num_trainer_gpus, replay_buffer=replay_buffers[i % replay_count], cfg=cfg,
             train_batch_size=args.train_batch_size, accumulation_steps=args.accumulation_steps,
             use_bf16=args.use_bf16, torch_dtype=torch_dtype, policy_lr=args.policy_lr, value_lr=args.value_lr,
             gamma=args.gamma, lambda_=args.lambda_, clip_eps=args.clip_eps, vf_coef=args.vf_coef,
@@ -2679,7 +3442,7 @@ def main(args):
             policy_train_start_step=args.policy_train_start_step, train_iters=args.train_iters,
             clip_mode=args.clip_mode,
             # World Model 相关参数
-            wm_replay_buffer=wm_replay_buffers[i],
+            wm_replay_buffer=wm_replay_buffers[i % replay_count],
             agent_config_path=agent_config_path,
             trainer_config_path=trainer_config_path,
             reward_batch_size=args.reward_batch_size,
@@ -2694,28 +3457,50 @@ def main(args):
             ctrl_lr=args.ctrl_lr,
             ctrl_warmup_steps=args.ctrl_warmup_steps,
             ctrl_train_interval=args.ctrl_train_interval,
+            batch_coordinator=batch_coordinator, training_role=training_role, split_train_serial=split_train_serial,
         )
-        for i in range(args.num_trainer_gpus)
-    ]
 
-    inference_pool = [
-        InferenceActor.remote(
-            actor_id=i, cfg=cfg, stats_actor=stats_actor, torch_dtype=torch_dtype,
-            inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms
-        ) for i in range(args.num_inference_actors)
-    ]
-    reward_inference_pool = [
-        RewardInferenceActor.remote(
-            actor_id=i, stats_actor=stats_actor,
-            agent_config_path=agent_config_path,
-            inference_batch=args.inference_batch,
-            inference_timeout_ms=args.inference_timeout_ms,
-            reward_checkpoint=args.reward_checkpoint,
-        ) for i in range(args.num_reward_inference_actors)
-    ]
+    if split_training:
+        training_groups = {kind: [create_trainer(i, kind) for i in range(args.num_trainer_gpus)]
+                           for kind in ("policy", "ctrl", "reward")}
+        trainer_group = training_groups["policy"]
+        all_trainers = [actor for group in training_groups.values() for actor in group]
+    else:
+        trainer_group = [create_trainer(i, "combined") for i in range(args.num_trainer_gpus)]
+        training_groups = {kind: trainer_group for kind in ("policy", "ctrl", "reward")}
+        all_trainers = trainer_group
+
+    if args.gpu_layout == DUAL_LAYOUT:
+        shared_inference = PolicyRewardInferenceActor.options(**actor_options(bindings, "policy_reward")).remote(
+            policy_cls=InferenceActor, reward_cls=RewardInferenceActor,
+            policy_kwargs=dict(actor_id=0, cfg=cfg, stats_actor=stats_actor, torch_dtype=torch_dtype,
+                               inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms),
+            reward_kwargs=dict(actor_id=0, stats_actor=stats_actor, agent_config_path=agent_config_path,
+                               inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms,
+                               reward_checkpoint=args.reward_checkpoint), placement_guard=verify_bound_gpu,
+        )
+        inference_pool = [shared_inference]
+        reward_inference_pool = [RewardInferenceHandle(shared_inference)]
+    else:
+        inference_pool = [
+            InferenceActor.options(**(actor_options(bindings, "policy", i, layout=args.gpu_layout) if four_layout else {"num_gpus": float(os.environ.get("ACCERL_POLICY_GPU","1"))})).remote(
+                actor_id=i, cfg=cfg, stats_actor=stats_actor, torch_dtype=torch_dtype,
+                inference_batch=args.inference_batch, inference_timeout_ms=args.inference_timeout_ms
+            ) for i in range(args.num_inference_actors)
+        ]
+        reward_inference_pool = [
+            RewardInferenceActor.options(**(actor_options(bindings, "reward", i, layout=args.gpu_layout) if four_layout else {"num_gpus": float(os.environ.get("ACCERL_REWARD_GPU","1"))})).remote(
+                actor_id=i, stats_actor=stats_actor,
+                agent_config_path=agent_config_path,
+                inference_batch=args.inference_batch,
+                inference_timeout_ms=args.inference_timeout_ms,
+                reward_checkpoint=args.reward_checkpoint,
+            ) for i in range(args.num_reward_inference_actors)
+        ]
     # ★ 替换 denoiser_inference_pool 为 ctrl_world_inference_pool
     ctrl_world_inference_pool = [
-        CtrlWorldInferenceActor.remote(
+        CtrlWorldInferenceActor.options(**(actor_options(bindings, "ctrl", i, layout=args.gpu_layout) if fixed_layout else
+                                          {"num_gpus": float(os.environ.get("ACCERL_CTRL_GPU", "1"))})).remote(
             actor_id=i,
             stats_actor=stats_actor,
             args=args,
@@ -2723,84 +3508,89 @@ def main(args):
             inference_timeout_ms=args.inference_timeout_ms,
         ) for i in range(args.num_ctrl_inference_actors)
     ]
-    rollout_workers = [
-        RolloutWorkerActor.remote(
-            inference_pool[i % args.num_inference_actors],
-            replay_buffers[i % args.num_trainer_gpus],
-            i,
-            stats_actor,
-            cfg,
-            benchmark,
-            args.num_step_cond,
-            args.imagine_horizon,
-            torch_dtype,
-            reward_inference_pool[i % args.num_reward_inference_actors],
-            ctrl_world_inference_pool[i % args.num_ctrl_inference_actors],  # ★ 替换
-            args.reward_scale,
-            args.gamma,
-            args.lambda_,
-            wm_replay_buffers[i % args.num_trainer_gpus],
-            args.real_traj_collect_interval,
-        ) for i in range(args.num_rollout_workers)
-    ]
-    eval_workers = [
-        EvaluationWorkerActor.remote(
-            inference_pool[i % args.num_inference_actors], i, stats_actor, cfg, benchmark, torch_dtype
-        ) for i in range(args.num_eval_workers)
-    ]
-    print(f"已创建 {args.num_rollout_workers} 个 Rollout workers 和 {args.num_eval_workers} 个 Evaluation workers。")
+    rollout_workers, eval_workers = [], []
+    if not args.validate_only:
+        rollout_workers = [
+            RolloutWorkerActor.remote(
+                inference_pool[i % args.num_inference_actors],
+                replay_buffers[i % replay_count],
+                i,
+                stats_actor,
+                cfg,
+                benchmark,
+                args.num_step_cond,
+                args.imagine_horizon,
+                torch_dtype,
+                reward_inference_pool[i % args.num_reward_inference_actors],
+                ctrl_world_inference_pool[i % args.num_ctrl_inference_actors],  # ★ 替换
+                args.reward_scale,
+                args.gamma,
+                args.lambda_,
+                wm_replay_buffers[i % replay_count],
+                args.real_traj_collect_interval,
+            ) for i in range(args.num_rollout_workers)
+        ]
+        eval_workers = [
+            EvaluationWorkerActor.remote(
+                inference_pool[i % args.num_inference_actors], i, stats_actor, cfg, benchmark, torch_dtype
+            ) for i in range(args.num_eval_workers)
+        ]
+    print(f"已创建 {len(rollout_workers)} 个 Rollout workers 和 {len(eval_workers)} 个 Evaluation workers。")
 
     print("\n--- 步骤 2: 建立独立的 DeepSpeed 训练组 ---")
-    train_group_port = find_free_port()
-    broadcast_group_port = find_free_port()
-    while broadcast_group_port == train_group_port:
-        broadcast_group_port = find_free_port()
-    trainer_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
-    train_setup_tasks = [actor.setup_deepspeed_group.remote(trainer_master_addr, train_group_port) for actor in trainer_group]
-    ray.get(train_setup_tasks)
-    print("DeepSpeed 训练组建立完成。")
+    used_train_ports = set()
+    groups_to_initialize = training_groups.items() if split_training else (("combined", trainer_group),)
+    for kind, group in groups_to_initialize:
+        train_group_port = find_free_port()
+        while train_group_port in used_train_ports:
+            train_group_port = find_free_port()
+        used_train_ports.add(train_group_port)
+        trainer_master_addr = ray.get(group[0].get_node_ip.remote())
+        ray.get([actor.setup_deepspeed_group.remote(trainer_master_addr, train_group_port) for actor in group])
+        print(f"DeepSpeed group ready: role={kind}, world={len(group)}, port={train_group_port}", flush=True)
 
-    print(f"\n--- 步骤 3: 建立共享广播组 ---")
-    broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
+    if not four_layout:
+        print(f"\n--- 步骤 3: 建立共享广播组 ---")
+        broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
 
-    # 3.1 Actor 广播组
-    broadcast_actor_port = find_free_port()
-    broadcast_actor_participants = [trainer_group[0]] + inference_pool
-    broadcast_actor_world_size = len(broadcast_actor_participants)
-    broadcast_setup_tasks = [
-        actor.setup_broadcast_group.remote(
-            master_addr=broadcast_master_addr, master_port=broadcast_actor_port,
-            group_name="broadcast_actor", group_world_size=broadcast_actor_world_size,
-            my_rank_in_group=rank) for rank, actor in enumerate(broadcast_actor_participants)
-    ]
-    ray.get(broadcast_setup_tasks)
-    print("Actor 广播组建立完成。")
+        # 3.1 Actor 广播组
+        broadcast_actor_port = find_free_port()
+        broadcast_actor_participants = [trainer_group[0]] + inference_pool
+        broadcast_actor_world_size = len(broadcast_actor_participants)
+        broadcast_setup_tasks = [
+            actor.setup_broadcast_group.remote(
+                master_addr=broadcast_master_addr, master_port=broadcast_actor_port,
+                group_name="broadcast_actor", group_world_size=broadcast_actor_world_size,
+                my_rank_in_group=rank) for rank, actor in enumerate(broadcast_actor_participants)
+        ]
+        ray.get(broadcast_setup_tasks)
+        print("Actor 广播组建立完成。")
 
-    # 3.2 Reward Model 广播组 (Trainer -> RewardInferenceActor)
-    broadcast_reward_port = find_free_port()
-    broadcast_reward_participants = [trainer_group[0]] + reward_inference_pool
-    broadcast_reward_world_size = len(broadcast_reward_participants)
-    broadcast_setup_tasks = [
-        actor.setup_broadcast_group.remote(
-            master_addr=broadcast_master_addr, master_port=broadcast_reward_port,
-            group_name="broadcast_reward", group_world_size=broadcast_reward_world_size,
-            my_rank_in_group=rank) for rank, actor in enumerate(broadcast_reward_participants)
-    ]
-    ray.get(broadcast_setup_tasks)
-    print("Reward Model 广播组建立完成。")
+        # 3.2 Reward Model 广播组 (Trainer -> RewardInferenceActor)
+        broadcast_reward_port = find_free_port()
+        broadcast_reward_participants = [trainer_group[0]] + reward_inference_pool
+        broadcast_reward_world_size = len(broadcast_reward_participants)
+        broadcast_setup_tasks = [
+            actor.setup_broadcast_group.remote(
+                master_addr=broadcast_master_addr, master_port=broadcast_reward_port,
+                group_name="broadcast_reward", group_world_size=broadcast_reward_world_size,
+                my_rank_in_group=rank) for rank, actor in enumerate(broadcast_reward_participants)
+        ]
+        ray.get(broadcast_setup_tasks)
+        print("Reward Model 广播组建立完成。")
 
-    # 3.3 Ctrl-World 广播组 (Trainer -> CtrlWorldInferenceActor)
-    broadcast_ctrl_port = find_free_port()
-    broadcast_ctrl_participants = [trainer_group[0]] + ctrl_world_inference_pool
-    broadcast_ctrl_world_size = len(broadcast_ctrl_participants)
-    broadcast_setup_tasks = [
-        actor.setup_broadcast_group.remote(
-            master_addr=broadcast_master_addr, master_port=broadcast_ctrl_port,
-            group_name="broadcast_ctrl", group_world_size=broadcast_ctrl_world_size,
-            my_rank_in_group=rank) for rank, actor in enumerate(broadcast_ctrl_participants)
-    ]
-    ray.get(broadcast_setup_tasks)
-    print("Ctrl-World 广播组建立完成。")
+        # 3.3 Ctrl-World 广播组 (Trainer -> CtrlWorldInferenceActor)
+        broadcast_ctrl_port = find_free_port()
+        broadcast_ctrl_participants = [trainer_group[0]] + ctrl_world_inference_pool
+        broadcast_ctrl_world_size = len(broadcast_ctrl_participants)
+        broadcast_setup_tasks = [
+            actor.setup_broadcast_group.remote(
+                master_addr=broadcast_master_addr, master_port=broadcast_ctrl_port,
+                group_name="broadcast_ctrl", group_world_size=broadcast_ctrl_world_size,
+                my_rank_in_group=rank) for rank, actor in enumerate(broadcast_ctrl_participants)
+        ]
+        ray.get(broadcast_setup_tasks)
+        print("Ctrl-World 广播组建立完成。")
 
     # 验证 Actor 模型键
     inf_keys = ray.get(inference_pool[0].get_model_keys.remote())
@@ -2816,54 +3606,137 @@ def main(args):
     ray.get(forward_test_tasks)
     print("Actor 推理器前向测试完成 (广播前)。")
 
-    # 广播 Actor 权重
-    broadcast_task = trainer_group[0].broadcast_weights.remote("broadcast_actor")
-    receive_tasks = [inf.receive_and_update_weights.remote("broadcast_actor") for inf in inference_pool]
-    ray.get([broadcast_task] + receive_tasks)
-    print("Actor 初始权重已广播。")
+    def sync_model(kind, pool):
+        if four_layout:
+            owners = training_groups[kind]
+            payloads = [trainer.export_rank_weights.remote(kind) for trainer in owners]
+            inventories = ray.get([trainer.describe_rank_weights.remote(payload)
+                                  for trainer, payload in zip(owners, payloads)])
+            if len({(item["version"], item["hash"]) for item in inventories}) != 1:
+                raise RuntimeError(f"Training weights diverged before {kind} sync: {inventories}")
+            received = ray.get([actor.apply_rank_weights.remote(payload, kind)
+                                for actor, payload in zip(pool, payloads)])
+            if received != inventories:
+                raise RuntimeError(f"Inference weights differ after {kind} sync")
+        else:
+            group = {"policy": "broadcast_actor", "reward": "broadcast_reward", "ctrl": "broadcast_ctrl"}[kind]
+            send = trainer_group[0].broadcast_weights.remote(group)
+            ray.get([send] + [actor.receive_and_update_weights.remote(group) for actor in pool])
 
-    # 广播 Reward Model 权重
-    broadcast_task = trainer_group[0].broadcast_weights.remote("broadcast_reward")
-    receive_tasks = [inf.receive_and_update_weights.remote("broadcast_reward") for inf in reward_inference_pool]
-    ray.get([broadcast_task] + receive_tasks)
-    print("Reward Model 初始权重已广播。")
-
-    # 广播 Ctrl-World 可训练权重
-    broadcast_task = trainer_group[0].broadcast_weights.remote("broadcast_ctrl")
-    receive_tasks = [
-        inf.receive_and_update_weights.remote("broadcast_ctrl")
-        for inf in ctrl_world_inference_pool
-    ]
-    ray.get([broadcast_task] + receive_tasks)
-    print("Ctrl-World 初始可训练权重已广播。")
+    for kind, pool in (("policy", inference_pool), ("reward", reward_inference_pool),
+                       ("ctrl", ctrl_world_inference_pool)):
+        sync_model(kind, pool)
+    states = ray.get([trainer.get_training_state.remote() for trainer in all_trainers])
+    if split_training:
+        validate_split_owners(states, bindings)
+    print("[Training topology] " + json.dumps(states, ensure_ascii=False), flush=True)
+    if args.gpu_layout == DUAL_LAYOUT:
+        print("[Independent inference queues] " + json.dumps(ray.get(shared_inference.get_inference_owners.remote())), flush=True)
+    if args.validate_only:
+        print("VALIDATION_OK: real models loaded; GPU bindings and three initial broadcasts completed", flush=True)
+        writer.close()
+        return
 
     forward_test_tasks = [inf.forward_test.remote() for inf in inference_pool]
     ray.get(forward_test_tasks)
     print("Actor 推理器前向测试完成 (广播后)。")
 
+    snapshot_dir = os.environ.get("ACCERL_FINAL_CHECKPOINT") if fixed_layout else None
+    def publish_snapshot(reason):
+        if snapshot_dir:
+            metadata = {"args": vars(args), "run_id": os.environ.get("ACCERL_RUN_ID"),
+                        "stop_policy": run_policy.metadata(),
+                        "frozen_weights": "Restore original checkpoints in args before applying snapshot"}
+            if split_training:
+                kinds = ("policy", "ctrl", "reward")
+                components = ray.get([training_groups[kind][0].export_snapshot_component.remote(kind)
+                                      for kind in kinds])
+                result = save_split_weights(dict(zip(kinds, components)), snapshot_dir,
+                                            reason=reason, metadata=metadata)
+            else:
+                result = ray.get(trainer_group[0].save_parallel_snapshot.remote(
+                    snapshot_dir, reason, metadata))
+            print("[Three-model checkpoint] " + json.dumps(result, ensure_ascii=False), flush=True)
+    publish_snapshot("initial")
+
     print("\n--- 步骤 4: 启动 Rollout Workers 进行数据收集 ---")
+    experiment = Telemetry("driver", "fill_experiment")
+    experiment.event("training_stop_policy", details={**run_policy.metadata(),
+                     "train_iters_lr_horizon": args.train_iters})
+    if split_training:
+        experiment.event("split_training_topology_validated", details={
+            "layout": SPLIT_LAYOUT, "states": states,
+            "trainer_processes": 12, "training_groups": 3, "world_size_per_group": 4,
+            "split_train_serial": split_train_serial,
+            "group_order": ["policy", "ctrl", "reward"] if split_train_serial else "concurrent"})
+        experiment.flush()
+    fill_started = time.time()
+    experiment.event("rollout_started", ts_ns=int(fill_started * 1e9),
+                     details={"layout": args.gpu_layout, "physical_gpus": args.cuda_visible_devices,
+                              "world_replicas": args.num_ctrl_inference_actors})
+    experiment.flush()
+    worker_run_refs = []
     for w in rollout_workers:
-        w.run.remote()
+        worker_run_refs.append(w.run.remote())
     for w in eval_workers:
-        w.run.remote()
+        worker_run_refs.append(w.run.remote())
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
-    min_buffer_size_for_start = args.train_batch_size * args.accumulation_steps
+    shard_factor = args.num_trainer_gpus if fixed_layout else 1
+    min_buffer_size_for_start = args.train_batch_size * args.accumulation_steps * shard_factor
     assert min_buffer_size_for_start < args.replay_capacity, "初始填充量必须小于回放池总容量"
 
     wm_min_buffer_size = max(
-        args.reward_batch_size * args.reward_accumulation_steps,
-        args.ctrl_batch_size * args.ctrl_accumulation_steps,
+        args.reward_batch_size * args.reward_accumulation_steps * shard_factor,
+        args.ctrl_batch_size * args.ctrl_accumulation_steps * shard_factor,
     )
     assert wm_min_buffer_size < args.wm_replay_capacity, "WM初始填充量必须小于WM回放池总容量"
 
+    last_fill_snapshot = -float("inf")
+    measured_twenty_minutes = False
     while True:
+        if stop_requested():
+            fill_completion_reason = run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
+                target_reached=False, requested_stop=True)
+            publish_snapshot("final_before_first_update")
+            experiment.event("experiment_completed", details={"global_step": 0, "completed_epochs": 0,
+                "run_started_ns": run_started_ns, "threshold_state": threshold_tracker.as_dict() if threshold_tracker else None,
+                "stop_reason": fill_completion_reason, "target_reached": False,
+                "stop_on_target": run_policy.stop_on_target, "until_deadline": run_policy.until_deadline,
+                "deadline_unix_seconds": run_policy.deadline_unix_seconds, "stop_policy": run_policy.metadata(),
+                "states": ray.get([trainer.get_training_state.remote() for trainer in all_trainers])})
+            experiment.close()
+            print("Scheduled stop during initial replay fill; no optimizer update completed", flush=True)
+            writer.close()
+            return
+        if time.time()-fill_started > float(os.environ.get("ACCERL_FILL_TIMEOUT_SEC","7200")):
+            raise TimeoutError("Initial replay fill exceeded configured grace period")
+        ready, _ = ray.wait(worker_run_refs, timeout=0, num_returns=1)
+        if ready:
+            ray.get(ready[0])
+            raise RuntimeError("A rollout/eval worker exited during initial replay fill")
         actor_sizes = ray.get([rb.size.remote() for rb in replay_buffers])
         wm_sizes = ray.get([rb.size.remote() for rb in wm_replay_buffers])
         actor_ready = all(size >= min_buffer_size_for_start for size in actor_sizes)
         wm_ready = all(size >= wm_min_buffer_size for size in wm_sizes)
+        fill_elapsed = time.time() - fill_started
+        at_twenty = fill_elapsed >= 1200 and not measured_twenty_minutes
+        if fill_elapsed - last_fill_snapshot >= 30 or at_twenty or (actor_ready and wm_ready):
+            experiment.event("fill_snapshot", details={
+                "elapsed_seconds": fill_elapsed, "policy_sizes": actor_sizes, "wm_sizes": wm_sizes,
+                "policy_target": min_buffer_size_for_start, "wm_target": wm_min_buffer_size,
+                "at_twenty_minutes": at_twenty, "ready": actor_ready and wm_ready})
+            experiment.flush()
+            last_fill_snapshot = fill_elapsed
+            measured_twenty_minutes = measured_twenty_minutes or at_twenty
+            writer.add_scalar("Fill/Policy_Resident", min(actor_sizes), int(fill_elapsed))
+            writer.add_scalar("Fill/WM_Resident", min(wm_sizes), int(fill_elapsed))
+            writer.flush()
 
         if actor_ready and wm_ready:
+            experiment.event("replay_ready", details={"elapsed_seconds": fill_elapsed,
+                             "policy_sizes": actor_sizes, "wm_sizes": wm_sizes})
+            experiment.flush()
             break
 
         print(
@@ -2872,48 +3745,157 @@ def main(args):
         )
         time.sleep(5)
     print("所有远程经验池已准备好，训练器将按需获取数据。")
+    if four_layout:
+        limits = ((inference_pool, 2), (ctrl_world_inference_pool, 3), (reward_inference_pool, 2))
+        ray.get([actor.set_training_batch_limit.remote(cap) for pool, cap in limits for actor in pool])
+        experiment.event("training_phase_limits", details={"policy": 2, "ctrl": 3, "reward": 2})
 
     print("\n--- 步骤 6: 开始主训练与同步循环 ---")
     start_time = time.time()
     last_log_time = time.time()
     last_log_global_step = 0
     global_step = 0
-    while global_step < args.train_iters:
+    completed_epochs = 0
+    measure_stop_epochs = int(os.environ.get("ACCERL_MEASURE_STOP_AFTER_EPOCHS", "0"))
+    nsight_windows = NsightCaptureWindows(experiment)
+    while run_policy.should_continue(global_step=global_step, train_iters=args.train_iters,
+            target_reached=target_reached, requested_stop=stop_requested(),
+            completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs):
+        ready, _ = ray.wait(worker_run_refs, timeout=0, num_returns=1)
+        if ready:
+            ray.get(ready[0])
+            raise RuntimeError("A rollout/eval worker exited unexpectedly")
         t_train_start = time.time()
-        train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
-        results = ray.get(train_tasks)
+        next_policy_step = global_step + 1
+        nsight_windows.before_epoch(next_policy_step)
+        epoch_owners = all_trainers if split_training else trainer_group
+        # Observe each rank separately so one failed rank cannot hide behind
+        # another rank blocked inside a collective or a missing data shard.
+        train_tasks = []
+        rank_results = {}
+        serial_sample_records = {}
+        deadline = time.monotonic() + float(os.environ.get("ACCERL_TRAIN_EPOCH_TIMEOUT_SEC", "3600"))
+        for group in epoch_groups(training_groups, epoch_owners, split_train_serial):
+            tasks = [trainer.run_training_epoch.remote(next_policy_step) if split_training
+                     else trainer.run_training_epoch.remote() for trainer in group]
+            train_tasks.extend(tasks)
+            pending = list(tasks)
+            while pending:
+                completed, pending = ray.wait(pending, num_returns=1, timeout=5)
+                for result_ref in completed:
+                    rank_results[result_ref] = ray.get(result_ref)
+                exited, _ = ray.wait(worker_run_refs, timeout=0, num_returns=1)
+                if exited:
+                    ray.get(exited[0])
+                    raise RuntimeError("A rollout/eval worker exited during training")
+                if time.monotonic() > deadline:
+                    raise TimeoutError("A synchronized training epoch exceeded its progress deadline")
+            if split_train_serial:
+                model = ("policy", "ctrl", "reward")[len(serial_sample_records)]
+                records = ray.get([trainer.serial_sample_identity.remote(next_policy_step) for trainer in group],
+                                  timeout=max(1.0, deadline - time.monotonic()))
+                union_due = (next_policy_step % args.ctrl_train_interval == 0
+                             or next_policy_step % args.reward_train_interval == 0)
+                local_size = (args.train_batch_size * args.accumulation_steps if model == "policy" else
+                              max(args.ctrl_batch_size * args.ctrl_accumulation_steps,
+                                  args.reward_batch_size * args.reward_accumulation_steps))
+                identity_audit = validate_sample_group(records, model, next_policy_step,
+                    args.num_trainer_gpus, local_size, required=model == "policy" or union_due)
+                serial_sample_records[model] = records
+                experiment.event("split_sample_identity_validated", details=identity_audit)
+        epoch_results = [rank_results[ref] for ref in train_tasks]
+        results = (merge_split_epoch_results(
+            epoch_results, args.num_trainer_gpus, next_policy_step,
+            args.ctrl_train_interval, args.reward_train_interval) if split_training else epoch_results)
+        rank_steps = [int(result[6]) for result in results]
+        rank_schedules = [(result[10]['trained_ctrl'], result[10]['trained_reward']) for result in results]
+        if len(set(rank_steps)) != 1 or len(set(rank_schedules)) != 1:
+            raise RuntimeError(f"Training ranks diverged: steps={rank_steps}, schedules={rank_schedules}")
+        if split_train_serial and (next_policy_step % args.ctrl_train_interval == 0
+                                   or next_policy_step % args.reward_train_interval == 0):
+            validate_shared_wm_samples(serial_sample_records["ctrl"], serial_sample_records["reward"])
+            experiment.event("split_wm_cohort_validated", details={
+                "policy_step": next_policy_step, "expected_consumers": 2 * args.num_trainer_gpus,
+                "actual_sample_ids_verified": True, "rank_shards_disjoint": True,
+                "world_reward_ordered_ids_identical": True,
+                "consumers": [{"model": kind, "rank": rank, **epoch_results[offset + rank]["wm_cohort"]}
+                              for kind, offset in (("ctrl", args.num_trainer_gpus),
+                                                   ("reward", 2 * args.num_trainer_gpus))
+                              for rank in range(args.num_trainer_gpus)]})
+            experiment.flush()
+        nsight_windows.after_epoch(next_policy_step)
         _, _, _, _, _, _, global_step, _, _, _, wm_metrics = results[0]
+        wm_metrics = combine_wm_metrics([result[10] for result in results])
         train_time = time.time() - t_train_start
 
         # ============ 权重同步 ============
         t_sync_start = time.time()
 
-        # 同步 Actor 权重（每次都同步）
-        broadcast_task = trainer_group[0].broadcast_weights.remote("broadcast_actor")
-        receive_tasks = [inf.receive_and_update_weights.remote("broadcast_actor") for inf in inference_pool]
-        ray.get([broadcast_task] + receive_tasks)
-
-        # 同步 Reward Model 权重（只在训练时同步）
-        print(f"trained_reward: {wm_metrics['trained_reward']}")
+        sync_model("policy", inference_pool)
         if wm_metrics.get("trained_reward", False):
-            broadcast_task = trainer_group[0].broadcast_weights.remote("broadcast_reward")
-            receive_tasks = [inf.receive_and_update_weights.remote("broadcast_reward") for inf in reward_inference_pool]
-            ray.get([broadcast_task] + receive_tasks)
-
-        # 同步 Ctrl-World 权重（只在训练时同步）
+            sync_model("reward", reward_inference_pool)
         if wm_metrics.get("trained_ctrl", False):
-            broadcast_task = trainer_group[0].broadcast_weights.remote("broadcast_ctrl")
-            receive_tasks = [
-                inf.receive_and_update_weights.remote("broadcast_ctrl")
-                for inf in ctrl_world_inference_pool
-            ]
-            ray.get([broadcast_task] + receive_tasks)
+            sync_model("ctrl", ctrl_world_inference_pool)
 
         sync_time = time.time() - t_sync_start
+        completed_epochs += 1
+        experiment.event("synchronized_epoch_completed", details={
+            "completed_epochs": completed_epochs, "global_step": global_step, "rank_steps": rank_steps,
+            "trained_ctrl": wm_metrics.get("trained_ctrl", False),
+            "trained_reward": wm_metrics.get("trained_reward", False),
+            "train_seconds": train_time, "sync_seconds": sync_time,
+            "elapsed_from_rollout_seconds": time.time() - fill_started})
+        experiment.flush()
+
+        epoch_stats = None
+        if threshold_tracker is not None:
+            epoch_stats = ray.get(stats_actor.get_stats.remote())
+            evaluation = epoch_stats["_global_eval_"]
+            watermark = int(evaluation["total_episodes_processed"])
+            fresh = evaluation_milestones.observe_watermark(watermark)
+            evaluation_ns = int(evaluation["snapshot_completed_ns"])
+            decision = threshold_tracker.update(
+                completed_epochs, float(evaluation["avg_return"]), evaluation_ns,
+                int(evaluation["window_episodes"]), int(global_step), fresh_count=fresh,
+                evaluation_watermark=watermark,
+                metadata={"metric_tag": "Eval/_Global/Average_Return",
+                          "scope": "original_task0_rolling_window",
+                          "snapshot_completed_ns": evaluation_ns,
+                          "latest_episode_completed_ns": evaluation["latest_episode_completed_ns"],
+                          "latest_episode_policy_versions": evaluation["latest_episode_policy_versions"],
+                          "rolling_window_can_span_policy_versions": True})
+            threshold_state = threshold_tracker.as_dict()
+            experiment.event("evaluation_threshold", ts_ns=evaluation_ns, details={
+                "state": threshold_state, "decision": decision, "snapshot_completed_ns": evaluation_ns,
+                "latest_episode_completed_ns": evaluation["latest_episode_completed_ns"],
+                "total_episodes": watermark, "fresh_episodes": fresh,
+                "live_evaluation_watermark": evaluation_milestones.last_watermark,
+                "rate": float(evaluation["avg_return"]), "policy_step": int(global_step)})
+            walltime = evaluation_ns / 1e9
+            writer.add_scalar("Eval/_Global/Average_Return", evaluation["avg_return"], global_step, walltime=walltime)
+            writer.add_scalar("Eval/Target85/Window_Episodes", evaluation["window_episodes"], global_step, walltime=walltime)
+            writer.add_scalar("Eval/Target85/New_Completed_Episodes", fresh, global_step, walltime=walltime)
+            writer.add_scalar("Eval/Target85/Consecutive_Qualified", threshold_tracker.streak, global_step, walltime=walltime)
+            writer.add_scalar("Eval/Target85/Threshold", threshold_tracker.target, global_step, walltime=walltime)
+            milestones = evaluation_milestones.new_marks(threshold_tracker)
+            for label, milestone in milestones:
+                writer.add_scalar(f"TimeTo85/{label}_Elapsed_Seconds", milestone["elapsed_seconds"],
+                                  global_step, walltime=milestone["completed_ns"] / 1e9, double_precision=True)
+                writer.add_scalar(f"TimeTo85/{label}_Completion_Unix_Seconds", milestone["completed_ns"] / 1e9,
+                                  global_step, walltime=milestone["completed_ns"] / 1e9, double_precision=True)
+            target_reached = threshold_tracker.should_stop
+            if evaluation_milestones.announce_target(target_reached):
+                experiment.event("accuracy_target_reached", ts_ns=evaluation_ns, details={
+                    "state": threshold_state, "global_step": int(global_step),
+                    "stop_policy": run_policy.metadata(),
+                    "reason": "consecutive_eval_85", "tensorboard_dir": str(Path(log_dir).resolve())})
+                print("[85% target completed] " + json.dumps(threshold_state, ensure_ascii=False), flush=True)
+            experiment.flush()
+            writer.flush()
 
         # Ctrl-World prediction quality eval (after latest weight sync)
         if (
-            args.ctrl_eval_interval > 0
+            not run_policy.target_stop_active(target_reached) and args.ctrl_eval_interval > 0
             and global_step > 0
             and global_step % args.ctrl_eval_interval == 0
         ):
@@ -2999,12 +3981,16 @@ def main(args):
                 print(f"[CtrlEval] failed at step={global_step}: {e}", flush=True)
                 traceback.print_exc()
 
-        if global_step > 0 and global_step % args.ckpt_every_steps == 0:
+        if os.environ.get("ACCERL_CAPTURE_ONLY") != "1" and global_step > 0 and global_step % args.ckpt_every_steps == 0:
             ray.get(trainer_group[0].save_agent.remote(args.ckpt_dir, global_step))
+
+        snapshot_interval = int(os.environ.get("ACCERL_SNAPSHOT_INTERVAL", "25"))
+        if not run_policy.target_stop_active(target_reached) and snapshot_dir and snapshot_interval > 0 and global_step % snapshot_interval == 0:
+            publish_snapshot("periodic")
 
         current_time = time.time()
         if current_time - last_log_time > args.log_interval_seconds:
-            all_stats = ray.get(stats_actor.get_stats.remote())
+            all_stats = epoch_stats if epoch_stats is not None else ray.get(stats_actor.get_stats.remote())
 
             elapsed_log_time = current_time - last_log_time
             steps_since_last_log = global_step - last_log_global_step
@@ -3027,7 +4013,7 @@ def main(args):
 
             total_losses, p_losses, v_losses, e_losses, kl_losses, lrs_list, _, ents, avg_kl_divs, perf_metrics_list, wm_metrics_list = zip(*results)
             current_lrs = lrs_list[0]
-            wm_metrics = wm_metrics_list[0]
+            wm_metrics = combine_wm_metrics(wm_metrics_list)
 
             elapsed_time = current_time - start_time
             total_buffer_size = sum(ray.get([rb.size.remote() for rb in replay_buffers]))
@@ -3115,6 +4101,10 @@ def main(args):
             writer.add_scalar('Performance/policy_train_time', avg_policy_train_time, global_step)
             writer.add_scalar('Performance/wm_sample_time', avg_wm_sample_time, global_step)
             writer.add_scalar('Performance/wm_prep_time', avg_wm_prep_time, global_step)
+            writer.add_scalar('Performance/policy_batch_wait_time',
+                              np.mean([pm.get("policy_batch_wait_time", 0.0) for pm in perf_metrics_list]), global_step)
+            writer.add_scalar('Performance/wm_batch_wait_time',
+                              np.mean([pm.get("wm_batch_wait_time", 0.0) for pm in perf_metrics_list]), global_step)
 
             reward_times = [pm.get("reward_train_time") for pm in perf_metrics_list if "reward_train_time" in pm]
             if reward_times:
@@ -3130,7 +4120,8 @@ def main(args):
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
             writer.add_scalar('Rollout/_Global/Average_Imagine_Reward', global_stats.get("avg_imagine_reward", 0.0), global_step)
-            writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
+            if threshold_tracker is None:
+                writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
             writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
 
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
@@ -3165,10 +4156,52 @@ def main(args):
             last_log_time = current_time
             last_log_global_step = global_step
 
-    print(f"\n成功完成 {args.train_iters} 次训练与同步循环！")
+    completion_reason = run_policy.stop_reason(global_step=global_step, train_iters=args.train_iters,
+        target_reached=target_reached, requested_stop=stop_requested(),
+        completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs)
+    nsight_windows.close()
+    publish_snapshot("final")
+    experiment.event("experiment_completed", details={"global_step": global_step,
+                     "completed_epochs": completed_epochs,
+                     "run_started_ns": run_started_ns,
+                     "threshold_state": threshold_tracker.as_dict() if threshold_tracker else None,
+                     "stop_reason": completion_reason, "target_reached": bool(target_reached),
+                     "stop_on_target": run_policy.stop_on_target, "until_deadline": run_policy.until_deadline,
+                     "deadline_unix_seconds": run_policy.deadline_unix_seconds,
+                     "stop_policy": run_policy.metadata(),
+                     "states": ray.get([trainer.get_training_state.remote() for trainer in all_trainers])})
+    experiment.close()
+    print(f"\n完成 {global_step} 次训练与同步循环；scheduled_stop={stop_requested()}", flush=True)
     writer.close()
     ray.shutdown()
 
+
+
+class CaptureSummaryWriter:
+    """One metric stream, optionally mirrored to a standard TensorBoard run."""
+    def __init__(self, path, tensorboard=False):
+        import hashlib
+        self.tensorboard = SummaryWriter(path, flush_secs=5) if tensorboard else None
+        self.telemetry = Telemetry("driver", "metrics")
+        self.telemetry.config({"args": vars(args), "source": __file__, "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "cwd": os.getcwd(), "python": sys.executable, "torch": torch.__version__, "ray": ray.__version__, "module_paths": {key: getattr(sys.modules.get(key),"__file__",None) for key in ("rl","prismatic","ctrl_world","libero")}})
+    def add_scalar(self, tag, value, step, walltime=None, double_precision=False):
+        self.telemetry.event("metric", tag=tag, value=float(value), step=int(step),
+                             **({"ts_ns": int(walltime * 1e9)} if walltime is not None else {}))
+        if self.tensorboard is not None:
+            self.tensorboard.add_scalar(tag, value, step, walltime=walltime,
+                                        new_style=double_precision, double_precision=double_precision)
+    def flush(self):
+        self.telemetry.flush()
+        if self.tensorboard is not None:
+            self.tensorboard.flush()
+    def close(self):
+        self.telemetry.close()
+        if self.tensorboard is not None:
+            self.tensorboard.close()
+
+if os.environ.get("ACCERL_TELEMETRY_DB"):
+    install_hooks(globals())
+    install_training_hooks(globals())
 
 if __name__ == "__main__":
     args = parse_args()
@@ -3178,4 +4211,7 @@ if __name__ == "__main__":
     for arg, value in vars(args).items():
         print(f"  {arg}: {value}")
     print("=" * 80)
-    main(args)
+    try:
+        main(args)
+    finally:
+        ray.shutdown()

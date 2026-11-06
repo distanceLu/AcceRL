@@ -1,0 +1,43 @@
+{
+  "configuration": "C:\\Users\\27640\\Downloads\\AcceRL\\world_backends_v1\\examples\\ctrl_external.json",
+  "service_plan": {
+    "backend": "ctrl",
+    "reward_provider": "external_vlm",
+    "world_kind": "ctrl",
+    "world_size": 4,
+    "trainer_kinds": [
+      "policy",
+      "ctrl",
+      "reward"
+    ],
+    "inference_kinds": [
+      "policy",
+      "ctrl",
+      "reward"
+    ],
+    "wm_consumers": [
+      "ctrl",
+      "reward"
+    ],
+    "expected_wm_consumers": 8,
+    "gpu_model_processes_per_card": 6,
+    "expected_gpu_model_processes": 24,
+    "logical_update_ratio": "5:1:1",
+    "checkpoint_kinds": [
+      "policy",
+      "ctrl",
+      "reward"
+    ],
+    "publication_kinds": [
+      "policy",
+      "ctrl",
+      "reward"
+    ]
+  },
+  "configuration_admitted": true,
+  "assets_checked": false,
+  "real_model_loaded": false,
+  "gpu_validated": false,
+  "errors": [],
+  "status": "cpu_configuration_checked_only"
+}

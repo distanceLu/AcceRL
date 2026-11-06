@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "enabled": true,
+  "weights": {
+    "policy_train": 1.0,
+    "world_train": 1.0,
+    "policy_infer": 1.0,
+    "world_infer": 1.0
+  },
+  "class_weights": {
+    "real": 1.0,
+    "imagined": 1.0,
+    "refresh": 1.0,
+    "eval": 1.0
+  },
+  "refresh_micro": 2,
+  "action_micro": 2,
+  "max_pending": 4096,
+  "card_inflight": 2,
+  "training_gangs": 1,
+  "macro_enabled": true,
+  "allow_probe": true,
+  "controller": {
+    "cooldown_seconds": 60.0,
+    "max_l1_change": 0.5,
+    "search_step": 0.25,
+    "beta_seconds_per_weight": 5.0,
+    "min_response_samples": 2,
+    "response_max_age_seconds": 3600.0
+  },
+  "initial_unit_costs": {
+    "policy_train:policy_zero2:micro8:gas18:global576": 262.0,
+    "policy_train:policy_zero2:micro4:gas36:global576": 340.0,
+    "world_train:native_ddp:micro4:gas64:global1024": 806.0,
+    "world_infer:generate_chunk": 4.0,
+    "policy_infer:real:batch1": 0.3,
+    "policy_infer:real:batch2": 0.3,
+    "policy_infer:imagined:batch1": 0.3,
+    "policy_infer:imagined:batch2": 0.3,
+    "policy_infer:refresh:batch1": 0.3,
+    "policy_infer:refresh:batch2": 0.3,
+    "policy_infer:eval:batch1": 0.3,
+    "policy_infer:eval:batch2": 0.3,
+    "world_infer:init_context": 0.4,
+    "policy_infer:refresh:batch3": 0.25,
+    "policy_infer:refresh:batch4": 0.25,
+    "policy_infer:refresh:batch5": 0.25,
+    "policy_infer:refresh:batch6": 0.25,
+    "policy_infer:refresh:batch7": 0.25,
+    "policy_infer:refresh:batch8": 0.25
+  },
+  "probe_min_cycles": 2,
+  "execution": {
+    "parent_policy_budget": true,
+    "authoritative_production": true,
+    "refresh_lease_micros": 4,
+    "refresh_lease_seconds": 0.8,
+    "refresh_trim": "legacy",
+    "dependency_priority": false,
+    "action_wait_seconds": 1.0
+  }
+}

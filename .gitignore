@@ -144,3 +144,10 @@ test/
 
 !test/openvla_realworldd/
 !test/openvla_realworldd/**
+
+# Local WEAVER resources and runs
+/.weaver.env
+/.weaver-deps/
+/.venv-*/
+/.weaver-runs/
+/assets/

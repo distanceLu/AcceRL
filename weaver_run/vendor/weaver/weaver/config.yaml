@@ -1,0 +1,132 @@
+defaults:
+
+  scratch_dir: './scratch/WEAVER/'
+  horizon: 8
+  eval_horizon: 8
+  eval_video_frames: 50
+  eval_bootstrap: 5
+  n_history: 2
+  n_memory_frames: 6    # number of sparse memory frames (0 = disabled)
+  t_memory: 5           # temporal stride between memory frames
+  use_precomputed_features: True
+  use_wandb: False
+  exp_name: 'wm_pretrain'
+  log_freq: 100
+  save_model: True
+  ckpt_freq: 5000
+  video_log_freq: 25000
+  valid_log_freq: 25000
+  resume: True
+  use_compile: True
+  use_activation_checkpointing: True
+  cpu_offload: False
+  finetune: False
+  eval_one_shot_chunk: True
+
+  finetune_cfg:
+    batch_size: 8
+    max_steps: 25000
+    max_lr: 0.00002
+    min_lr: 0.00002
+    warmup_steps: 100
+    weight_decay: 0.01
+    betas: [0.9, 0.99]
+    gradient_accumulation_steps: 1
+
+  posttrain_cfg:
+    batch_size: 8
+    max_steps: 4000
+    max_lr: 0.00002
+    min_lr: 0.00002
+    warmup_steps: 100
+    weight_decay: 0.01
+    betas: [0.9, 0.99]
+    gradient_accumulation_steps: 1
+
+  wandb:
+    project: 'weaver'
+    entity: 'world_model_team'
+
+  experiment:
+    name: weaver_exp
+    seed: 42
+
+  dataset:
+    name: DROID
+    path: /data/droid
+    n_workers: 10
+    n_states: 8
+    n_actions: 8
+    relabel_actions: True
+    normalize: True
+    norm_stats_path: null
+    annotation_dir: annotation_rewards
+    reward_key: reward_progress
+    negative_reward: True
+    sample_aux_from_left_right: False
+    collapse_prob: 0.1    # probability of collapsing history + memory frames to current frame t
+    subdirs: ''
+    img_keys: [
+      'wrist_left',
+      'exterior_1_left'
+    ]
+    image_size: [192, 320]
+
+  model:
+    n_embed: 1536
+    n_layers: 32
+    n_heads: 16
+    n_latent: 768
+    n_spatial: 1
+    qk_norm: True
+    train_steps: 1000
+    val_steps: 16
+    n_hidden: 512
+    loss_target: 'v-pred'
+    use_linear_proj: True
+    rectified_gt_loss_coeff: 0.1
+    use_temporal_loss: False
+    temporal_loss_coeff: 0.1
+    rm_loss_coeff: 1.0
+    critic_loss_coeff: 1.0
+    discount_factor: 0.995
+    gae_lambda: 0.95
+    history_noise_std: 0.1  # std of Gaussian noise added to history/memory frame latents during training (0 = disabled)
+    diff_forcing: True
+    # SPRINT: Sparse spatial attention for efficiency
+    # Patch grid is computed automatically from image_size and im_encoder.spatial_size
+    use_sprint: True
+    sprint_drop_ratio: 0.5        # Fraction of image patches to drop (0.5 = keep 50%)
+    sprint_encoder_blocks: 2      # First N blocks are dense (encoder)
+    sprint_decoder_blocks: 2      # Last N blocks are dense (decoder)
+    path_drop_prob: 0.05          # Probability to drop entire sparse path during training
+    loss_scale:
+      states: 0.1
+      reward_l2: 0.5
+
+  inference:
+    pyramid_schedule: 'linear'        # 'linear', 'cosine', 'power', or 'sigmoid'
+    pyramid_stagger_width: 1          # frames offset per step (0 = lockstep, 1 = default pyramid)
+    pyramid_schedule_power: 0.5       # for 'power' schedule: <1 = more steps near clean, >1 = more near noisy
+    pyramid_schedule_steepness: 5.0   # for 'sigmoid' schedule: controls transition sharpness
+    pyramid_schedule_center: 0.5      # for 'sigmoid' schedule: where transition is centered
+
+  training:
+    batch_size: 8
+    max_lr: 0.0001
+    min_lr: 0.0001
+    max_steps: 2500000
+    warmup_steps: 10000
+    gradient_accumulation_steps: 1
+    weight_decay: 0.01          # AdamW weight decay (0.0-0.1, lower for flow matching)
+    betas: [0.9, 0.99]          # AdamW betas (beta1, beta2)
+
+  im_encoder:
+    # name: 'stabilityai/stable-video-diffusion-img2vid'
+    name: 'stabilityai/stable-diffusion-3-medium-diffusers'
+    freeze: True
+    spatial_size: 2  # SVD spatial pooling factor (4 → 60 patches for 192x320, 2 → 240 patches)
+
+debug:
+  training:
+    max_steps: 2500
