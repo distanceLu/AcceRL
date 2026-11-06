@@ -108,4 +108,4 @@ echo "Online WEAVER initialized3200 + Policy ZeRO2 + Reward FSDP2 + existing MPS
 
 # Use the same checked-in argv and base imports as the portable entry.
 export PYTHONPATH="$FSDP_SOURCE/..:$PYTHONPATH:$FSDP_SOURCE/../vendor/ctrl"
-/mnt/data/lcx3/envs/merged-env/bin/python -B -c 'from launch import exec_managed_driver; exec_managed_driver()'
+/mnt/data/lcx3/envs/merged-env/bin/python -B -c 'import sys; from launch import exec_managed_driver; exec_managed_driver(sys.argv[1:])' "$@"

@@ -196,6 +196,7 @@ def start(profile,label):
     else:
         require(lookup("weaver-run-"+label) is None,"该提交编号已有其他记录")
         ready()
+        require(CHECKOUT==(HOME/"code").resolve(), "Start new runs from the maintained WEAVER/code checkout.")
         pin_worktree(CHECKOUT, RUNTIME, revision(CHECKOUT))
         with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".staging-") as staging:
             staged=Path(staging)/"output"
@@ -267,7 +268,7 @@ def stop(record,job):
 
 def main():
     p=argparse.ArgumentParser(prog="./run.sh",description="WEAVER GPU4–7 | 无参数启动 restore；check 只做 CPU 验收",
-        epilog="./run.sh  |  ./run.sh list  |  ./run.sh check restore  |  ./run.sh fixed --id trial01  |  ./run.sh status  |  ./run.sh stop")
+        epilog="./run.sh  |  ./run.sh list  |  ./run.sh check restore  |  ./run.sh original --id trial01  |  ./run.sh status  |  ./run.sh stop")
     p.add_argument("args",nargs="*",metavar="动作或配置")
     p.add_argument("--id",dest="label",help="自定义实验名；重试时使用相同名字")
     opts=p.parse_args()
@@ -275,7 +276,7 @@ def main():
     action=args.pop(0) if args and args[0] in ("list","check","start","status","stop") else "start"
     profile=args.pop(0) if args else "restore"
     profile="restore" if profile=="original" else profile
-    if profile not in PROFILES or action=="list" or profile=="all":
+    if action=="check" and profile not in PROFILES and profile!="all":
         os.execv(PYTHON,[PYTHON,"-I","-B",str(LEGACY_CLI),*sys.argv[1:]])
     if args or (profile not in PROFILES and not (action=="check" and profile=="all")):
         p.error("未知配置或多余参数，使用 ./run.sh list")

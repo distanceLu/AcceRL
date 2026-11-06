@@ -381,8 +381,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),'--exp-name',
-                'OpenVLA_IntegratedWEAVER_PolicyWorldRM_Real1_Imag4_Budget1M_Manual_gpu47_fresh'],
+            child=subprocess.Popen(['bash',str(SOURCE/'run.sh')],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
             state['minimum_child_birth_ticks']=state['child']['birth_ticks']

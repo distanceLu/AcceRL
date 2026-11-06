@@ -130,12 +130,12 @@ def expand(data, values):
     return data
 
 
-def exec_managed_driver():
+def exec_managed_driver(overrides=()):
     """Start the real trainer after the site supervisor has set its run identity and paths."""
     values=dict(settings(), ids="4,5,6,7", world=os.environ["ACCERL_WORLD_BACKEND_CONFIG"],
                 pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
-    argv=expand(read(RECIPE/"argv.json"),values)
+    argv=expand(read(RECIPE/"argv.json"),values) + list(overrides)
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
     # TensorBoard consumers on this host already watch the original runs directory.
