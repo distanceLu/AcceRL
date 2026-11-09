@@ -37,6 +37,27 @@ cp .weaver.env.example .weaver.env
 
 在普通服务器上，训练由当前终端的前台 supervisor 管理，长训可在 tmux 或批作业中运行。默认输出在 `.weaver-runs/<实验名>/`，通过 `WEAVER_OUTPUTS` 可换盘。日志为 `train.log`，TensorBoard 事件在 `runs/Libero/`，Policy 与 World 权重在 `checkpoints/`。普通服务器入口仍跳过单独的最终评估。在原实验服务器上，启动、查询和停止走已有队列；本次开启保存退出后的四卡固定评估，初始/最终Policy各greedy/stochastic、各50初态共200回合，每回合最多220动作。训练中的10个Eval worker沿用橙线设置。
 
+## 训练仿真、想象轨迹与评估回放
+
+新任务自动抽样记录两路相机，通过同一入口打开只读观察台：
+
+```bash
+./run.sh view --id exp1 --port 8765
+# 原服务器：cd /mnt/data/lcx1/dong/WEAVER 后使用同一命令
+# 也可明确选择已有实验输出：
+./run.sh view --root /absolute/path/to/experiment --port 8765
+```
+
+在 VS Code 的 Ports 面板转发服务器的 `8765` 端口，然后打开 `http://127.0.0.1:8765`。观察台仅监听服务器回环地址；结束观察台不会停止训练。录像写入实验目录的 `visualization/`，独立于 TensorBoard。已运行的旧进程不会自动加载新录像代码，旧日志没有保存的图像不能补造。
+
+- **训练仿真**：全景/腕部相机、实际动作位置、服务版本、环境奖励；150 动作预算提前截断标为未知结果。
+- **想象轨迹**：真实起始画面及 WM 已输出的决策边界图像、Policy/World 版本、RM 分数、预测奖励和丢弃原因。默认不额外解码，中间帧不补造；RM 分数不是已校准的成功概率。
+- **评估回放**：在线或冻结 checkpoint 的视频，按初态、成功/失败、greedy/stochastic、任务或 checkpoint 搜索。抽样录像不能用于重新计算总体成功率。
+
+抽样和保留策略在 `weaver_run/recipe/visualization.json`，每次启动复制到实验记录。默认每个 worker 首条及之后每20条真实/评估 episode、每100条想象 seed 录一次，仿真每2动作取一帧、上限128帧，末状态保留；每4秒最多发布一张最新抽样画面。每个生产者保留最多12条/64MiB视频和元数据，不是整机硬磁盘配额。帧上限达到后会记录时间缺口。设置 `enabled:false` 可对后续任务关闭。
+
+CPU 后台队列深度2、单编码器线程，满时只跳过预览。仅复制已有 CPU 图像，不增加模型前向、训练 RPC 或 CUDA 同步，不保留训练计算图/IPC 引用。CPU转换、复制和写盘仍有成本，尚未用长训证明吞吐不变。控制环境已有 `imageio-ffmpeg==0.6.0` 依赖；缺失时显示错误且保留 JPEG 预览，不阻止训练。最近画面的时间戳和编码错误在页面中可见，画面陈旧不等于训练停止。
+
 ## 复现口径
 
 2026-11-09按用户选择恢复橙线 `weaverintegrated_1030_181824_cf621e5b` 的算法实现：共享推理池current-critic刷新、batch优势归一化、独立chunk抽样、单训练组准入和原03_adaptive调度。每个 Policy batch 有144个真实chunk和432个想象chunk，Policy/World global batch为576/1024，每5次Policy更新配1次World更新。学习配方唯一新增变量是采集150动作预算；150步未成功按budget censor处理，Policy bootstrap，RM标签mask为0，World仍可训练已观察前缀。正式任务失败仍以220步为界。详细变更见[采集预算实验](docs/collection150.md)。

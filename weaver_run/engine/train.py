@@ -1047,6 +1047,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         return run_producer(self)
 
     def get_one_episode(self):
+        import visualization as visual_preview
         obs_list, reward_list, done_list = [], [], []
         action_env_list = []
         terminated_frames, truncated_frames, success_frames = [False], [False], [False]
@@ -1063,6 +1064,10 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.collection_metadata = dict(info) if assigned is not None else {}
         self.collection_policy_versions = set()
         self.collection_started_ns = time.time_ns()
+        preview = visual_preview.begin('real', self.wid, self.capture_episode_id,
+            task=self.task_description, deterministic=False,
+            **visual_preview.env_metadata(self.env, info))
+        preview.add(obs, 0)
         if self.world_config.backend == "weaver":
             if not math.isclose(environment_dt(self.env), self.world_config.schema["dt_seconds"], rel_tol=1e-6):
                 raise ValueError("Live environment timestep differs from the WEAVER checkpoint schema")
@@ -1100,6 +1105,8 @@ class RolloutWorkerActor(BaseWorkerActor):
                 reward_sum += r
                 chunk_reward += r * self.reward_scale
                 step_count_total += 1
+                preview.add(nxt, step_count_total, force=bool(term or trunc),
+                            policy_version=version, reward=float(r))
                 if term or trunc:
                     done = True; break
             real_group = lineage_end(self)
@@ -1121,6 +1128,9 @@ class RolloutWorkerActor(BaseWorkerActor):
                 success = float(info.get('is_success', 0.0))
                 budget_cut = bool(assigned is not None and trunc and not term and
                     assigned['max_action_steps'] < self.collection_metadata['task_action_horizon'])
+                preview.finish(success=None if budget_cut else bool(success), budget_censored=budget_cut,
+                    terminated=bool(term), truncated=bool(trunc), action_steps=step_count_total,
+                    episode_return=float(reward_sum), policy_versions=sorted(self.collection_policy_versions))
                 if assigned is not None:
                     self.collection_metadata.update(
                         termination_reason='success' if term else 'real_env_budget' if budget_cut else 'task_horizon',
@@ -1357,6 +1367,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
         return obs, info
 
     def run(self):
+        import visualization as visual_preview
         try:
             self.capture_episode_count = getattr(self,"capture_episode_count",0)+1
             current_seed = (int(os.environ["ACCERL_SEED"])+50000000+self.wid*1000000+self.capture_episode_count) if os.environ.get("ACCERL_SEED") else int(time.time()*1000)+os.getpid()+random.randint(0,10000)
@@ -1365,6 +1376,10 @@ class EvaluationWorkerActor(BaseWorkerActor):
             while True:
                 reward_sum, time_start, step_count_total, done = 0.0, time.time(), 0, False
                 episode_policy_versions = set()
+                preview = visual_preview.begin('evaluation', self.wid, self.capture_episode_id,
+                    task=self.task_description, deterministic=True, evaluation_kind='online_cross_version',
+                    **visual_preview.env_metadata(self.env, info))
+                preview.add(obs, 0)
                 while not done:
                     inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
                     _, action_env, _, _, _ = profile_rpc(self, 'policy_infer', self.infer, 'request', inputs_t, deterministic=True, _capture_context={'workflow': 'evaluation'})
@@ -1373,10 +1388,15 @@ class EvaluationWorkerActor(BaseWorkerActor):
                         single_action = action_env[i]
                         obs, r, term, trunc, info = self.env.step(single_action)
                         reward_sum += r; step_count_total += 1
+                        preview.add(obs, step_count_total, force=bool(term or trunc),
+                            policy_version=int(self.capture_last_versions.get('policy', -1)), reward=float(r))
                         if term or trunc: done = True; break
                 completed_ns = now_ns()
                 step_time = (time.time() - time_start) / max(step_count_total, 1)
                 success = float(info.get('is_success', 0.0))
+                preview.finish(success=bool(success), terminated=bool(term), truncated=bool(trunc),
+                    action_steps=step_count_total, episode_return=float(reward_sum),
+                    policy_versions=sorted(episode_policy_versions))
                 self.stats_actor.add_episode_return.remote(
                     f"eval_{self.current_env_name}", reward_sum, step_time,
                     step_count_total, success, actor_id=None, step_num=step_count_total,

@@ -154,6 +154,10 @@ class FullWorkerLoopTests(unittest.TestCase):
         for name in ("_process_traj", "predict_rew_end", "obs2inp", "_obs_to_views"):
             setattr(Worker, name, namespace[name])
         worker = Worker()
+        # The production method now explicitly reads FRESH configuration. These
+        # legacy-loop fixtures intentionally exercise the disabled FRESH path.
+        from fresh_config import FreshConfig
+        worker.fresh_config = FreshConfig()
         worker.world_config, worker.num_step_cond, worker.num_policy_chunks = config, 2, 2
         worker.ctrl_world_infer_stride = 2
         worker.real_traj_collect_interval, worker.wid = 1, 0

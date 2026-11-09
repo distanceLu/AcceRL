@@ -129,6 +129,7 @@ def imagine_weaver_seed(worker, job):
 
 
 def _imagine_weaver_seed_owned(worker, job, state_owner):
+    import visualization as visual_preview
     import numpy as np
     import torch
     from capture_hooks import profile_rpc, lineage_begin, lineage_end, lineage_frame_parent
@@ -183,6 +184,13 @@ def _imagine_weaver_seed_owned(worker, job, state_owner):
                         else worker.predict_rew_end(last_observation, task_description)[0])
     prefix_group = lineage_end(worker)
     end, stale = False, False
+    preview = visual_preview.begin('imagined', worker.wid, f'{episode_id}:anchor{seed_anchor}',
+        task=task_description, deterministic=False, source_episode_id=episode_id,
+        seed_anchor=seed_anchor, reward_semantics=config.reward_semantics,
+        sparse_decision_frames=True, reward_is_real_success=False,
+        preview_fps=1.0, playback_note='Sparse decision snapshots at 1 fps; see exact action indices')
+    preview.add(last_observation, 0, normalized=True, rm_score=float(last_probability))
+    preview_actions, preview_world_versions, preview_policy_versions = 0, set(), set()
     for transition in range(worker.num_policy_chunks):
         lineage_begin(worker, "imagined_transition", (prefix_group,), episode_id=episode_id,
                       seed_start=frame_start, seed_anchor=seed_anchor,
@@ -193,6 +201,9 @@ def _imagine_weaver_seed_owned(worker, job, state_owner):
             _capture_context={"workflow": "imagined_action"})
         num_imagine_samples += 1
         actions = torch.from_numpy(np.asarray(actions, dtype=np.float32))
+        preview_policy_version = getattr(worker, 'capture_last_versions', {}).get('policy')
+        if preview_policy_version is not None:
+            preview_policy_versions.add(int(preview_policy_version))
         chunk_reward = 0.
         phi_before = float(last_probability)
         served_version = state["version"]
@@ -216,12 +227,17 @@ def _imagine_weaver_seed_owned(worker, job, state_owner):
                     terminal = probability >= config.terminal_threshold
                 return probability, terminal
             external = None if integrated else external_classifier
-            reward, last_probability, end, last_observation, _, _ = consume_predicted_chunk(
+            reward, last_probability, end, last_observation, _, consumed = consume_predicted_chunk(
                 result, last_probability, worker.reward_scale, external,config.reward_semantics)
             chunk_reward += reward
             state = result["next_state"]
             state_owner[0] = state
             served_version = result["served_version"]
+            preview_actions += consumed
+            preview_world_versions.add(served_version)
+            preview.add(last_observation, preview_actions, normalized=True, force=True,
+                policy_version=preview_policy_version, world_version=served_version,
+                rm_score=float(last_probability), reward=float(reward))
             if end:
                 break
         prefix_group = lineage_end(worker)
@@ -239,6 +255,9 @@ def _imagine_weaver_seed_owned(worker, job, state_owner):
         if end:
             break
     if stale or not worker.local_buffer:
+        preview.finish(discarded=True, discard_reason='stale_version' if stale else 'empty',
+            action_steps=preview_actions, policy_versions=sorted(preview_policy_versions),
+            world_versions=sorted(preview_world_versions))
         return
     worker.capture_bootstrap_lineage = ()
     if end:
@@ -256,4 +275,7 @@ def _imagine_weaver_seed_owned(worker, job, state_owner):
             terminated=False,truncated=True,seed_anchor=seed_anchor)
     mean_reward = sum(row[2] for row in worker.local_buffer) / len(worker.local_buffer)
     worker.stats_actor.add_imagine_reward.remote(mean_reward, worker.wid, num_imagine_samples)
+    preview.finish(discarded=False, predicted_terminal=bool(end), action_steps=preview_actions,
+        policy_versions=sorted(preview_policy_versions), world_versions=sorted(preview_world_versions),
+        predicted_mean_chunk_reward=float(mean_reward))
     worker.local_buffer.clear()

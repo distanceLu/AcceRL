@@ -144,6 +144,7 @@ def exec_managed_driver(overrides=()):
 
 
 def prepare(work, ids, run_id):
+    put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
     missing=[k+"="+v for k,v in host.items() if not Path(v).exists()]
     require(not missing,"Missing local resources: "+", ".join(missing)+". See .weaver.env.example.")
@@ -260,10 +261,25 @@ def supervise(work, cmd, env, log, run_id):
 
 def main():
     parser=argparse.ArgumentParser(prog="./run.sh")
-    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status"],default="original",nargs="?")
+    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","view"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
+    parser.add_argument("--root",type=Path,help="Existing output directory (view only)")
+    parser.add_argument("--port",type=int,default=8765,help="Loopback viewer port (view only)")
     args=parser.parse_args()
     host=socket.gethostname()==REFERENCE_SERVER
+    if args.action=='view':
+        sys.path.insert(0,str(ENGINE))
+        from visualization import serve
+        if args.root:
+            work=args.root
+        else:
+            outputs=Path('/mnt/data/lcx1/dong/WEAVER/experiments') if host else Path(os.getenv('WEAVER_OUTPUTS',ROOT/'.weaver-runs'))
+            label=args.id or read(outputs/('.last.json' if host else 'last.json'))
+            require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',label),'Invalid run label')
+            work=outputs/label
+        serve(work,args.port)
+        return 0
+    require(args.root is None and args.port==8765,'--root/--port are only for view')
     if host and args.action!="check":
         op="original" if args.action in ("original","restore","start") else args.action
         cli=HERE/"reference_site/cli.py"

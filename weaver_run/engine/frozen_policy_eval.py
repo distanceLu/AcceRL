@@ -354,6 +354,7 @@ def verify_single_gpu():
 
 
 def run_episode(model, cfg, dtype, env, case, checkpoint, plan, deadline):
+    import visualization as visual_preview
     import numpy as np
     import torch
     from initial_state_env import reset_with_initial_state
@@ -368,6 +369,12 @@ def run_episode(model, cfg, dtype, env, case, checkpoint, plan, deadline):
     torch.cuda.manual_seed_all(case["action_seed"])
     steps, total_return, chunks = 0, 0.0, 0
     action_hash = hashlib.sha256()
+    preview = visual_preview.begin('evaluation', 'frozen-'+checkpoint['name']+'-'+str(os.getpid()),
+        str(case), task=env.task_description, deterministic=case['deterministic'],
+        initial_state_id=case['initial_state_id'], initial_state_hash=initial_info['initial_state_hash'],
+        checkpoint=checkpoint['name'], checkpoint_sha256=checkpoint['sha256'],
+        policy_version=checkpoint['metadata']['policy_step'], evaluation_kind='frozen_checkpoint')
+    preview.add(observation, 0)
     while True:
         check_deadline(deadline, 5)
         inputs = prepare_one_obs(cfg, model.processor, observation, env.task_description, dtype)
@@ -382,9 +389,12 @@ def run_episode(model, cfg, dtype, env, case, checkpoint, plan, deadline):
             observation, reward, terminated, truncated, info = env.step(action)
             steps += 1
             total_return += float(reward)
+            preview.add(observation, steps, force=bool(terminated or truncated), reward=float(reward))
             if terminated or truncated:
                 success = bool(info.get("is_success", False))
                 termination = "success" if success else "horizon" if truncated else "terminated_unsuccessful"
+                preview.finish(success=success, action_steps=steps, episode_return=total_return,
+                    termination=termination, terminated=bool(terminated), truncated=bool(truncated))
                 return {"protocol": PROTOCOL, "plan_sha256": plan["sha256"],
                         "checkpoint": checkpoint["name"], "checkpoint_sha256": checkpoint["sha256"],
                         "policy_version": checkpoint["metadata"]["policy_step"], **case,

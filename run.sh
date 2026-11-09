@@ -9,7 +9,7 @@ if [[ -f "$repo/.weaver.env" ]]; then
 fi
 case "${1:-start}" in
     setup) exec bash "$repo/weaver_run/setup.sh" ;;
-    -h|--help|status|stop) ;;
+    -h|--help|status|stop|view) ;;
     *)
         if [[ "$(hostname)" != h20-xyff52ab-0001 && -z "${WEAVER_CONTROL_PYTHON:-}" && ! -f "$repo/.weaver-deps/ready" ]]; then
             bash "$repo/weaver_run/setup.sh"

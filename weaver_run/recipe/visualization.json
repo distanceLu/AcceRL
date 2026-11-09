@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "real_every": 20,
+  "imagined_every": 100,
+  "evaluation_every": 20,
+  "frame_stride": 2,
+  "max_frames": 128,
+  "clips_per_producer": 12,
+  "bytes_per_producer": 67108864,
+  "live_seconds": 4
+}

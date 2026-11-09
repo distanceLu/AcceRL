@@ -105,6 +105,7 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME):
     template=json.loads((checkout/"weaver_run/recipe/world_backend_config.json").read_bytes())
     config=expand(template,dict(settings(),weaver=str(checkout/"weaver_run/vendor/weaver")))
     json_write(stage/"git-world.json",config)
+    json_write(stage/'visualization_config.json',json.loads((checkout/'weaver_run/recipe/visualization.json').read_bytes()))
     mps=(PARENT/"mps.json").read_bytes()
     require(digest(mps)==PROFILES[profile]["mps_receipt"], "MPS receipt differs")
     (stage/"mps.json").write_bytes(mps)
@@ -271,6 +272,18 @@ def stop(record,job):
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=='view':
+        p=argparse.ArgumentParser(prog='./run.sh view',description='CPU-only read-only three-view dashboard')
+        p.add_argument('--id',dest='label')
+        p.add_argument('--root',type=Path)
+        p.add_argument('--port',type=int,default=8765)
+        opts=p.parse_args(sys.argv[2:])
+        label=opts.label or (latest() if opts.root is None else None)
+        require(opts.root is not None or (label and LABEL.fullmatch(label)),'Choose an existing experiment with --id or --root')
+        sys.path.insert(0,str(CHECKOUT/'weaver_run/engine'))
+        from visualization import serve
+        serve(opts.root or EXPERIMENTS/label,opts.port)
+        return
     if len(sys.argv)>1 and sys.argv[1] in ('diagnose','diagnose-status'):
         p=argparse.ArgumentParser(prog='./run.sh '+sys.argv[1]);p.add_argument('--id',dest='label')
         opts=p.parse_args(sys.argv[2:])
