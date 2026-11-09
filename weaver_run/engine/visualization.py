@@ -143,6 +143,7 @@ class Writer:
         self.root = Path(root) / 'visualization'
         self.root.mkdir(parents=True, exist_ok=True)
         self.cfg = cfg
+        self.writer_id = str(os.getpid())+'-'+str(time.time_ns())
         self.jobs = queue.Queue(maxsize=2)
         self.errors, self.dropped, self.written = 0, 0, 0
         self.error = None
@@ -163,7 +164,7 @@ class Writer:
             return False
 
     def _health(self, directory):
-        atomic_json(directory/'health.json', dict(updated_ns=time.time_ns(), pid=os.getpid(),
+        atomic_json(directory/'health.json', dict(updated_ns=time.time_ns(), pid=os.getpid(), writer_id=self.writer_id,
                     errors=self.errors, dropped=self.dropped, written=self.written, last_error=self.error,
                     config=self.cfg, note='Preview drops/errors never fail training; counters are process-local'))
 
