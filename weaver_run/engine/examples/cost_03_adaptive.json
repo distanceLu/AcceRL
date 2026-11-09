@@ -41,22 +41,7 @@
     "policy_infer:refresh:batch2": 0.3,
     "policy_infer:eval:batch1": 0.3,
     "policy_infer:eval:batch2": 0.3,
-    "world_infer:init_context": 0.4,
-    "policy_infer:refresh:batch3": 0.25,
-    "policy_infer:refresh:batch4": 0.25,
-    "policy_infer:refresh:batch5": 0.25,
-    "policy_infer:refresh:batch6": 0.25,
-    "policy_infer:refresh:batch7": 0.25,
-    "policy_infer:refresh:batch8": 0.25
+    "world_infer:init_context": 0.4
   },
-  "probe_min_cycles": 2,
-  "execution": {
-    "parent_policy_budget": true,
-    "authoritative_production": true,
-    "refresh_lease_micros": 4,
-    "refresh_lease_seconds": 0.8,
-    "refresh_trim": "legacy",
-    "dependency_priority": false,
-    "action_wait_seconds": 1.0
-  }
+  "probe_min_cycles": 2
 }

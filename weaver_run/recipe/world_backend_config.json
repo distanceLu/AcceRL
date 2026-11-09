@@ -195,13 +195,7 @@
       "seed_scheduler_mode": "balanced",
       "seed_scheduler_seed": 20261028,
       "real_policy_replay": true,
-      "real_fraction": 0.25,
-      "jit_gae_mode": "fused",
-      "advantage_norm": "ema_zscore",
-      "advantage_ema_beta": 0.9,
-      "advantage_scale_floor": 0.001,
-      "jit_context_micro": 2,
-      "policy_sampling": "imagined_trajectories"
+      "real_fraction": 0.25
     }
   },
   "critic_mode": "disabled"

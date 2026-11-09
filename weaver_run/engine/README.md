@@ -1,3 +1,11 @@
+# Current engine: orange 1793355532 with collection budget 150
+
+Active configuration is in `../recipe/`. Task and evaluation horizon remain 220. The original shared-critic, chunk-replay, batch-normalization and single-training-gang implementation is active. Code is identified by its Git commit.
+
+The text below documents the historical November 3 candidate; its optional JIT/EMA/parallel-cycle modules are retained for history and are not enabled by the current entry. See `../../docs/collection150.md` for the active experiment.
+
+---
+
 # WEAVER：完整周期调权与双训练组并行候选
 
 当前GPU训练 `weaverintegrated_1103_145816_a9fe5a02` 保持原255文件源码冻结。

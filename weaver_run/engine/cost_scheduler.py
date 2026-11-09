@@ -373,7 +373,7 @@ class WeightedCostScheduler:
         return deepcopy(grant)
 
     def complete(self, work_id, observed_cost, *, completed_units=None,
-                 provenance="execution_wall_proxy", success=True, allow_partial=False):
+                 provenance="execution_wall_proxy", success=True):
         _identifier(work_id, "work_id"); _identifier(provenance, "provenance")
         if type(success) is not bool:
             raise ValueError("success must be bool")
@@ -383,9 +383,7 @@ class WeightedCostScheduler:
         grant = self._inflight[work_id]; item = grant.item
         units = item.units if completed_units is None and success else (0.0 if completed_units is None else completed_units)
         units = _number(units, "completed_units")
-        if type(allow_partial) is not bool or (allow_partial and not item.metadata.get('bounded_refresh_lease')):
-            raise ValueError('Partial settlement requires an explicit bounded refresh lease')
-        if units > item.units or (success and (units <= 0 or (units != item.units and not allow_partial))):
+        if units > item.units or (success and units != item.units):
             raise ValueError("Successful work must complete its full declared units")
         state = self._services[item.service]
         correction = (observed_cost-grant.estimated_cost)/grant.dispatch_weight
@@ -404,7 +402,7 @@ class WeightedCostScheduler:
             if self._replicas[item.replica] == 0:
                 del self._replicas[item.replica]
         if success:
-            self.cost_model.update(item.cost_key, observed_cost, units, provenance=provenance)
+            self.cost_model.update(item.cost_key, observed_cost, item.units, provenance=provenance)
         record = {"work_id": work_id, "service": item.service, "status": self._state[work_id],
             "cost_unit": COST_UNIT, "provenance": provenance, "estimated_cost": grant.estimated_cost,
             "observed_cost": observed_cost, "dispatch_weight": grant.dispatch_weight,

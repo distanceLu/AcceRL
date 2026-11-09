@@ -295,9 +295,6 @@ def smoke_worker(role, rank):
                         engine.publication_idle = lambda: not exporter.active
                     result = {'worker_identity': process_identity(os.getpid()), 'rank': rank,
                               'role': role, 'uuid': actual_uuid, 'torch': torch.__version__, 'run_id': run_id}
-                    if role == 'inference':
-                        from execution_gpu_probe import run as execution_probe
-                        result['execution_refresh_probe'] = execution_probe(torch)
                 elif method == 'update' and engine is not None:
                     update = values[0]
                     for policy in range(engine.policy_step + 1, update * 5 + 1):

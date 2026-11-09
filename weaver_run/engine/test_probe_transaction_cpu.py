@@ -18,7 +18,6 @@ class ProbeTransactionTests(unittest.IsolatedAsyncioTestCase):
         clock=Clock()
         cfg=load_settings(Path(__file__).parent/'examples/cost_03_adaptive.json')
         broker=CostAdmissionBroker(cfg,'probe-regression',SOURCE,clock=clock)
-        await self.authority(broker,0,0)
         await broker.update_cycle(cycle())
         for p in range(1,11):
             decision=await self.advance(broker,clock,p,100.)
@@ -31,15 +30,10 @@ class ProbeTransactionTests(unittest.IsolatedAsyncioTestCase):
         clock.advance(elapsed)
         broker.refresh_completed+=100
         broker.action_observations_completed+=1000
-        await self.authority(broker,p,p//5)
         return await broker.update_cycle(cycle(policy=p,world=p//5,
             context='joint' if (p+1)%5==0 else 'ordinary',
             completed_context='joint' if p%5==0 else 'ordinary',
             admitted={'real':p,'imagined':p*4}))
-
-    async def authority(self,broker,policy,world):
-        await broker.update_production(dict(revision=broker.production_revision+1,
-            versions=[policy,world],real_production_ready=True,imagination_ready=True))
 
     async def test_actual_3621_second_probe_expired_baseline_rolls_back_without_chaining(self):
         broker,clock=await self.make_probe()

@@ -201,8 +201,6 @@ class MacroRegressions(unittest.IsolatedAsyncioTestCase):
                 await b.publication(True)
                 await b.publication(False,policy_version=p,world_version=p//5)
                 self.assertEqual(b.weights,weights)
-            await b.update_production(dict(revision=b.production_revision+1,
-                versions=[p,p//5],real_production_ready=True,imagination_ready=True))
             d=await b.update_cycle(cycle(p,p//5,context='joint' if (p+1)%5==0 else 'ordinary',
                 completed_context='joint' if p and p%5==0 else 'ordinary',
                 admitted={'real':144*p,'imagined':432*p}))

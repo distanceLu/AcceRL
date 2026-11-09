@@ -110,10 +110,13 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME):
     (stage/"mps.json").write_bytes(mps)
     argv=["/usr/bin/env","PYTHONNOUSERSITE=1","PYTHONDONTWRITEBYTECODE=1",PYTHON,str(wrapper),
           "--source",str(source),"--root",str(root),"--git-commit",commit,
-          "--native-gpu-preflight","--skip-final-evaluation"]
+          "--native-gpu-preflight"]
     job=dict(name="WEAVER "+profile+" "+label,submission_id="weaver-run-"+label,
              cwd=str(source),argv=argv,manual=True,timeout_seconds=0)
     record=dict(schema=2,profile=profile,label=label,root=str(root),source=str(source),
+                recipe_baseline="1793355532",real_collection_action_limit=150,
+                task_action_horizon=220,final_evaluation_action_horizon=220,
+                stop_policy="explicit_user_stop_or_existing_budget_or_fault_guard",
                 git_branch=BRANCH,git_commit=commit,job=job)
     json_write(stage/"experiment.json",record)
     return record

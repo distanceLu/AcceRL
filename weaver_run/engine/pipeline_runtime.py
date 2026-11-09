@@ -14,24 +14,6 @@ import numpy as np
 
 
 class EpisodeReplayMixin:
-    def configure_production_scheduler(self, broker):
-        self.production_scheduler = broker
-        self.production_revision = 0
-        return self.production_scheduler_status()
-
-    def production_scheduler_status(self):
-        from execution_control import production_snapshot
-        return production_snapshot(self)
-
-    def _publish_production_status(self):
-        broker = getattr(self, 'production_scheduler', None)
-        if broker is not None:
-            snapshot = self.production_scheduler_status()
-            signature = {k:v for k,v in snapshot.items() if k != 'revision'}
-            if signature != getattr(self, '_last_production_signature', None):
-                self._last_production_signature = signature
-                broker.update_production.remote(snapshot)
-
     def init_pipeline(self, config, world_config, context_frames, window_frames,
                       policy_chunks_per_seed, minimum_train_windows):
         from episode_frame_store import EpisodeFrameStore
@@ -87,11 +69,6 @@ class EpisodeReplayMixin:
         writer = getattr(self, 'telemetry', None) or getattr(self, 'capture_telemetry', None)
         if writer is not None:
             writer.event(name, details=details)
-        if name in ('initial_state_assigned', 'initial_state_completed',
-                    'initial_state_cancelled', 'episode_frames_added',
-                    'imagination_lease', 'imagination_completed', 'real_env_budget_exhausted'):
-            if getattr(self, 'production_scheduler', None) is not None:
-                self._publish_production_status()
 
     def _prune_imagination_records(self):
         pinned = self.pipeline.pinned_episode_ids()
@@ -167,8 +144,6 @@ class EpisodeReplayMixin:
 
     def policy_drawn(self, global_samples):
         self.pipeline.policy_drawn(global_samples)
-        if getattr(self, 'production_scheduler', None) is not None:
-            self._publish_production_status()
         return True
 
     def _resident_frame_bytes(self):
@@ -205,8 +180,11 @@ class EpisodeReplayMixin:
         lease = self.pipeline.acquire_real(worker_id, resident_bytes=self._resident_frame_bytes())
         self._prune_imagination_records()
         if lease is not None and state_owner is not None:
+            action_limit = initial_state_pool['max_action_steps']
+            if self.pipeline_config.real_collection_action_limit is not None:
+                action_limit = min(action_limit, self.pipeline_config.real_collection_action_limit)
             state_lease = state_owner.acquire(str(worker_id),
-                max_action_steps=initial_state_pool['max_action_steps'], reset_steps=initial_state_pool['reset_steps'])
+                max_action_steps=action_limit, reset_steps=initial_state_pool['reset_steps'])
             if state_lease is None:
                 self.pipeline.cancel_real(lease['token'])
                 return None
@@ -274,31 +252,15 @@ class EpisodeReplayMixin:
                                  status=self.initial_state_scheduler.status())
         result = self.pipeline.cancel_real(token)
         self._prune_imagination_records()
-        if getattr(self, 'production_scheduler', None) is not None:
-            self._publish_production_status()
         return result
 
     def set_fresh_replay_versions(self, policy, world):
-        result = self.pipeline.set_production_versions(policy, world)
-        if getattr(self, 'production_scheduler', None) is not None:
-            self._publish_production_status()
-        return result
+        return self.pipeline.set_production_versions(policy, world)
 
     def set_fresh_replay_pressure(self, snapshot):
         if self.pipeline_stopped:
             return dict(stopped=True)
-        result = self.pipeline.set_replay_pressure(snapshot)
-        if getattr(self, 'production_scheduler', None) is not None:
-            self._publish_production_status()
-        return result
-
-    def set_fresh_lookahead(self, snapshot):
-        if self.pipeline_stopped:
-            return dict(stopped=True)
-        result = self.pipeline.set_lookahead(snapshot)
-        if getattr(self, 'production_scheduler', None) is not None:
-            self._publish_production_status()
-        return result
+        return self.pipeline.set_replay_pressure(snapshot)
 
     def acquire_imagine(self, worker_id):
         if self.pipeline_stopped:
@@ -346,8 +308,6 @@ class EpisodeReplayMixin:
             return {'stopped': True}
         result = self.pipeline.cancel_imagine(token)
         self._prune_imagination_records()
-        if getattr(self, 'production_scheduler', None) is not None:
-            self._publish_production_status()
         return result
 
     def pipeline_status(self):

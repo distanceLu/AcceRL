@@ -67,7 +67,6 @@ class InventoryBucket:
     successful_uses: int = 0
     reserved_uses: int = 0
     expires_at: float | None = None
-    sampling_unit_chunks: int = 1
 
     def __post_init__(self):
         if not isinstance(self.bucket_id, str) or not self.bucket_id:
@@ -75,10 +74,6 @@ class InventoryBucket:
         if self.source not in ('real', 'imagined'):
             raise ValueError('Inventory source must be real or imagined')
         _integer('distinct_chunks', self.distinct_chunks)
-        if (type(self.sampling_unit_chunks) is not int or self.sampling_unit_chunks not in (1,4)
-                or (self.sampling_unit_chunks != 1 and self.source != 'imagined')
-                or self.distinct_chunks % self.sampling_unit_chunks):
-            raise ValueError('Inventory must contain integral admitted sampling units')
         _integer('generation_policy_version', self.generation_policy_version)
         if self.generation_world_version is not None:
             _integer('generation_world_version', self.generation_world_version)
@@ -389,8 +384,6 @@ class CycleServiceController:
         new_sample_capacity = max(1,min(4,future_batches))
         cycle_missing_chunks = {source:max(next_missing[source],
             math.ceil(cycle_missing[source]/new_sample_capacity)) for source in ('real','imagined')}
-        imagined_unit = max((b.sampling_unit_chunks for b in snapshot.inventory if b.source == 'imagined'), default=1)
-        cycle_missing_chunks['imagined'] = imagined_unit*math.ceil(cycle_missing_chunks['imagined']/imagined_unit)
         action_work = 0.0
         action_work_known = True
         for source, multiplier in [('real',snapshot.policy_action_observations_per_real_chunk),
@@ -421,7 +414,7 @@ class CycleServiceController:
         if not any(d['next_batch_missing'].values()):
             if snapshot.current_critic_work is None or snapshot.current_critic_work > 0:
                 ready.append('policy_infer')
-            elif snapshot.phase in ('needs_batch', 'train') and d['remaining_policy_updates'] > 0 and snapshot.policy_training_units_remaining > 0:
+            elif snapshot.phase == 'train' and d['remaining_policy_updates'] > 0 and snapshot.policy_training_units_remaining > 0:
                 ready.append('policy_train')
         world_due_now = (snapshot.world_version < snapshot.policy_version//5 or
                          (d['remaining_policy_updates'] > 0 and (snapshot.policy_version+1)%5 == 0))

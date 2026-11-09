@@ -26,8 +26,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 NEW_MODULES = (
-    'test_execution_control_cpu',
-    'test_inventory_lookahead_cpu',
     'test_cost_scheduler_cpu',
     'test_collective_phase_gate_cpu',
     'test_cycle_service_controller_cpu',

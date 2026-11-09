@@ -22,38 +22,8 @@ class FreshConfig:
     seed_scheduler_seed: int = 20261028
     real_policy_replay: bool = False
     real_fraction: float = 0.25
-    jit_gae_mode: str = 'off'
-    advantage_norm: str = 'optimizer_window'
-    advantage_ema_beta: float = 0.9
-    advantage_scale_floor: float = 0.001
-    jit_context_micro: int = 2
-    policy_sampling: str = 'chunks'
 
     def __post_init__(self):
-        if self.policy_sampling not in ('chunks', 'imagined_trajectories'):
-            raise ValueError('Unknown Policy sampling protocol')
-        if self.policy_sampling == 'imagined_trajectories' and (
-                self.jit_gae_mode != 'fused' or not self.refresh_gae
-                or not self.replay_age_limits or not self.real_policy_replay
-                or self.real_fraction != .25 or self.max_policy_age != 16
-                or self.max_world_age != 3 or self.max_sample_uses != 4):
-            raise ValueError('Trajectory sampling requires fused JIT and the reviewed FRESH recipe')
-        if self.jit_gae_mode not in ('off', 'trainer_separate', 'fused'):
-            raise ValueError('Unknown JIT GAE mode')
-        if self.advantage_norm not in ('optimizer_window', 'ema_zscore', 'ema_rms'):
-            raise ValueError('Unknown advantage normalization')
-        if self.jit_gae_mode == 'off' and self.advantage_norm != 'optimizer_window':
-            raise ValueError('EMA requires trainer-owned GAE')
-        if self.jit_gae_mode != 'off' and not self.refresh_gae:
-            raise ValueError('JIT requires current-critic FRESH GAE')
-        for name in ('advantage_ema_beta', 'advantage_scale_floor'):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                raise ValueError('Invalid EMA configuration')
-        if not 0 <= self.advantage_ema_beta < 1 or self.advantage_scale_floor <= 0:
-            raise ValueError('Invalid EMA beta/scale floor')
-        if type(self.jit_context_micro) is not int or not 1 <= self.jit_context_micro <= 8:
-            raise ValueError('JIT context micro must be bounded to 1..8')
         if self.protocol != 'weaver_fresh_v1':
             raise ValueError('Unsupported FRESH protocol')
         for name in ('dense_reward', 'signal_telemetry', 'refresh_gae', 'replay_age_limits',

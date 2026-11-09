@@ -57,11 +57,6 @@ def shortage(store, count):
     for sample in store.samples.values():
         if store._eligible(sample):
             eligible[store.segments[sample['segment_id']].source] += 1
-    from trajectory_sampling import enabled, eligible_groups, GLOBAL_BATCH, UNIT
-    if enabled(store.config):
-        if count != GLOBAL_BATCH:
-            raise ValueError('Trajectory shortage requires global576')
-        eligible['imagined'] = UNIT*sum(1 for _ in eligible_groups(store))
     if store.config.real_policy_replay:
         if count < 2:
             raise ValueError('Mixed-source FRESH cohorts require at least two samples')
@@ -95,8 +90,6 @@ async def reserve_with_production_pressure(owner, count):
 
     try:
         while True:
-            from inventory_lookahead import check_health
-            check_health(owner)
             try:
                 result = store.reserve(count)
                 return result

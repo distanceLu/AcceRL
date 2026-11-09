@@ -45,7 +45,7 @@ def measurement_configuration(active_kinds=('policy', 'ctrl', 'reward')):
 
 
 
-COST_SCHEDULER_PROFILE = '03_feedback_parallel'
+COST_SCHEDULER_PROFILE = '03_adaptive'
 COST_SCHEDULER_RELATIVE = '../recipe/cost_scheduler_config.json'
 
 

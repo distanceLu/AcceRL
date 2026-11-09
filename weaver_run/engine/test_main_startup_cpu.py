@@ -58,6 +58,15 @@ def arguments(validate_only=False):
         line = line.strip()
         if line.startswith("--"):
             argv.extend(shlex.split(line.rstrip("\\").strip()))
+    if not argv:
+        # The managed launcher keeps its arguments in recipe/argv.json. These
+        # legacy three-role startup tests exercise the CTRL baseline, before
+        # the online-WEAVER overrides appended to that argument list.
+        recipe = json.loads((SOURCE.parent / "recipe" / "argv.json").read_text(encoding="utf-8"))
+        argv = recipe[:recipe.index("--world-backend-config")]
+        argv = ["4,5,6,7" if value == "@ids" else
+                "cpu_fixture_" + value[1:] if value.startswith("@") else value
+                for value in argv]
     if validate_only:
         argv.append("--validate-only")
     old = sys.argv
@@ -222,7 +231,11 @@ class Context:
         from world_backends.runtime import load_backend_config, context_geometry
         from pipeline_budget import PipelineBudgetConfig
         from world_backends.libero import validate_online_schema
+        from fresh_config import FreshConfig
+        from world_backend_runtime import isolated_online_weaver, validate_online_runtime_arguments
         space = {"load_backend_config": load_backend_config, "build_service_plan": build_service_plan,
+                 "FreshConfig": FreshConfig, "isolated_online_weaver": isolated_online_weaver,
+                 "validate_online_runtime_arguments": validate_online_runtime_arguments,
                  "PipelineBudgetConfig": PipelineBudgetConfig, "context_geometry": context_geometry,
                  "validate_online_schema": validate_online_schema, "ACTION_DIM": 7,
                  "os": fake_os, "time": time, "math": math, "Path": Path, "json": json,

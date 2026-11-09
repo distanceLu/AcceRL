@@ -172,9 +172,6 @@ class SegmentReplay:
     def add(self, segment):
         if not isinstance(segment, PolicySegment) or segment.count > self.capacity:
             raise ValueError('A complete segment must fit FRESH Replay capacity')
-        from trajectory_sampling import enabled, UNIT
-        if enabled(self.config) and segment.source == 'imagined' and segment.count != UNIT:
-            raise ValueError('Trajectory mode admits only complete native four-chunk imagined segments')
         if segment.segment_id in self.segments or any(segment.sample_id(i) in self.samples for i in range(segment.count)):
             raise ValueError('Duplicate FRESH segment/sample identity')
         while len(self.samples) + segment.count > self.capacity:
@@ -206,12 +203,8 @@ class SegmentReplay:
     def reserve(self, count):
         if type(count) is not int or count < 1:
             raise ValueError('FRESH cohort size must be positive')
-        from trajectory_sampling import enabled, choose
-        eligible = ([] if enabled(self.config) else
-            [(sid, value) for sid, value in self.samples.items() if self._eligible(value)])
-        if enabled(self.config):
-            selected = choose(self, count)
-        elif self.config.real_policy_replay:
+        eligible = [(sid, value) for sid, value in self.samples.items() if self._eligible(value)]
+        if self.config.real_policy_replay:
             real_count = max(1, min(count - 1, int(round(count * self.config.real_fraction))))
             if count < 2:
                 raise ValueError('Mixed-source FRESH cohorts require at least two samples')
@@ -241,9 +234,6 @@ class SegmentReplay:
         sample_ids = list(sample_ids)
         if pending is None or len(set(sample_ids)) != len(sample_ids) or not set(sample_ids) <= pending:
             raise ValueError('FRESH commit must match one unconsumed rank shard exactly once')
-        from trajectory_sampling import enabled, check_commit
-        if enabled(self.config):
-            check_commit(self, sample_ids)
         # Nothing mutates until all identities pass the common version check.
         for sid in sample_ids:
             sample = self.samples[sid]
@@ -256,40 +246,24 @@ class SegmentReplay:
         if not pending:
             del self.reservations[token]
 
-    def materialize(self, sample_ids, refreshed_values=None, *, jit=False):
-        if jit and (refreshed_values is not None or self.versions is None):
-            raise ValueError('JIT transport requires one published version and no external refresh')
+    def materialize(self, sample_ids, refreshed_values=None):
         targets = {}
-        contexts = {}
         for sid in sample_ids:
             segment = self.segments[self.samples[sid]['segment_id']]
             if segment.segment_id not in targets:
-                if jit:
-                    targets[segment.segment_id] = (None, None)
-                    contexts[segment.segment_id] = dict(segment_id=segment.segment_id, count=segment.count,
-                        observations=segment.observations, rewards=segment.rewards,
-                        terminated=segment.terminated, truncated=segment.truncated,
-                        gamma=segment.gamma, lambda_=segment.lambda_)
-                    if self.config.policy_sampling == 'imagined_trajectories':
-                        contexts[segment.segment_id].update(source=segment.source,
-                            sampling=self.config.policy_sampling)
-                else:
-                    values = (refreshed_values[segment.segment_id] if refreshed_values is not None else segment.generation_values)
-                    targets[segment.segment_id] = generalized_advantages(segment.rewards, values,
-                        segment.terminated, segment.truncated, segment.gamma, segment.lambda_)
+                values = (refreshed_values[segment.segment_id] if refreshed_values is not None else segment.generation_values)
+                targets[segment.segment_id] = generalized_advantages(segment.rewards, values,
+                    segment.terminated, segment.truncated, segment.gamma, segment.lambda_)
         observations, tokens, advantages, logits, returns, records = [], [], [], [], [], []
         for sid in sample_ids:
             sample = self.samples[sid];index = sample['index'];segment = self.segments[sample['segment_id']]
             adv, target = targets[segment.segment_id]
             observation = dict(segment.observations[index])
             observation['_fresh_action_mask'] = segment.action_mask[index].copy()
-            if jit:
-                observation.update(_jit_segment=contexts[segment.segment_id], _jit_index=index,
-                    _jit_version=self.versions[0], _jit_sample_id=sid)
             observations.append(observation);tokens.append(segment.action_tokens[index])
-            advantages.append(0. if jit else adv[index]);logits.append(segment.behaviour_logits[index]);returns.append(0. if jit else target[index])
+            advantages.append(adv[index]);logits.append(segment.behaviour_logits[index]);returns.append(target[index])
             records.append(dict(sample_id=sid, source=segment.source, segment_id=segment.segment_id,
-                reward=float(segment.rewards[index]), advantage=None if jit else float(adv[index]), value_target=None if jit else float(target[index]),
+                reward=float(segment.rewards[index]), advantage=float(adv[index]), value_target=float(target[index]),
                 phi_before=segment.phi[index], phi_after=segment.phi[index+1],
                 generation_policy_version=segment.versions[index]['policy'],
                 generation_world_version=segment.versions[index].get('world_bundle_version'),

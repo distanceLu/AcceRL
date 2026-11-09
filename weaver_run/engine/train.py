@@ -710,22 +710,6 @@ class ReplayBufferActor:
         self.cost_admitted_chunks={'real':0,'imagined':0}
         return {'enabled':self.cost_scheduler_enabled}
 
-    async def configure_inventory_lookahead(self, horizon, batch_size, world_interval):
-        from inventory_lookahead import LookaheadPump, forecast
-        if getattr(self, 'inventory_lookahead', None) is not None:
-            raise RuntimeError('inventory lookahead already configured')
-        if not self.fresh_enabled or getattr(self, 'fresh_production_budget', None) is None:
-            raise ValueError('inventory lookahead needs an owned FRESH production budget')
-        forecast(self.fresh_store, horizon, batch_size=batch_size, world_interval=world_interval)
-        pump = self.inventory_lookahead = LookaheadPump(self, horizon)
-        pump.task = asyncio.create_task(pump.run())
-        return {'enabled': True, 'horizon': horizon, 'batch_size': batch_size,
-                'world_interval': world_interval, 'credit_refill_performed': False}
-
-    async def stop_inventory_lookahead(self):
-        pump = getattr(self, 'inventory_lookahead', None)
-        return await pump.stop() if pump is not None else {'enabled': False}
-
     def set_fresh_versions(self, policy, world):
         if self.fresh_enabled:
             self.fresh_store.set_versions(policy, world)
@@ -753,22 +737,11 @@ class ReplayBufferActor:
         if getattr(self,'cost_scheduler_enabled',False):
             self.cost_scheduler_broker.update_inventory.remote(self.scheduler_inventory())
 
-    def commit_fresh_use(self, token, sample_ids, jit_receipts=None):
-        records = self.fresh_records[token]
-        if self.fresh_config.jit_gae_mode != 'off':
-            from jit_replay import validate_receipts
-            validated = validate_receipts(records, sample_ids, jit_receipts, self.fresh_store.versions[0])
-        elif jit_receipts is not None:
-            raise ValueError('Unexpected JIT receipts on shared-critic path')
-        else:
-            validated = {}
+    def commit_fresh_use(self, token, sample_ids):
         self.fresh_store.commit(token, sample_ids)
+        records = self.fresh_records[token]
         for sample_id in sample_ids:
             record = records.pop(sample_id)
-            if sample_id in validated:
-                record.update(validated[sample_id])
-                if self.fresh_config.signal_telemetry:
-                    record_signal(self.telemetry, phase='refreshed', **record)
             if self.fresh_config.signal_telemetry:
                 record_signal(self.telemetry, phase='consumed', **record,
                     consumption_policy_version=self.fresh_store.versions[0],
@@ -776,13 +749,6 @@ class ReplayBufferActor:
         if not records:
             del self.fresh_records[token]
         if getattr(self,'cost_scheduler_enabled',False):self._notify_scheduler_inventory()
-        return True
-
-    def cancel_fresh_use(self, token):
-        if token in self.fresh_store.reservations:
-            self.fresh_store.cancel(token)
-        self.fresh_records.pop(token, None)
-        self._notify_scheduler_inventory()
         return True
 
     def add_batch(self, batch: List[Experience]):
@@ -803,7 +769,7 @@ class ReplayBufferActor:
                 if getattr(self,'cost_scheduler_enabled',False):
                     await self.cost_scheduler_broker.update_inventory.remote(self.scheduler_inventory())
                 refreshed = None
-                if self.fresh_config.refresh_gae and self.fresh_config.jit_gae_mode == 'off':
+                if self.fresh_config.refresh_gae:
                     from critic_refresh_plan import balanced_refresh_groups, refresh_plan_receipt
                     unique = list(dict.fromkeys(self.fresh_store.samples[sid]['segment_id'] for sid in sample_ids))
                     groups = balanced_refresh_groups(
@@ -833,20 +799,13 @@ class ReplayBufferActor:
                             offset += count
                         if offset != len(answer['values']):
                             raise RuntimeError('FRESH critic response differs from ordered K+1 observations')
-                jit = self.fresh_config.jit_gae_mode != 'off'
-                result, records = self.fresh_store.materialize(sample_ids, refreshed, jit=jit)
-                from inventory_lookahead import check_health
-                check_health(self)
+                result, records = self.fresh_store.materialize(sample_ids, refreshed)
                 ledger = self.capture_ledger.reserve(sample_ids)
                 metadata = dict(ledger, fresh_reservation_token=token, fresh_versions=list(self.fresh_store.versions),
                     source_counts={source:sum(record['source']==source for record in records)
                                    for source in ('real','imagined')},
-                    rewards_refreshed=False, critic_refreshed=bool(refreshed is not None), jit_pending=jit,
-                    sampling_protocol=self.fresh_config.policy_sampling)
-                if jit:
-                    from jit_replay import dependency_counts
-                    metadata.update(dependency_counts(self.fresh_store, sample_ids))
-                if self.fresh_config.signal_telemetry and not jit:
+                    rewards_refreshed=False, critic_refreshed=bool(refreshed is not None))
+                if self.fresh_config.signal_telemetry:
                     for record in records:
                         record_signal(self.telemetry, phase='refreshed', **record)
                 self.fresh_records[token] = {record['sample_id']:record for record in records}
@@ -1587,8 +1546,7 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         self.cost_scheduler_broker = broker
         self._policy_dispatch = PolicyServiceDispatch(settings) if settings['enabled'] else None
         return {'enabled':settings['enabled'],'classes':['real','imagined','refresh','eval'],
-                'shared_model':True,'maximum_refresh_micro':settings['refresh_micro'],
-                'execution':settings['execution']}
+                'shared_model':True,'maximum_refresh_micro':settings['refresh_micro']}
 
     async def apply_rank_weights(self, payload, kind):
         dispatcher = getattr(self, '_policy_dispatch', None)
@@ -1668,9 +1626,7 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
             'resources':('card:'+str(self.gpu_binding['physical_gpu']),),
             'metadata':{'policy_version_at_submission':self.capture_model_version,
                         'request_class':batch.request_class,'refresh_job_id':None if
-                             batch.refresh_job is None else batch.refresh_job.job_id,
-                        'bounded_refresh_lease':bool(batch.refresh_job is not None and
-                            dispatcher.execution['refresh_lease_micros'] > 1)}}
+                            batch.refresh_job is None else batch.refresh_job.job_id}}
         acquired = False
         completed = False
         capture_batch = None
@@ -1684,17 +1640,10 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 job = batch.refresh_job
                 if self.capture_model_version != job.version:
                     raise RuntimeError('Policy version changed before scheduled critic execution')
-                if dispatcher.execution['refresh_lease_micros'] > 1:
-                    from execution_control import refresh_block
-                    values, block_receipt = await refresh_block(self, batch, torch)
-                    batch.inputs = batch.inputs[:len(values)]
-                    self.telemetry.event('cost_refresh_block', actual_batch=len(values),
-                        model_version=job.version, details=block_receipt)
-                else:
-                    with torch.inference_mode():
-                        prepared = self.model.prepare_inputs_batch(list(batch.inputs))
-                        _, value = self.model(prepared)
-                        values = value.detach().float().reshape(-1).cpu().numpy()
+                with torch.inference_mode():
+                    prepared = self.model.prepare_inputs_batch(list(batch.inputs))
+                    _, value = self.model(prepared)
+                    values = value.detach().float().reshape(-1).cpu().numpy()
                 if len(values) != batch.units or not np.isfinite(values).all():
                     raise ValueError('Scheduled critic returned invalid values')
                 result_values = [float(x) for x in values]
@@ -1720,27 +1669,13 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                     results.append((normalized_actions_all[i],action_env,tokens[i],logits[i],values[i]))
                 batch_end(self,capture_batch)
             elapsed = time.perf_counter()-started
-            combined = spec['metadata']['bounded_refresh_lease']
-            if combined:
-                from cost_scheduler_runtime import finish_owned_rpc
-                settlement = asyncio.ensure_future(self.cost_scheduler_broker.settle_refresh.remote(
-                    batch.batch_id, elapsed, batch.units))
-                try:
-                    await asyncio.shield(settlement)
-                except asyncio.CancelledError:
-                    await finish_owned_rpc(settlement)
-                    completed = True
-                    batch.refresh_job.reported_remaining -= batch.units
-                    raise
-            else:
-                await self.cost_scheduler_broker.complete.remote(batch.batch_id,elapsed,
-                    completed_units=batch.units,success=True)
+            await self.cost_scheduler_broker.complete.remote(batch.batch_id,elapsed,
+                completed_units=batch.units,success=True)
             completed = True
             dispatcher.complete_batch(batch,elapsed)
             if batch.refresh_job is not None:
                 job.reported_remaining -= batch.units
-                if not combined:
-                    await self.cost_scheduler_broker.refresh_demand.remote(-batch.units)
+                await self.cost_scheduler_broker.refresh_demand.remote(-batch.units)
                 if dispatcher.finish_refresh(batch,result_values,self.capture_model_version):
                     self.telemetry.event('fresh_critic_refresh',actual_batch=len(job.inputs),
                         model_version=job.version,details={'action_sampling':False,
@@ -1753,8 +1688,7 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                     else:
                         self.capture_served_versions.pop(action.metadata['request_id'],None)
                 self.stats_actor.add_timing_metric.remote('Inference/loop_time_s',elapsed)
-            if batch.refresh_job is None or not combined or dispatcher.execution['refresh_trim'] == 'block':
-                _trim_cuda_cache('idle')
+            _trim_cuda_cache('idle')
             # Only this bounded micro is complete; other already-submitted GPU
             # work is not drained and independent replicas need not form a gang.
             await asyncio.sleep(0)
@@ -2474,10 +2408,6 @@ class TrainerActor(TrainerActorCom):
             raise ValueError('Serial split training requires an independent model owner')
         self.split_train_serial = bool(split_train_serial)
         self.cpu_replay_prefetch = bool(split_train_serial or os.environ.get("ACCERL_CPU_REPLAY_PREFETCH") == "1")
-        if self.fresh_config.jit_gae_mode != 'off' and training_role in ('policy', 'combined'):
-            if (training_role != 'policy' or not self.cpu_replay_prefetch or world_size != 4
-                    or os.environ.get('ACCERL_POLICY_BACKEND', 'zero2') != 'zero2'):
-                raise ValueError('JIT candidate requires four-rank independent serial Policy ZeRO2')
         self._serial_phase = SerialPhase(training_role, rank, world_size) if self.cpu_replay_prefetch else None
         self._serial_prefetch = None
         setup_debugger("trainer", rank)
@@ -2589,13 +2519,6 @@ class TrainerActor(TrainerActorCom):
 
     def get_training_state(self):
         return {"rank": self.rank, "gpu": self.gpu_binding, "pid": os.getpid(),
-                "jit_gae": None if self.fresh_config.jit_gae_mode == 'off' else {
-                    "mode": self.fresh_config.jit_gae_mode,
-                    "normalization": self.fresh_config.advantage_norm,
-                    "ema_successful_updates": getattr(getattr(self, 'advantage_ema', None), 'updates', 0),
-                    "ema_beta": self.fresh_config.advantage_ema_beta,
-                    "scale_floor": self.fresh_config.advantage_scale_floor,
-                    "checkpoint_contract": "weights_only_new_optimizer_replay_and_ema"},
                 "training_role": self.training_role, "world_size": self.world_size,
                 "split_train_serial": self.split_train_serial,
                 "cpu_replay_prefetch": self.cpu_replay_prefetch,
@@ -2903,10 +2826,6 @@ class TrainerActor(TrainerActorCom):
         return {'backend':'policy_zero2','boundary':'optimizer_update','rank':self.rank}
 
     def _train_policy(self, inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs):
-        if '_jit_observations' in inputs_batch:
-            from jit_gae_runtime import run_jit_policy_update
-            return run_jit_policy_update(self, inputs_batch['_jit_observations'], act_token_t,
-                logits_old_t, micro_begin=micro_begin, micro_end=micro_end, trim=_trim_cuda_cache)
         from cost_scheduler_runtime import scheduled_policy_update
         with scheduled_policy_update(self):
             """Policy 训练（包含 Value 网络）— 与原版完全一致"""
@@ -3180,10 +3099,6 @@ class TrainerActor(TrainerActorCom):
 
     def _prepare_policy_batch(self, obs_list, action_token_np, adv_np, logits_old_np, v_targ_np):
         """Policy batch preparation; runs in a worker thread, off the event loop."""
-        if self.fresh_config.jit_gae_mode != 'off':
-            if not obs_list or any('_jit_segment' not in obs for obs in obs_list):
-                raise ValueError('JIT requires complete dependency metadata')
-            return {'_jit_observations':obs_list}, action_token_np, adv_np, logits_old_np, v_targ_np
         masks = [obs.get('_fresh_action_mask') for obs in obs_list]
         if any(mask is not None for mask in masks):
             if any(mask is None for mask in masks):
@@ -3470,19 +3385,17 @@ class TrainerActor(TrainerActorCom):
         policy_prep_time = current_batch['prep_time']
 
         # 修正std 归一化
-        global_mean = global_std = None
-        if '_jit_observations' not in inputs_batch:
-            local_sum = adv_t.sum()
-            local_sq_sum = (adv_t * adv_t).sum()
-            local_count = torch.tensor([adv_t.numel()], device=adv_t.device, dtype=torch.float32)
+        local_sum = adv_t.sum()
+        local_sq_sum = (adv_t * adv_t).sum()
+        local_count = torch.tensor([adv_t.numel()], device=adv_t.device, dtype=torch.float32)
 
-            stats_tensor = torch.stack([local_sum, local_sq_sum, local_count.squeeze(0)])
-            distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
+        stats_tensor = torch.stack([local_sum, local_sq_sum, local_count.squeeze(0)])
+        distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
 
-            global_sum, global_sq_sum, global_count = stats_tensor[0], stats_tensor[1], stats_tensor[2]
-            global_mean = global_sum / torch.clamp(global_count, min=1.0)
-            global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
-            global_std = torch.sqrt(global_var)
+        global_sum, global_sq_sum, global_count = stats_tensor[0], stats_tensor[1], stats_tensor[2]
+        global_mean = global_sum / torch.clamp(global_count, min=1.0)
+        global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
+        global_std = torch.sqrt(global_var)
 
         policy_result = self._train_policy(inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs)
 
@@ -3611,10 +3524,6 @@ class TrainerActor(TrainerActorCom):
         else:
             record = await self._serial_prefetch.take()
         raw = record["raw"]
-        if policy and self.fresh_config.jit_gae_mode != 'off':
-            # Own the lease before preparation can fail; prior-window metadata
-            # must never be used to clean up this newly received reservation.
-            self._jit_active_reservation = raw[-1]['fresh_reservation_token']
         loop = asyncio.get_running_loop()
         started = time.time()
         if policy:
@@ -3695,10 +3604,7 @@ class TrainerActor(TrainerActorCom):
                 self._serial_prefetch.release_in_use()
             if self.training_role == 'policy' and self.fresh_policy_replay:
                 metadata = self.capture_policy_metadata
-                await self.replay_buffer.commit_fresh_use.remote(metadata['fresh_reservation_token'], metadata['sample_ids'],
-                    getattr(self, '_jit_receipts', None))
-                self._jit_receipts = None
-                self._jit_active_reservation = None
+                await self.replay_buffer.commit_fresh_use.remote(metadata['fresh_reservation_token'], metadata['sample_ids'])
             trained = self.training_role == "policy" or result["metrics"]["trained_" + self.training_role]
             self.telemetry.event("split_serial_phase_end", details={
                 "policy_step": policy_step, "model": self.training_role, "rank": self.rank,
@@ -3710,15 +3616,6 @@ class TrainerActor(TrainerActorCom):
             return result
         except BaseException as error:
             self._serial_phase.fail(error)
-            if self.training_role == 'policy' and self.fresh_config.jit_gae_mode != 'off':
-                reservation = getattr(self, '_jit_active_reservation', None)
-                if reservation:
-                    try:
-                        await self.replay_buffer.cancel_fresh_use.remote(reservation)
-                    except BaseException:
-                        pass  # Original failure remains authoritative; job fails closed.
-                self._jit_receipts = None
-                self._jit_active_reservation = None
             self.next_ready_batch = self.next_ready_wm_batch = None
             if self._serial_prefetch is not None:
                 await self._serial_prefetch.close()
@@ -4030,11 +3927,6 @@ def main(args):
     """Run the original training recipe with optional evaluation-based stop."""
     world_config = load_backend_config(args)
     fresh_config = FreshConfig.from_world_config(world_config)
-    if fresh_config.policy_sampling == 'imagined_trajectories':
-        if (args.num_trainer_gpus != 4 or args.train_batch_size * args.accumulation_steps * 4 != 576
-                or args.imagine_horizon != 4 * NUM_ACTIONS_CHUNK
-                or world_config.terminal_rule != 'horizon_only'):
-            raise ValueError('Trajectory sampling requires four ranks, global576 and four-chunk horizon-only branches')
     from cost_scheduler_runtime import load_settings, CostAdmissionBroker, source_fingerprint
     cost_settings=load_settings()
     cost_broker=None
@@ -4054,11 +3946,6 @@ def main(args):
     online_weaver = isolated_online_weaver(world_config)
     validate_online_runtime_arguments(world_config, args)
     pipeline_config = PipelineBudgetConfig.from_json(getattr(args, 'pipeline_config', None))
-    if pipeline_config.fresh_lookahead_updates:
-        from inventory_lookahead import forecast
-        forecast(SegmentReplay(1, fresh_config), pipeline_config.fresh_lookahead_updates,
-            batch_size=args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus,
-            world_interval=args.ctrl_train_interval)
     if pipeline_config.bytes_per_frame != 2 * 3 * 224 * 224:
         raise ValueError("Frame budget must use the actual two-camera uint8 geometry")
     geometry = context_geometry(world_config)
@@ -4312,15 +4199,10 @@ def main(args):
         ray.get([actor.configure_cost_scheduler.remote(cost_broker,cost_settings,cost_source_sha) for actor in all_trainers])
         policy_dispatch_settings={k:cost_settings[k] for k in
             ('enabled','refresh_micro','action_micro','class_weights','max_pending')}
-        policy_dispatch_settings['execution'] = cost_settings['execution']
         ray.get([actor.configure_cost_scheduler.remote(cost_broker,policy_dispatch_settings)
             for actor in inference_pool+replay_buffers])
         ray.get([actor.configure_cost_scheduler.remote(cost_broker,cost_settings)
             for actor in ctrl_world_inference_pool])
-        if cost_settings['execution']['authoritative_production']:
-            for actor in wm_replay_buffers:
-                authority = ray.get(actor.configure_production_scheduler.remote(cost_broker))
-                ray.get(cost_broker.update_production.remote(authority))
     rollout_workers, eval_workers = [], []
     if not args.validate_only:
         rollout_workers = [
@@ -4451,14 +4333,6 @@ def main(args):
     if fresh_replay:
         ray.get([replay.configure_fresh.remote(inference_pool, wm_replay_buffers[index])
                  for index, replay in enumerate(replay_buffers)])
-    if pipeline_config.fresh_lookahead_updates:
-        if not fresh_replay or len(replay_buffers) != 1 or len(wm_replay_buffers) != 1:
-            raise ValueError('inventory lookahead admits one shared Replay/budget owner only')
-        receipts = ray.get([replay.configure_inventory_lookahead.remote(
-            pipeline_config.fresh_lookahead_updates,
-            args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus,
-            args.ctrl_train_interval) for replay in replay_buffers])
-        experiment.event('fresh_inventory_lookahead_configured', details={'receipts': receipts})
 
     def sync_model(kind, pool):
         publication_started_ns = time.time_ns()
@@ -4618,7 +4492,6 @@ def main(args):
             fill_completion_reason = run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
                 target_reached=False, requested_stop=True)
             ray.get([buffer.stop_pipeline.remote() for buffer in wm_replay_buffers])
-            ray.get([replay.stop_inventory_lookahead.remote() for replay in replay_buffers])
             publish_snapshot("final_before_first_update")
             experiment.event("experiment_completed", details={"global_step": 0, "completed_epochs": 0,
                 "run_started_ns": run_started_ns, "threshold_state": threshold_tracker.as_dict() if threshold_tracker else None,
@@ -4694,9 +4567,6 @@ def main(args):
         if cost_broker is not None:
             inventory=ray.get(replay_buffers[0].scheduler_inventory.remote())
             wm_ready=ray.get(wm_replay_buffers[0].size.remote())>=1024
-            if cost_settings['execution']['authoritative_production']:
-                authority=ray.get(wm_replay_buffers[0].production_scheduler_status.remote())
-                ray.get(cost_broker.update_production.remote(authority))
             ray.get(cost_broker.update_cycle.remote(dict(inventory,policy_version=global_step,
                 world_version=global_step//5,phase='needs_batch',
                 context='joint' if next_policy_step%5==0 else 'ordinary',
@@ -5125,7 +4995,6 @@ def main(args):
         completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs)
     nsight_windows.close()
     ray.get([buffer.stop_pipeline.remote() for buffer in wm_replay_buffers])
-    ray.get([replay.stop_inventory_lookahead.remote() for replay in replay_buffers])
     publish_snapshot("final")
     experiment.event("experiment_completed", details={"global_step": global_step,
                      "completed_epochs": completed_epochs,

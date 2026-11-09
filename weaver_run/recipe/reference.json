@@ -1,15 +1,26 @@
 {
-  "training_run": "weaverintegrated_1106_142611_cafe8ae1",
-  "original": "weaverintegrated_1103_172031_a7557d7d",
+  "training_run": "new_run_pending",
+  "original": "weaverintegrated_1030_181824_cf621e5b",
   "base_commit": "a0a0dfa969a9f1a8f5e85af0bca0b5facab5b5d8",
   "world_source_commit": "3e41e90738fea9a7b142db6b2fd3d9ae72b7a82e",
   "native3200_sha256": "6b45705115034914803224c3653533e30236fffdac544b46400b5af68bfd3443",
   "portable_changed_engine_files": [
     "cost_scheduler_runtime.py",
     "policy_joint_batch_mode.py",
+    "runner.py",
+    "run.sh",
+    "pipeline_budget.py",
+    "pipeline_runtime.py",
     "train.py"
   ],
-  "frozen_source_sha256": "9a0d2a8247fc055760fa5076f4d1e7278586eb8f3c09a87581794a7e4a56b91b",
+  "frozen_source_sha256": "4dd45ee7d3aba4ab831e94b5d3c43670e50557e171c49de9fe33f73548f0ead5",
   "libero_commit": "8f1084e3132a39270c3a13ebe37270a43ece2a01",
-  "libero_benchmark_sha256": "9c07414d4c75f5de50d9c8b3fefbda81ae72b3eae158c1af1d115e77063efd18"
+  "libero_benchmark_sha256": "9c07414d4c75f5de50d9c8b3fefbda81ae72b3eae158c1af1d115e77063efd18",
+  "tensorboard_baseline": "1793355532_OpenVLA_IntegratedWEAVER_PolicyWorldRM_Real1_Imag4_Budget1M_Manual_gpu47_fresh",
+  "previous_managed_commit": "5d728230e87a915908d3a53ad9580b536468482a",
+  "real_collection_action_limit": 150,
+  "task_action_horizon": 220,
+  "final_evaluation_action_horizon": 220,
+  "training_identity": "git_commit",
+  "recipe_change": "Only real training collection action budget, with existing censor semantics; orange algorithm restored"
 }

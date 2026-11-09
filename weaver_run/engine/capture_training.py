@@ -267,7 +267,7 @@ def install_training_hooks(namespace):
     _install_trainer_hooks(namespace)
 
 
-def micro_begin(self, workload, engine, actual_batch, start, end, sample_indices=None):
+def micro_begin(self, workload, engine, actual_batch, start, end):
     writer = _writer(self)
     key = {"policy_train": "policy", "ctrl_train": "ctrl", "reward_train": "reward"}[workload]
     if not hasattr(self, "capture_versions"):
@@ -275,10 +275,6 @@ def micro_begin(self, workload, engine, actual_batch, start, end, sample_indices
     metadata = getattr(self, "capture_policy_metadata" if key == "policy" else "capture_wm_metadata", None)
     if not metadata or len(metadata.get("sample_ids", [])) < end:
         raise RuntimeError("%s microbatch has no complete replay identity metadata" % workload)
-    indices = list(range(start, end)) if sample_indices is None else list(sample_indices)
-    if (len(indices) != actual_batch or len(set(indices)) != len(indices)
-            or any(type(i) is not int or not 0 <= i < len(metadata['sample_ids']) for i in indices)):
-        raise ValueError('Invalid reordered microbatch identities')
     policy_step = int(getattr(self, "global_step", 0))
     training_role = getattr(self, "training_role", "combined")
     step_scope = ("logical_policy_boundary_in_progress" if training_role in ("ctrl", "reward")
@@ -287,11 +283,10 @@ def micro_begin(self, workload, engine, actual_batch, start, end, sample_indices
                        policy_step=policy_step, training_role=training_role,
                        step_scope=step_scope,
                        microbatch_start=start, microbatch_end=end,
-                        reordered_sample_indices=indices if sample_indices is not None else None,
                        reservation_id=metadata.get("reservation_id"))
     token = {"span": span, "writer": writer, "workload": workload, "key": key,
              "replay": "policy" if key == "policy" else "wm", "metadata": metadata,
-             "sample_ids": [metadata['sample_ids'][i] for i in indices],
+             "sample_ids": metadata["sample_ids"][start:end],
              "before_steps": int(getattr(engine, "global_steps", 0)),
              "before_skips": int(getattr(engine, "skipped_steps", 0)),
              "micro_id": new_id("micro"),

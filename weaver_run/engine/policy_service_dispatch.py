@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from copy import deepcopy
 import math
 import uuid
-import time
 
 from cost_scheduler import CostModel
 
@@ -31,7 +30,7 @@ def dispatch_settings(settings):
     if not isinstance(settings, dict):
         raise ValueError("Policy dispatch settings must be a mapping")
     out = dict(settings)
-    allowed = {"enabled", "refresh_micro", "action_micro", "class_weights", "max_pending", "execution"}
+    allowed = {"enabled", "refresh_micro", "action_micro", "class_weights", "max_pending"}
     if set(out)-allowed:
         raise ValueError("Unknown Policy dispatch settings")
     if type(out.get("enabled", True)) is not bool:
@@ -51,8 +50,6 @@ def dispatch_settings(settings):
         if isinstance(value, bool) or not isinstance(value, (int,float)) or not math.isfinite(value) or value <= 0:
             raise ValueError("Policy class weights must be positive finite numbers")
     out["class_weights"] = {k:float(v) for k,v in weights.items()}
-    from execution_control import execution_settings
-    out['execution'] = execution_settings(out.get('execution'))
     return out
 
 
@@ -62,7 +59,6 @@ class ActionJob:
     deterministic: bool
     metadata: dict
     future: object
-    queued_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -101,7 +97,6 @@ class PolicyServiceDispatch:
     def __init__(self, settings):
         self.settings = dispatch_settings(settings)
         self.weights = self.settings["class_weights"]
-        self.execution = self.settings['execution']
         self.queues = {k:deque() for k in CLASSES}
         self.cost_model = CostModel(default_unit_cost=.1)
         self.finish = {k:0.0 for k in CLASSES}
@@ -177,20 +172,13 @@ class PolicyServiceDispatch:
                 job = q[0]
                 if job.version != version:
                     raise RuntimeError("Policy version changed during a pinned refresh job")
-                count = min(self.settings['refresh_micro'] * self.execution['refresh_lease_micros'],
-                            len(job.inputs)-job.offset)
+                count = min(self.settings['refresh_micro'], len(job.inputs)-job.offset)
             else:
                 count = min(limit,len(q))
             cost = self.cost_model.estimate(cls, count)
             candidates.append((self.finish[cls]+cost/self.weights[cls],index,cls,count,cost))
         if not candidates:
             return None
-        if self.execution['dependency_priority'] and any(x[2]=='refresh' for x in candidates):
-            # Bound real/active-imagination waiting; use the rest for the
-            # current update dependency. Eval resumes outside refresh.
-            urgent = [x for x in candidates if x[2] in ('real','imagined') and
-                      time.monotonic()-self.queues[x[2]][0].queued_at >= self.execution['action_wait_seconds']]
-            candidates = urgent or [x for x in candidates if x[2]=='refresh']
         finish,_,cls,count,cost = min(candidates)
         self.finish[cls] = finish
         if cls == 'refresh':

@@ -36,13 +36,16 @@ def validate_budgets(args):
     return budgets
 
 
-def evaluation_command(args, seconds):
-    command = [sys.executable, str(args.source / 'frozen_policy_eval.py'),
-               '--training-root', str(args.root / 'formal_v3'),
+def evaluation_command(args, seconds, *, run_id='weaverintegrated_plan_only', deadline_unix=None):
+    command = [sys.executable, str(Path(__file__).resolve().parent.parent / 'parallel_eval/parallel_eval.py'),
+               '--source', str(args.source), '--queue-wrapper', str(Path(__file__).resolve().parent),
+               '--master', str(args.root), '--run-id', run_id, '--git-commit', args.git_commit,
                '--output-root', str(args.root / 'policy_eval'),
-               '--max-seconds', str(seconds), '--initial-state-count', '50',
+               '--max-seconds', str(seconds),
                '--modes', args.evaluation_modes, '--seed', str(args.evaluation_seed),
                '--repeats', str(args.evaluation_repeats)]
+    if deadline_unix is not None:
+        command += ['--deadline-unix', str(deadline_unix)]
     if args.baseline_checkpoint is not None:
         command += ['--baseline-checkpoint', str(args.baseline_checkpoint)]
     return command
@@ -59,6 +62,9 @@ def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochasti
         complete = training.read_json(path)
         if complete.get('complete') is not True:
             reasons.append('paired_full_pool_evaluation_incomplete')
+        if (complete.get('errors') != [] or complete.get('cleanup',{}).get('survivors') != []
+                or complete.get('cleanup',{}).get('errors') != []):
+            reasons.append('parallel_worker_errors_or_cleanup_unconfirmed')
         expected = 2 * 50 * len(modes.split(',')) * repeats
         if (complete.get('initial_state_count') != 50
                 or complete.get('modes') != modes.split(',')
@@ -76,6 +82,39 @@ def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochasti
     for name in ('summary.json', 'episodes.jsonl', 'plan.json'):
         if not (root / 'policy_eval' / name).is_file():
             reasons.append('evaluation_artifact_missing:' + name)
+    try:
+        parallel_dir = str(Path(__file__).resolve().parent.parent / 'parallel_eval')
+        if parallel_dir not in sys.path:
+            sys.path.insert(0, parallel_dir)
+        import plan_contract
+        plan = training.read_json(root / 'policy_eval/plan.json')
+        shards = training.read_json(root / 'policy_eval/shards.json')
+        plan_contract.validate_shards(plan, shards)
+        base = plan_contract.load_base(Path(__file__).resolve().parents[2] / 'engine')
+        rows = base.read_rows(root / 'policy_eval/episodes.jsonl', plan)
+        by_worker = {i: [r for r in rows if r.get('execution_worker_index') == i] for i in range(4)}
+        checked_rows = plan_contract.merge_rows(plan, shards, by_worker, complete.get('run_token'), base)
+        reconstructed = base.summarize(plan, checked_rows)
+        if (len(checked_rows) != len(rows) or not reconstructed['complete']
+                or any(complete.get(key) != reconstructed[key] for key in ('groups', 'paired'))):
+            reasons.append('parallel_episode_ledger_coverage_or_summary_mismatch')
+        workers = shards.get('workers', [])
+        if (plan.get('horizon_action_steps') != 220 or plan.get('task_id') != 0
+                or len(workers) != 4 or [w.get('gpu_uuid') for w in workers] != list(training.GPUS)
+                or complete.get('shards_sha256') != shards.get('sha256')):
+            reasons.append('four_gpu_220_step_protocol_mismatch')
+        for index, worker in enumerate(workers):
+            result = training.read_json(root / f'policy_eval/workers/worker_{index}/completed.json')
+            if (result.get('complete') is not True or result.get('errors') != []
+                    or result.get('exit_code') != 0 or result.get('worker_index') != index
+                    or result.get('run_token') != complete.get('run_token')
+                    or result.get('plan_sha256') != plan.get('sha256')
+                    or result.get('shards_sha256') != shards.get('sha256')
+                    or result.get('gpu_uuid') != worker.get('gpu_uuid')
+                    or result.get('completed_episode_records') != worker.get('expected_episode_records')):
+                reasons.append('parallel_worker_result_mismatch:' + str(index))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        reasons.append('parallel_evaluation_evidence_unavailable:' + str(exc))
     return {'passed': not reasons, 'reasons': reasons,
             'completion_receipt': complete, 'exit_code': exit_code,
             'scope': 'frozen checkpoints, paired complete 50-state pool; '
@@ -130,22 +169,28 @@ def run(args):
     remaining = []
     job_id = os.environ['EXPERIMENT_QUEUE_JOB_ID']
     env = training.launch_environment(args.root, args.source, os.environ)
-    env['CUDA_VISIBLE_DEVICES'] = training.GPUS[0]
+    # Coordinator is CPU-only; workers independently bind the four reserved UUIDs.
+    env['CUDA_VISIBLE_DEVICES'] = ''
     env['ACCERL_RUN_ID'] = str(receipt['run_id']) + '_frozen_eval'
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda number, frame: received.append(number))
         # Admission checks inspect the full reservation, using the original
-        # four-device environment; evaluator itself receives exactly one GPU.
+        # four-device environment; each independent worker receives one UUID.
         admission_env = dict(env, CUDA_VISIBLE_DEVICES=','.join(training.GPUS))
         training.wait_idle(args.source, admission_env)
         # Its own budget begins after training cleanup and the idle admission.
         # No wall-clock duration from training is subtracted or converted into
         # a hidden morning deadline.
-        command = evaluation_command(args, seconds)
+        evaluation_started_ns = time.time_ns()
+        deadline = time.monotonic() + seconds
+        command = evaluation_command(args, seconds, run_id=receipt['run_id'],
+                                     deadline_unix=evaluation_started_ns / 1e9 + seconds)
         receipt.update(state='evaluating', evaluation={'argv': command,
-                       'started_ns': time.time_ns(), 'budget_seconds': seconds,
+                       'started_ns': evaluation_started_ns, 'budget_seconds': seconds,
                        'cuda_visible_devices': env['CUDA_VISIBLE_DEVICES'],
+                       'worker_gpu_uuids': list(training.GPUS), 'worker_count': 4,
+                       'horizon_action_steps': 220,
                        'checkpoint_selection': 'final and explicit baseline or initial snapshot'})
         training.atomic_json(receipt_path, receipt)
         child = subprocess.Popen(command, cwd=args.source, env=env,
@@ -156,7 +201,6 @@ def run(args):
         owned.append(identity)
         receipt['evaluation']['supervisor'] = identity
         training.atomic_json(receipt_path, receipt)
-        deadline = time.monotonic() + seconds
         stop_sent_at = None
         while child.poll() is None:
             now = time.monotonic()

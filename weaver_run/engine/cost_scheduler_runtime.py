@@ -7,7 +7,7 @@ replicas share accounts but never become a gang. Existing submitted work drains.
 from __future__ import annotations
 
 import asyncio
-from collections import Counter, OrderedDict
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 import hashlib
@@ -21,7 +21,6 @@ from cost_scheduler import CostModel, ServiceConfig, WorkItem, WeightedCostSched
 from collective_phase_gate import BoundaryAttestation, PhaseSpec, GangPhaseGate
 from cycle_service_controller import (CycleServiceController, ControllerConfig,
     CycleSnapshot, InventoryBucket, ResponseSample, SERVICES)
-from cycle_feedback import CycleFeedbackConfig, CompleteCycleFeedback
 
 CLASSES = ('real', 'imagined', 'refresh', 'eval')
 
@@ -76,8 +75,7 @@ def load_settings(path=None):
     raw = json.loads(Path(path).read_text(encoding='utf8'))
     allowed = {'schema', 'enabled', 'weights', 'class_weights', 'refresh_micro',
         'action_micro', 'max_pending', 'card_inflight', 'training_gangs',
-        'macro_enabled', 'allow_probe', 'probe_min_cycles', 'controller', 'initial_unit_costs', 'execution',
-        'cycle_feedback'}
+        'macro_enabled', 'allow_probe', 'probe_min_cycles', 'controller', 'initial_unit_costs'}
     if set(raw)-allowed or raw.get('schema') != 1 or type(raw.get('enabled')) is not bool:
         raise ValueError('Unknown cost scheduler schema/options')
     for key, default, maximum in [('refresh_micro', 2, 2), ('action_micro', 2, 2),
@@ -94,12 +92,7 @@ def load_settings(path=None):
         weights = raw.setdefault(key, dict.fromkeys(names, 1.0))
         if set(weights) != set(names) or any(type(v) not in (int,float) or not math.isfinite(v) or v <= 0 for v in weights.values()):
             raise ValueError('Scheduler weights must be positive finite named budgets')
-    from execution_control import execution_settings
-    raw['execution'] = execution_settings(raw.get('execution'))
     ControllerConfig(**raw.get('controller', {}))
-    CycleFeedbackConfig(**raw.get('cycle_feedback', {}))
-    if raw['training_gangs'] == 2 and raw['card_inflight'] < 3:
-        raise ValueError('Two training groups require a spare per-card inference lane')
     return raw
 
 
@@ -113,8 +106,6 @@ def source_fingerprint(root):
 class CostAdmissionBroker:
     def __init__(self, settings, run_id, source_sha256, *, clock=None, emit=None):
         self.settings, self.run_id, self.source_sha256 = settings, run_id, source_sha256
-        from execution_control import execution_settings
-        self.execution = execution_settings(settings.get('execution'))
         self.clock, self.emit = clock or time.monotonic, emit or (lambda *args,**kwargs:None)
         if emit is None and settings.get('telemetry'):
             from capture_telemetry import Telemetry
@@ -122,21 +113,14 @@ class CostAdmissionBroker:
             self.emit=self.telemetry.event
         self.weights = dict(settings.get('weights', dict.fromkeys(SERVICES,1.)))
         self.controller = CycleServiceController(self.weights, ControllerConfig(**settings.get('controller',{})))
-        feedback_config = CycleFeedbackConfig(**settings.get('cycle_feedback', {}))
-        self.cycle_feedback = CompleteCycleFeedback(feedback_config) if feedback_config.enabled else None
-        if settings.get('training_gangs', 1) == 2 and settings.get('card_inflight', 2) < 3:
-            raise ValueError('Two training groups require a spare per-card inference lane')
         limits = {'card:'+str(i):settings.get('card_inflight',2) for i in tuple(map(int, os.environ.get('ACCERL_ALLOCATED_GPU_IDS', '4,5,6,7').split(',')))}
         limits['training_lane'] = settings.get('training_gangs',1)
         self.scheduler = WeightedCostScheduler(cost_model=CostModel(settings.get('initial_unit_costs',{})),
             resource_limits=limits,max_pending=settings.get('max_pending',4096),max_inflight_total=16)
         for service in ('policy_train','world_train','world_infer'):
             self.scheduler.register_service(service,ServiceConfig(self.weights[service],4 if service=='world_infer' else 1))
-        if self.execution['parent_policy_budget']:
-            self.scheduler.register_service('policy_infer', ServiceConfig(self.weights['policy_infer'], 4))
-        else:
-            for kind, weight in self._child_weights().items():
-                self.scheduler.register_service('policy_infer.'+kind,ServiceConfig(weight,4))
+        for kind, weight in self._child_weights().items():
+            self.scheduler.register_service('policy_infer.'+kind,ServiceConfig(weight,4))
         self.waiters, self.gates, self.phase_records = {}, {}, {}
         self.active_items = {}
         self.refresh_remaining = 0
@@ -161,22 +145,10 @@ class CostAdmissionBroker:
         self.latest_inventory = None
         self.inventory_revision = -1
         self.failed = None
-        self.production = None
-        self.production_revision = -1
-        self.production_blocked_window = set()
-        self.refresh_settlements = OrderedDict()
 
     def _child_weights(self):
         cw = self.settings.get('class_weights',dict.fromkeys(CLASSES,1.))
         return {k:self.weights['policy_infer']*cw[k]/sum(cw.values()) for k in CLASSES}
-
-    def _scheduler_weights(self):
-        weights = {k:self.weights[k] for k in ('policy_train','world_train','world_infer')}
-        if self.execution['parent_policy_budget']:
-            weights['policy_infer'] = self.weights['policy_infer']
-        else:
-            weights.update({'policy_infer.'+k:v for k,v in self._child_weights().items()})
-        return weights
 
     def _pump(self):
         while self.failed is None:
@@ -193,17 +165,7 @@ class CostAdmissionBroker:
                 'dispatch_weight':grant.dispatch_weight,'cost_unit':grant.cost_unit}
             if record is not None:
                 record['group_grant'] = self.gates[record['spec'].group_id].grant(record['spec'])
-                record['admitted_at'] = self.clock()
                 result['group_grant'] = asdict(record['group_grant'])
-                peers = [x for x in self.active_items.values()
-                         if x.work_id != wid and x.service in ('policy_train','world_train')]
-                self.emit('cost_training_execution_admitted', details={
-                    'work_id':wid, 'service':grant.service,
-                    'policy_version':record['spec'].policy_version,
-                    'world_version':record['spec'].world_version,
-                    'coadmitted_training': [x.work_id for x in peers],
-                    'training_gangs':self.settings.get('training_gangs',1),
-                    'scope':'coexisting whole-update submission leases; not CUDA kernel overlap'})
             future = self.waiters[wid]
             if not future.done():future.set_result(result)
             self.emit('cost_work_admitted',details={**result,'service':grant.service})
@@ -213,15 +175,8 @@ class CostAdmissionBroker:
         item = WorkItem(**spec)
         if item.service not in ('world_infer',)+tuple('policy_infer.'+x for x in CLASSES):
             raise ValueError('Training requires collective phase admission')
-        if item.metadata.get('bounded_refresh_lease'):
-            if (item.service != 'policy_infer.refresh' or self.execution['refresh_lease_micros'] <= 1
-                    or item.units > 2*self.execution['refresh_lease_micros']):
-                raise ValueError('Bounded refresh grants cannot be used for actions or unbounded work')
         if item.replica is None or len(item.resources)!=1 or item.resources[0] not in {'card:'+str(i) for i in tuple(map(int, os.environ.get('ACCERL_ALLOCATED_GPU_IDS', '4,5,6,7').split(',')))}:
             raise ValueError('Independent inference needs one exact replica and card lane')
-        if self.execution['parent_policy_budget'] and item.service.startswith('policy_infer.'):
-            item = replace(item, service='policy_infer', metadata={**item.metadata,
-                'request_class':item.service.split('.')[1]})
         future = asyncio.get_running_loop().create_future()
         self.scheduler.enqueue(item);self.waiters[item.work_id]=future;self._pump()
         try:
@@ -247,14 +202,10 @@ class CostAdmissionBroker:
         if not success:
             completed_units=0.
         result = self.scheduler.complete(work_id,observed_cost,completed_units=completed_units,
-            provenance='execution_wall_proxy',success=success,
-            allow_partial=bool(item and item.metadata.get('bounded_refresh_lease')))
-        service = (('policy_infer.'+item.metadata['request_class']) if item is not None
-            and item.service == 'policy_infer' else None if item is None else item.service)
-        result['request_service'] = service
-        if success and service in ('policy_infer.real','policy_infer.imagined'):
+            provenance='execution_wall_proxy',success=success)
+        if success and item is not None and item.service in ('policy_infer.real','policy_infer.imagined'):
             self.action_observations_completed += completed_units if completed_units is not None else item.units
-        if success and service == 'policy_infer.refresh':
+        if success and item is not None and item.service == 'policy_infer.refresh':
             self.refresh_completed += result['completed_units']
         self.waiters.pop(work_id,None)
         self.active_items.pop(work_id,None)
@@ -265,45 +216,6 @@ class CostAdmissionBroker:
         self._pump()
         self.emit('cost_work_completed',details=result)
         return result
-
-    async def settle_refresh(self, work_id, observed_cost, completed_units):
-        """Atomic bounded block settlement plus demand progress, idempotent."""
-        signature = (observed_cost, completed_units)
-        if work_id in self.refresh_settlements:
-            old_signature, receipt = self.refresh_settlements[work_id]
-            if signature != old_signature:
-                raise ValueError('Refresh settlement retry differs')
-            return receipt
-        item = self.active_items.get(work_id)
-        if (item is None or not item.metadata.get('bounded_refresh_lease')
-                or type(completed_units) is not int or not 0 < completed_units <= item.units
-                or completed_units > self.refresh_remaining):
-            raise ValueError('Invalid refresh lease settlement')
-        receipt = await self.complete(work_id, observed_cost, completed_units=completed_units)
-        await self.refresh_demand(-completed_units)
-        self.refresh_settlements[work_id] = (signature, receipt)
-        while len(self.refresh_settlements) > 256:
-            self.refresh_settlements.popitem(last=False)
-        return receipt
-
-    async def update_production(self, raw):
-        if not self.execution['authoritative_production']:
-            return False
-        raw = dict(raw)
-        if (type(raw.get('revision')) is not int or raw['revision'] < 0
-                or any(type(raw.get(k)) is not bool for k in ('real_production_ready','imagination_ready'))
-                or len(raw.get('versions', ())) != 2
-                or any(type(v) is not int or v < 0 for v in raw['versions'])):
-            raise ValueError('Production needs canonical authority revision, versions and readiness')
-        if raw['revision'] <= self.production_revision:
-            return False
-        self.production_revision = raw['revision']
-        self.production = raw
-        for field, progress in [('real_production_ready','real_chunks'),('imagination_ready','imagined_chunks')]:
-            if not raw[field]:
-                self.production_blocked_window.add(progress)
-        self.emit('cost_production_authority', details=raw)
-        return True
 
     async def refresh_demand(self, delta):
         if type(delta) is not int or self.refresh_remaining+delta<0:
@@ -337,18 +249,6 @@ class CostAdmissionBroker:
                 self.phase_records[wid]={'spec':spec,'enqueued':False}
             record=self.phase_records[wid]
             if gate.ready and not record['enqueued']:
-                if self.publication_blocked:
-                    raise ValueError('Cannot admit a training stage during weight publication')
-                # Distinct communicators may overlap only at the same published
-                # model boundary. Every group's own four-rank protocol remains.
-                if self.settings.get('training_gangs',1) == 2:
-                    for other_id, other in self.phase_records.items():
-                        if other_id == wid or not other['enqueued']:
-                            continue
-                        peer = other['spec']
-                        if ((peer.policy_version, peer.world_version) != (spec.policy_version, spec.world_version)
-                                or peer.service == spec.service):
-                            raise ValueError('Concurrent training groups require distinct services at one version boundary')
                 self._reconsider_phase(spec.service+'_ranks_ready',
                     phase='train' if spec.service=='policy_train' else None)
                 record['enqueued']=True
@@ -421,7 +321,7 @@ class CostAdmissionBroker:
         Replay is backpressured. A finished but unpublished optimizer update
         still belongs to the old measurement vector and defers the rollback.
         """
-        probe = self.cycle_feedback.active_probe if self.cycle_feedback is not None else self.active_probe
+        probe=self.active_probe
         if probe is None or snapshot.now < probe['deadline_at']:return False
         blockers=[]
         if self.publication_blocked:blockers.append('publication')
@@ -433,16 +333,13 @@ class CostAdmissionBroker:
         if blockers:
             probe['timeout_pending']=True;probe['timeout_blockers']=blockers
             return False
-        if self.cycle_feedback is not None:
-            decision = self.cycle_feedback.rollback(snapshot, self.weights, self.controller,
-                                                    'cycle_probe_rollback_timeout')
-            self._apply_cycle_feedback(decision, snapshot, admitted)
-            return True
         self._record_partial_window(snapshot,admitted,'probe_deadline_before_complete_window')
         baseline=dict(probe['baseline_weights']);candidate=dict(self.weights)
         self.weights=baseline;self.controller.weights=dict(baseline)
         self.controller.last_change_at=snapshot.now
-        self.scheduler.set_weights(self._scheduler_weights())
+        updates={k:baseline[k] for k in ('policy_train','world_train','world_infer')}
+        updates.update({'policy_infer.'+k:v for k,v in self._child_weights().items()})
+        self.scheduler.set_weights(updates)
         self.last_probe_result={'baseline_weights':baseline,'candidate_weights':candidate,
             'reason':'probe_rollback_timeout','accepted':False,
             'started_at':probe['started_at'],'deadline_at':probe['deadline_at'],
@@ -463,14 +360,6 @@ class CostAdmissionBroker:
         return True
 
     def _choose_cycle(self, snapshot, *, published=True, permit_changes=True):
-        if self.cycle_feedback is not None:
-            safe = (self.failed is None and published and not self.publication_blocked and not self.unpublished_training
-                    and not any(x.service in ('policy_train','world_train') for x in self.active_items.values()))
-            decision = self.cycle_feedback.decide(snapshot, self.weights, self.controller,
-                permit_changes=bool(permit_changes and self.settings.get('macro_enabled')),
-                allow_probe=bool(self.settings.get('allow_probe')), safe_boundary=safe)
-            self._apply_cycle_feedback(decision, snapshot, self.latest_admitted)
-            return decision
         prior_controller_weights=dict(self.controller.weights)
         prior_change_at=self.controller.last_change_at
         apply_enabled=bool(self.settings.get('macro_enabled') and permit_changes)
@@ -493,7 +382,9 @@ class CostAdmissionBroker:
                 'completed_cycle':synchronized_cycle}
             self.active_probe=None
             self.weights=dict(decision.weights)
-            self.scheduler.set_weights(self._scheduler_weights())
+            updates={k:self.weights[k] for k in ('policy_train','world_train','world_infer')}
+            updates.update({'policy_infer.'+k:v for k,v in self._child_weights().items()})
+            self.scheduler.set_weights(updates)
             self.probe_anchor_cycle=synchronized_cycle
             self.probe_windows_at_anchor=self.stable_windows
             self.probe_contexts.clear()
@@ -527,32 +418,13 @@ class CostAdmissionBroker:
                     'deadline_at':snapshot.now+self.controller.config.response_max_age_seconds,
                     'baseline_seconds_at_start':decision.baseline_cycle_seconds}
             self.weights=dict(decision.weights)
-            self.scheduler.set_weights(self._scheduler_weights())
+            updates={k:self.weights[k] for k in ('policy_train','world_train','world_infer')}
+            updates.update({'policy_infer.'+k:v for k,v in self._child_weights().items()})
+            self.scheduler.set_weights(updates)
             self.probe_anchor_cycle=(snapshot.policy_version+4)//5
             self.probe_windows_at_anchor=self.stable_windows
             self.probe_contexts.clear()
         return decision
-
-    def _apply_cycle_feedback(self, decision, snapshot, admitted):
-        if decision.changed:
-            previous = dict(self.weights)
-            self.weights = dict(decision.weights)
-            self.controller.weights = dict(self.weights)
-            self.controller.last_change_at = snapshot.now
-            self.scheduler.set_weights(self._scheduler_weights())
-            self.emit('cost_weights_applied', details={'previous':previous,
-                'weights':dict(self.weights),'reason':decision.reason,
-                'policy_version':snapshot.policy_version,'world_version':snapshot.world_version,
-                'scope':'future cooperative admission; submitted grants keep their dispatch weight'})
-        if decision.changed or decision.probe_comparison is not None:
-            self.cycle_feedback.rebase(snapshot, self.weights, admitted, self.controller)
-            if decision.reason == 'cycle_probe_rollback_timeout':
-                # Even p%5==0 may be mid-wait for the next update. Exclude that
-                # remainder; anchor only at the next fully published boundary.
-                self.cycle_feedback.anchor = None
-        if decision.probe_comparison is not None:
-            self.last_probe_result = decision.probe_comparison
-            self.emit('cost_probe_result', details=decision.probe_comparison)
 
     def _reconsider_phase(self, trigger, *, phase=None, published=True,
                           policy_version=None, world_version=None, permit_changes=False):
@@ -576,10 +448,6 @@ class CostAdmissionBroker:
                   updates.get('world_version',prior.world_version))
         if self.latest_inventory is not None and self.latest_inventory['versions']==versions:
             updates['inventory']=self.latest_inventory['inventory']
-        if self.execution['authoritative_production']:
-            matched = self.production is not None and tuple(self.production['versions']) == versions
-            for field in ('real_production_ready','imagination_ready'):
-                updates[field] = bool(matched and self.production[field])
         snapshot=replace(prior,**updates)
         self.latest_cycle_snapshot=snapshot
         # Phase edges are advisory. Changes use update_cycle(), or a bounded
@@ -598,8 +466,6 @@ class CostAdmissionBroker:
         versions=tuple(raw['inventory_versions'])
         if type(revision) is not int or revision<0 or len(versions)!=2 or any(type(v) is not int or v<0 for v in versions):
             raise ValueError('Inventory needs a canonical revision and version pair')
-        refresh_owner=raw.get('critic_refresh_owner',getattr(self,'critic_refresh_owner','inference'))
-        if refresh_owner not in ('inference','trainer'):raise ValueError('Unknown critic owner')
         inventory=tuple(InventoryBucket(**x) for x in raw['inventory'])
         admitted=raw.get('admitted_chunks')
         if admitted is not None and (set(admitted)-{'real','imagined'} or
@@ -608,7 +474,6 @@ class CostAdmissionBroker:
         if revision<=self.inventory_revision:
             return False
         self.inventory_revision=revision
-        self.critic_refresh_owner=refresh_owner
         self.latest_inventory={'versions':versions,'inventory':inventory}
         if admitted is not None:self.latest_admitted=dict(admitted)
         prior=self.latest_cycle_snapshot
@@ -623,15 +488,13 @@ class CostAdmissionBroker:
 
     async def update_cycle(self, raw):
         now=self.clock();raw=dict(raw);admitted=raw.pop('admitted_chunks',{})
-        refresh_owner=raw.pop('critic_refresh_owner',getattr(self,'critic_refresh_owner','inference'))
         revision=raw.pop('inventory_revision',None)
         versions=raw.pop('inventory_versions',None)
         if revision is not None:
             if tuple(versions or ())!=(raw['policy_version'],raw['world_version']):
                 raise ValueError('Decision inventory differs from the published versions')
             await self.update_inventory(dict(inventory_revision=revision,
-                inventory_versions=versions,inventory=raw.get('inventory',()),admitted_chunks=admitted,
-                critic_refresh_owner=refresh_owner))
+                inventory_versions=versions,inventory=raw.get('inventory',()),admitted_chunks=admitted))
         published=raw.pop('published',True)
         completed_context=raw.pop('completed_context',raw.get('context','ordinary'))
         if self.last_cycle is not None:
@@ -639,17 +502,8 @@ class CostAdmissionBroker:
             if delta>0:
                 raw.setdefault('critic_observations_per_future_update',
                     (self.refresh_completed-self.last_cycle['refresh'])/delta)
-        if refresh_owner == 'trainer':
-            if self.refresh_remaining:raise RuntimeError('Trainer JIT cannot have inference refresh debt')
-            raw['critic_observations_per_future_update']=0.
         raw['inventory']=tuple(InventoryBucket(**x) for x in raw.get('inventory',()))
         raw['now']=now;raw['critic_observations_remaining']=self.refresh_remaining
-        if self.execution['authoritative_production']:
-            production=self.production
-            matching=production is not None and tuple(production['versions'])==(raw['policy_version'],raw['world_version'])
-            for key in ('real_production_ready','imagination_ready'):
-                raw[key]=bool(matching and production[key])
-            if not matching:self.production_blocked_window.update(('real_chunks','imagined_chunks'))
         snapshot=CycleSnapshot(**raw)
         self.latest_admitted=dict(admitted)
         self._expire_probe_if_safe(snapshot,admitted,
@@ -663,8 +517,6 @@ class CostAdmissionBroker:
                     'critic_observations':'policy_infer','real_chunks':'policy_infer','imagined_chunks':'world_infer'}
                 service['policy_action_observations']='policy_infer'
                 for kind,units in progress.items():
-                    if self.execution['authoritative_production'] and kind in self.production_blocked_window:
-                        continue
                     if units<0:raise ValueError('Service progress counters cannot move backwards')
                     self.controller.observe(ResponseSample(last['weights'],service[kind],units,elapsed,
                         context=last['context'],progress_kind=kind,observed_at=now))
@@ -677,15 +529,7 @@ class CostAdmissionBroker:
                 self._record_partial_window(snapshot,admitted,self.skip_response_reason)
             self.skip_response_window=False
             self.skip_response_reason=None
-        self.production_blocked_window.clear()
-        if self.execution['authoritative_production']:
-            for field,kind in [('real_production_ready','real_chunks'),('imagination_ready','imagined_chunks')]:
-                if not getattr(snapshot,field):self.production_blocked_window.add(kind)
         self.latest_cycle_snapshot=snapshot
-        if self.cycle_feedback is not None and published and not self.publication_blocked:
-            measured = self.cycle_feedback.observe(snapshot, self.weights, admitted, self.controller)
-            if measured is not None:
-                self.emit('cost_complete_cycle_measured', details=measured)
         decision=self._choose_cycle(snapshot,published=published)
         self.last_cycle={'at':now,'policy':snapshot.policy_version,'world':snapshot.world_version,
             'refresh':self.refresh_completed,'actions':self.action_observations_completed,
@@ -721,8 +565,6 @@ class CostAdmissionBroker:
 
     def snapshot(self):
         return {'run_id':self.run_id,'source_sha256':self.source_sha256,
-            'cycle_feedback':None if self.cycle_feedback is None else self.cycle_feedback.snapshot(),
-            'execution':dict(self.execution),'production_authority':self.production,
             'weights':dict(self.weights),'failed':self.failed,'refresh_remaining':self.refresh_remaining,
             'scheduler':self.scheduler.snapshot(),'controller':self.controller.snapshot(),
             'phase_gates':{k:v.snapshot() for k,v in self.gates.items()},
@@ -838,13 +680,9 @@ def scheduled_policy_update(owner):
 
 
 def replay_inventory(store, admitted=None):
-    from trajectory_sampling import enabled, inventory_buckets
-    trajectory = enabled(getattr(store, 'config', None))
     buckets=Counter()
     for sample in store.samples.values():
         segment=store.segments[sample['segment_id']];version=segment.versions[sample['index']]
-        if trajectory and segment.source == 'imagined':
-            continue
         key=(segment.source,version['policy'],version.get('world_reward_bundle_version',version.get('world_bundle_version')),
             sample['uses'],sample['reserved'])
         buckets[key]+=1
@@ -854,12 +692,7 @@ def replay_inventory(store, admitted=None):
         inventory.append(dict(bucket_id=str(index),source=source,distinct_chunks=count,
             generation_policy_version=pv,generation_world_version=wv,
             successful_uses=uses,reserved_uses=reserved))
-    if trajectory:
-        inventory.extend(inventory_buckets(store))
-    result={'inventory':inventory,'admitted_chunks':dict(admitted or {})}
-    if getattr(getattr(store,'config',None),'jit_gae_mode','off') != 'off':
-        result['critic_refresh_owner']='trainer'
-    return result
+    return {'inventory':inventory,'admitted_chunks':dict(admitted or {})}
 
 
 async def acquire_world_request(owner, *, cost_key='world_infer:generate_chunk'):

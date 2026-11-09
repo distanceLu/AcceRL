@@ -18,5 +18,5 @@
   "initial_state_count": 50,
   "initial_state_seed": 20261026,
   "real_env_step_budget": 1000000,
-  "fresh_lookahead_updates": 2
+  "real_collection_action_limit": 150
 }

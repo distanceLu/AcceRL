@@ -28,15 +28,9 @@ GPUS = ('GPU-c43d6671-0979-b38d-9eae-4fe0a9d71c8c',
 PIPE = '/dev/shm/mps_lcx1_gpu47_pzero2_20261020/pipe'
 FRESH_PROFILE = '04_real'
 BACKEND_CONFIG = 'git-world.json'
-COST_SCHEDULER_PROFILE = '03_feedback_parallel'
+COST_SCHEDULER_PROFILE = '03_adaptive'
 COST_SCHEDULER_CONFIG = '../recipe/cost_scheduler_config.json'
-CYCLE_FEEDBACK = {'enabled': True, 'warmup_policy_updates': 20, 'observation_cycles': 2,
-                  'timeout_seconds': 7200.0, 'inventory_tolerance': 0.1, 'max_cycle_spread': 0.5}
 PIPELINE_CONFIG = '../recipe/pipeline_config.json'
-EXECUTION_CONFIG = {'parent_policy_budget': True, 'authoritative_production': True,
-                    'refresh_lease_micros': 4, 'refresh_lease_seconds': 0.8,
-                    'refresh_trim': 'legacy', 'dependency_priority': False,
-                    'action_wait_seconds': 1.0}
 NATIVE_REWARD = {'mode': 'libero_discounted_success_value_v1', 'link': 'sigmoid',
                  'loss': 'masked_half_mse', 'label_source': 'libero_env_step',
                  'calibrated': False, 'terminal': 'horizon_only', 'balance': 'none',
@@ -48,10 +42,7 @@ FRESH_OPTIONS = {'protocol': 'weaver_fresh_v1', 'dense_reward': True,
                  'max_policy_age': 16, 'max_world_age': 3, 'max_sample_uses': 4,
                  'seed_balancing': True, 'early_seed_context': True,
                  'seed_scheduler_mode': 'balanced', 'seed_scheduler_seed': 20261028,
-                 'real_policy_replay': True, 'real_fraction': .25,
-                 'jit_gae_mode': 'fused', 'advantage_norm': 'ema_zscore',
-                 'advantage_ema_beta': .9, 'advantage_scale_floor': .001, 'jit_context_micro': 2,
-                 'policy_sampling': 'imagined_trajectories'}
+                 'real_policy_replay': True, 'real_fraction': .25}
 OPTIMIZATIONS = {'selected_frame_encoding': True, 'kv_cache': True, 'decode_mode': 'last',
                  'feature_cache_max_bytes': 67108864, 'resident_rollout_state': True,
                  'resident_max_sessions': 8, 'resident_max_bytes': 67108864,
@@ -69,7 +60,17 @@ INITIAL_WORLD = {'backend': 'weaver', 'world_trainable': True, 'source_optimizer
 PIPELINE_RECIPE = {'real_workers': 1, 'imagination_workers': 4, 'max_real_in_flight': 1,
                    'max_imagine_in_flight': 4, 'initial_state_enabled': True,
                    'initial_state_count': 50, 'initial_state_seed': 20261026,
-                   'real_env_step_budget': 1000000}
+                   'real_env_step_budget': 1000000, 'real_collection_action_limit': 150}
+
+
+def validate_pipeline_admission(pipeline):
+    # The 150-action limit is an earlier collection budget, not a new task
+    # horizon. The original 220-action evaluation/terminal contract is retained.
+    if (not isinstance(pipeline, dict) or 'fresh_lookahead_updates' in pipeline
+            or any(type(pipeline.get(k)) is not type(v) or pipeline.get(k) != v
+                   for k, v in PIPELINE_RECIPE.items())):
+        raise ValueError('Expected orange Real1/Imag4, 1M budget and a 150-action collection limit without lookahead')
+    return True
 
 
 def validate_backend_admission(backend, pipeline, admission):
@@ -93,8 +94,7 @@ def validate_backend_admission(backend, pipeline, admission):
             or any(type(options.get(k)) is not type(v) or options.get(k) != v
                    for k, v in OPTIMIZATIONS.items())):
         raise ValueError('All four pinned WEAVER execution optimizations must be enabled')
-    if any(type(pipeline.get(k)) is not type(v) or pipeline.get(k) != v for k, v in PIPELINE_RECIPE.items()):
-        raise ValueError('Expected Real1/Imag4, full 50 initial-state pool and separate 1M real-step budget')
+    validate_pipeline_admission(pipeline)
     training_environment = admission.get('online_training_environment', {})
     if (admission.get('configuration_admitted') is not True
             or admission.get('assets_checked') is not True or admission.get('errors')
@@ -202,11 +202,10 @@ def validate_cost_scheduler_admission(source):
     if (settings.get('schema') != 1
             or any(settings.get(k) is not True for k in ('enabled', 'macro_enabled', 'allow_probe'))):
         raise ValueError('Adaptive scheduler must explicitly enable scheduling, macro feedback and probes')
-    if settings.get('execution') != EXECUTION_CONFIG:
-        raise ValueError('Execution scheduler profile differs from the admitted experiment')
-    if (settings.get('training_gangs') != 2 or settings.get('card_inflight') != 3
-            or settings.get('cycle_feedback') != CYCLE_FEEDBACK):
-        raise ValueError('Combined parallel/feedback scheduler contract differs')
+    if (any(key in settings for key in ('execution', 'cycle_feedback'))
+            or type(settings.get('training_gangs')) is not int or settings['training_gangs'] != 1
+            or type(settings.get('card_inflight')) is not int or settings['card_inflight'] != 2):
+        raise ValueError('Expected the orange single-training-gang adaptive scheduler without later execution/cycle extensions')
     return {'profile': COST_SCHEDULER_PROFILE, 'source_path': str(path),
             'source_sha256': digest, 'settings': settings}
 
@@ -217,19 +216,17 @@ def check_cost_scheduler_state(state, source, root):
     if (any(observed.get(k) != expected[k] for k in ('profile', 'source_path', 'source_sha256'))
             or observed.get('configuration_path') != str(root / 'formal_v3/cost_scheduler_config.json')
             or observed.get('configuration_sha256') != expected['source_sha256']
-            or observed.get('settings', {}).get('execution') != EXECUTION_CONFIG
+            or observed.get('settings') != expected['settings']
             or any(observed.get('settings', {}).get(k) is not True
                    for k in ('enabled', 'macro_enabled', 'allow_probe'))):
         raise ValueError('Runner did not activate the exact frozen adaptive scheduler')
-    for key in ('training_gangs', 'card_inflight', 'cycle_feedback'):
-        if observed.get('settings', {}).get(key) != expected['settings'][key]:
-            raise ValueError('Runner did not activate combined parallel/feedback settings')
     actual = state.get('pipeline_config', {})
     expected_pipeline = read_json(source / PIPELINE_CONFIG)
-    if (actual.get('fresh_lookahead_updates') != 2
-            or any(actual.get(k) != v for k, v in expected_pipeline.items())
+    validate_pipeline_admission(expected_pipeline)
+    validate_pipeline_admission(actual)
+    if (actual != expected_pipeline
             or state.get('pipeline_config_path') != str(root / 'formal_v3/pipeline_config.json')):
-        raise ValueError('Runner did not activate the exact inventory lookahead pipeline')
+        raise ValueError('Runner did not activate the exact orange pipeline with the 150-action collection budget')
     return True
 
 
@@ -319,8 +316,9 @@ def check_state(state, source, root, run_id=None, supervisor=None):
                           for k in ('pid', 'uid', 'birth_ticks')):
         raise ValueError('Runner state supervisor birth identity mismatch')
     fresh = state.get('world_backend_config', {}).get('backend_options', {}).get('fresh', {})
-    if any(type(fresh.get(k)) is not type(v) or fresh.get(k) != v for k,v in FRESH_OPTIONS.items()):
-        raise ValueError('Actual runner JIT/FRESH settings differ from the frozen profile')
+    if (not isinstance(fresh, dict) or set(fresh) != set(FRESH_OPTIONS)
+            or any(type(fresh.get(k)) is not type(v) or fresh.get(k) != v for k,v in FRESH_OPTIONS.items())):
+        raise ValueError('Actual runner FRESH settings differ from the orange profile')
     return rid
 
 
@@ -802,7 +800,7 @@ def runner_command(args):
 def run(args):
     budgets = validate_manual_contract(args.post_stop_grace_seconds)
     if getattr(args, 'stop_control', None) is not None or getattr(args, 'measurement_seconds', None) is not None:
-        raise ValueError('JIT deployment is manual-stop only; no inherited calendar/duration')
+        raise ValueError('Orange deployment is manual-stop only; no inherited calendar/duration')
     if getattr(args, 'native_gpu_preflight', False) is not True:
         raise ValueError('This online candidate requires explicit --native-gpu-preflight once after queue admission')
     source, root = args.source, args.root

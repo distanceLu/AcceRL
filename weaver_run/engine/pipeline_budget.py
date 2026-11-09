@@ -64,7 +64,9 @@ class PipelineBudgetConfig:
     initial_state_count: int = 50
     initial_state_seed: int = 20261026
     real_env_step_budget: int = 11000
-    fresh_lookahead_updates: int = 0
+    # Real collection may stop before the task horizon. This is a censored
+    # prefix, not a failed task; evaluation and imagination keep their horizons.
+    real_collection_action_limit: int | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -77,11 +79,12 @@ class PipelineBudgetConfig:
         _positive_int("initial_state_count", self.initial_state_count)
         _nonnegative_int("initial_state_seed", self.initial_state_seed)
         _positive_int("real_env_step_budget", self.real_env_step_budget)
-        _nonnegative_int("fresh_lookahead_updates", self.fresh_lookahead_updates)
-        if self.fresh_lookahead_updates > 4:
-            raise ValueError('fresh_lookahead_updates must be between zero and four')
         if type(self.initial_state_enabled) is not bool:
             raise ValueError("initial_state_enabled must be boolean")
+        if self.real_collection_action_limit is not None:
+            _positive_int("real_collection_action_limit", self.real_collection_action_limit)
+            if not self.initial_state_enabled:
+                raise ValueError("real_collection_action_limit requires initial_state_enabled")
         _nonnegative_int("policy_low_watermark", self.policy_low_watermark)
         if self.policy_low_watermark >= self.policy_high_watermark:
             raise ValueError("policy_low_watermark must be below policy_high_watermark")
@@ -187,8 +190,6 @@ class PipelineBudget:
         self._replay_pressure = None
         self._pressure_revision = -1
         self._production_versions = None
-        from inventory_lookahead import LookaheadAdmission
-        self._lookahead = LookaheadAdmission(config.fresh_lookahead_updates, clock)
         self._stopped = False
         self._failure: str | None = None
         self._last_block_reason: str | None = None
@@ -250,21 +251,7 @@ class PipelineBudget:
         if versions != self._production_versions:
             self._production_versions = versions
             self._replay_pressure = None
-            self._lookahead.clear()
         return dict(production_versions=list(versions), pressure_cleared=self._replay_pressure is None)
-
-    def set_lookahead(self, snapshot):
-        self._guard()
-        if self._stopped:
-            return {'stopped': True}
-        accepted = self._lookahead.receive(snapshot, self._production_versions)
-        return dict(self.lookahead_status(), accepted=accepted, stopped=self._stopped,
-                    failure=self._failure)
-
-    def lookahead_status(self):
-        return self._lookahead.status(self._production_versions, self.policy_added,
-            self.reserved_policy_samples, self._credits, self.policy_chunks_per_seed,
-            self._stopped)
 
     def set_replay_pressure(self, snapshot):
         """A short-lived next-cohort shortage may use existing credits early.
@@ -482,22 +469,6 @@ class PipelineBudget:
         del self._real[token]
         self._counts["real_cancelled"] += 1
 
-    def imagination_admission(self):
-        """The same gate used by actual admission, not an inferred pause flag."""
-        self._guard()
-        self._refresh_pause()
-        reason = None
-        if self._stopped:
-            reason = 'stopped'
-        elif len(self._imagine) >= self.config.max_imagine_in_flight:
-            reason = 'imagine_in_flight'
-        elif (self._paused and not self.pressure_status()['pressure_can_spend_existing_credit']
-                and not self.lookahead_status()['can_spend_existing_credit']):
-            reason = 'policy_demand'
-        elif not self._dispatch:
-            reason = 'no_seeds'
-        return {'can_start':reason is None, 'reason':reason}
-
     def acquire_imagine(self, worker_id: Any) -> dict | None:
         self._guard()
         if self._stopped:
@@ -505,9 +476,15 @@ class PipelineBudget:
         worker_id = str(worker_id)
         if any(lease["worker_id"] == worker_id for lease in self._imagine.values()):
             raise PipelineBudgetError(f"imagination worker {worker_id} already owns a lease")
-        admission = self.imagination_admission()
-        if not admission['can_start']:
-            self._last_block_reason = admission['reason']
+        self._refresh_pause()
+        if len(self._imagine) >= self.config.max_imagine_in_flight:
+            self._last_block_reason = "imagine_in_flight"
+            return None
+        if self._paused and not self.pressure_status()['pressure_can_spend_existing_credit']:
+            self._last_block_reason = "policy_demand"
+            return None
+        if not self._dispatch:
+            self._last_block_reason = "no_seeds"
             return None
         bucket = None
         if self.seed_scheduler is None:
@@ -616,7 +593,6 @@ class PipelineBudget:
                     policy_paused=self._paused, stopped=self._stopped, failure=self._failure,
                     last_block_reason=self._last_block_reason, **self._counts)
         result['replay_pressure'] = self.pressure_status()
-        result['inventory_lookahead'] = self.lookahead_status()
         if self.seed_scheduler is not None:
             from collections import Counter
             from fresh_seed_scheduler import seed_bucket

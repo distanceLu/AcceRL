@@ -1,6 +1,6 @@
 # AcceRL · WEAVER original95
 
-这个分支运行 OpenVLA Policy 与 WEAVER World/Reward Model 在 LIBERO Spatial 上的联合训练。入口是仓库根目录的 `./run.sh`。默认从原始 OpenVLA、蒸馏 Policy 和 native3200 World 权重开始，重新建立 optimizer、Replay 和 Advantage EMA。训练持续到手动停止。
+这个分支运行 OpenVLA Policy 与 WEAVER World/Reward Model 在 LIBERO Spatial task 0 上的联合训练。入口是仓库根目录的 `./run.sh`。当前默认为用户选定的橙线 `1793355532` 配方，从原始 OpenVLA、蒸馏 Policy 和 native3200 World 权重开始，重新建立 optimizer 和 Replay。真实训练采集最多执行150个动作；任务和评估上限仍为220。训练等待用户明确停止，不设次日自动截止；原1M模拟调用预算和故障保护保留。
 
 ## 在另一台服务器上启动
 
@@ -35,11 +35,13 @@ cp .weaver.env.example .weaver.env
 ./run.sh stop --id exp1      # 请求在安全边界保存退出；再用 status 确认 finished
 ```
 
-在普通服务器上，训练由当前终端的前台 supervisor 管理，长训可在 tmux 或批作业中运行。默认输出在 `.weaver-runs/<实验名>/`，通过 `WEAVER_OUTPUTS` 可换盘。日志为 `train.log`，TensorBoard 事件在 `runs/Libero/`，Policy 与 World 权重在 `checkpoints/`。保存后跳过单独的最终评估，训练中的 10 个 Eval worker 正常运行。在原实验服务器上，同一入口的启动、查询和停止走已有队列，保留该站的资源预约及身份核验。
+在普通服务器上，训练由当前终端的前台 supervisor 管理，长训可在 tmux 或批作业中运行。默认输出在 `.weaver-runs/<实验名>/`，通过 `WEAVER_OUTPUTS` 可换盘。日志为 `train.log`，TensorBoard 事件在 `runs/Libero/`，Policy 与 World 权重在 `checkpoints/`。普通服务器入口仍跳过单独的最终评估。在原实验服务器上，启动、查询和停止走已有队列；本次开启保存退出后的四卡固定评估，初始/最终Policy各greedy/stochastic、各50初态共200回合，每回合最多220动作。训练中的10个Eval worker沿用橙线设置。
 
 ## 复现口径
 
-本分支对应 `weaverintegrated_1106_142611_cafe8ae1` 使用的 original95 配方及其历史参照 `weaverintegrated_1103_172031_a7557d7d`。每个 Policy batch 有 144 个真实 chunk 和 432 个想象 chunk，Policy/World 的 global batch 为 576/1024，每 5 次 Policy 更新配 1 次 World 更新。完整想象轨迹、fused JIT GAE、全局 EMA、双训练组并行、反馈调权和 Eval10 的 1000-episode 滚动窗口均来自该配方。历史约 17 小时到达的 95% 是跨多个 Policy 版本的滚动观测；新实验应按实际评估记录判断。
+2026-11-09按用户选择恢复橙线 `weaverintegrated_1030_181824_cf621e5b` 的算法实现：共享推理池current-critic刷新、batch优势归一化、独立chunk抽样、单训练组准入和原03_adaptive调度。每个 Policy batch 有144个真实chunk和432个想象chunk，Policy/World global batch为576/1024，每5次Policy更新配1次World更新。学习配方唯一新增变量是采集150动作预算；150步未成功按budget censor处理，Policy bootstrap，RM标签mask为0，World仍可训练已观察前缀。正式任务失败仍以220步为界。详细变更见[采集预算实验](docs/collection150.md)。
+
+此前粉线的完整想象轨迹、fused JIT GAE、Advantage EMA和双训练组并行保存在Git历史提交 `5d728230e87a915908d3a53ad9580b536468482a` 中。当前橙线实验不启用这些改动。历史滚动成功率可混合Policy版本，并不保证新实验达到同一曲线。
 
 ## 代码和实验版本
 
