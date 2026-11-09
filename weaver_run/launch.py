@@ -260,7 +260,7 @@ def supervise(work, cmd, env, log, run_id):
 
 def main():
     parser=argparse.ArgumentParser(prog="./run.sh")
-    parser.add_argument("action",choices=["original","restore","start","check","status","stop"],default="original",nargs="?")
+    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
     args=parser.parse_args()
     host=socket.gethostname()==REFERENCE_SERVER
@@ -268,6 +268,7 @@ def main():
         op="original" if args.action in ("original","restore","start") else args.action
         cli=HERE/"reference_site/cli.py"
         os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else [])])
+    require(not args.action.startswith('diagnose'),'This saved-checkpoint diagnostic uses the reference site queue and assets')
     if args.action=="check":
         with tempfile.TemporaryDirectory(prefix="weaver-check-") as d:
             ids,_=allocated(True)

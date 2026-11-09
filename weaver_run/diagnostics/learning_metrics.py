@@ -139,12 +139,13 @@ def source_losses(logits, values, actions, old_logits, advantages, targets,
     return result
 
 
-def loss_gradients(loss, named_parameters, *, retain_graph=False):
+def loss_gradients(loss, named_parameters, *, retain_graph=False, storage_device='cpu', storage_dtype=None):
     """No optimizer step and no writes to parameter.grad. Full coordinates."""
     import torch
     pairs = [(n, p) for n, p in named_parameters if p.requires_grad]
     if not pairs or loss.ndim:
         raise ValueError('Need trainable named parameters and a scalar loss')
     grads = torch.autograd.grad(loss, [p for _, p in pairs], allow_unused=True, retain_graph=retain_graph)
-    return {n: (g.detach().to(device='cpu', dtype=torch.float64) if g is not None
-                else torch.zeros(p.shape, dtype=torch.float64)) for (n, p), g in zip(pairs, grads)}
+    dtype=torch.float64 if storage_dtype is None else storage_dtype
+    return {n: (g.detach().to(device=storage_device, dtype=dtype) if g is not None
+                else torch.zeros(p.shape, device=storage_device, dtype=dtype)) for (n, p), g in zip(pairs, grads)}

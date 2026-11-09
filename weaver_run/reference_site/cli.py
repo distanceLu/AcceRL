@@ -268,6 +268,17 @@ def stop(record,job):
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1] in ('diagnose','diagnose-status'):
+        p=argparse.ArgumentParser(prog='./run.sh '+sys.argv[1]);p.add_argument('--id',dest='label')
+        opts=p.parse_args(sys.argv[2:])
+        require((os.getuid(),socket.gethostname())==(1004,'h20-xyff52ab-0001') and
+                (HOME/'.owner').read_text()=='WEAVER server catalog v1\n','Unexpected diagnostic server')
+        sys.path.insert(0,str(CHECKOUT))
+        from weaver_run.diagnostics.queue_panel import submit
+        with (EXPERIMENTS/'.launch.lock').open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            print(json.dumps(submit(sys.modules[__name__],opts.label,status=sys.argv[1]=='diagnose-status'),indent=2))
+        return
     p=argparse.ArgumentParser(prog="./run.sh",description="WEAVER GPU4–7 | 无参数启动 restore；check 只做 CPU 验收",
         epilog="./run.sh  |  ./run.sh list  |  ./run.sh check restore  |  ./run.sh original --id trial01  |  ./run.sh status  |  ./run.sh stop")
     p.add_argument("args",nargs="*",metavar="动作或配置")
