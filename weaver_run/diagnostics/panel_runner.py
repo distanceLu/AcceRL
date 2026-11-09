@@ -3,7 +3,7 @@ import argparse,gc,json,math,os,random,signal,sqlite3,sys,time,traceback
 from pathlib import Path
 from contextlib import closing
 ROOT=Path(__file__).resolve().parents[2]
-sys.path[:0]=[str(ROOT),str(ROOT/'weaver_run/engine')]
+sys.path[:0]=[str(ROOT),str(ROOT/'weaver_run'),str(ROOT/'weaver_run/engine')]
 from weaver_run.diagnostics.panel_common import save,spec,GPUS,flatten_segments
 
 
@@ -139,16 +139,16 @@ def main():
     plan=json.loads(Path(args.plan).read_bytes());out=Path(plan['output'])
     if args.validate_only:
         print(json.dumps(admission(plan)));return
-    from weaver_run.git_version import revision
-    revision(ROOT,plan['git_commit']);identity=verify_owner(plan)
-    # CPU parent has not imported Torch yet; check existing GPU service without changing it.
-    from weaver_run.launch import mps_preflight
-    mps_preflight(os.environ.get('CUDA_MPS_PIPE_DIRECTORY'),GPUS)
-    os.environ.update(CUDA_VISIBLE_DEVICES=GPUS[0],MUJOCO_GL='osmesa',TOKENIZERS_PARALLELISM='false',
-        HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',USE_TF='0',OMP_NUM_THREADS='1')
     signal.signal(signal.SIGALRM,lambda *_: (_ for _ in ()).throw(TimeoutError('Finite diagnostic time budget exceeded')))
     signal.alarm(plan['max_seconds'])
     try:
+        from weaver_run.git_version import revision
+        revision(ROOT,plan['git_commit']);identity=verify_owner(plan)
+        # CPU parent has not imported Torch yet; inspect the existing GPU service.
+        from weaver_run.launch import mps_preflight
+        mps_preflight(os.environ.get('CUDA_MPS_PIPE_DIRECTORY'),GPUS)
+        os.environ.update(CUDA_VISIBLE_DEVICES=GPUS[0],MUJOCO_GL='osmesa',TOKENIZERS_PARALLELISM='false',
+            HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',USE_TF='0',OMP_NUM_THREADS='1')
         receipt=admission(plan)
         if receipt!=plan['admission']:raise ValueError('Frozen checkpoint or EMA changed after queue submission')
         save(out/'started.json',dict(identity=identity,git_commit=plan['git_commit'],started_ns=time.time_ns()))

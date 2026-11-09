@@ -1,4 +1,4 @@
-import json,os,re,sys,tempfile,types,unittest
+import json,os,re,sys,tempfile,types,unittest,subprocess
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
@@ -17,6 +17,16 @@ def episode(n=40,success=True):
 
 
 class PanelTests(unittest.TestCase):
+    def test_queue_script_imports_launcher_in_clean_interpreter(self):
+        code="import runpy,sys,types,os\nsys.path.insert(0,sys.argv[2])\n"
+        code+="if os.name=='nt': sys.modules['fcntl']=types.SimpleNamespace()\n"
+        code+="runpy.run_path(sys.argv[1],run_name='diagnostic_import_check')\n"
+        code+="from weaver_run.launch import mps_preflight\nassert callable(mps_preflight)\n"
+        result=subprocess.run([sys.executable,'-I','-B','-c',code,str(ROOT/'weaver_run/diagnostics/panel_runner.py'),str(Path(np.__file__).parent.parent)],
+            cwd=tempfile.gettempdir(),capture_output=True,text=True,timeout=30,
+            env=dict(os.environ,CUDA_VISIBLE_DEVICES=''))
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_episode_requires_complete_outcome_and_endpoint(self):
         ep=episode();self.assertEqual(validate_episode(ep),40)
         with self.assertRaises(ValueError):validate_episode(dict(ep,frames=ep['frames'][:-1]))
