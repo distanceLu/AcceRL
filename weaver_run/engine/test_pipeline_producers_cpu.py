@@ -106,7 +106,7 @@ class TinyEnv:
 
 
 def make_worker(events, replay, wm_replay, *, mode="imagine", backend="ctrl",
-                base_must_not_run=False):
+                base_must_not_run=False, real_env=None, pipeline_config=None):
     """Compile selected unmodified methods; imports/models in train.py stay out."""
     fake_ray = FakeRay(events)
     class Base:
@@ -116,7 +116,7 @@ def make_worker(events, replay, wm_replay, *, mode="imagine", backend="ctrl",
             events.append("base_env_init")
             self.infer, self.replay, self.wid = infer, replay, wid
             self.stats_actor, self.cfg, self.processor = stats_actor, cfg, "processor"
-            self.num_tasks, self.envs = 1, [TinyEnv()]
+            self.num_tasks, self.envs = 1, [real_env if real_env is not None else TinyEnv()]
             self.current_env_idx = -1
 
     def rpc(worker, role, actor, method, *args, **kwargs):
@@ -162,7 +162,7 @@ def make_worker(events, replay, wm_replay, *, mode="imagine", backend="ctrl",
         imagine_horizon=32, torch_dtype="unused-cpu-test", reward_infer="existing-reward-actor",
         ctrl_world_infer="existing-world-actor", reward_scale=1., gamma=.9, lambda_=.8,
         wm_replay_buffer=wm_replay, real_traj_collect_interval=1,
-        world_config={"backend": backend}, worker_mode=mode)
+        world_config={"backend": backend}, worker_mode=mode, pipeline_config=pipeline_config)
     return worker, fake_ray
 
 

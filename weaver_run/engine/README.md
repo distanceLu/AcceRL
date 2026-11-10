@@ -1,8 +1,8 @@
-# Current engine: orange 1793355532 with collection budget 150
+# Current engine: orange 1793355532 with a 150-action real training task
 
-Active configuration is in `../recipe/`. Task and evaluation horizon remain 220. The original shared-critic, chunk-replay, batch-normalization and single-training-gang implementation is active. Code is identified by its Git commit.
+Active configuration is in `../recipe/`. `real_training_action_horizon:150` makes real training timeouts formal failures with valid zero RM labels and terminal Policy targets without bootstrap. `real_collection_action_limit:null` disables the former extra collection cap. Earlier global-budget exhaustion remains censored. Online and final evaluation keep 220 actions. The original shared-critic, chunk-replay, batch-normalization and single-training-gang implementation and CPU previews are retained. Code is identified by its Git commit; this description does not assert that a new process has started.
 
-The text below documents the historical November 3 candidate; its optional JIT/EMA/parallel-cycle modules are retained for history and are not enabled by the current entry. See `../../docs/collection150.md` for the active experiment.
+The text below documents the historical November 3 candidate; its optional JIT/EMA/parallel-cycle modules are retained for history and are not enabled by the current entry. See `../../docs/collection150.md` for the new task-horizon rule and the older budget-censor experiment.
 
 ---
 

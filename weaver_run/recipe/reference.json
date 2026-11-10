@@ -18,9 +18,15 @@
   "libero_benchmark_sha256": "9c07414d4c75f5de50d9c8b3fefbda81ae72b3eae158c1af1d115e77063efd18",
   "tensorboard_baseline": "1793355532_OpenVLA_IntegratedWEAVER_PolicyWorldRM_Real1_Imag4_Budget1M_Manual_gpu47_fresh",
   "previous_managed_commit": "5d728230e87a915908d3a53ad9580b536468482a",
-  "real_collection_action_limit": 150,
-  "task_action_horizon": 220,
+  "real_collection_action_limit": null,
+  "real_training_action_horizon": 150,
+  "task_action_horizon": 150,
+  "base_task_action_horizon": 220,
   "final_evaluation_action_horizon": 220,
+  "training_horizon_failure_reward_target": 0.0,
+  "training_horizon_failure_labels_valid": true,
+  "training_horizon_failure_is_terminal": true,
+  "training_horizon_failure_bootstrap": false,
   "training_identity": "git_commit",
-  "recipe_change": "Only real training collection action budget, with existing censor semantics; orange algorithm restored"
+  "recipe_change": "Orange algorithm with a 150-action real training task horizon: horizon failures have valid zero RM targets and terminal Policy targets without bootstrap; full evaluation remains 220, and earlier global-budget exhaustion remains censored"
 }

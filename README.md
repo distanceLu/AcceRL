@@ -1,6 +1,6 @@
 # AcceRL · WEAVER original95
 
-这个分支运行 OpenVLA Policy 与 WEAVER World/Reward Model 在 LIBERO Spatial task 0 上的联合训练。入口是仓库根目录的 `./run.sh`。当前默认为用户选定的橙线 `1793355532` 配方，从原始 OpenVLA、蒸馏 Policy 和 native3200 World 权重开始，重新建立 optimizer 和 Replay。真实训练采集最多执行150个动作；任务和评估上限仍为220。训练等待用户明确停止，不设次日自动截止；原1M模拟调用预算和故障保护保留。
+这个分支运行 OpenVLA Policy 与 WEAVER World/Reward Model 在 LIBERO Spatial task 0 上的联合训练。入口是仓库根目录的 `./run.sh`。当前代码采用用户选定的橙线 `1793355532` 算法，从原始 OpenVLA、蒸馏 Policy 和 native3200 World 权重开始，重新建立 optimizer 和 Replay。新实验规则把真实训练任务上限设为150动作：达到上限仍未成功记为正式失败，RM使用有效零标签，Policy按终止处理且不bootstrap；正式评估仍为220动作。代码配置不代表新进程已启动，实际运行以队列回执中的Git提交号为准。训练等待用户明确停止，不设次日自动截止；原1M模拟调用预算和故障保护保留。
 
 ## 在另一台服务器上启动
 
@@ -35,7 +35,7 @@ cp .weaver.env.example .weaver.env
 ./run.sh stop --id exp1      # 请求在安全边界保存退出；再用 status 确认 finished
 ```
 
-在普通服务器上，训练由当前终端的前台 supervisor 管理，长训可在 tmux 或批作业中运行。默认输出在 `.weaver-runs/<实验名>/`，通过 `WEAVER_OUTPUTS` 可换盘。日志为 `train.log`，TensorBoard 事件在 `runs/Libero/`，Policy 与 World 权重在 `checkpoints/`。普通服务器入口仍跳过单独的最终评估。在原实验服务器上，启动、查询和停止走已有队列；本次开启保存退出后的四卡固定评估，初始/最终Policy各greedy/stochastic、各50初态共200回合，每回合最多220动作。训练中的10个Eval worker沿用橙线设置。
+在普通服务器上，训练由当前终端的前台 supervisor 管理，长训可在 tmux 或批作业中运行。默认输出在 `.weaver-runs/<实验名>/`，通过 `WEAVER_OUTPUTS` 可换盘。日志为 `train.log`，TensorBoard 事件在 `runs/Libero/`，Policy 与 World 权重在 `checkpoints/`。普通服务器入口仍跳过单独的最终评估。在原实验服务器上，启动、查询和停止走已有队列；新训练默认在保存退出后执行四卡固定评估，初始/最终Policy各greedy/stochastic、各50初态共200回合，每回合最多220动作。用户要求跳过的是旧150动作预算截断实验的最终评估，不改变新任务的默认设置。训练中的10个Eval worker沿用橙线设置和220动作评估上限。
 
 ## 训练仿真、想象轨迹与评估回放
 
@@ -50,7 +50,7 @@ cp .weaver.env.example .weaver.env
 
 在 VS Code 的 Ports 面板转发服务器的 `8765` 端口，然后打开 `http://127.0.0.1:8765`。观察台仅监听服务器回环地址；结束观察台不会停止训练。录像写入实验目录的 `visualization/`，独立于 TensorBoard。已运行的旧进程不会自动加载新录像代码，旧日志没有保存的图像不能补造。
 
-- **训练仿真**：全景/腕部相机、实际动作位置、服务版本、环境奖励；150 动作预算提前截断标为未知结果。
+- **训练仿真**：全景/腕部相机、实际动作位置、服务版本、环境奖励；新规则下达到150动作仍未成功记为训练任务失败。累计模拟预算不足导致更早终止时仍标为未知结果；旧150动作预算截断录像保留原标签，不重标历史数据。
 - **想象轨迹**：真实起始画面及 WM 已输出的决策边界图像、Policy/World 版本、RM 分数、预测奖励和丢弃原因。默认不额外解码，中间帧不补造；RM 分数不是已校准的成功概率。
 - **评估回放**：在线或冻结 checkpoint 的视频，按初态、成功/失败、greedy/stochastic、任务或 checkpoint 搜索。抽样录像不能用于重新计算总体成功率。
 
@@ -60,7 +60,7 @@ CPU 后台队列深度2、单编码器线程，满时只跳过预览。仅复制
 
 ## 复现口径
 
-2026-11-09按用户选择恢复橙线 `weaverintegrated_1030_181824_cf621e5b` 的算法实现：共享推理池current-critic刷新、batch优势归一化、独立chunk抽样、单训练组准入和原03_adaptive调度。每个 Policy batch 有144个真实chunk和432个想象chunk，Policy/World global batch为576/1024，每5次Policy更新配1次World更新。学习配方唯一新增变量是采集150动作预算；150步未成功按budget censor处理，Policy bootstrap，RM标签mask为0，World仍可训练已观察前缀。正式任务失败仍以220步为界。详细变更见[采集预算实验](docs/collection150.md)。
+2026-11-09按用户选择恢复橙线 `weaverintegrated_1030_181824_cf621e5b` 的算法实现：共享推理池current-critic刷新、batch优势归一化、独立chunk抽样、单训练组准入和原03_adaptive调度。每个 Policy batch 有144个真实chunk和432个想象chunk，Policy/World global batch为576/1024，每5次Policy更新配1次World更新。2026-11-10的新实验设置为 `real_training_action_horizon:150`、`real_collection_action_limit:null`，将真实训练任务定义为150动作内成功；超时失败的RM目标为有效0，Policy末端不bootstrap。仅累计1M模拟预算不足造成的更早截断保留budget censor语义。评估使用原220动作，想象horizon与其它橙线规则保持不变。这个训练目标与原橙线220动作目标不同，不能把新旧训练成功率当作同口径结果；比较Policy效果应使用相同的固定220动作评估。详细说明见[150动作训练与旧预算截断的区别](docs/collection150.md)。
 
 此前粉线的完整想象轨迹、fused JIT GAE、Advantage EMA和双训练组并行保存在Git历史提交 `5d728230e87a915908d3a53ad9580b536468482a` 中。当前橙线实验不启用这些改动。历史滚动成功率可混合Policy版本，并不保证新实验达到同一曲线。
 

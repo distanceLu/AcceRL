@@ -67,6 +67,9 @@ class PipelineBudgetConfig:
     # Real collection may stop before the task horizon. This is a censored
     # prefix, not a failed task; evaluation and imagination keep their horizons.
     real_collection_action_limit: int | None = None
+    # A finite training-task deadline is distinct from an early budget censor.
+    # It applies only to real collectors, never to the evaluation environments.
+    real_training_action_horizon: int | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -85,6 +88,10 @@ class PipelineBudgetConfig:
             _positive_int("real_collection_action_limit", self.real_collection_action_limit)
             if not self.initial_state_enabled:
                 raise ValueError("real_collection_action_limit requires initial_state_enabled")
+        if self.real_training_action_horizon is not None:
+            _positive_int("real_training_action_horizon", self.real_training_action_horizon)
+            if not self.initial_state_enabled:
+                raise ValueError("real_training_action_horizon requires initial_state_enabled")
         _nonnegative_int("policy_low_watermark", self.policy_low_watermark)
         if self.policy_low_watermark >= self.policy_high_watermark:
             raise ValueError("policy_low_watermark must be below policy_high_watermark")

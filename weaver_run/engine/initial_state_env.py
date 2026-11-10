@@ -26,14 +26,34 @@ def _digest(value):
     return hashlib.sha256(header + b'\0' + value.tobytes()).hexdigest()
 
 
+def set_real_training_action_horizon(env, action_horizon):
+    """Set one collector's finite task deadline without changing Eval defaults.
+
+    The benchmark horizon is retained as provenance. Subsequent per-episode
+    budget limits may be shorter than this training horizon and remain censored.
+    """
+    if action_horizon is None:
+        return
+    benchmark_horizon = int(getattr(env, '_benchmark_episode_steps',
+        getattr(env, '_unbounded_episode_steps', env.max_episode_steps)))
+    if type(action_horizon) is not int or not 0 < action_horizon <= benchmark_horizon:
+        raise ValueError('Real training horizon must be positive and at most the benchmark horizon')
+    env._benchmark_episode_steps = benchmark_horizon
+    env._unbounded_episode_steps = action_horizon
+    env.max_episode_steps = action_horizon
+
+
 def initial_state_pool_metadata(env):
     states = _state_array(env.initial_states)
     if states.ndim != 2 or not len(states):
         raise ValueError('Expected a nonempty [initial_state, state_dimension] pool')
-    return {'count': len(states), 'shape': list(states.shape), 'sha256': _digest(states),
+    result = {'count': len(states), 'shape': list(states.shape), 'sha256': _digest(states),
             'hash_semantics': 'canonical_array_shape_dtype_bytes',
             'max_action_steps': int(getattr(env, '_unbounded_episode_steps', env.max_episode_steps)),
             'reset_steps': int(env.num_steps_wait)}
+    if hasattr(env, '_benchmark_episode_steps'):
+        result['benchmark_action_horizon'] = int(env._benchmark_episode_steps)
+    return result
 
 
 def reset_with_initial_state(env, initial_state_id, env_seed, max_action_steps=None):
@@ -56,6 +76,8 @@ def reset_with_initial_state(env, initial_state_id, env_seed, max_action_steps=N
                 reset_env_steps=int(env.num_steps_wait),
                 budget_action_limit=max_action_steps,
                 task_action_horizon=original_horizon)
+    if hasattr(env, '_benchmark_episode_steps'):
+        info['benchmark_action_horizon'] = int(env._benchmark_episode_steps)
     return observation, info
 
 

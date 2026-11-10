@@ -115,8 +115,13 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME):
     job=dict(name="WEAVER "+profile+" "+label,submission_id="weaver-run-"+label,
              cwd=str(source),argv=argv,manual=True,timeout_seconds=0)
     record=dict(schema=2,profile=profile,label=label,root=str(root),source=str(source),
-                recipe_baseline="1793355532",real_collection_action_limit=150,
-                task_action_horizon=220,final_evaluation_action_horizon=220,
+                recipe_baseline="1793355532",real_collection_action_limit=None,
+                real_training_action_horizon=150,task_action_horizon=150,
+                base_task_action_horizon=220,final_evaluation_action_horizon=220,
+                training_horizon_failure_reward_target=0.0,
+                training_horizon_failure_labels_valid=True,
+                training_horizon_failure_is_terminal=True,
+                training_horizon_failure_bootstrap=False,
                 stop_policy="explicit_user_stop_or_existing_budget_or_fault_guard",
                 git_branch=BRANCH,git_commit=commit,job=job)
     json_write(stage/"experiment.json",record)

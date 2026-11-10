@@ -79,7 +79,7 @@ class CriticEndpointTests(unittest.TestCase):
 
 
 class RealCollectorTests(unittest.TestCase):
-    def collect(self, *, steps=10, success=True, budget_cut=False):
+    def collect(self, *, steps=10, success=True, budget_cut=False, task_horizon=220):
         segments=[];observed=[];critic_calls=[]
         namespace=dict(np=np,math=math,os=os,time=time,FreshConfig=FreshConfig,PolicySegment=PolicySegment,
             NUM_ACTIONS_CHUNK=8,ACTION_DIM=7,new_id=lambda prefix:prefix+':one',
@@ -102,12 +102,12 @@ class RealCollectorTests(unittest.TestCase):
         def critic(rows):
             critic_calls.append(rows)
             return {'policy_version':4,'values':[.7]}
-        assigned={'env_seed':3,'allocation_id':1,'cycle':0,'max_action_steps':steps if budget_cut else 220}
+        assigned={'env_seed':3,'allocation_id':1,'cycle':0,'max_action_steps':steps if budget_cut else task_horizon}
         owner=SimpleNamespace(wid=0,initial_state_enabled=True,pipeline_job={'initial_state':assigned},
             env=env,cfg=None,processor=None,infer=SimpleNamespace(scheduled_evaluate_values=SimpleNamespace(remote=critic)),
             task_description='task',torch_dtype=None,world_config=SimpleNamespace(backend='weaver',schema={'dt_seconds':.05}),
             pipeline_max_episode_frames=221,fresh_config=FreshConfig(real_policy_replay=True),
-            _reset_and_select_env=lambda **kwargs:({'frame':0},{'task_action_horizon':220}),reward_scale=1.,
+            _reset_and_select_env=lambda **kwargs:({'frame':0},{'task_action_horizon':task_horizon}),reward_scale=1.,
             env_outcome=[deque()],current_env_idx=0,current_env_name='task',gamma=.9,lambda_=.8,
             stats_actor=SimpleNamespace(add_episode_return=SimpleNamespace(remote=lambda *a,**k:None)),
             replay=SimpleNamespace(add_segment=SimpleNamespace(remote=lambda item:segments.append(item))),

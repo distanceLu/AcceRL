@@ -974,6 +974,10 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.pipeline_max_episode_frames = pipeline.max_episode_frames
         if worker_mode == "real":
             super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
+            if pipeline.real_training_action_horizon is not None:
+                from initial_state_env import set_real_training_action_horizon
+                for env in self.envs:
+                    set_real_training_action_horizon(env, pipeline.real_training_action_horizon)
             if any(env.max_episode_steps + 1 > self.pipeline_max_episode_frames for env in self.envs):
                 raise ValueError("Episode frame budget is smaller than the environment horizon")
             if self.initial_state_enabled:

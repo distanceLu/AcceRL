@@ -60,16 +60,18 @@ INITIAL_WORLD = {'backend': 'weaver', 'world_trainable': True, 'source_optimizer
 PIPELINE_RECIPE = {'real_workers': 1, 'imagination_workers': 4, 'max_real_in_flight': 1,
                    'max_imagine_in_flight': 4, 'initial_state_enabled': True,
                    'initial_state_count': 50, 'initial_state_seed': 20261026,
-                   'real_env_step_budget': 1000000, 'real_collection_action_limit': 150}
+                   'real_env_step_budget': 1000000, 'real_collection_action_limit': None,
+                   'real_training_action_horizon': 150}
 
 
 def validate_pipeline_admission(pipeline):
-    # The 150-action limit is an earlier collection budget, not a new task
-    # horizon. The original 220-action evaluation/terminal contract is retained.
+    # The real training task ends at 150 actions, with valid failure labels
+    # and no Policy bootstrap. There is no extra collection censor cap;
+    # evaluation remains 220 and earlier global-budget exhaustion is censored.
     if (not isinstance(pipeline, dict) or 'fresh_lookahead_updates' in pipeline
-            or any(type(pipeline.get(k)) is not type(v) or pipeline.get(k) != v
+            or any(k not in pipeline or type(pipeline[k]) is not type(v) or pipeline[k] != v
                    for k, v in PIPELINE_RECIPE.items())):
-        raise ValueError('Expected orange Real1/Imag4, 1M budget and a 150-action collection limit without lookahead')
+        raise ValueError('Expected orange Real1/Imag4, 1M budget, a 150-action real training horizon and an explicit null collection cap without lookahead')
     return True
 
 
@@ -226,7 +228,7 @@ def check_cost_scheduler_state(state, source, root):
     validate_pipeline_admission(actual)
     if (actual != expected_pipeline
             or state.get('pipeline_config_path') != str(root / 'formal_v3/pipeline_config.json')):
-        raise ValueError('Runner did not activate the exact orange pipeline with the 150-action collection budget')
+        raise ValueError('Runner did not activate the exact orange pipeline with the 150-action real training horizon')
     return True
 
 

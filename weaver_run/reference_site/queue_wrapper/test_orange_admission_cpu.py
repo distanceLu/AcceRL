@@ -43,7 +43,7 @@ class OrangeAdmissionTests(unittest.TestCase):
         return dict(cost_scheduler=scheduler, pipeline_config=copy.deepcopy(self.pipeline),
                     pipeline_config_path=str(self.root / 'formal_v3/pipeline_config.json'))
 
-    def test_orange_scheduler_and_collection_budget_activate_together(self):
+    def test_orange_scheduler_and_formal_training_horizon_activate_together(self):
         self.assertEqual(training.validate_cost_scheduler_admission(self.source)['profile'], '03_adaptive')
         self.assertTrue(training.check_cost_scheduler_state(self.state(), self.source, self.root))
 
@@ -75,14 +75,35 @@ class OrangeAdmissionTests(unittest.TestCase):
                     training.validate_cost_scheduler_admission(self.source)
                 self.scheduler[key] = True
 
-    def test_missing_or_different_collection_budget_is_rejected(self):
-        for value in (None, 220, 150.0, True):
+    def test_collection_censor_cap_cannot_silently_replace_formal_horizon(self):
+        for value in (150, 220, 150.0, True, False, 0):
             p = dict(self.pipeline, real_collection_action_limit=value)
             with self.subTest(value=value), self.assertRaises(ValueError):
                 training.validate_pipeline_admission(p)
         p.pop('real_collection_action_limit')
         with self.assertRaises(ValueError):
             training.validate_pipeline_admission(p)
+
+    def test_training_horizon_is_required_and_strictly_integer_150(self):
+        for value in (None, 220, 150.0, '150', True, 0):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                training.validate_pipeline_admission(dict(self.pipeline, real_training_action_horizon=value))
+        p = dict(self.pipeline)
+        p.pop('real_training_action_horizon')
+        with self.assertRaises(ValueError):
+            training.validate_pipeline_admission(p)
+
+    def test_managed_recipe_uses_formal_150_not_the_old_censor_recipe(self):
+        recipe = training.read_json(HERE.parents[1] / 'recipe/pipeline_config.json')
+        self.assertTrue(training.validate_pipeline_admission(recipe))
+        self.assertIsNone(recipe['real_collection_action_limit'])
+        self.assertEqual(recipe['real_training_action_horizon'], 150)
+        reference = training.read_json(HERE.parents[1] / 'recipe/reference.json')
+        self.assertTrue(reference['training_horizon_failure_labels_valid'])
+        self.assertTrue(reference['training_horizon_failure_is_terminal'])
+        self.assertFalse(reference['training_horizon_failure_bootstrap'])
+        self.assertEqual(reference['training_horizon_failure_reward_target'], 0.0)
+        self.assertEqual(reference['final_evaluation_action_horizon'], 220)
 
     def test_lookahead_is_rejected_even_when_zero(self):
         for value in (0, 2):
@@ -96,8 +117,13 @@ class OrangeAdmissionTests(unittest.TestCase):
                 training.validate_pipeline_admission(dict(self.pipeline, **{key: value}))
 
     def test_runner_cannot_report_original_recipe_but_activate_another_budget(self):
+        for key, value in [('real_collection_action_limit', 150), ('real_training_action_horizon', 220)]:
+            state = self.state()
+            state['pipeline_config'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                training.check_cost_scheduler_state(state, self.source, self.root)
         state = self.state()
-        state['pipeline_config']['real_collection_action_limit'] = 220
+        state['pipeline_config'].pop('real_collection_action_limit')
         with self.assertRaises(ValueError):
             training.check_cost_scheduler_state(state, self.source, self.root)
 
