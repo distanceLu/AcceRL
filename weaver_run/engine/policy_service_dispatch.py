@@ -53,6 +53,18 @@ def dispatch_settings(settings):
     return out
 
 
+def refresh_batch_sizes(count, micro, batch_sizes=None):
+    if type(count) is not int or not 1 <= count <= 4096 or type(micro) is not int or micro not in (1,2):
+        raise ValueError('Refresh batch geometry is outside the reviewed bound')
+    if batch_sizes is None:
+        return tuple(min(micro,count-start) for start in range(0,count,micro))
+    if (not isinstance(batch_sizes,(list,tuple)) or not batch_sizes
+            or any(type(n) is not int or not 1 <= n <= micro for n in batch_sizes)
+            or sum(batch_sizes) != count):
+        raise ValueError('Explicit refresh batches must cover exactly the bounded input list')
+    return tuple(batch_sizes)
+
+
 @dataclass
 class ActionJob:
     inputs: object
@@ -67,6 +79,8 @@ class RefreshJob:
     inputs: tuple
     version: int
     future: object
+    batch_sizes: tuple = ()
+    batch_index: int = 0
     offset: int = 0
     values: list = field(default_factory=list)
     ready: bool = False
@@ -147,13 +161,14 @@ class PolicyServiceDispatch:
                     return True
         return False
 
-    def enqueue_refresh(self, inputs, version, future):
+    def enqueue_refresh(self, inputs, version, future, *, batch_sizes=None):
         if type(version) is not int or version < 0 or not isinstance(inputs,(list,tuple)) or not 1 <= len(inputs) <= 4096:
             raise ValueError("Refresh needs a nonnegative exact version and 1..4096 observations")
+        sizes = refresh_batch_sizes(len(inputs), self.settings['refresh_micro'], batch_sizes)
         self._capacity()
         if any(job.version != version for job in self._refresh.values()):
             raise ValueError("Queued refresh jobs cannot mix published Policy versions")
-        job = RefreshJob('refresh:'+uuid.uuid4().hex, tuple(inputs), version, future)
+        job = RefreshJob('refresh:'+uuid.uuid4().hex, tuple(inputs), version, future, batch_sizes=sizes)
         if not self.queues['refresh']:
             self.finish['refresh'] = max(self.finish['refresh'], self.virtual_time)
         self.queues['refresh'].append(job); self._refresh[job.job_id] = job
@@ -172,7 +187,7 @@ class PolicyServiceDispatch:
                 job = q[0]
                 if job.version != version:
                     raise RuntimeError("Policy version changed during a pinned refresh job")
-                count = min(self.settings['refresh_micro'], len(job.inputs)-job.offset)
+                count = job.batch_sizes[job.batch_index]
             else:
                 count = min(limit,len(q))
             cost = self.cost_model.estimate(cls, count)
@@ -216,7 +231,10 @@ class PolicyServiceDispatch:
             raise RuntimeError("Refresh chunk identity, order, or Policy version mismatch")
         if len(values) != batch.units or any(isinstance(x,bool) or not isinstance(x,(int,float)) or not math.isfinite(x) for x in values):
             raise ValueError("Refresh chunk must return finite per-observation values")
+        if batch.units != job.batch_sizes[job.batch_index]:
+            raise ValueError('Refresh completion changed an explicit micro boundary')
         job.values.extend(float(x) for x in values); job.offset += len(values)
+        job.batch_index += 1
         if job.offset == len(job.inputs):
             if self.queues['refresh'][0] is not job:
                 raise RuntimeError("Refresh completion order mismatch")

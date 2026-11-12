@@ -247,23 +247,33 @@ class SegmentReplay:
             del self.reservations[token]
 
     def materialize(self, sample_ids, refreshed_values=None):
+        from critic_refresh_plan import RefreshedSuffix
         targets = {}
+        selected = {}
+        for sid in sample_ids:
+            sample = self.samples[sid]
+            selected.setdefault(sample['segment_id'], []).append(sample['index'])
         for sid in sample_ids:
             segment = self.segments[self.samples[sid]['segment_id']]
             if segment.segment_id not in targets:
                 values = (refreshed_values[segment.segment_id] if refreshed_values is not None else segment.generation_values)
-                targets[segment.segment_id] = generalized_advantages(segment.rewards, values,
-                    segment.terminated, segment.truncated, segment.gamma, segment.lambda_)
+                first = 0
+                if isinstance(values, RefreshedSuffix):
+                    first, values = values.for_segment(segment, selected[segment.segment_id])
+                adv, target = generalized_advantages(segment.rewards[first:], values,
+                    segment.terminated[first:], segment.truncated[first:], segment.gamma, segment.lambda_)
+                targets[segment.segment_id] = first, adv, target
         observations, tokens, advantages, logits, returns, records = [], [], [], [], [], []
         for sid in sample_ids:
             sample = self.samples[sid];index = sample['index'];segment = self.segments[sample['segment_id']]
-            adv, target = targets[segment.segment_id]
+            first, adv, target = targets[segment.segment_id]
+            offset = index - first
             observation = dict(segment.observations[index])
             observation['_fresh_action_mask'] = segment.action_mask[index].copy()
             observations.append(observation);tokens.append(segment.action_tokens[index])
-            advantages.append(adv[index]);logits.append(segment.behaviour_logits[index]);returns.append(target[index])
+            advantages.append(adv[offset]);logits.append(segment.behaviour_logits[index]);returns.append(target[offset])
             records.append(dict(sample_id=sid, source=segment.source, segment_id=segment.segment_id,
-                reward=float(segment.rewards[index]), advantage=float(adv[index]), value_target=float(target[index]),
+                reward=float(segment.rewards[index]), advantage=float(adv[offset]), value_target=float(target[offset]),
                 phi_before=segment.phi[index], phi_after=segment.phi[index+1],
                 generation_policy_version=segment.versions[index]['policy'],
                 generation_world_version=segment.versions[index].get('world_bundle_version'),

@@ -1,0 +1,63 @@
+{
+  "change": "critic_dependency_pruning_preserving_original_micro_pairs",
+  "base_commit": "10914ab908ce280de45e41f48fc1bd3f8d07fee6",
+  "local_acceptance": {
+    "command": "cd weaver_run/engine && WEAVER_TEST_UPSTREAM=$(cd ../vendor/weaver && pwd) python -B validate_cost_scheduler_candidate.py",
+    "python": "3.14.0",
+    "torch": "2.9.1+cpu",
+    "tests_run": 400,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "compiled_python_files": 208,
+    "cuda_initialized": false
+  },
+  "server_cpu_overlay": {
+    "method": "In-memory changed-module imports and train.py AST source, against the same base commit; no source deployment",
+    "python": "3.11.13",
+    "torch": "2.12.0+cu130",
+    "modules": [
+      "test_critic_dependency_cpu",
+      "test_critic_refresh_plan_cpu",
+      "test_policy_service_dispatch_cpu",
+      "test_fresh_policy_replay_cpu",
+      "test_scheduler_review_regressions_cpu"
+    ],
+    "tests_run": 61,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "cloudpickle_version": "3.1.2",
+    "serialization_checks": 12,
+    "serialization_passed": true,
+    "cuda_initialized": false,
+    "ray_started": false,
+    "full_server_suite": "Earlier attempt exceeded 180-second SSH budget; not counted as passing"
+  },
+  "independent_review": {
+    "read_only": true,
+    "definite_findings": 0,
+    "scope": "Planner, full-suffix GAE, original replica/micro geometry, actual Replay/actor wiring, version pin, cancellation and demand settlement"
+  },
+  "historical_test_issue": {
+    "module": "test_execution_control_cpu",
+    "tests_run": 12,
+    "parent_failures": 2,
+    "parent_errors": 9,
+    "candidate_failures": 2,
+    "candidate_errors": 9,
+    "failed_and_error_test_ids_identical": true,
+    "scope": "Outside existing orange acceptance suite; expects later parent-budget/block APIs absent from both parent and candidate"
+  },
+  "training_started": false,
+  "real_openvla_cuda_equivalence_verified": false,
+  "measured_gpu_speedup": null,
+  "predicted_refresh_micro_reduction_percent": 20.10442901898,
+  "prediction_scope": "Historical fixed samples P491-P590: 81395 to 65031 calls; not end-to-end speedup",
+  "limits": [
+    "CPU fixtures do not execute real Ray/ZeRO2/NCCL/OpenVLA",
+    "Equal GAE/targets assumes equal current scalar Values on retained observations",
+    "Async timing can change future collection and learning trajectories",
+    "Skipped unused predictions no longer undergo finite-output checking"
+  ]
+}

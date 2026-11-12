@@ -690,6 +690,9 @@ class ReplayBufferActor:
         self.fresh_critics = []
         self.fresh_records = {}
         self.fresh_admitted_chunks = {'real':0, 'imagined':0}
+        from critic_refresh_plan import dependency_pruning_enabled
+        self.fresh_refresh_prune = dependency_pruning_enabled()
+        self.fresh_refresh_micro = 2
 
     def configure_fresh(self, critics, production_budget=None):
         if not self.fresh_enabled:
@@ -707,6 +710,7 @@ class ReplayBufferActor:
         settings = dispatch_settings(settings)
         self.cost_scheduler_enabled = settings['enabled']
         self.cost_scheduler_broker = broker
+        self.fresh_refresh_micro = settings['refresh_micro']
         self.cost_admitted_chunks={'real':0,'imagined':0}
         return {'enabled':self.cost_scheduler_enabled}
 
@@ -770,17 +774,40 @@ class ReplayBufferActor:
                     await self.cost_scheduler_broker.update_inventory.remote(self.scheduler_inventory())
                 refreshed = None
                 if self.fresh_config.refresh_gae:
-                    from critic_refresh_plan import balanced_refresh_groups, refresh_plan_receipt
+                    from critic_refresh_plan import (balanced_refresh_groups, refresh_plan_receipt,
+                        dependency_refresh_groups, dependency_refresh_receipt)
                     unique = list(dict.fromkeys(self.fresh_store.samples[sid]['segment_id'] for sid in sample_ids))
-                    groups = balanced_refresh_groups(
-                        [(sid, self.fresh_store.segments[sid].observations) for sid in unique],
-                        len(self.fresh_critics))
+                    # The reviewed micro geometry is known only for the enabled
+                    # cooperative dispatcher. Other endpoints keep full refresh.
+                    prune = (getattr(self, 'cost_scheduler_enabled', False) and
+                             self.fresh_refresh_prune)
+                    if prune:
+                        selected = {sid:[] for sid in unique}
+                        for sample_id in sample_ids:
+                            sample = self.fresh_store.samples[sample_id]
+                            selected[sample['segment_id']].append(sample['index'])
+                        groups = dependency_refresh_groups(
+                            [self.fresh_store.segments[sid] for sid in unique], selected,
+                            len(self.fresh_critics), getattr(self, 'fresh_refresh_micro', 2))
+                        receipt = dependency_refresh_receipt(groups)
+                    else:
+                        groups = balanced_refresh_groups(
+                            [(sid, self.fresh_store.segments[sid].observations) for sid in unique],
+                            len(self.fresh_critics))
+                        receipt = refresh_plan_receipt(groups)
                     version = self.fresh_store.versions[0]
                     self.telemetry.event('fresh_critic_refresh_plan', details={
-                        **refresh_plan_receipt(groups), 'policy_version':version,
+                        **receipt, 'policy_version':version,
                         'reserved_samples':len(sample_ids)})
                     calls, maps = [], []
                     for critic, group in zip(self.fresh_critics, groups):
+                        if prune:
+                            if not group.inputs:
+                                continue
+                            calls.append(critic.scheduled_evaluate_values.remote(
+                                group.inputs, version, batch_sizes=group.batch_sizes))
+                            maps.append(group)
+                            continue
                         if not group:
                             continue
                         inputs = [obs for _, observations in group for obs in observations]
@@ -793,6 +820,9 @@ class ReplayBufferActor:
                     for answer, group in zip(answers, maps):
                         if answer['policy_version'] != version:
                             raise RuntimeError('FRESH critic cohort mixed published Policy versions')
+                        if prune:
+                            refreshed.update(group.restore(answer['values']))
+                            continue
                         offset = 0
                         for segment_id, count in group:
                             refreshed[segment_id] = answer['values'][offset:offset+count]
@@ -1536,7 +1566,7 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         self.promises.append(fut)
         return await fut
 
-    def evaluate_values(self, inputs, expected_version=None):
+    def evaluate_values(self, inputs, expected_version=None, *, batch_sizes=None):
         """Bounded critic-only forward; never sample actions or advance RNG."""
         self._check_inference_health()
         if getattr(self, '_policy_dispatch', None) is not None:
@@ -1546,15 +1576,19 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 or not isinstance(inputs, (list, tuple)) or not 1 <= len(inputs) <= 4096):
             raise ValueError('FRESH critic refresh needs a bounded batch and exact published version')
         limit = min(2, max(1, int(getattr(self, 'training_batch_limit', 2))))
+        from policy_service_dispatch import refresh_batch_sizes
+        sizes = refresh_batch_sizes(len(inputs), limit, batch_sizes)
         values = []
         with torch.inference_mode():
-            for start in range(0, len(inputs), limit):
-                batch = self.model.prepare_inputs_batch(inputs[start:start+limit])
+            start = 0
+            for count in sizes:
+                batch = self.model.prepare_inputs_batch(inputs[start:start+count])
                 _, value = self.model(batch)
                 current = value.detach().float().reshape(-1).cpu().numpy()
-                if len(current) != min(limit, len(inputs)-start) or not np.isfinite(current).all():
+                if len(current) != count or not np.isfinite(current).all():
                     raise ValueError('FRESH critic returned invalid per-observation values')
                 values.extend(float(number) for number in current)
+                start += count
         if self.capture_model_version != expected_version:
             raise RuntimeError('FRESH critic changed version during ordered segment evaluation')
         self.telemetry.event('fresh_critic_refresh', actual_batch=len(values), model_version=expected_version,
@@ -1592,18 +1626,20 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 asyncio.get_event_loop().create_task(self._release_refresh_demand(remaining))
         super()._fail_pending_requests(error)
 
-    async def scheduled_evaluate_values(self, inputs, expected_version=None):
+    async def scheduled_evaluate_values(self, inputs, expected_version=None, *, batch_sizes=None):
         self._check_inference_health()
         while getattr(self, '_policy_publication_pending', False):
             await asyncio.sleep(.0005)
             self._check_inference_health()
         if self._policy_dispatch is None:
-            return self.evaluate_values(inputs, expected_version)
+            if batch_sizes is None:
+                return self.evaluate_values(inputs, expected_version)
+            return self.evaluate_values(inputs, expected_version, batch_sizes=batch_sizes)
         version = self.capture_model_version if expected_version is None else expected_version
         if type(version) is not int or version != self.capture_model_version:
             raise ValueError('Scheduled critic requires the exact published Policy version')
         future = asyncio.get_running_loop().create_future()
-        job = self._policy_dispatch.enqueue_refresh(inputs, version, future)
+        job = self._policy_dispatch.enqueue_refresh(inputs, version, future, batch_sizes=batch_sizes)
         from cost_scheduler_runtime import finish_owned_rpc
         registration = asyncio.ensure_future(
             self.cost_scheduler_broker.refresh_demand.remote(len(job.inputs)))

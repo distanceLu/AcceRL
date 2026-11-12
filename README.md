@@ -64,6 +64,8 @@ CPU 后台队列深度2、单编码器线程，满时只跳过预览。仅复制
 
 此前粉线的完整想象轨迹、fused JIT GAE、Advantage EMA和双训练组并行保存在Git历史提交 `5d728230e87a915908d3a53ad9580b536468482a` 中。当前橙线实验不启用这些改动。历史滚动成功率可混合Policy版本，并不保证新实验达到同一曲线。
 
+当前维护配方启用[critic 依赖裁剪](docs/critic-dependency-pruning.md)：先保留原副本分配与 micro 配对，再跳过没有 GAE 依赖的整块 Value 前向。完整后缀、非终止 bootstrap、原抽样和 batch 归一化保持原路径。历史固定样本预计减少约20.1%的刷新 micro，实际 GPU 提速和数值等价性尚待验证；文档包含回退方法。
+
 ## 代码和实验版本
 
 在 `codex/weaver-original95-runnable` 分支直接修改训练代码和配置，测试后只提交本次变更。训练入口和原站队列共用 `weaver_run/recipe/` 下的参数与配置。历史 original95 的首个可移植提交是 `87a65a2c336877cc8877dd56a21c7208ea41e8d5`。

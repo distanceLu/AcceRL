@@ -36,6 +36,7 @@ NEW_MODULES = (
     'test_scheduler_review_regressions_cpu',
     'test_probe_transaction_cpu',
     'test_critic_refresh_plan_cpu',
+    'test_critic_dependency_cpu',
 )
 FULL_FRESH_RULES = {
     'dense_reward': True, 'signal_telemetry': True, 'refresh_gae': True,
