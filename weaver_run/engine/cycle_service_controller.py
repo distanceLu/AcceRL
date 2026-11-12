@@ -117,6 +117,12 @@ class CycleSnapshot:
     world_batch_ready: bool = True
     policy_action_observations_per_real_chunk: float | None = None
     policy_action_observations_per_imagined_chunk: float | None = None
+    production_state_required: bool = False
+    production_state_expires_at: float = 0.
+    production_inflight: bool = False
+    production_refill_chunks: int = 0
+    production_seed_expires_at: float = 0.
+    production_inflight_chunks: int = 0
 
     def __post_init__(self):
         _number('now', self.now)
@@ -130,9 +136,14 @@ class CycleSnapshot:
             raise ValueError('Unknown update phase')
         if not isinstance(self.context, str) or not self.context:
             raise ValueError('Execution context must be explicit')
-        for name in ('publication_blocked', 'real_production_ready', 'imagination_ready', 'world_batch_ready'):
+        for name in ('publication_blocked', 'real_production_ready', 'imagination_ready', 'world_batch_ready',
+                     'production_state_required', 'production_inflight'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(name+' must be boolean')
+        _number('production_state_expires_at', self.production_state_expires_at)
+        _integer('production_refill_chunks', self.production_refill_chunks)
+        _number('production_seed_expires_at', self.production_seed_expires_at)
+        _integer('production_inflight_chunks', self.production_inflight_chunks)
         for name in ('critic_observations_remaining', 'policy_training_units_remaining',
                      'world_training_units_remaining', 'publication_seconds_remaining',
                      'policy_training_units_per_future_update', 'world_training_units_per_future_update'):
@@ -384,6 +395,13 @@ class CycleServiceController:
         new_sample_capacity = max(1,min(4,future_batches))
         cycle_missing_chunks = {source:max(next_missing[source],
             math.ceil(cycle_missing[source]/new_sample_capacity)) for source in ('real','imagined')}
+        # The producer may already be refilling the first post-publication
+        # batch even when the old cycle-only demand is zero.
+        if not snapshot.production_state_required or snapshot.now < snapshot.production_state_expires_at:
+            unstarted = (snapshot.production_refill_chunks if not snapshot.production_state_required
+                         or snapshot.now < snapshot.production_seed_expires_at else 0)
+            cycle_missing_chunks['imagined'] = max(cycle_missing_chunks['imagined'],
+                                                   unstarted+snapshot.production_inflight_chunks)
         action_work = 0.0
         action_work_known = True
         for source, multiplier in [('real',snapshot.policy_action_observations_per_real_chunk),
@@ -407,9 +425,14 @@ class CycleServiceController:
         if snapshot.publication_blocked:
             return ()
         ready = []
-        if snapshot.real_production_ready and d['cycle_missing_exposures']['real']:
+        state_fresh = not snapshot.production_state_required or snapshot.now < snapshot.production_state_expires_at
+        if state_fresh and snapshot.real_production_ready and d['cycle_missing_exposures']['real']:
             ready.append('policy_infer')
-        if snapshot.imagination_ready and d['cycle_missing_exposures']['imagined']:
+        imag_ready = (snapshot.imagination_ready and state_fresh
+            and (not snapshot.production_state_required or snapshot.production_inflight
+                 or snapshot.now < snapshot.production_seed_expires_at))
+        if imag_ready and (d['cycle_missing_exposures']['imagined']
+                or snapshot.production_refill_chunks or snapshot.production_inflight):
             ready.extend(('policy_infer','world_infer'))
         if not any(d['next_batch_missing'].values()):
             if snapshot.current_critic_work is None or snapshot.current_critic_work > 0:
@@ -482,7 +505,10 @@ class CycleServiceController:
                 return None,d,'unmeasured_response'
             if any(not math.isfinite(x) for x in (real,imag,first_real,first_imag,critic,actions,policy,world)):
                 return None,d,'observed_no_progress'
-            if (real > 0 and not snapshot.real_production_ready) or (imag > 0 and not snapshot.imagination_ready):
+            fresh = not snapshot.production_state_required or snapshot.now < snapshot.production_state_expires_at
+            imag_ready = fresh and snapshot.imagination_ready and (not snapshot.production_state_required
+                or snapshot.production_inflight or snapshot.now < snapshot.production_seed_expires_at)
+            if (real > 0 and not (fresh and snapshot.real_production_ready)) or (imag > 0 and not imag_ready):
                 return None,d,'production_dependency_not_ready'
             if world > 0 and not snapshot.world_batch_ready:
                 return None,d,'world_batch_dependency_not_ready'

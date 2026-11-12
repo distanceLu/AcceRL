@@ -144,6 +144,9 @@ class CostAdmissionBroker:
         self.skip_response_reason = None
         self.latest_inventory = None
         self.inventory_revision = -1
+        self.latest_production = None
+        self.production_revision = -1
+        self.production_required = False
         self.failed = None
 
     def _child_weights(self):
@@ -448,6 +451,8 @@ class CostAdmissionBroker:
                   updates.get('world_version',prior.world_version))
         if self.latest_inventory is not None and self.latest_inventory['versions']==versions:
             updates['inventory']=self.latest_inventory['inventory']
+        if self.production_required:
+            updates.update(self._production_fields(versions))
         snapshot=replace(prior,**updates)
         self.latest_cycle_snapshot=snapshot
         # Phase edges are advisory. Changes use update_cycle(), or a bounded
@@ -486,8 +491,69 @@ class CostAdmissionBroker:
             self._expire_probe_if_safe(snapshot,admitted,inventory_versions=versions)
         return True
 
+    def _production_fields(self, versions):
+        state = self.latest_production
+        fresh = bool(state and tuple(state['versions']) == tuple(versions)
+                     and self.clock() < state['expires_at'])
+        seed_expiry = state.get('seed_admission_expires_at', state['expires_at']) if fresh else 0.
+        seed_fresh = fresh and self.clock() < seed_expiry
+        return dict(production_state_required=True,
+            production_state_expires_at=state['expires_at'] if fresh else 0.,
+            real_production_ready=bool(fresh and state['real_production_ready']),
+            imagination_ready=bool(fresh and (state['has_inflight_work']
+                or seed_fresh and state['can_start_new_seed'])),
+            production_inflight=bool(fresh and state['has_inflight_work']),
+            production_seed_expires_at=seed_expiry,
+            production_inflight_chunks=state.get('reserved_policy_samples', 0) if fresh else 0,
+            production_refill_chunks=state['refill']['remaining_new_chunks'] if seed_fresh else 0)
+
+    async def update_production(self, raw):
+        """Only serialized producer receipts establish runnable production."""
+        from inventory_refill import PLAN_TTL
+        raw = dict(raw)
+        revision, versions = raw.get('revision'), raw.get('versions')
+        observed, expires = raw.get('observed_monotonic'), raw.get('expires_at')
+        if (type(revision) is not int or revision < 0 or not isinstance(versions, (list, tuple))
+                or len(versions) != 2 or any(type(v) is not int or v < 0 for v in versions)
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in (observed, expires))
+                or not 0 <= self.clock()-observed < PLAN_TTL
+                or not 0 < expires-observed <= PLAN_TTL or self.clock() >= expires):
+            return False
+        for name in ('can_start_new_seed', 'has_inflight_work', 'imagination_ready', 'real_production_ready'):
+            if type(raw.get(name)) is not bool:
+                raise ValueError('Producer readiness must include exact '+name)
+        chunks = raw.get('refill', {}).get('remaining_new_chunks')
+        if type(chunks) is not int or not 0 <= chunks <= 432:
+            raise ValueError('Producer refill must be one bounded cohort')
+        reserved = raw.get('reserved_policy_samples', 0)
+        seed_expiry = raw.get('seed_admission_expires_at', expires)
+        if (type(reserved) is not int or not 0 <= reserved <= 432 or
+                type(seed_expiry) not in (int, float) or not math.isfinite(seed_expiry) or seed_expiry < 0):
+            raise ValueError('Invalid producer seed expiry/reservation')
+        prior = self.latest_cycle_snapshot
+        if revision <= self.production_revision or (prior is not None and
+                (versions[0] < prior.policy_version or versions[1] < prior.world_version)):
+            return False
+        self.production_revision = revision
+        self.latest_production = raw
+        self.production_required = True
+        if prior is not None:
+            # A low-frequency status refresh is not a new weight experiment.
+            # Avoid repeating the candidate search on every two-second poll.
+            snapshot = replace(prior, now=self.clock(), **self._production_fields(
+                (prior.policy_version, prior.world_version)))
+            self.latest_cycle_snapshot = snapshot
+            if self.last_decision is not None:
+                self.last_decision = dict(self.last_decision,
+                    ready_services=self.controller.ready_services(snapshot),
+                    production_revision=revision)
+        return True
+
     async def update_cycle(self, raw):
         now=self.clock();raw=dict(raw);admitted=raw.pop('admitted_chunks',{})
+        self.production_required |= raw.pop('production_state_required', False)
+        if self.production_required:
+            raw.update(self._production_fields((raw['policy_version'], raw['world_version'])))
         revision=raw.pop('inventory_revision',None)
         versions=raw.pop('inventory_versions',None)
         if revision is not None:

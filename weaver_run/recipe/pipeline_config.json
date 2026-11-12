@@ -14,6 +14,8 @@
   "poll_seconds": 0.25,
   "lease_timeout_seconds": 3600.0,
   "replace_old_pending": true,
+  "inventory_refill_enabled": true,
+  "seed_reserve_per_bucket": 1,
   "initial_state_enabled": true,
   "initial_state_count": 50,
   "initial_state_seed": 20261026,

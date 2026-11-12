@@ -694,15 +694,31 @@ class ReplayBufferActor:
         self.fresh_refresh_prune = dependency_pruning_enabled()
         self.fresh_refresh_micro = 2
 
-    def configure_fresh(self, critics, production_budget=None):
+    def configure_fresh(self, critics, production_budget=None, inventory_refill=False):
         if not self.fresh_enabled:
             return False
         if not critics:
             raise ValueError('FRESH needs the published current Policy critic owners')
         self.fresh_critics = list(critics)
         self.fresh_production_budget = production_budget
+        self.inventory_refill = None
+        if inventory_refill:
+            if production_budget is None:
+                raise ValueError('Inventory refill requires the authoritative production owner')
+            from inventory_refill import InventoryRefillPump
+            self.inventory_refill = InventoryRefillPump(self)
         self.fresh_store.on_add = self.capture_ledger.add
         self.fresh_store.on_evict = self.capture_ledger.evict
+        return True
+
+    async def start_inventory_refill(self):
+        if self.inventory_refill is not None:
+            self.inventory_refill.start()
+        return self.inventory_refill is not None
+
+    async def stop_inventory_refill(self):
+        if self.inventory_refill is not None:
+            await self.inventory_refill.stop()
         return True
 
     def configure_cost_scheduler(self, broker, settings):
@@ -717,6 +733,11 @@ class ReplayBufferActor:
     def set_fresh_versions(self, policy, world):
         if self.fresh_enabled:
             self.fresh_store.set_versions(policy, world)
+            pump = getattr(self, 'inventory_refill', None)
+            if pump is not None and world == policy//5:
+                import time
+                pump.timing.published((policy, world), time.monotonic())
+                pump.notify()
             if getattr(self,'cost_scheduler_enabled',False):self._notify_scheduler_inventory()
 
     def add_segment(self, segment):
@@ -737,6 +758,16 @@ class ReplayBufferActor:
             inventory_revision=self.cost_inventory_revision,
             inventory_versions=list(self.fresh_store.versions))
 
+    async def scheduler_inventory_with_refill(self):
+        # Reuse the once-per-update inventory read. Settle its same-version
+        # producer receipt before the driver asks macro control to choose weights.
+        if getattr(self, 'inventory_refill', None) is not None:
+            try:
+                await self.inventory_refill.tick()
+            except Exception as error:
+                self.inventory_refill.degraded(error)
+        return self.scheduler_inventory()
+
     def _notify_scheduler_inventory(self):
         if getattr(self,'cost_scheduler_enabled',False):
             self.cost_scheduler_broker.update_inventory.remote(self.scheduler_inventory())
@@ -752,6 +783,8 @@ class ReplayBufferActor:
                     consumption_world_version=self.fresh_store.versions[1])
         if not records:
             del self.fresh_records[token]
+        if getattr(self, 'inventory_refill', None) is not None:
+            self.inventory_refill.notify()
         if getattr(self,'cost_scheduler_enabled',False):self._notify_scheduler_inventory()
         return True
 
@@ -769,6 +802,10 @@ class ReplayBufferActor:
         if self.fresh_enabled:
             from fresh_replay_pressure import reserve_with_production_pressure
             token, sample_ids = await reserve_with_production_pressure(self, batch_size)
+            if getattr(self, 'inventory_refill', None) is not None:
+                import time
+                self.inventory_refill.timing.reserved(self.fresh_store.versions, time.monotonic())
+                self.inventory_refill.notify()
             try:
                 if getattr(self,'cost_scheduler_enabled',False):
                     await self.cost_scheduler_broker.update_inventory.remote(self.scheduler_inventory())
@@ -842,6 +879,9 @@ class ReplayBufferActor:
                 return (*result, metadata)
             except BaseException:
                 self.fresh_store.cancel(token)
+                if getattr(self, 'inventory_refill', None) is not None:
+                    self.inventory_refill.timing.active = None
+                    self.inventory_refill.notify()
                 if getattr(self,'cost_scheduler_enabled',False):self._notify_scheduler_inventory()
                 raise
         batch = random.sample(self.buffer, batch_size)
@@ -4006,6 +4046,13 @@ def main(args):
     online_weaver = isolated_online_weaver(world_config)
     validate_online_runtime_arguments(world_config, args)
     pipeline_config = PipelineBudgetConfig.from_json(getattr(args, 'pipeline_config', None))
+    if pipeline_config.inventory_refill_enabled and (not fresh_replay
+            or not fresh_config.replay_age_limits or not fresh_config.real_policy_replay
+            or fresh_config.real_fraction != .25
+            or (fresh_config.max_policy_age, fresh_config.max_world_age, fresh_config.max_sample_uses) != (16, 3, 4)
+            or args.train_batch_size*args.accumulation_steps*args.num_trainer_gpus != 576
+            or args.ctrl_train_interval != 5):
+        raise ValueError('Inventory refill requires the reviewed global576, 5:1 mixed FRESH recipe')
     if pipeline_config.bytes_per_frame != 2 * 3 * 224 * 224:
         raise ValueError("Frame budget must use the actual two-camera uint8 geometry")
     geometry = context_geometry(world_config)
@@ -4391,7 +4438,8 @@ def main(args):
 
     published_fresh_versions = {'policy':0, 'ctrl':0}
     if fresh_replay:
-        ray.get([replay.configure_fresh.remote(inference_pool, wm_replay_buffers[index])
+        ray.get([replay.configure_fresh.remote(inference_pool, wm_replay_buffers[index],
+                     inventory_refill=pipeline_config.inventory_refill_enabled)
                  for index, replay in enumerate(replay_buffers)])
 
     def sync_model(kind, pool):
@@ -4601,6 +4649,8 @@ def main(args):
         )
         time.sleep(5)
     print("所有远程经验池已准备好，训练器将按需获取数据。")
+    if fresh_replay and pipeline_config.inventory_refill_enabled:
+        ray.get([replay.start_inventory_refill.remote() for replay in replay_buffers])
     if four_layout:
         limits = ((inference_pool, 2), (ctrl_world_inference_pool, 3), (reward_inference_pool, 2))
         ray.get([actor.set_training_batch_limit.remote(cap) for pool, cap in limits for actor in pool])
@@ -4625,13 +4675,15 @@ def main(args):
         t_train_start = time.time()
         next_policy_step = global_step + 1
         if cost_broker is not None:
-            inventory=ray.get(replay_buffers[0].scheduler_inventory.remote())
+            inventory=ray.get(replay_buffers[0].scheduler_inventory_with_refill.remote()
+                if pipeline_config.inventory_refill_enabled else replay_buffers[0].scheduler_inventory.remote())
             wm_ready=ray.get(wm_replay_buffers[0].size.remote())>=1024
             ray.get(cost_broker.update_cycle.remote(dict(inventory,policy_version=global_step,
                 world_version=global_step//5,phase='needs_batch',
                 context='joint' if next_policy_step%5==0 else 'ordinary',
                 completed_context='joint' if global_step and global_step%5==0 else 'ordinary',
                 world_training_units_remaining=float(next_policy_step%5==0),world_batch_ready=wm_ready,
+                production_state_required=pipeline_config.inventory_refill_enabled,
                 policy_action_observations_per_real_chunk=1.,
                 policy_action_observations_per_imagined_chunk=1.25)))
         nsight_windows.before_epoch(next_policy_step)
@@ -5054,6 +5106,8 @@ def main(args):
         target_reached=target_reached, requested_stop=stop_requested(),
         completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs)
     nsight_windows.close()
+    if fresh_replay and pipeline_config.inventory_refill_enabled:
+        ray.get([replay.stop_inventory_refill.remote() for replay in replay_buffers])
     ray.get([buffer.stop_pipeline.remote() for buffer in wm_replay_buffers])
     publish_snapshot("final")
     experiment.event("experiment_completed", details={"global_step": global_step,

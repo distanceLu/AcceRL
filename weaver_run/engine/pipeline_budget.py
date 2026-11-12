@@ -70,6 +70,8 @@ class PipelineBudgetConfig:
     # A finite training-task deadline is distinct from an early budget censor.
     # It applies only to real collectors, never to the evaluation environments.
     real_training_action_horizon: int | None = None
+    inventory_refill_enabled: bool = False
+    seed_reserve_per_bucket: int = 0
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -101,6 +103,10 @@ class PipelineBudgetConfig:
                 raise ValueError(f"{name} must be finite and positive")
         if not isinstance(self.replace_old_pending, bool):
             raise ValueError("replace_old_pending must be boolean")
+        if type(self.inventory_refill_enabled) is not bool:
+            raise ValueError('inventory_refill_enabled must be boolean')
+        if type(self.seed_reserve_per_bucket) is not int or self.seed_reserve_per_bucket not in (0, 1):
+            raise ValueError('seed_reserve_per_bucket must be zero or one')
         if self.max_episode_bytes > self.max_resident_frame_bytes:
             raise ValueError("max_resident_frame_bytes cannot fit one maximum episode")
 
@@ -197,6 +203,14 @@ class PipelineBudget:
         self._replay_pressure = None
         self._pressure_revision = -1
         self._production_versions = None
+        self._refill_armed = False
+        self._refill_plan = None
+        self._refill_revision = -1
+        self._admission_revision = 0
+        from inventory_refill import ProductionTiming
+        self.production_timing = ProductionTiming(config.max_imagine_in_flight)
+        self._seed_wait_started = None
+        self._seed_reserve_forced_releases = 0
         self._stopped = False
         self._failure: str | None = None
         self._last_block_reason: str | None = None
@@ -258,7 +272,90 @@ class PipelineBudget:
         if versions != self._production_versions:
             self._production_versions = versions
             self._replay_pressure = None
+            self._refill_plan = None
         return dict(production_versions=list(versions), pressure_cleared=self._replay_pressure is None)
+
+    def arm_inventory_refill(self):
+        self._guard()
+        if not self.config.inventory_refill_enabled:
+            raise ValueError('Inventory refill is disabled')
+        self._refill_armed = True
+        return self.production_admission()
+
+    def set_refill_plan(self, plan):
+        from inventory_refill import PLAN_TTL
+        self._guard()
+        if not self._refill_armed:
+            raise ValueError('Refill must be armed after bootstrap')
+        if not isinstance(plan, dict):
+            raise ValueError('Refill plan must be a mapping')
+        for name in ('revision', 'new_chunks_needed', 'admitted_imagined_chunks'):
+            _nonnegative_int(name, plan.get(name))
+        if plan['new_chunks_needed'] > 432:
+            raise ValueError('Refill plan exceeds one imagined cohort')
+        versions = plan.get('versions')
+        if (not isinstance(versions, (list, tuple)) or len(versions) != 2
+                or any(type(v) is not int or v < 0 for v in versions)):
+            raise ValueError('Refill needs exact published versions')
+        observed = plan.get('observed_monotonic')
+        if type(observed) not in (int, float) or not math.isfinite(observed):
+            raise ValueError('Refill needs a finite observation clock')
+        if plan['revision'] > self._refill_revision:
+            self._refill_revision = plan['revision']
+            self._refill_plan = (dict(plan, expires_at=observed+PLAN_TTL)
+                if tuple(versions) == self._production_versions
+                and versions[1] == versions[0]//5
+                and 0 <= self._clock()-observed < PLAN_TTL else None)
+        return self.production_admission()
+
+    def refill_status(self):
+        row = self._refill_plan
+        active = bool(self._refill_armed and not self._stopped and row
+            and tuple(row['versions']) == self._production_versions
+            and self._clock() < row['expires_at'])
+        target = row['new_chunks_needed'] if active else 0
+        supplied = max(0, self.policy_added-row['admitted_imagined_chunks']) if active else 0
+        remaining = max(0, target-supplied-self.reserved_policy_samples)
+        return dict(armed=self._refill_armed, active=active, revision=self._refill_revision,
+            target_new_chunks=target, remaining_new_chunks=remaining,
+            supplied_since_snapshot=supplied, credit_refill_performed=False)
+
+    def production_admission(self):
+        """Same gates as acquisition; pending requests and credits are distinct."""
+        from inventory_refill import PLAN_TTL
+        self._admission_revision += 1
+        refill = self.refill_status()
+        pressure = self.pressure_status()
+        funded = self._credits >= self.policy_chunks_per_seed
+        demand = (max(refill['remaining_new_chunks'], pressure['pressure_remaining_imagined']) > 0
+                  if self._refill_armed else not self._paused or pressure['pressure_can_spend_existing_credit'])
+        canonical = (not self._refill_armed or self._production_versions is not None
+                     and self._production_versions[1] == self._production_versions[0]//5)
+        seeds = sum(len(ep.starts) for ep in self._episodes.values())
+        reason = next((why for blocked, why in (
+            (self._stopped or self._failure is not None, 'stopped'),
+            (not canonical, 'publication_in_progress'),
+            (len(self._imagine) >= self.config.max_imagine_in_flight, 'imagine_in_flight'),
+            (not demand, 'policy_demand'), (not funded, 'production_credit'),
+            (not seeds, 'no_seeds')) if blocked), None)
+        inflight = bool(self._imagine) and not self._stopped and self._failure is None
+        seed_expiries = []
+        if self._refill_armed and refill['remaining_new_chunks']:
+            seed_expiries.append(self._refill_plan['expires_at'])
+        if pressure['pressure_can_spend_existing_credit']:
+            seed_expiries.append(self._replay_pressure['expires_at'])
+        if not self._refill_armed and not self._paused:
+            seed_expiries.append(self._clock()+PLAN_TTL)
+        return dict(versions=list(self._production_versions) if self._production_versions else None,
+            revision=self._admission_revision, observed_monotonic=self._clock(),
+            expires_at=self._clock()+PLAN_TTL, can_start_new_seed=reason is None,
+            seed_admission_expires_at=max(seed_expiries, default=0.),
+            has_inflight_work=inflight, imagination_ready=inflight or reason is None,
+            stopped=self._stopped, failure=self._failure,
+            blocked_reason=reason, available_policy_credits=self._credits,
+            reserved_policy_samples=self.reserved_policy_samples, pending_seed_count=seeds,
+            active_real=len(self._real), active_imagine=len(self._imagine),
+            refill=refill, **self.production_timing.status())
 
     def set_replay_pressure(self, snapshot):
         """A short-lived next-cohort shortage may use existing credits early.
@@ -372,26 +469,34 @@ class PipelineBudget:
         else:
             self._counts["episodes_drained"] += 1
 
+    def _protected_seed_episodes(self):
+        if not self.config.seed_reserve_per_bucket or self.seed_scheduler is None:
+            return set()
+        from fresh_seed_scheduler import seed_bucket
+        selected = {}
+        for eid, ep in reversed(self._episodes.items()):
+            for start in ep.starts:
+                key = seed_bucket(ep.success, start+ep.context_frames-1, ep.frame_count)
+                selected.setdefault(key, eid)
+        return set(selected.values())
+
     def _evict_old_pending(self) -> bool:
-        for eid, episode in self._episodes.items():
-            if episode.active == 0:
-                self._drop_episode(eid, dropped=True)
-                return True
-        return False
+        return self.drop_oldest_pending(force=True) is not None
 
-    def drop_oldest_pending(self) -> str | None:
-        """Let the owner shed one imagination pin under total frame pressure.
-
-        Active episodes are protected. The owner must release its corresponding
-        cache reference and remeasure total resident bytes before admission.
-        """
+    def drop_oldest_pending(self, *, force=False) -> str | None:
+        """Soft seed reserve yields when the owner needs mandatory frame space."""
         self._guard()
         if not self.config.replace_old_pending:
             return None
-        for eid, episode in self._episodes.items():
-            if episode.active == 0:
-                self._drop_episode(eid, dropped=True)
-                return eid
+        protected = self._protected_seed_episodes()
+        candidates = [eid for eid, ep in self._episodes.items() if ep.active == 0]
+        unprotected = [eid for eid in candidates if eid not in protected]
+        if unprotected or force and candidates:
+            eid = (unprotected or candidates)[0]
+            if eid in protected:
+                self._seed_reserve_forced_releases += 1
+            self._drop_episode(eid, dropped=True)
+            return eid
         return None
 
     def acquire_real(self, worker_id: Any, resident_bytes: int | None = None) -> dict | None:
@@ -484,15 +589,19 @@ class PipelineBudget:
         if any(lease["worker_id"] == worker_id for lease in self._imagine.values()):
             raise PipelineBudgetError(f"imagination worker {worker_id} already owns a lease")
         self._refresh_pause()
-        if len(self._imagine) >= self.config.max_imagine_in_flight:
-            self._last_block_reason = "imagine_in_flight"
+        state = self.production_admission()
+        if not state['can_start_new_seed']:
+            self._last_block_reason = state['blocked_reason']
+            if state['blocked_reason'] == 'no_seeds' and self._seed_wait_started is None:
+                self._seed_wait_started = self._clock()
+            elif state['blocked_reason'] in ('policy_demand', 'production_credit') and not self._imagine:
+                self.production_timing.idle()
+                self._seed_wait_started = None
             return None
-        if self._paused and not self.pressure_status()['pressure_can_spend_existing_credit']:
-            self._last_block_reason = "policy_demand"
-            return None
-        if not self._dispatch:
-            self._last_block_reason = "no_seeds"
-            return None
+        demand_started = self._seed_wait_started
+        if demand_started is not None:
+            self.production_timing.seed_wait = self._clock()-self._seed_wait_started
+            self._seed_wait_started = None
         bucket = None
         if self.seed_scheduler is None:
             episode_id = self._dispatch.popleft()
@@ -515,6 +624,8 @@ class PipelineBudget:
         lease = dict(token=token, worker_id=worker_id, acquired_at=self._clock(),
                      episode_id=episode_id, start=start,
                      reserved_samples=self.policy_chunks_per_seed)
+        if demand_started is not None:
+            lease['demand_started_at'] = demand_started
         if self.fresh.seed_balancing or self.fresh.early_seed_context:
             lease.update(seed_anchor=start + episode.context_frames - 1,
                          seed_bucket=bucket,
@@ -535,6 +646,9 @@ class PipelineBudget:
         if actual_samples > lease["reserved_samples"]:
             raise ValueError("produced samples exceed the seed's prior demand reservation")
         del self._imagine[token]
+        if not cancelled:
+            self.production_timing.completed(lease.get('demand_started_at', lease['acquired_at']),
+                                             self._clock(), actual_samples)
         self.policy_added += actual_samples
         self._return_credits(lease["reserved_samples"] - actual_samples)
         episode = self._episodes[lease["episode_id"]]
@@ -600,6 +714,8 @@ class PipelineBudget:
                     policy_paused=self._paused, stopped=self._stopped, failure=self._failure,
                     last_block_reason=self._last_block_reason, **self._counts)
         result['replay_pressure'] = self.pressure_status()
+        result['inventory_refill'] = self.refill_status()
+        result['seed_reserve_forced_releases'] = self._seed_reserve_forced_releases
         if self.seed_scheduler is not None:
             from collections import Counter
             from fresh_seed_scheduler import seed_bucket

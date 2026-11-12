@@ -1,0 +1,82 @@
+{
+  "change": "inventory_driven_bounded_refill",
+  "base_commit": "2a7618e3da5e2c2e3e89d5df8a003859baa454ba",
+  "branch": "codex/weaver-original95-runnable",
+  "local_canonical_cpu": {
+    "command": "cd weaver_run/engine && WEAVER_TEST_UPSTREAM=$(cd ../vendor/weaver && pwd) python -B validate_cost_scheduler_candidate.py",
+    "tests_run": 430,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "new_refill_tests": 30,
+    "compiled_python_files": 210,
+    "python": "3.14.0",
+    "torch": "2.9.1+cpu",
+    "cuda_initialized": false
+  },
+  "reference_site_wrapper_cpu": {
+    "command": "python -B -m unittest discover -s weaver_run/reference_site/queue_wrapper -p 'test_*cpu.py' -q",
+    "tests_run": 15,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "server_cpu_overlay": {
+    "method": "In-memory changed modules and actual train.py AST; server checkout and active training source unchanged",
+    "python": "3.11.13",
+    "torch": "2.12.0+cu130",
+    "tests_run": 148,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "serialization_checks": 15,
+    "serialization_passed": true,
+    "cloudpickle": "3.1.2",
+    "cuda_initialized": false,
+    "ray_started": false,
+    "overlaps_local_suite": true
+  },
+  "independent_review": {
+    "read_only": true,
+    "important_findings": 2,
+    "fixed_with_red_green_regressions": [
+      "Separate seed-admission expiry from owner/inflight expiry; delayed receipt cannot renew an expired plan",
+      "Read-only real readiness includes legal frame reclamation; protects eval/WM tickets and minimum World windows"
+    ],
+    "fixes_retested_locally_and_on_server_cpu": true,
+    "second_independent_review_performed": false,
+    "deferred_findings": []
+  },
+  "historical_test_scope": {
+    "test_execution_control_cpu": "Not part of canonical orange acceptance; previously established same 2 failures and 9 errors on parent and critic-pruning revision for later parent-budget/block APIs. Not repaired or counted as passing here."
+  },
+  "runtime_changes": [
+    "Project exact distinct/use capacity through next World publication plus first Policy draw",
+    "Use measured reserve-to-publication work and ACK-side complete-cohort lead; unknown timing is explicit",
+    "One expiring earliest-deficit quota <=432, replacement revisions and unchanged earned credits",
+    "Macro consumes producer readiness and distinguishes inflight work from new seed admission",
+    "Bounded soft seed episode references yield to hard frame budget and mandatory World windows"
+  ],
+  "learning_contract": {
+    "global_policy_world": [576, 1024],
+    "real_imagined": [144, 432],
+    "policy_world_interval": 5,
+    "max_policy_world_age": [16, 3],
+    "max_uses": 4,
+    "generation_credit_per_imagined_draw": 0.25,
+    "sampler_reward_gae_logits_masks_unchanged": true,
+    "asynchronous_sample_distribution_can_change": true
+  },
+  "training_started": false,
+  "current_training_modified": false,
+  "real_ray_cuda_ordering_verified": false,
+  "gpu_speedup_measured": false,
+  "learning_equivalence_verified": false,
+  "limits": [
+    "Capacity matching is a feasible envelope, not a promise about future random Replay draws",
+    "Incomplete production cohorts use an explicitly labelled scaled seed-latency proxy",
+    "Soft seed protection can retain up to six whole episode references, not exactly six frames",
+    "Publication order and stale-version checks remain unchanged; publication waste is not proven eliminated",
+    "Credit rate/usecap cannot guarantee more unique data or lower mean reuse"
+  ]
+}

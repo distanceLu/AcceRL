@@ -170,7 +170,9 @@ class EpisodeReplayMixin:
             if self.pipeline.drop_oldest_pending() is not None:
                 self._prune_imagination_records()
             elif len(self.buffer) <= self.minimum_train_windows:
-                break
+                if self.pipeline.drop_oldest_pending(force=True) is None:
+                    break
+                self._prune_imagination_records()
             else:
                 sample = self.buffer.popleft()
                 ledger = getattr(self, 'capture_ledger', None)
@@ -261,6 +263,56 @@ class EpisodeReplayMixin:
         if self.pipeline_stopped:
             return dict(stopped=True)
         return self.pipeline.set_replay_pressure(snapshot)
+
+    def arm_inventory_refill(self):
+        self.pipeline.arm_inventory_refill()
+        return self.production_admission()
+
+    def set_refill_plan(self, snapshot):
+        self.pipeline.set_refill_plan(snapshot)
+        return self.production_admission()
+
+    def production_admission(self):
+        result = self.pipeline.production_admission()
+        initial = self.initial_state_scheduler.status() if self.initial_state_scheduler else None
+        can_collect = (initial is None or initial['available_env_steps'] > self.initial_state_pool['reset_steps'])
+        result['real_production_ready'] = bool(not self.pipeline_stopped and not result['stopped']
+            and result['failure'] is None and (result['active_real'] or can_collect and self._real_capacity_ready()))
+        return result
+
+    def _real_capacity_ready(self):
+        """Read-only preview of mandatory pins after all legal reclamation.
+
+        No records/windows are removed here. Unknown resident references stay
+        charged; actual acquire_real still measures bytes after real eviction.
+        """
+        budget, cfg = self.pipeline, self.pipeline_config
+        if len(budget._real) >= cfg.max_real_in_flight:
+            return False
+        pending = (sum(ep.active > 0 for ep in budget._episodes.values())
+                   if cfg.replace_old_pending else len(budget._episodes))
+        if pending+len(budget._real) >= cfg.max_pending_episodes:
+            return False
+        resident = self._resident_frame_bytes()
+        reserve = budget.reserved_frame_bytes+cfg.max_episode_bytes
+        if resident+reserve <= cfg.max_resident_frame_bytes:
+            return True
+        owned = dict(self.imagination_records)
+        mandatory = {eid for eid, ep in budget._episodes.items() if ep.active}
+        if not cfg.replace_old_pending:
+            mandatory.update(self.imagination_records)
+        windows = list(self.buffer)
+        if self.minimum_train_windows:
+            mandatory.update(row.episode_id for row in windows[-self.minimum_train_windows:])
+        for row in windows+list(self.eval_buffer):
+            owned[row.episode_id] = row.episode
+        mandatory.update(row.episode_id for row in self.eval_buffer)
+        for batch, _ in self.window_tickets.values():
+            for row in batch:
+                owned[row.episode_id] = row.episode
+                mandatory.add(row.episode_id)
+        reclaimable = sum(record.image_nbytes for eid, record in owned.items() if eid not in mandatory)
+        return resident-reclaimable+reserve <= cfg.max_resident_frame_bytes
 
     def acquire_imagine(self, worker_id):
         if self.pipeline_stopped:
