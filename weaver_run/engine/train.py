@@ -1,7 +1,7 @@
 import os
 import argparse
-os.environ["MUJOCO_GL"] = "osmesa"
-os.environ["PYOPENGL_PLATFORM"] = "osmesa"
+from environment_rendering import configure_render_backend
+configure_render_backend()
 os.environ["TMPDIR"] = "/dev/shm"
 
 import sys
@@ -1005,6 +1005,8 @@ class WMReplayBufferActor(EpisodeReplayMixin):
 class BaseWorkerActor:
     """rollout 和 eval worker 的共享逻辑。"""
     def __init__(self, infer, replay, wid, stats_actor, cfg, benchmark_name):
+        from environment_rendering import prepare_environment_renderer, verify_environment_renderer
+        prepare_environment_renderer()
         self.infer = infer
         self.replay = replay
         self.stats_actor = stats_actor
@@ -1022,6 +1024,12 @@ class BaseWorkerActor:
                 image_size=224,
                 render_mode="rgb_array"
             ) for i in range(self.num_tasks)]
+        try:
+            self.renderer_info = verify_environment_renderer()
+        except BaseException:
+            for env in self.envs:
+                env.close()
+            raise
         print(f"BaseWorker {wid}: 环境初始化完成。")
 
         self.env = None
@@ -1029,6 +1037,9 @@ class BaseWorkerActor:
         self.wid = wid
         self.task_description = None
         self.current_env_name = None
+
+    def get_renderer_info(self):
+        return self.renderer_info
 
 
 # ================================================================
@@ -4031,6 +4042,7 @@ def merge_split_epoch_results(epoch_results, world_size, policy_step, ctrl_inter
 
 def main(args):
     """Run the original training recipe with optional evaluation-based stop."""
+    from environment_rendering import render_backend, discover_render_bindings, render_worker_options
     from evaluation_threshold import resolve_online_evaluation
     evaluation_plan = resolve_online_evaluation(
         args.num_eval_workers, args.num_inference_actors,
@@ -4152,6 +4164,10 @@ def main(args):
     four_layout = args.gpu_layout in (FOUR_LAYOUT, SPLIT_LAYOUT)
     fixed_layout = args.gpu_layout in (DUAL_LAYOUT, FOUR_LAYOUT, SPLIT_LAYOUT)
     bindings = build_bindings(parse_gpu_ids(args.cuda_visible_devices)) if fixed_layout else None
+    backend = render_backend(os.environ)
+    if backend == 'egl' and not four_layout:
+        raise ValueError('EGL rendering requires the explicit four-card Policy replica layout')
+    render_bindings = discover_render_bindings(bindings, backend=backend) if not args.validate_only else []
     topology = ray_init_options(bindings, args.gpu_layout, active_kinds=active_kinds,
                                inference_kinds=inference_kinds) if fixed_layout else {"num_gpus": len(args.cuda_visible_devices.split(","))}
     object_store_size_gb = 328
@@ -4333,7 +4349,9 @@ def main(args):
     rollout_workers, eval_workers = [], []
     if not args.validate_only:
         rollout_workers = [
-            RolloutWorkerActor.remote(
+            RolloutWorkerActor.options(**(render_worker_options(
+                render_bindings, i % args.num_inference_actors, f'real-{i}', environ=os.environ)
+                if i < pipeline_config.real_workers else {})).remote(
                 inference_pool[i % args.num_inference_actors],
                 replay_buffers[i % replay_count],
                 i,
@@ -4355,10 +4373,16 @@ def main(args):
             ) for i in range(pipeline_config.real_workers + pipeline_config.imagination_workers)
         ]
         eval_workers = [
-            EvaluationWorkerActor.remote(
+            EvaluationWorkerActor.options(**render_worker_options(
+                render_bindings, replica, f'eval-{i}', environ=os.environ)).remote(
                 inference_pool[replica], i, stats_actor, cfg, benchmark, torch_dtype
             ) for i, replica in enumerate(evaluation_plan['replica_ids'])
         ]
+        renderer_receipts = ray.get([worker.get_renderer_info.remote() for worker in
+            rollout_workers[:pipeline_config.real_workers] + eval_workers], timeout=180)
+        writer.telemetry.event('environment_rendering', details={
+            'backend': backend, 'physics': 'cpu', 'workers': renderer_receipts})
+        writer.flush()
     print(f"已创建 {len(rollout_workers)} 个 Rollout workers 和 {len(eval_workers)} 个 Evaluation workers。")
 
     print("\n--- 步骤 2: 建立独立的四 rank 训练组 ---")

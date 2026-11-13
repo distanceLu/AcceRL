@@ -175,6 +175,10 @@ class Actor:
             return {"kind": args[0], "fake_cpu_component": True}
         if method == "run":
             return ("pending_worker_run", self.pid)
+        if method == "get_renderer_info":
+            child = self.options.get('runtime_env', {}).get('env_vars', {})
+            return {'backend':child.get('MUJOCO_GL'), 'pid':self.pid,
+                    'worker':child.get('ACCERL_RENDER_WORKER')}
         if method == "size":
             return 10000 if self.name == "ReplayBufferActor" else 50000
         if method == "set_training_batch_limit":

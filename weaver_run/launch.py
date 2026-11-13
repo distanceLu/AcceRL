@@ -185,7 +185,11 @@ def prepare(work, ids, run_id):
 
 
 def check(work, cmd, env, host):
-    safe=dict(env,CUDA_VISIBLE_DEVICES="")
+    # CPU admission creates a simulator, but must not open a hardware GL context.
+    safe=dict(env,CUDA_VISIBLE_DEVICES="",ACCERL_ENV_RENDER_BACKEND="osmesa",
+              MUJOCO_GL="osmesa",PYOPENGL_PLATFORM="osmesa")
+    safe.pop("MUJOCO_EGL_DEVICE_ID",None)
+    safe.pop("ACCERL_RENDER_BINDING",None)
     for name,h in read(RECIPE/"bundle-checksums.json").items():
         require(checksum(Path(host["bundle"])/name)==h,"native3200 bundle mismatch: "+name)
     for name,h in read(RECIPE/"policy-checksums.json").items():
