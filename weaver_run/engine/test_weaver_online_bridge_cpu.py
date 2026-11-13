@@ -79,7 +79,9 @@ class Client:
             commit = self.micros == 64
             self.steps += int(commit)
             return {'committed': commit, 'result': {'successful_updates': self.steps, 'loss': 1.,
-                'grad_norm': .5, 'learning_rate': 5e-7, 'update_wall_seconds': .1} if commit else None}
+                'grad_norm': .5, 'learning_rate': 5e-7, 'update_wall_seconds': .1,
+                'native_flow_loss': .8, 'native_half_mse_loss': .2,
+                'native_half_brier_loss': .2} if commit else None}
         if method == 'state':
             return {'ctrl_steps': self.steps, 'global_steps': self.steps, 'skipped_steps':0, 'global_batch':1024,
                     'distributed_world_size':4}
@@ -106,10 +108,17 @@ class NativeBridge(unittest.IsolatedAsyncioTestCase):
             result = await actor.run_training_epoch(policy)
             self.assertEqual(result['metrics']['trained_ctrl'], policy == 5)
             self.assertEqual(result['model_step'], int(policy == 5))
+            if policy == 5:
+                self.assertEqual(result['metrics'].get('native_flow_loss'), .8)
+                self.assertEqual(result['metrics'].get('native_half_brier_loss'), .2)
+            else:
+                self.assertNotIn('native_flow_loss', result['metrics'])
         self.assertEqual(self.coordinator.calls[0], ('reserve', 0, 256, 'ctrl'))
         slices = [row[1:] for row in self.coordinator.calls if row[0] == 'micro']
         self.assertEqual(slices, [(index,index+4) for index in range(0,256,4)])
         self.assertTrue(self.coordinator.done)
+        self.assertEqual([name for name, _ in actor.worker_client.calls],
+                         ['setup'] + ['advance'] * 5 + ['begin_update'] + ['train_micro'] * 64)
         self.assertEqual(actor.serial_sample_identity(5)['cohort']['sample_ids'], self.coordinator.ids)
         await actor.run_training_epoch(6)
         self.assertIsNone(actor.serial_sample_identity(6)['cohort'])

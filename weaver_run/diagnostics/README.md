@@ -87,3 +87,95 @@ the frozen models, not an exact reconstruction of an old asynchronous update.
 CPU test success validates mathematical and orchestration contracts only.
 GPU results exist only when the queued diagnostic has actually executed and
 written a complete result; queued status is not a passed OpenVLA/CUDA check.
+
+## Frozen RM state-discrimination report (CPU only)
+
+On the reference server, queue the finite GPU collection/scoring job through the
+same entrypoint:
+
+```sh
+./run.sh diagnose-rm --id rm-state-20261113-a
+./run.sh diagnose-rm-status --id rm-state-20261113-a
+```
+
+It waits behind active training and never requests its stop. It cross-scores
+orange150 P594/W118 and inventory-refill P275/W55 on 32 newly collected real
+episodes (two frozen policies, the same 16 initial states). The four-hour budget
+applies to diagnostic execution, not queue waiting or the active training.
+Checkpoint admission is CPU-only; GPU models require exclusive queue ownership.
+The live training runtime is untouched. The diagnostic runs from the published
+development commit and fails closed if that checkout changes before execution;
+keep it at the submitted commit while the job is pending. It never updates model
+weights, produces imagined data, or inserts samples into training Replay.
+Completion requires `result.json` with `complete=true`; queued status does not
+mean any RM prediction has yet been measured.
+
+`rm_report.rm_state_report` consumes already-scored independent real samples;
+it imports NumPy and the standard library only, with no model loading or I/O.
+Cross-score every frozen RM on the **same** `(episode_id, frame_index)` panel.
+Each row supplies `model`, `episode_id`, `initial_state_id`, `frame_index`,
+`episode_length`, `success`, `target`, and `prediction`; optional `policy_panel`
+is retained. Scores and discounted targets must be finite numbers in `[0,1]`.
+
+```python
+from weaver_run.diagnostics.rm_report import rm_state_report
+
+STATES = [0, 3, 6, 8, 11, 13, 18, 23, 27, 29, 31, 37, 39, 42, 47, 49]
+report = rm_state_report(
+    rows,
+    calibration_initial_states=STATES[::2],
+    test_initial_states=STATES[1::2],
+)
+```
+
+The complete signature is
+`rm_state_report(rows, calibration_ids=None, test_ids=None, *, calibration_initial_states=None, test_initial_states=None, valid=None, include_oracle=False)`.
+Choose either the two episode-ID arguments or the two initial-state keywords.
+Both modes require exhaustive, disjoint partitions and prohibit any initial
+state from crossing the split. For the two-policy protocol, episode IDs are
+`<policy>:state<id>`; both policy episodes for a state stay together. The
+`split` manifest records the state-to-episode mapping and sample support.
+
+For real 150-action-prefix evaluation of complete collected episodes, use
+`episode_length=min(N,150)`, frames `1..min(N,150)`, and
+`success=full_episode_success and N<=150`. Successful targets are
+`(.99**(1/8))**(episode_length-frame_index)`; other observed-prefix targets are
+zero. The report accepts frame zero as well, following the repository's
+N-action/N+1-state convention. It does not infer these outcomes from scores.
+Fresh collection after checkpoint freezing and exclusion from training Replay
+remain the caller's responsibility; rows alone cannot prove independence.
+
+Each model has four headline values for each of `frame_weighted` and
+`equal_episode`: MSE, signed bias (prediction minus target), calibration-constant
+MSE, and `skill_vs_constant = 1 - MSE/constant_MSE`. Each constant is fitted
+**only** on calibration targets under its own weighting. Zero reference error
+makes skill undefined (`null`). Groups never refit their reference constants.
+The compact `groups` table covers success/failure, early/middle/late, and their
+crosses; empty groups have `no_support`, counts, and null metrics. Time groups
+are right-closed thirds of the evaluated horizon (for 150 actions: 1–50,
+51–100, 101–150), using actual frame indices, not the rank of sampled frames.
+Equal-episode weights give each represented episode equal total weight within
+each group. `prediction_distribution` provides population mean/std and weighted
+empirical-CDF p05/p25/p50/p75/p95, without quantile interpolation.
+
+`success_failure` uses episode-mean prediction scores for descriptive AUC
+(half credit for ties) and a success-minus-failure score gap. A missing class is
+`no_support`; fewer than two initial states in either class is `limited_support`.
+RM scores are discounted outcomes, **not calibrated binary probabilities**.
+`progression` removes each successful episode's prediction and target means,
+then compares centered MSE against a flat-prediction reference. It needs at
+least two valid frames per trace, and flat targets have no progression skill.
+No Pearson significance or frame-independent uncertainty is claimed; episodes
+sharing an initial state are also related. Optional `held_out_oracle` is labeled
+non-deployable and is only a lower bound for the **constant predictor class**.
+
+The optional `valid` argument is a boolean vector aligned with input rows.
+All models must agree on keys, metadata, targets, and masks; duplicates or
+episodes without any valid support fail explicitly. `raw_rows` retains the
+normalized input schema, policy panel, split, and validity; masked nonfinite
+numbers become JSON `null`. The result supports `json.dumps(..., allow_nan=False)`.
+No TensorBoard metrics are emitted.
+
+```sh
+python -m unittest weaver_run.diagnostics.test_rm_report -v
+```

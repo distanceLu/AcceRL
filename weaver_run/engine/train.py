@@ -4174,6 +4174,8 @@ def main(args):
     log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
     writer = CaptureSummaryWriter(log_dir, tensorboard=(
         os.environ.get("ACCERL_CAPTURE_ONLY") != "1" or os.environ.get("ACCERL_TENSORBOARD") == "1"))
+    writer.native_world_losses = online_weaver
+    writer.native_reward_losses = online_weaver and world_config.reward_provider == "world_head"
     if writer.tensorboard is not None:
         writer.telemetry.event("tensorboard_started", details={
             "log_dir": str(Path(log_dir).resolve()), "run_started_ns": run_started_ns,
@@ -4768,6 +4770,57 @@ def main(args):
         wm_metrics = combine_wm_metrics([result[10] for result in results])
         train_time = time.time() - t_train_start
 
+        # World observations belong to actual updates, independently of the
+        # wall-clock Policy logging interval. Never pad missing work with zero.
+        if wm_metrics.get('trained_ctrl', False) or wm_metrics.get('trained_reward', False):
+            if wm_metrics.get('trained_ctrl', False):
+                if 'ctrl_loss' in wm_metrics:
+                    writer.add_scalar('Loss/CtrlWorld', wm_metrics['ctrl_loss'], global_step)
+                if wm_metrics.get('native_flow_loss') is not None:
+                    writer.add_scalar('Loss/World_Flow', wm_metrics['native_flow_loss'], global_step)
+                native_rm_loss = wm_metrics.get('native_half_mse_loss')
+                if native_rm_loss is None:
+                    native_rm_loss = wm_metrics.get('native_half_brier_loss')
+                if native_rm_loss is not None:
+                    writer.add_scalar('Loss/World_RM', native_rm_loss, global_step)
+                if math.isfinite(wm_metrics.get('ctrl_grad_norm', float('nan'))):
+                    writer.add_scalar('WorldModel/Diagnostics/Ctrl_Grad_Norm', wm_metrics['ctrl_grad_norm'], global_step)
+                    writer.add_scalar('WorldModel/Diagnostics/Ctrl_Grad_Clip_Ratio', wm_metrics['ctrl_clip_ratio'], global_step)
+                for key, tag in (
+                    ('ctrl_sample_unique_episodes', 'WorldModel/Diagnostics/Sampled_Unique_Episodes'),
+                    ('ctrl_sample_fresh_episode_ratio', 'WorldModel/Diagnostics/Fresh_Episode_Ratio'),
+                ):
+                    if key in wm_metrics:
+                        writer.add_scalar(tag, wm_metrics[key], global_step)
+            if wm_metrics.get('trained_reward', False):
+                if 'reward_loss' in wm_metrics:
+                    writer.add_scalar('Loss/Reward_Model', wm_metrics['reward_loss'], global_step)
+                if math.isfinite(wm_metrics.get('reward_grad_norm', float('nan'))):
+                    writer.add_scalar('WorldModel/Diagnostics/Reward_Grad_Norm', wm_metrics['reward_grad_norm'], global_step)
+                    writer.add_scalar('WorldModel/Diagnostics/Reward_Grad_Clip_Ratio', wm_metrics['reward_clip_ratio'], global_step)
+                if 'reward_tp' in wm_metrics:
+                    writer.add_scalar('WorldModel/Reward_TP', wm_metrics['reward_tp'], global_step)
+                    writer.add_scalar('WorldModel/Reward_TN', wm_metrics['reward_tn'], global_step)
+                    writer.add_scalar('WorldModel/Reward_FP', wm_metrics['reward_fp'], global_step)
+                    writer.add_scalar('WorldModel/Reward_FN', wm_metrics['reward_fn'], global_step)
+                    pos_total = wm_metrics['reward_tp'] + wm_metrics['reward_fn']
+                    neg_total = wm_metrics['reward_tn'] + wm_metrics['reward_fp']
+                    reward_pos_acc = wm_metrics['reward_tp'] / pos_total if pos_total > 0 else 0.0
+                    reward_neg_acc = wm_metrics['reward_tn'] / neg_total if neg_total > 0 else 0.0
+                    writer.add_scalar('WorldModel/Reward_Pos_Acc', reward_pos_acc, global_step)
+                    writer.add_scalar('WorldModel/Reward_Neg_Acc', reward_neg_acc, global_step)
+                if 'reward_pos_ratio_batch' in wm_metrics:
+                    writer.add_scalar('WorldModel/Reward_Batch_Pos_Ratio', wm_metrics['reward_pos_ratio_batch'], global_step)
+            world_timing_keys = ['wm_sample_time', 'wm_prep_time', 'wm_batch_wait_time']
+            if wm_metrics.get('trained_ctrl', False):
+                world_timing_keys.append('ctrl_train_time')
+            if wm_metrics.get('trained_reward', False):
+                world_timing_keys.append('reward_train_time')
+            for key in world_timing_keys:
+                values = [result[9][key] for result in results if key in result[9]]
+                if values:
+                    writer.add_scalar(f'Performance/{key}', np.mean(values), global_step)
+
         # ============ 权重同步 ============
         t_sync_start = time.time()
         if cost_broker is not None:ray.get(cost_broker.publication.remote(True))
@@ -5005,44 +5058,6 @@ def main(args):
             writer.add_scalar('Loss/Entropy', np.mean(e_losses), global_step)
             writer.add_scalar('Loss/KL', np.mean(kl_losses), global_step)
 
-            if 'ctrl_loss' in wm_metrics:
-                writer.add_scalar('Loss/CtrlWorld', wm_metrics['ctrl_loss'], global_step)
-                if math.isfinite(wm_metrics.get('ctrl_grad_norm', float('nan'))):
-                    writer.add_scalar('WorldModel/Diagnostics/Ctrl_Grad_Norm', wm_metrics['ctrl_grad_norm'], global_step)
-                    writer.add_scalar('WorldModel/Diagnostics/Ctrl_Grad_Clip_Ratio', wm_metrics['ctrl_clip_ratio'], global_step)
-            writer.add_scalar(
-                'WorldModel/Diagnostics/Sampled_Unique_Episodes',
-                wm_metrics.get('ctrl_sample_unique_episodes', 0),
-                global_step,
-            )
-            writer.add_scalar(
-                'WorldModel/Diagnostics/Fresh_Episode_Ratio',
-                wm_metrics.get('ctrl_sample_fresh_episode_ratio', 0.0),
-                global_step,
-            )
-            if 'reward_loss' in wm_metrics:
-                writer.add_scalar('Loss/Reward_Model', wm_metrics['reward_loss'], global_step)
-                if math.isfinite(wm_metrics.get('reward_grad_norm', float('nan'))):
-                    writer.add_scalar('WorldModel/Diagnostics/Reward_Grad_Norm', wm_metrics['reward_grad_norm'], global_step)
-                    writer.add_scalar('WorldModel/Diagnostics/Reward_Grad_Clip_Ratio', wm_metrics['reward_clip_ratio'], global_step)
-            if 'reward_tp' in wm_metrics:
-                writer.add_scalar('WorldModel/Reward_TP', wm_metrics['reward_tp'], global_step)
-                writer.add_scalar('WorldModel/Reward_TN', wm_metrics['reward_tn'], global_step)
-                writer.add_scalar('WorldModel/Reward_FP', wm_metrics['reward_fp'], global_step)
-                writer.add_scalar('WorldModel/Reward_FN', wm_metrics['reward_fn'], global_step)
-                pos_total = wm_metrics['reward_tp'] + wm_metrics['reward_fn']
-                neg_total = wm_metrics['reward_tn'] + wm_metrics['reward_fp']
-                reward_pos_acc = wm_metrics['reward_tp'] / pos_total if pos_total > 0 else 0.0
-                reward_neg_acc = wm_metrics['reward_tn'] / neg_total if neg_total > 0 else 0.0
-                writer.add_scalar('WorldModel/Reward_Pos_Acc', reward_pos_acc, global_step)
-                writer.add_scalar('WorldModel/Reward_Neg_Acc', reward_neg_acc, global_step)
-            if 'reward_pos_ratio_batch' in wm_metrics:
-                writer.add_scalar(
-                    'WorldModel/Reward_Batch_Pos_Ratio',
-                    wm_metrics['reward_pos_ratio_batch'],
-                    global_step,
-                )
-
             writer.add_scalar('Metrics/Entropy', np.mean(ents), global_step)
             writer.add_scalar('Metrics/KL_Divergence', np.mean(avg_kl_divs), global_step)
             writer.add_scalar('Metrics/Training_Speed_Steps_per_Sec', training_speed_steps_per_sec, global_step)
@@ -5051,25 +5066,11 @@ def main(args):
             avg_policy_sample_time = np.mean([pm["policy_sample_time"] for pm in perf_metrics_list])
             avg_policy_prep_time = np.mean([pm["policy_prep_time"] for pm in perf_metrics_list])
             avg_policy_train_time = np.mean([pm["policy_train_time"] for pm in perf_metrics_list])
-            avg_wm_sample_time = np.mean([pm.get("wm_sample_time", 0.0) for pm in perf_metrics_list])
-            avg_wm_prep_time = np.mean([pm.get("wm_prep_time", 0.0) for pm in perf_metrics_list])
             writer.add_scalar('Performance/policy_sample_time', avg_policy_sample_time, global_step)
             writer.add_scalar('Performance/policy_prep_time', avg_policy_prep_time, global_step)
             writer.add_scalar('Performance/policy_train_time', avg_policy_train_time, global_step)
-            writer.add_scalar('Performance/wm_sample_time', avg_wm_sample_time, global_step)
-            writer.add_scalar('Performance/wm_prep_time', avg_wm_prep_time, global_step)
             writer.add_scalar('Performance/policy_batch_wait_time',
                               np.mean([pm.get("policy_batch_wait_time", 0.0) for pm in perf_metrics_list]), global_step)
-            writer.add_scalar('Performance/wm_batch_wait_time',
-                              np.mean([pm.get("wm_batch_wait_time", 0.0) for pm in perf_metrics_list]), global_step)
-
-            reward_times = [pm.get("reward_train_time") for pm in perf_metrics_list if "reward_train_time" in pm]
-            if reward_times:
-                avg_reward_train_time = np.mean(reward_times)
-                writer.add_scalar('Performance/reward_train_time', avg_reward_train_time, global_step)
-            ctrl_times = [pm.get("ctrl_train_time") for pm in perf_metrics_list if "ctrl_train_time" in pm]
-            if ctrl_times:
-                writer.add_scalar('Performance/ctrl_train_time', np.mean(ctrl_times), global_step)
             writer.add_scalar('Performance/train_time', train_time, global_step)
             writer.add_scalar('Performance/sync_time', sync_time, global_step)
             writer.add_scalar('Performance/train_time_total', time.time() - t_train_start, global_step)
@@ -5146,16 +5147,31 @@ def main(args):
 
 
 class CaptureSummaryWriter:
-    """One metric stream, optionally mirrored to a standard TensorBoard run."""
+    """Full audit stream with a compact, explicit TensorBoard mirror."""
+    # Exact tags only: new diagnostics stay in SQLite until deliberately added.
+    # No value/history heuristics: flat warmup and real zeroes remain meaningful.
+    TENSORBOARD_TAGS = frozenset({
+        'Eval/_Global/Average_Return', 'Eval/_Global/Average_Episode_Length',
+        'Rollout/_Global/Average_Return', 'Rollout/_Global/Average_Episode_Length',
+        'Loss/Policy', 'Loss/Value',
+        'Metrics/Entropy', 'Metrics/KL_Divergence',
+        'Performance/policy_train_time', 'Performance/ctrl_train_time', 'Performance/sync_time',
+        'System/Replay_Buffer_Size_Total', 'System/WM_Replay_Buffer_Size_Total',
+    })
+
     def __init__(self, path, tensorboard=False):
         import hashlib
+        # Two backend-specific loss slots keep the compact view at 15 tags.
+        self.native_world_losses = self.native_reward_losses = False
         self.tensorboard = SummaryWriter(path, flush_secs=5) if tensorboard else None
         self.telemetry = Telemetry("driver", "metrics")
         self.telemetry.config({"args": vars(args), "source": __file__, "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "cwd": os.getcwd(), "python": sys.executable, "torch": torch.__version__, "ray": ray.__version__, "module_paths": {key: getattr(sys.modules.get(key),"__file__",None) for key in ("rl","prismatic","ctrl_world","libero")}})
     def add_scalar(self, tag, value, step, walltime=None, double_precision=False):
         self.telemetry.event("metric", tag=tag, value=float(value), step=int(step),
                              **({"ts_ns": int(walltime * 1e9)} if walltime is not None else {}))
-        if self.tensorboard is not None:
+        world_tag = 'Loss/World_Flow' if self.native_world_losses else 'Loss/CtrlWorld'
+        reward_tag = 'Loss/World_RM' if self.native_reward_losses else 'Loss/Reward_Model'
+        if self.tensorboard is not None and (tag in self.TENSORBOARD_TAGS or tag in (world_tag, reward_tag)):
             self.tensorboard.add_scalar(tag, value, step, walltime=walltime,
                                         new_style=double_precision, double_precision=double_precision)
     def flush(self):

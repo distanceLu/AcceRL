@@ -160,6 +160,7 @@ def make_weaver_online_trainer(runtime):
                     'native_reward_head', {}).get('mode') == 'libero_discounted_success_value_v1'
                     else 'native_half_brier_loss')
                 metrics[loss_key] = final.get(loss_key)
+                metrics['native_flow_loss'] = final.get('native_flow_loss')
                 performance.update(wm_sample_time=samples, wm_prep_time=0.,
                     ctrl_train_time=final['update_wall_seconds'], native_world_stream_wall_seconds=prepare)
                 learning_rates['ctrl'] = final['learning_rate']

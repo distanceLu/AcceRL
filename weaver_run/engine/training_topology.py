@@ -389,6 +389,14 @@ def combine_wm_metrics(metrics):
         values = [item[key] for item in metrics if key in item]
         if values:
             combined[key] = sum(values) / len(values)
+    # Native RM is already normalized by the global valid-frame denominator
+    # before GAS/DDP averaging. Local mask counts must not weight it again.
+    # Require all ranks: an absent component is not a rank-zero observation.
+    for key in ('native_flow_loss', 'native_half_mse_loss', 'native_half_brier_loss'):
+        if any(key in item for item in metrics):
+            values = [item.get(key) for item in metrics]
+            combined[key] = (sum(values) / len(values)
+                             if all(value is not None for value in values) else None)
     for key in ('reward_tp', 'reward_tn', 'reward_fp', 'reward_fn'):
         if key in combined:
             combined[key] = sum(item[key] for item in metrics)

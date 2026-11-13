@@ -5,6 +5,33 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'weaver_run/engine'))
 from weaver_subprocess import send_frame,receive_frame,cpu_wire
 
+def score_real_episode(b,ep):
+    """Actual observations only; each endpoint once, no diffusion or noise draw."""
+    import torch
+    import numpy as np
+    from .panel_common import validate_episode
+    from .rm_probe import rm_prefix,real_scoring_blocks
+    observed=validate_episode(ep)
+    n,success,targets=rm_prefix(observed,ep['success'])
+    incoming=np.concatenate([np.zeros((1,7),np.float32),ep['actions']],axis=0)
+    rows=[]
+    for context,frames in real_scoring_blocks(n):
+        idx=np.asarray(context)
+        with torch.inference_mode(),b._autocast():
+            states=b._normal(b._tensor(ep['states'][idx]),'state').unsqueeze(0)
+            actions=b._normal(b._tensor(incoming[idx]),'actions').unsqueeze(0)
+            images=b._selected_images([dict(observations=ep['frames'])],idx)
+            enc=b._encoded(images,states)
+            latent={key:enc[key+'_features'] for key in b.image_keys};latent['states']=enc['states']
+            scores=b.upstream_model.rm(latent,actions,b._task_features([ep['instruction']])).float()[0,-len(frames):]
+        values=scores.detach().cpu().numpy().reshape(-1)
+        if len(values)!=len(frames) or not np.isfinite(values).all() or np.any((values<0)|(values>1)):
+            raise ValueError('Invalid native RM outputs')
+        for i,value in zip(frames,values):
+            rows.append(dict(episode_id=ep['episode_id'],initial_state_id=ep['initial_state_id'],
+                frame_index=i,episode_length=n,success=success,target=targets[i-1],prediction=float(value)))
+    return rows
+
 def score_episode(b,ep,cfg,version):
     import torch
     import numpy as np
@@ -100,6 +127,9 @@ def main():
             elif op=='score':
                 rows=score_episode(b,req['episode'],cfg,version)
                 send_frame(wire,dict(rows=rows))
+            elif op=='score_real':
+                if b is None:raise ValueError('No frozen RM checkpoint loaded')
+                send_frame(wire,dict(rows=score_real_episode(b,req['episode'])))
             else:raise ValueError('Unknown diagnostic operation')
         except BaseException:
             send_frame(wire,dict(error=traceback.format_exc()));raise

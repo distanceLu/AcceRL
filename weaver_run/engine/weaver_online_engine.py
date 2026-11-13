@@ -123,7 +123,7 @@ class WeaverOnlineEngine:
                              if self.warmup_updates else 1.)
         for group in self.optimizer.param_groups:
             group['lr'] = lr
-        self.active_update = {'policy_step': policy_step, 'micro': 0, 'losses': [],
+        self.active_update = {'policy_step': policy_step, 'micro': 0, 'losses': [], 'flow_losses': [],
                               'started': time.monotonic(), 'lr': lr,'rm_losses':[],
                               'rm_positive_augmented':0,'rm_negative_augmented':0,
                               'rm_valid_augmented':0,'rm_masked_augmented':0,
@@ -183,6 +183,14 @@ class WeaverOnlineEngine:
                 update['rm_negative_augmented'] += statistics['negative_labels_with_native_augmentation']
         value = float(loss.detach().item())
         update['losses'].append(value)
+        components = result[1] if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict) else {}
+        logs = {key: float(item.detach().item()) if hasattr(item, 'detach') else float(item)
+                for key, item in components.items() if isinstance(item, (int, float)) or
+                (hasattr(item, 'numel') and item.numel() == 1)}
+        # Reuse the audit-log readback, including the committing micro. Do not
+        # infer flow by subtraction or perform another tensor-to-host pass.
+        if 'flow/Total Loss' in logs:
+            update['flow_losses'].append(logs['flow/Total Loss'])
         update['micro'] += 1
         self.micro_steps += 1
         if last:
@@ -253,11 +261,9 @@ class WeaverOnlineEngine:
             self.last_result['native_half_mse_loss' if self.native_reward is not None and self.native_reward.dense
                              else 'native_half_brier_loss']=(sum(update['rm_losses'])/len(update['rm_losses'])
                                                            if update['rm_losses'] else None)
+            self.last_result['native_flow_loss'] = (sum(update['flow_losses']) / update['micro']
+                if len(update['flow_losses']) == update['micro'] else None)
             self.active_update = None
-        components = result[1] if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict) else {}
-        logs = {key: float(item.detach().item()) if hasattr(item, 'detach') else float(item)
-                for key, item in components.items() if isinstance(item, (int, float)) or
-                (hasattr(item, 'numel') and item.numel() == 1)}
         return {'loss': value, 'native_losses': logs, 'micro_steps': self.micro_steps, 'successful_updates': self.global_steps,
                 'committed': last, 'result': self.last_result if last else None}
 
