@@ -35,7 +35,11 @@ cp .weaver.env.example .weaver.env
 ./run.sh stop --id exp1      # 请求在安全边界保存退出；再用 status 确认 finished
 ```
 
-在普通服务器上，训练由当前终端的前台 supervisor 管理，长训可在 tmux 或批作业中运行。默认输出在 `.weaver-runs/<实验名>/`，通过 `WEAVER_OUTPUTS` 可换盘。日志为 `train.log`，TensorBoard 事件在 `runs/Libero/`，Policy 与 World 权重在 `checkpoints/`。普通服务器入口仍跳过单独的最终评估。在原实验服务器上，启动、查询和停止走已有队列；新训练默认在保存退出后执行四卡固定评估，初始/最终Policy各greedy/stochastic、各50初态共200回合，每回合最多220动作。用户要求跳过的是旧150动作预算截断实验的最终评估，不改变新任务的默认设置。训练中的10个Eval worker沿用橙线设置和220动作评估上限。
+在普通服务器上，训练由当前终端的前台 supervisor 管理，长训可在 tmux 或批作业中运行。默认输出在 `.weaver-runs/<实验名>/`，通过 `WEAVER_OUTPUTS` 可换盘。日志为 `train.log`，TensorBoard 事件在 `runs/Libero/`，Policy 与 World 权重在 `checkpoints/`。普通服务器入口仍跳过单独的最终评估。在原实验服务器上，启动、查询和停止走已有队列；新训练默认在保存退出后执行四卡固定评估，初始/最终Policy各greedy/stochastic、各50初态共200回合，每回合最多220动作。用户要求跳过的是旧150动作预算截断实验的最终评估，不改变新任务的默认设置。
+
+**在线Eval配置。** 当前配方启用3个Eval worker，`--eval-inference-replicas 1,2,3` 明确连接四个Policy推理副本中的后三个。在GPU4–7上对应GPU5–7；在其他服务器上对应所分配四张卡的第二至第四张，绝不额外选择未分配的GPU。第一张卡保留真实采集、想象、Value重算和训练，只移除其Eval请求。worker自身ID仍为0、1、2，220动作评估上限和greedy动作语义保持。
+
+主曲线 `Eval/_Global/Average_Return` 使用 `Eval worker数×100` 条完成episode，本次300。`--moving-avg-window 1000` 只控制非Eval统计，真实采集、想象奖励及耗时统计不随Eval缩短。`ACCERL_EVAL_MIN_EPISODES=auto` 与实际Eval窗口对齐；显式设置大于窗口的门槛会在创建Actor前拒绝。启动事件 `online_evaluation_config` 记录worker数、逻辑副本、物理GPU、窗口及最低样本数。减少Eval可能改变共享随机数调用顺序及异步数据经历，不承诺学习等价。当前分支配方不代表已有训练已热切换。[Eval3验收说明](docs/eval3-acceptance.md)
 
 ## 训练仿真、想象轨迹与评估回放
 

@@ -38,6 +38,7 @@ NEW_MODULES = (
     'test_critic_refresh_plan_cpu',
     'test_critic_dependency_cpu',
     'test_inventory_refill_cpu',
+    'test_online_eval_config_cpu',
 )
 FULL_FRESH_RULES = {
     'dense_reward': True, 'signal_telemetry': True, 'refresh_gae': True,

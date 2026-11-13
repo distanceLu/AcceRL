@@ -47,7 +47,7 @@ def execute_definition(node, namespace):
     return namespace[node.name]
 
 
-def arguments(validate_only=False):
+def arguments(validate_only=False, overrides=()):
     node = definition(TREE, "parse_args")
     boundary = next(i for i, stmt in enumerate(node.body)
                     if isinstance(stmt, ast.Assign) and any(isinstance(n, ast.Name) and n.id == "args"
@@ -67,6 +67,7 @@ def arguments(validate_only=False):
         argv = ["4,5,6,7" if value == "@ids" else
                 "cpu_fixture_" + value[1:] if value.startswith("@") else value
                 for value in argv]
+    argv.extend(overrides)
     if validate_only:
         argv.append("--validate-only")
     old = sys.argv
@@ -166,7 +167,7 @@ class Actor:
             self.context.actions.append(("release", kind, self.rank))
             return dict(acknowledgement)
         if method == "get_training_state":
-            return {"rank": self.rank, "gpu": {"physical_gpu": str(self.rank + 4)}, "pid": self.pid,
+            return {"rank": self.rank, "gpu": {"physical_gpu": str(self.context.physical_gpu_ids[self.rank])}, "pid": self.pid,
                     "training_role": self.kind, "world_size": 4, "distributed_world_size": 4,
                     "group_port": self.port, "engines": {self.kind: {"global_steps": 0, "skipped_steps": 0}},
                     "policy_steps": 0, "ctrl_steps": 0, "reward_steps": 0}
@@ -216,7 +217,8 @@ class Policy:
 
 
 class Context:
-    def __init__(self):
+    def __init__(self, physical_gpu_ids=(4,5,6,7)):
+        self.physical_gpu_ids = tuple(physical_gpu_ids)
         self.actors, self.calls, self.telemetries, self.summaries = [], [], [], []
         self.snapshots, self.actions, self.limits = [], [], []
         self.ray = Ray(self)

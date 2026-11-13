@@ -23,6 +23,38 @@ def _count(value, name, minimum=0):
     return int(value)
 
 
+def resolve_online_evaluation(num_workers, num_replicas, replica_ids=None, min_samples=None):
+    """Resolve worker targets independently of worker IDs and training statistics.
+
+    Replica numbers index the existing Policy inference pool, not physical GPUs.
+    A disabled (zero-worker) evaluator keeps an inert one-entry statistics buffer.
+    """
+    workers = _count(num_workers, 'num_eval_workers')
+    replicas = _count(num_replicas, 'num_inference_actors', minimum=1)
+    if replica_ids is None or (workers == 0 and replica_ids == ''):
+        targets = [i % replicas for i in range(workers)]
+    else:
+        if not isinstance(replica_ids, str):
+            raise ValueError('eval_inference_replicas must be comma-separated replica IDs')
+        tokens = replica_ids.split(',')
+        try:
+            targets = [int(token.strip()) for token in tokens]
+        except ValueError as error:
+            raise ValueError('eval_inference_replicas contains a missing or invalid replica ID') from error
+        if len(targets) != workers or any(i < 0 or i >= replicas for i in targets):
+            raise ValueError('eval_inference_replicas needs one in-range target per Eval worker')
+    window = max(1, workers * 100)
+    if min_samples is None or min_samples == 'auto':
+        minimum = window
+    else:
+        minimum = _count(int(min_samples) if isinstance(min_samples, str) else min_samples,
+                         'eval_min_samples', minimum=1)
+        if minimum > window:
+            raise ValueError('eval_min_samples exceeds the online Eval window; use auto or a reachable value')
+    return {'num_workers': workers, 'replica_ids': targets,
+            'window_size': window, 'min_samples': minimum}
+
+
 def _json_copy(value):
     # Besides making independent snapshots, reject unserializable values and
     # NaNs in metadata before mutating the tracker.

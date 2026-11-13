@@ -293,6 +293,8 @@ def parse_args():
     parser.add_argument('--num-rollout-workers', type=int, default=20)
     parser.add_argument("--pipeline-config", default=os.environ.get("ACCERL_PIPELINE_CONFIG"))
     parser.add_argument('--num-eval-workers', type=int, default=10)
+    parser.add_argument('--eval-inference-replicas', default=None,
+                        help='One Policy replica ID per Eval worker, comma-separated; default round-robin. Eval window is workers * 100.')
     parser.add_argument('--rollout-local-buf', type=int, default=64)
     parser.add_argument('--inference-batch', type=int, default=8)
     parser.add_argument('--inference-timeout-ms', type=int, default=300)
@@ -554,16 +556,10 @@ class WMExperience:
 # ================================================================
 @ray.remote
 class StatsActor:
-    def __init__(self, window_size):
+    def __init__(self, window_size, eval_window_size=None):
         setup_debugger("stats")
-        self.stats = defaultdict(lambda: {
-            "episode_returns": deque(maxlen=window_size),
-            "step_times": deque(maxlen=window_size),
-            "episode_lengths": deque(maxlen=window_size),
-            "successes": deque(maxlen=window_size),
-            "total_episodes_processed": 0,
-            "total_env_steps": 0
-        })
+        self.eval_window_size = window_size if eval_window_size is None else eval_window_size
+        self.stats = defaultdict(lambda: self._episode_stats(window_size))
         self.timings = defaultdict(lambda: deque(maxlen=window_size))
         self.imagine_rewards = deque(maxlen=window_size)
         self.actor_last_active = {}
@@ -573,8 +569,18 @@ class StatsActor:
         self.last_eval_completed_ns = 0
         self.last_eval_versions = None
 
+    @staticmethod
+    def _episode_stats(window_size):
+        return {"episode_returns": deque(maxlen=window_size),
+                "step_times": deque(maxlen=window_size),
+                "episode_lengths": deque(maxlen=window_size),
+                "successes": deque(maxlen=window_size),
+                "total_episodes_processed": 0, "total_env_steps": 0}
+
     def add_episode_return(self, env_name, ep_return, step_time, ep_length, success,
                            actor_id=None, step_num=0, completed_ns=None, evaluation_versions=None):
+        if env_name.startswith("eval_") and env_name not in self.stats:
+            self.stats[env_name] = self._episode_stats(self.eval_window_size)
         env_stats = self.stats[env_name]
         env_stats["episode_returns"].append(ep_return)
         env_stats["step_times"].append(step_time)
@@ -4025,6 +4031,10 @@ def merge_split_epoch_results(epoch_results, world_size, policy_step, ctrl_inter
 
 def main(args):
     """Run the original training recipe with optional evaluation-based stop."""
+    from evaluation_threshold import resolve_online_evaluation
+    evaluation_plan = resolve_online_evaluation(
+        args.num_eval_workers, args.num_inference_actors,
+        getattr(args, 'eval_inference_replicas', None), os.environ.get('ACCERL_EVAL_MIN_EPISODES'))
     world_config = load_backend_config(args)
     fresh_config = FreshConfig.from_world_config(world_config)
     from cost_scheduler_runtime import load_settings, CostAdmissionBroker, source_fingerprint
@@ -4089,7 +4099,7 @@ def main(args):
     threshold_tracker = (ThresholdTracker(
         target=float(eval_target), run_started_ns=run_started_ns,
         required_consecutive=int(os.environ.get("ACCERL_EVAL_CONSECUTIVE", "2")),
-        min_samples=int(os.environ.get("ACCERL_EVAL_MIN_EPISODES", str(args.moving_avg_window))))
+        min_samples=evaluation_plan['min_samples'])
         if eval_target is not None else None)
     target_reached = False
     benchmark = args.benchmark
@@ -4167,12 +4177,20 @@ def main(args):
     if writer.tensorboard is not None:
         writer.telemetry.event("tensorboard_started", details={
             "log_dir": str(Path(log_dir).resolve()), "run_started_ns": run_started_ns,
-            "metric_tag": "Eval/_Global/Average_Return", "window_size": args.moving_avg_window,
+            "metric_tag": "Eval/_Global/Average_Return", "window_size": evaluation_plan['window_size'],
             "target": float(eval_target) if eval_target is not None else None,
             "mps_enabled": os.environ.get("ACCERL_USE_MPS") == "1"})
         writer.add_scalar("System/MPS_Enabled", int(os.environ.get("ACCERL_USE_MPS") == "1"), 0)
         writer.flush()
-    stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
+    writer.telemetry.event('online_evaluation_config', details={
+        **evaluation_plan, 'non_eval_window_size': args.moving_avg_window,
+        'physical_gpus': [int(bindings[i]['index']) for i in evaluation_plan['replica_ids']]
+                         if four_layout else None,
+        'worker_ids': list(range(args.num_eval_workers)),
+        'metric_tag': 'Eval/_Global/Average_Return', 'greedy': True})
+    writer.flush()
+    stats_actor = StatsActor.remote(window_size=args.moving_avg_window,
+                                   eval_window_size=evaluation_plan['window_size'])
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
     cfg = build_openvla_cfg(args)
@@ -4336,8 +4354,8 @@ def main(args):
         ]
         eval_workers = [
             EvaluationWorkerActor.remote(
-                inference_pool[i % args.num_inference_actors], i, stats_actor, cfg, benchmark, torch_dtype
-            ) for i in range(args.num_eval_workers)
+                inference_pool[replica], i, stats_actor, cfg, benchmark, torch_dtype
+            ) for i, replica in enumerate(evaluation_plan['replica_ids'])
         ]
     print(f"已创建 {len(rollout_workers)} 个 Rollout workers 和 {len(eval_workers)} 个 Evaluation workers。")
 

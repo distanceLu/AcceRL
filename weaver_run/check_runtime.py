@@ -16,6 +16,7 @@ from rl.libero_env import LiberoEnvWrapper
 from initial_state_env import reset_with_initial_state
 from policy_joint_batch_mode import verify_installed_sources
 from cost_scheduler_runtime import load_settings
+from evaluation_threshold import resolve_online_evaluation
 
 
 def main():
@@ -35,6 +36,8 @@ def main():
     diff={k:[expected.get(k),vars(args).get(k)] for k in expected.keys()|vars(args).keys() if expected.get(k)!=vars(args).get(k)}
     if diff:
         raise ValueError("Command differs from the observed training run: "+json.dumps(diff))
+    online_eval = resolve_online_evaluation(args.num_eval_workers, args.num_inference_actors,
+        args.eval_inference_replicas, os.environ.get('ACCERL_EVAL_MIN_EPISODES'))
     assert load_settings()["training_gangs"]==2
     env=LiberoEnvWrapper(benchmark_name="libero_spatial",task_id=0,image_size=224,render_mode="rgb_array")
     try:
@@ -45,7 +48,8 @@ def main():
     finally:
         env.close()
     assert not torch.cuda.is_initialized()
-    print(json.dumps({"parsed_arguments_matched":len(expected),"libero_initial_states":50,"cuda_initialized":False}))
+    print(json.dumps({"parsed_arguments_matched":len(expected),"libero_initial_states":50,
+                      "cuda_initialized":False,"online_evaluation":online_eval}))
 
 
 if __name__=="__main__":
