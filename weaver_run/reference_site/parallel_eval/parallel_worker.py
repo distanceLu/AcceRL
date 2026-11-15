@@ -322,6 +322,8 @@ class Runtime:
             timeout=min(10.0, max(0.1, deadline - time.time())))
         if inventory.strip().splitlines() != [self.gpu_uuid]:
             raise ValueError("The selected physical GPU UUID differs from the shard")
+        from environment_rendering import prepare_evaluation_renderer
+        prepare_evaluation_renderer(self.gpu_uuid)
         import torch
         self.torch = torch
         if torch.cuda.device_count() != 1:
@@ -331,6 +333,8 @@ class Runtime:
         from initial_state_env import initial_state_pool_metadata
         self.env = LiberoEnvWrapper(benchmark_name="libero_spatial", task_id=0,
                                    image_size=224, render_mode="rgb_array")
+        from environment_rendering import verify_environment_renderer
+        verify_environment_renderer()
         pool = initial_state_pool_metadata(self.env)
         if pool["count"] != 50:
             raise ValueError("Live initial-state pool differs from the fixed 50-state protocol")

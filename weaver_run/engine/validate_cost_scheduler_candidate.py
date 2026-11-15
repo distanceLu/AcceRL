@@ -40,6 +40,8 @@ NEW_MODULES = (
     'test_inventory_refill_cpu',
     'test_online_eval_config_cpu',
     'test_environment_rendering_cpu',
+    'test_evaluation_rendering_cpu',
+    'test_eval_episode_gate_cpu',
 )
 FULL_FRESH_RULES = {
     'dense_reward': True, 'signal_telemetry': True, 'refresh_gae': True,

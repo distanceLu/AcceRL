@@ -371,7 +371,9 @@ class ParallelWorkerTests(unittest.TestCase):
         with patch.object(os, "getuid", return_value=1004, create=True), \
                 patch.object(BASE, "load_snapshot", side_effect=snapshot), \
                 patch.object(worker_module.subprocess, "check_output", return_value=APPROVED_GPUS[0] + "\n") as probe, \
-                patch.dict(sys.modules, {"torch": torch, "rl.libero_env": libero, "initial_state_env": initial}):
+                patch.dict(sys.modules, {"torch": torch, "rl.libero_env": libero, "initial_state_env": initial}), \
+                patch("environment_rendering.prepare_evaluation_renderer"), \
+                patch("environment_rendering.verify_environment_renderer"):
             runtime.prepare(self.plan, time.time() + 100, self.root, {})
             self.assertEqual(sys.path[0], str(SOURCE.resolve()))
             command = probe.call_args.args[0]
@@ -392,7 +394,9 @@ class ParallelWorkerTests(unittest.TestCase):
                     patch.object(os, "getuid", return_value=1004, create=True), \
                     patch.object(BASE, "load_snapshot", side_effect=snapshot), \
                     patch.object(worker_module.subprocess, "check_output", return_value=APPROVED_GPUS[0] + "\n"), \
-                    patch.dict(sys.modules, {"torch": torch, "rl.libero_env": libero, "initial_state_env": initial}):
+                    patch.dict(sys.modules, {"torch": torch, "rl.libero_env": libero, "initial_state_env": initial}), \
+                patch("environment_rendering.prepare_evaluation_renderer"), \
+                patch("environment_rendering.verify_environment_renderer"):
                 with self.assertRaisesRegex(ValueError, "evidenced"):
                     runtime.prepare(self.plan, time.time() + 100, self.root, {})
                 runtime.close()
@@ -404,7 +408,9 @@ class ParallelWorkerTests(unittest.TestCase):
         with patch.object(os, "getuid", return_value=1004, create=True), \
                 patch.object(BASE, "load_snapshot", side_effect=snapshot), \
                 patch.object(worker_module.subprocess, "check_output", return_value=APPROVED_GPUS[0] + "\n"), \
-                patch.dict(sys.modules, {"torch": torch, "rl.libero_env": libero, "initial_state_env": initial}):
+                patch.dict(sys.modules, {"torch": torch, "rl.libero_env": libero, "initial_state_env": initial}), \
+                patch("environment_rendering.prepare_evaluation_renderer"), \
+                patch("environment_rendering.verify_environment_renderer"):
             runtime.prepare(self.plan, time.time() + 100, self.root, {})
             self.assertIsNone(runtime.payloads["baseline"]["manifest"]["metadata"]["initial_state_queue"]["pool"])
             self.assertEqual(json.loads((self.root / "initial_state_pool.json").read_text()), pool)

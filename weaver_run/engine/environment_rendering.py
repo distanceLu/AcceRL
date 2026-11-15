@@ -193,3 +193,67 @@ def verify_environment_renderer():
         temporary.replace(target)
     print('[Environment renderer] '+json.dumps(receipt, sort_keys=True), flush=True)
     return receipt
+
+
+def prepare_evaluation_renderer(gpu_uuid):
+    """Bootstrap simulator before model CUDA initialization, retaining UUID masks."""
+    import importlib
+    import sys
+    backend = os.environ.get('ACCERL_EVAL_RENDER_BACKEND', 'egl')
+    if backend not in ('egl', 'osmesa'):
+        raise ValueError('Evaluation renderer must be egl or osmesa')
+    os.environ['ACCERL_ENV_RENDER_BACKEND'] = backend
+    os.environ['MUJOCO_GL'] = os.environ['PYOPENGL_PLATFORM'] = backend
+    if backend == 'osmesa':
+        os.environ.pop('MUJOCO_EGL_DEVICE_ID', None)
+        os.environ.pop('ACCERL_RENDER_BINDING', None)
+        return backend
+    if os.environ.get('CUDA_VISIBLE_DEVICES') != gpu_uuid:
+        raise RuntimeError('Evaluation CUDA visibility must equal its exact GPU UUID')
+    def check_uninitialized():
+        if 'tensorflow' in sys.modules:
+            raise RuntimeError('EGL bootstrap must precede TensorFlow imports')
+        torch = sys.modules.get('torch')
+        if torch is not None and torch.cuda.is_initialized():
+            raise RuntimeError('EGL bootstrap must precede Torch CUDA initialization')
+    check_uninitialized()
+    binding = discover_evaluation_binding(gpu_uuid)
+    os.environ['ACCERL_RENDER_BINDING'] = json.dumps(binding, sort_keys=True)
+    os.environ['MUJOCO_EGL_DEVICE_ID'] = str(binding['egl_device_id'])
+    # robosuite 1.4 compares this EGL ordinal with the CUDA mask at import.
+    # Hide CUDA only during simulator import; model initialization sees the UUID.
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    try:
+        importlib.import_module('robosuite.utils.binding_utils')
+        check_uninitialized()
+    finally:
+        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_uuid
+    return backend
+
+
+def discover_evaluation_binding(gpu_uuid):
+    """Keep ctypes' libEGL loader out of the simulator process.
+
+    Conda ctypes and PyOpenGL can select different libEGL installations. Device
+    enumeration in a separate CPU process prevents an incompatible display table
+    from being loaded before robosuite selects its EGL implementation.
+    """
+    import sys
+    code = """import json,sys
+sys.path.insert(0,sys.argv[1])
+from environment_rendering import discover_render_bindings,subprocess
+uuid=sys.argv[2]
+output=subprocess.check_output(['nvidia-smi','--id='+uuid,'--query-gpu=index,uuid','--format=csv,noheader,nounits'],text=True,timeout=15)
+rows=[line.split(',') for line in output.splitlines() if line.strip()]
+if len(rows)!=1 or len(rows[0])!=2 or rows[0][1].strip()!=uuid:
+    raise RuntimeError('Evaluation GPU UUID is not uniquely present')
+print(json.dumps(discover_render_bindings([{'index':rows[0][0].strip(),'uuid':uuid}],backend='egl')[0]))
+"""
+    child = dict(os.environ, CUDA_VISIBLE_DEVICES='')
+    output = subprocess.check_output([sys.executable, '-c', code,
+        str(Path(__file__).resolve().parent), gpu_uuid], env=child, text=True, timeout=40)
+    binding = json.loads(output)
+    if (binding.get('uuid') != gpu_uuid or type(binding.get('egl_device_id')) is not int
+            or binding['egl_device_id'] < 0 or normalize_pci(binding['pci']) != binding['pci']):
+        raise RuntimeError('Invalid isolated evaluation render binding')
+    return binding

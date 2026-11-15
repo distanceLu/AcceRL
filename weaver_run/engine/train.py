@@ -1446,8 +1446,23 @@ class EvaluationWorkerActor(BaseWorkerActor):
     def __init__(self, infer, wid, stats_actor, cfg, benchmark_name, torch_dtype):
         super().__init__(infer, None, wid, stats_actor, cfg, benchmark_name)
         setup_debugger("eval_worker", self.wid)
+        import threading
+        self.eval_stop = threading.Event()
+        self.eval_broker = None
         self.torch_dtype = torch_dtype
         print(f"EvaluationWorker {self.wid}: 环境初始化完成。")
+
+    def configure_eval_admission(self, broker):
+        self.eval_broker = broker
+
+    def stop(self):
+        self.eval_stop.set()
+
+    def _admit_episode(self):
+        from eval_episode_gate import wait_for_episode
+        return wait_for_episode(
+            lambda started: ray.get(self.eval_broker.eval_episode_admission.remote(
+                self.wid, started), timeout=5), self.eval_stop) if self.eval_broker else not self.eval_stop.is_set()
 
     def _reset_and_select_env(self, seed=None):
         self.current_env_idx = (self.current_env_idx + 1) % self.num_tasks
@@ -1463,6 +1478,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
             self.capture_episode_count = getattr(self,"capture_episode_count",0)+1
             current_seed = (int(os.environ["ACCERL_SEED"])+50000000+self.wid*1000000+self.capture_episode_count) if os.environ.get("ACCERL_SEED") else int(time.time()*1000)+os.getpid()+random.randint(0,10000)
             self.capture_episode_id = f"eval{self.wid}:seed{current_seed}"
+            if not self._admit_episode(): return
             obs, info = self._reset_and_select_env(seed=current_seed)
             while True:
                 reward_sum, time_start, step_count_total, done = 0.0, time.time(), 0, False
@@ -1495,6 +1511,7 @@ class EvaluationWorkerActor(BaseWorkerActor):
                 self.capture_episode_count = getattr(self,"capture_episode_count",0)+1
                 current_seed = (int(os.environ["ACCERL_SEED"])+50000000+self.wid*1000000+self.capture_episode_count) if os.environ.get("ACCERL_SEED") else int(time.time()*1000)+os.getpid()+random.randint(0,10000)
                 self.capture_episode_id = f"eval{self.wid}:seed{current_seed}"
+                if not self._admit_episode(): return
                 obs, info = self._reset_and_select_env(seed=current_seed)
         except Exception as e:
             import traceback
@@ -4378,6 +4395,8 @@ def main(args):
                 inference_pool[replica], i, stats_actor, cfg, benchmark, torch_dtype
             ) for i, replica in enumerate(evaluation_plan['replica_ids'])
         ]
+        if cost_broker is not None:
+            ray.get([worker.configure_eval_admission.remote(cost_broker) for worker in eval_workers])
         renderer_receipts = ray.get([worker.get_renderer_info.remote() for worker in
             rollout_workers[:pipeline_config.real_workers] + eval_workers], timeout=180)
         writer.telemetry.event('environment_rendering', details={
@@ -5148,6 +5167,8 @@ def main(args):
     completion_reason = run_policy.stop_reason(global_step=global_step, train_iters=args.train_iters,
         target_reached=target_reached, requested_stop=stop_requested(),
         completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs)
+    if cost_broker is not None:
+        ray.get(cost_broker.stop_eval_admission.remote(), timeout=10)
     nsight_windows.close()
     if fresh_replay and pipeline_config.inventory_refill_enabled:
         ray.get([replay.stop_inventory_refill.remote() for replay in replay_buffers])

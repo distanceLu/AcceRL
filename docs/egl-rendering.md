@@ -16,7 +16,7 @@ Receipts are saved under `<ACCERL_EXPERIMENT_ROOT>/rendering/real-0.json` and `e
 
 To select software rendering for a later run, change `ACCERL_ENV_RENDER_BACKEND`, `MUJOCO_GL` and `PYOPENGL_PLATFORM` in `weaver_run/recipe/env.json` to `osmesa`, then commit/push/synchronize that recipe through the normal managed entry. Shell environment overrides are not authoritative: managed launchers reload the committed recipe.
 
-The portable CPU admission check explicitly continues to use OSMesa. The separate saved-checkpoint evaluation utility is unchanged; it is not the online Eval worker path.
+The portable CPU admission check explicitly continues to use OSMesa. Saved-checkpoint GPU evaluation has its own bootstrap, described below; it is separate from the online Eval worker path.
 
 Changing source or environment variables cannot change existing OpenGL contexts. The running job retains its pinned source. A newly submitted managed training uses the new recipe; do not claim the old process has switched. Existing checkpoints are weights-only, so restarting is not an exact optimizer/Replay continuation.
 
@@ -30,3 +30,35 @@ Changing source or environment variables cannot change existing OpenGL contexts.
 - The bounded validation creates no Policy/World model weights and does not start or restart training. Earlier standalone CPU/EGL timing evidence is separate from this integration acceptance; full training throughput remains to be measured in an EGL training run.
 
 Experiment artifacts are in the workspace's `analysis/egl_integration_20261113/` and the server data-disk directory recorded by its `stage.json`.
+
+## Formal fixed evaluation (2026-11-15)
+
+Formal GPU evaluation now defaults to EGL. `ACCERL_EVAL_RENDER_BACKEND=osmesa`
+selects the explicit diagnostic rollback; CPU admission remains OSMesa.
+The shared bootstrap discovers the selected model UUID's physical PCI identity,
+selects the matching EGL ordinal in a short-lived CPU subprocess, and preimports
+robosuite while CUDA is hidden. Isolated discovery prevents Conda ctypes and
+system PyOpenGL from loading incompatible libEGL display tables in one process.
+It restores the original UUID mask even on import failure, before model CUDA
+or TensorFlow initialization. An already initialized Torch CUDA runtime or
+imported TensorFlow is rejected. No installed packages are modified.
+The newly created context must report NVIDIA hardware and the selected PCI
+identity. Rendering receipts record the requested binding and actual renderer.
+Initial states, case seeds, checkpoints, actions and policy modes are unchanged.
+
+Validation for this integration: local and server CPU acceptance each pass 466
+tests with no failures, errors or skips; the parallel evaluator suite passes
+112 tests. Four production `Runtime.prepare()` workers pass on GPUs4–7, each
+resetting states 0, 13 and 49 and executing eight fixed actions per state.
+Construction and post-reset receipts confirm NVIDIA EGL and the assigned PCI;
+Torch's device UUID matches the evaluator's original UUID. This smoke loads
+checkpoint payloads on CPU but does not load the Policy onto GPU or train it.
+All four workers exit successfully; subsequent inspection finds no test
+processes or MPS clients and zero utilization on the four GPUs.
+
+The online Eval gate is separately verified using the actual Ray broker:
+nested refresh demand blocks admission until the last demand finishes, broker
+stop releases a waiting worker, and the private zero-GPU test cluster shuts down
+cleanly. This establishes control behavior; training throughput improvement
+has not yet been measured. Artifacts are in workspace
+`analysis/egl_eval_gate_implementation_20261115/` and its recorded server stage.

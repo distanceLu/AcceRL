@@ -75,7 +75,7 @@ def load_settings(path=None):
     raw = json.loads(Path(path).read_text(encoding='utf8'))
     allowed = {'schema', 'enabled', 'weights', 'class_weights', 'refresh_micro',
         'action_micro', 'max_pending', 'card_inflight', 'training_gangs',
-        'macro_enabled', 'allow_probe', 'probe_min_cycles', 'controller', 'initial_unit_costs'}
+        'macro_enabled', 'allow_probe', 'probe_min_cycles', 'controller', 'initial_unit_costs', 'eval_refresh_gate'}
     if set(raw)-allowed or raw.get('schema') != 1 or type(raw.get('enabled')) is not bool:
         raise ValueError('Unknown cost scheduler schema/options')
     for key, default, maximum in [('refresh_micro', 2, 2), ('action_micro', 2, 2),
@@ -83,7 +83,7 @@ def load_settings(path=None):
         value = raw.setdefault(key, default)
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError('Invalid bounded scheduler option: '+key)
-    for key in ('macro_enabled', 'allow_probe'):
+    for key in ('macro_enabled', 'allow_probe', 'eval_refresh_gate'):
         if type(raw.setdefault(key, False)) is not bool:
             raise ValueError(key+' must be boolean')
     if type(raw.setdefault('probe_min_cycles',2)) is not int or not 2<=raw['probe_min_cycles']<=1000:
@@ -123,6 +123,8 @@ class CostAdmissionBroker:
             self.scheduler.register_service('policy_infer.'+kind,ServiceConfig(weight,4))
         self.waiters, self.gates, self.phase_records = {}, {}, {}
         self.active_items = {}
+        self.eval_admission_last_reason = {}
+        self.eval_admission_stopped = False
         self.refresh_remaining = 0
         self.refresh_completed = 0
         self.action_observations_completed = 0
@@ -219,6 +221,23 @@ class CostAdmissionBroker:
         self._pump()
         self.emit('cost_work_completed',details=result)
         return result
+
+    async def eval_episode_admission(self, worker_id, waited_seconds):
+        from eval_episode_gate import admission_decision
+        if self.failed is not None:
+            raise RuntimeError(self.failed)
+        if self.eval_admission_stopped:
+            return dict(admitted=False, stopped=True, reason='stopped', waited_seconds=waited_seconds)
+        decision = admission_decision(self.settings.get('eval_refresh_gate', False),
+            self.refresh_remaining, waited_seconds)
+        if decision['admitted'] or self.eval_admission_last_reason.get(worker_id) != decision['reason']:
+            self.emit('eval_episode_admission', details=dict(decision, worker_id=worker_id,
+                refresh_remaining=self.refresh_remaining))
+        self.eval_admission_last_reason[worker_id] = decision['reason']
+        return decision
+
+    async def stop_eval_admission(self):
+        self.eval_admission_stopped = True
 
     async def refresh_demand(self, delta):
         if type(delta) is not int or self.refresh_remaining+delta<0:

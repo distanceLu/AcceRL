@@ -150,3 +150,15 @@ freshness and successful updates together. No speedup follows from CPU tests.
 These provide established components and references. The current code is a new
 integration for this workload; it is not claimed to introduce a new fair-queuing
 algorithm or to reproduce Gavel's cluster scheduler or reported results.
+
+
+Online Eval episode admission: the managed recipe enables `eval_refresh_gate`
+(optional boolean, absent means off). Before every reset, including the first,
+Eval polls a nonblocking broker query at 100 ms intervals. Pending critic demand
+includes terminal Real critic work. Existing episodes finish naturally and
+refresh dispatch never waits for Eval. A continuous local monotonic wait admits
+one episode after 360 seconds, even if refresh demand changes; each new episode
+starts a new wait. Admission telemetry records start/release reasons, elapsed
+wait and guard triggers, suppressing repeated pending events. Worker stop events
+and ACCERL_STOP_FILE end waits; broker failure/stop and a five second RPC timeout
+fail promptly. These controls do not unload resident models or environments.

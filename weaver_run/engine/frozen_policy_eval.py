@@ -347,6 +347,9 @@ def verify_single_gpu():
     selected = mapping.get(visible, visible)
     if selected not in APPROVED_GPUS:
         raise ValueError("Evaluator GPU is outside the approved GPU4-7 UUIDs")
+    os.environ["CUDA_VISIBLE_DEVICES"] = selected
+    from environment_rendering import prepare_evaluation_renderer
+    prepare_evaluation_renderer(selected)
     import torch
     if torch.cuda.device_count() != 1:
         raise ValueError("Evaluator sees more or fewer than one GPU")
@@ -458,6 +461,7 @@ def main(argv=None):
     rows = read_rows(rows_path, plan, repair_partial_tail=True)
     completed_keys = {row_key(row) for row in rows}
     errors = []
+    from environment_rendering import verify_environment_renderer
     selected_gpu = verify_single_gpu()
     started_path = args.output_root / "started.json"
     if not started_path.exists():
@@ -477,6 +481,7 @@ def main(argv=None):
         from initial_state_env import initial_state_pool_metadata
         import torch
         env = LiberoEnvWrapper(benchmark_name="libero_spatial", task_id=0, image_size=224, render_mode="rgb_array")
+        verify_environment_renderer()
         pool = initial_state_pool_metadata(env)
         if pool["count"] != 50:
             raise ValueError("Live initial-state pool differs from the formal 50-state plan")

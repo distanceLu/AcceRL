@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "enabled": true,
+  "eval_refresh_gate": true,
   "weights": {
     "policy_train": 1.0,
     "world_train": 1.0,
