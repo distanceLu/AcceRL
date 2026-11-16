@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 import sys
 
-from launch import ENGINE, RECIPE, ROOT, expand, settings
+from launch import (ENGINE, RECIPE, ROOT, expand, settings,
+                    fixed_validation_options, fixed_validation_overrides)
 
 import train
 import torch
@@ -43,6 +44,8 @@ def main():
         expected.update(num_eval_workers=count,eval_inference_replicas=','.join(map(str,range(count))))
     if args.model_free:
         expected['exp_name']=f'OpenVLA_ModelFree_Real4_Imag0_Eval{count}_Budget1M_Manual_gpu47_fresh'
+        validation = fixed_validation_options(True, count, fixed_validation_overrides(args))
+        expected.update({'fixed_validation_' + key: value for key, value in validation.items()})
     diff={k:[expected.get(k),vars(args).get(k)] for k in expected.keys()|vars(args).keys() if expected.get(k)!=vars(args).get(k)}
     if diff:
         raise ValueError("Command differs from the observed training run: "+json.dumps(diff))
