@@ -47,6 +47,14 @@ class OrangeAdmissionTests(unittest.TestCase):
         self.assertEqual(training.validate_cost_scheduler_admission(self.source)['profile'], '03_adaptive')
         self.assertTrue(training.check_cost_scheduler_state(self.state(), self.source, self.root))
 
+    def test_serialized_default_model_free_false_preserves_original_admission(self):
+        state=self.state()
+        state['pipeline_config']['model_free']=False
+        self.assertTrue(training.check_cost_scheduler_state(state,self.source,self.root))
+        state['pipeline_config']['model_free']=True
+        with self.assertRaises(ValueError):
+            training.check_cost_scheduler_state(state,self.source,self.root)
+
     def test_parallel_training_or_extra_card_lane_is_rejected(self):
         for key, value in [('training_gangs', 2), ('training_gangs', True), ('card_inflight', 3)]:
             with self.subTest(key=key, value=value):

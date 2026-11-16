@@ -138,7 +138,16 @@ def save_split_weights(components, checkpoint_dir, *, reason="periodic", metadat
     exporting components. Reject mixed Policy boundaries before touching the
     existing checkpoint, even when a component has otherwise valid tensors.
     """
-    if tuple(active_kinds or ()) == ('policy',):
+    config = (metadata or {}).get('world_backend_config', {})
+    model_free = isinstance(config, dict) and config.get('backend') == 'model_free'
+    if tuple(active_kinds or ()) == ('policy',) and model_free:
+        from world_backends import build_service_plan
+        if (config.get('world_trainable') is not False or config.get('reward_provider') != 'environment'
+                or 'online_world' in metadata or 'frozen_world' in metadata
+                or metadata.get('service_plan') != build_service_plan(config, world_size=4).to_dict()):
+            raise ValueError('Model-free Policy snapshot requires its exact environment-only config and service plan')
+        kinds = ('policy',)
+    elif tuple(active_kinds or ()) == ('policy',):
         # This is only the controller's monolithic file selection. Native
         # World/RM owners remain active and save their separate full artifact.
         native = (metadata or {}).get('online_world', {})
@@ -177,7 +186,9 @@ def save_split_weights(components, checkpoint_dir, *, reason="periodic", metadat
         raise ValueError("Split checkpoint components have different world sizes")
     if len(policy_steps) != 1 or components["policy"]["model_step"] != components["policy"]["policy_step"]:
         raise ValueError("Split checkpoint components have different Policy boundaries")
-    if kinds == ('policy',) and (native.get('policy_step') != components['policy']['policy_step']
+    if model_free and (kinds != ('policy',) or world_sizes != {4}):
+        raise ValueError('Model-free snapshots require exactly four Policy ranks and no World owners')
+    if kinds == ('policy',) and not model_free and (native.get('policy_step') != components['policy']['policy_step']
             or native.get('successful_updates') != components['policy']['policy_step'] // 5
             or native.get('model_version') != native.get('successful_updates')):
         raise ValueError('Native World/RM artifact and Policy-only monolith have different synchronized boundaries')

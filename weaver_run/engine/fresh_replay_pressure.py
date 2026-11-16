@@ -57,7 +57,9 @@ def shortage(store, count):
     for sample in store.samples.values():
         if store._eligible(sample):
             eligible[store.segments[sample['segment_id']].source] += 1
-    if store.config.real_policy_replay:
+    if getattr(store.config, 'real_only', False):
+        quotas = {'real': count, 'imagined': 0}
+    elif store.config.real_policy_replay:
         if count < 2:
             raise ValueError('Mixed-source FRESH cohorts require at least two samples')
         real = max(1, min(count-1, int(round(count*store.config.real_fraction))))
@@ -73,7 +75,8 @@ def shortage(store, count):
 async def reserve_with_production_pressure(owner, count):
     store = owner.fresh_store
     sink = getattr(owner, 'fresh_production_budget', None)
-    if not store.config.real_policy_replay:
+    real_only = getattr(store.config, 'real_only', False)
+    if real_only or not store.config.real_policy_replay:
         sink = None
     request_id = 'fresh-demand:'+uuid.uuid4().hex
     started = time.monotonic()
@@ -112,7 +115,7 @@ async def reserve_with_production_pressure(owner, count):
                             raise RuntimeError('FRESH production is stopped or failed: '+repr(budget))
                     # Real collection can continue while imagined supply is
                     # permanently unfunded. It must not reset this diagnosis.
-                    key = (status['eligible']['imagined'], budget.get('policy_added'),
+                    key = (status['eligible']['real' if real_only else 'imagined'], budget.get('policy_added'),
                            budget.get('policy_sampled'), budget.get('reserved_policy_samples'))
                     if key != last_progress_key:
                         last_progress, last_progress_key = now, key

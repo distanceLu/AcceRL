@@ -72,15 +72,23 @@ class PipelineBudgetConfig:
     real_training_action_horizon: int | None = None
     inventory_refill_enabled: bool = False
     seed_reserve_per_bucket: int = 0
+    model_free: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.model_free) is not bool:
+            raise ValueError('model_free must be boolean')
+        if self.model_free and (self.imagination_workers != 0 or self.max_imagine_in_flight != 0
+                                or self.inventory_refill_enabled or self.seed_reserve_per_bucket):
+            raise ValueError('Model-free collection requires zero imagination workers and no inventory refill or seed reserve')
         integer_fields = (
-            "real_workers", "imagination_workers", "max_real_in_flight", "max_imagine_in_flight", "max_pending_episodes",
+            "real_workers", "max_real_in_flight", "max_pending_episodes",
             "seeds_per_episode", "max_episode_frames", "bytes_per_frame",
             "max_resident_frame_bytes", "policy_high_watermark",
         )
         for name in integer_fields:
             _positive_int(name, getattr(self, name))
+        for name in ('imagination_workers', 'max_imagine_in_flight'):
+            (_nonnegative_int if self.model_free else _positive_int)(name, getattr(self, name))
         _positive_int("initial_state_count", self.initial_state_count)
         _nonnegative_int("initial_state_seed", self.initial_state_seed)
         _positive_int("real_env_step_budget", self.real_env_step_budget)
@@ -107,7 +115,7 @@ class PipelineBudgetConfig:
             raise ValueError('inventory_refill_enabled must be boolean')
         if type(self.seed_reserve_per_bucket) is not int or self.seed_reserve_per_bucket not in (0, 1):
             raise ValueError('seed_reserve_per_bucket must be zero or one')
-        if self.max_episode_bytes > self.max_resident_frame_bytes:
+        if not self.model_free and self.max_episode_bytes > self.max_resident_frame_bytes:
             raise ValueError("max_resident_frame_bytes cannot fit one maximum episode")
 
     @property

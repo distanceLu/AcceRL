@@ -172,6 +172,8 @@ class SegmentReplay:
     def add(self, segment):
         if not isinstance(segment, PolicySegment) or segment.count > self.capacity:
             raise ValueError('A complete segment must fit FRESH Replay capacity')
+        if self.config.real_only and segment.source != 'real':
+            raise ValueError('Real-only Policy replay rejects imagined segments')
         if segment.segment_id in self.segments or any(segment.sample_id(i) in self.samples for i in range(segment.count)):
             raise ValueError('Duplicate FRESH segment/sample identity')
         while len(self.samples) + segment.count > self.capacity:
@@ -204,7 +206,7 @@ class SegmentReplay:
         if type(count) is not int or count < 1:
             raise ValueError('FRESH cohort size must be positive')
         eligible = [(sid, value) for sid, value in self.samples.items() if self._eligible(value)]
-        if self.config.real_policy_replay:
+        if self.config.real_policy_replay and not self.config.real_only:
             real_count = max(1, min(count - 1, int(round(count * self.config.real_fraction))))
             if count < 2:
                 raise ValueError('Mixed-source FRESH cohorts require at least two samples')

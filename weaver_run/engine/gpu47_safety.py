@@ -240,6 +240,7 @@ def audit_final_weights(data, state, *, torch_module=None, persist=True):
         expected={model:state.get('report',{}).get('training',{}).get(model,{}).get('global_updates',0) for model in plan.active_kinds}
         online_world = (plan.backend == 'weaver' and plan.world_trainable
             and state.get('world_backend_config',{}).get('backend_options',{}).get('transport') == 'isolated_online_ddp')
+        model_free = plan.backend == 'model_free'
         monolith_expected = {key: value for key, value in expected.items() if not (online_world and key == 'ctrl')}
         reason=manifest.get('reason')
         accepted_reasons={'final'} if expected['policy'] else {'final_before_first_update','final'}
@@ -250,8 +251,15 @@ def audit_final_weights(data, state, *, torch_module=None, persist=True):
             or policy.get('until_manual_stop') is not True or policy.get('until_deadline') is not False
             or policy.get('deadline_unix_seconds') is not None or policy.get('stop_on_target') is not False):
             raise ValueError('Manual final run/world/steps/stop-policy identity differs')
-        if plan.integrated_reward and manifest.get('metadata', {}).get('service_plan') != plan.to_dict():
+        if (plan.integrated_reward or model_free) and manifest.get('metadata', {}).get('service_plan') != plan.to_dict():
             raise ValueError('Manual final checkpoint service plan differs')
+        if model_free:
+            metadata = manifest.get('metadata', {})
+            config = state.get('world_backend_config', {})
+            if (metadata.get('world_backend_config') != config
+                    or config.get('world_trainable') is not False or config.get('reward_provider') != 'environment'
+                    or 'online_world' in metadata or 'frozen_world' in metadata):
+                raise ValueError('Model-free final checkpoint must contain only its environment-only Policy identity')
         if online_world:
             from world_backend_audit import validate_online_descriptor
             if (manifest.get('metadata', {}).get('service_plan') != plan.to_dict()
@@ -281,7 +289,7 @@ def audit_final_weights(data, state, *, torch_module=None, persist=True):
                     or native.get('successful_updates') != expected['ctrl']):
                 raise ValueError('Native World independent CPU artifact audit failed')
             result.update(online_world=native, monolith_steps=monolith_expected)
-        if not plan.world_trainable:
+        if not plan.world_trainable and not model_free:
             from world_backend_audit import frozen_world_identity
             frozen = frozen_world_identity(state['world_backend_config'])
             if (manifest.get('metadata', {}).get('frozen_world') != frozen
@@ -308,7 +316,7 @@ def audit_final_weights(data, state, *, torch_module=None, persist=True):
                 or len(tensors)!=manifest.get('tensor_counts',{}).get(model)):
                 raise ValueError('Incomplete CPU tensor inventory: '+model)
             counts[model]=len(tensors)
-            if online_world:
+            if online_world or model_free:
                 for name, tensor in tensors.items():
                     if tensor.is_floating_point() and not torch_module.isfinite(tensor).all().item():
                         raise ValueError('Nonfinite CPU '+model+' tensor: '+name)
@@ -319,6 +327,8 @@ def audit_final_weights(data, state, *, torch_module=None, persist=True):
         if online_world:
             result['tensor_counts']['ctrl'] = result['online_world']['tensor_count']
             result['finite'] = True
+        if model_free:
+            result.update(finite=True, monolith_steps=monolith_expected)
         del payload
     except Exception as exc:
         result['error']=repr(exc)

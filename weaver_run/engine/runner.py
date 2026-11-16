@@ -123,8 +123,10 @@ def collect(data, state):
               'mode': state['mode'], 'training': {}, 'source': str(SOURCE),
               'until_manual_stop': True, 'deadline_unix': None,
               'stop_on_target': False, 'mps_active_thread_caps': None}
-    result['policy_batch_schedule']={'ordinary_micro_GAS':[8,18],'joint_micro_GAS':[4,36],
-                                    'joint_interval':5,'global_batch':576,'local_batch':144}
+    result['model_free']=state.get('model_free',False)
+    result['num_eval_workers']=state.get('num_eval_workers',3)
+    result['policy_batch_schedule']=state.get('policy_batch_schedule',{'ordinary_micro_GAS':[8,18],'joint_micro_GAS':[4,36],
+                                    'joint_interval':5,'global_batch':576,'local_batch':144})
     result['warmup_steps']={kind: value for kind, value in {'policy':100,'value':100,'ctrl':20,'reward':20}.items()
                             if kind == 'value' or kind in plan.active_kinds}
     result['service_plan'] = plan.to_dict()
@@ -235,6 +237,12 @@ def report(data, state):
         lines[5] = ('Policy和在线World/RM联合bundle使用CUDA IPC及四rank SHA/ACK/release；无外部Reward服务。'
             'WEAVER从已评估World微调3200步native权重初始化（该阶段RM冻结）；原生DDP4、micro4/GAS64/global1024，独立环境。')
         lines[6] = 'Policy100、Value100、World20预热。原生RM以真实LIBERO成功标签训练sigmoid/Brier分数，未经校准；想象仅按horizon终止。真实worker1、想象worker4；真实预算1000000步含reset settling。'
+    if state.get('model_free'):
+        lines[0]='# GPU4–7 Model-free Policy 训练记录'
+        lines[3:7]=['Real4 / Imag0，Policy 四卡 ZeRO2 micro8/GAS18/global576；没有 World/Reward 模型。',
+                    '每25次Policy更新保存weights；Policy100、Value100预热，使用真实环境奖励和当前Value GAE。',
+                    '在线Eval workers='+str(state.get('num_eval_workers',0))+'；固定checkpoint评测独立执行。',
+                    '真实预算1000000步，训练150动作，评测220动作；双图像、无proprio、GIPO，cost scheduler关闭。']
     for key in ('error', 'checkpoint_cpu_audit', 'sampled_gpu_peaks', 'cleanup'):
         if key in state:
             lines += ['', key+':', '```json', json.dumps(state[key], ensure_ascii=False, indent=2), '```']
@@ -299,6 +307,12 @@ def formal_environment(state, data, pre):
     if state.get('experiment_root'):
         env['ACCERL_EXPERIMENT_ROOT'] = state['experiment_root']
     env.update(cost_scheduler_environment_configuration(state, data))
+    if state.get('model_free'):
+        env['ACCERL_MODEL_FREE']='1'
+        env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
+        env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
+    if state.get('num_eval_workers') is not None:
+        env['ACCERL_NUM_EVAL_WORKERS']=str(state['num_eval_workers'])
     return env
 
 
@@ -326,7 +340,7 @@ def enforce_stop_window(data, state, child, now=None):
         raise SaveGraceExpired('Manual-stop GPU save grace of900seconds expired')
 
 
-def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None):
+def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None):
     if mode != 'manual' or stop_on_target:
         raise RuntimeError('This source only permits a fresh manual-stop formal run')
     if data.resolve() != (safe.MASTER/'formal_v3').resolve():
@@ -335,18 +349,22 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     from types import SimpleNamespace
     from candidate_paths import candidate_data, RUN_ID_PREFIX
     candidate_data(data, root=safe.MASTER)
-    config_path = world_backend_config or os.environ.get('ACCERL_WORLD_BACKEND_CONFIG')
-    config = load_backend_config(SimpleNamespace(world_backend_config=config_path))
+    config_path = None if model_free else (world_backend_config or os.environ.get('ACCERL_WORLD_BACKEND_CONFIG'))
+    config = load_backend_config(SimpleNamespace(world_backend_config=config_path,model_free=model_free))
     plan = prepare_runtime(config, world_size=4)
-    if config.backend != 'weaver' or not plan.world_trainable or not plan.integrated_reward:
+    if not model_free and (config.backend != 'weaver' or not plan.world_trainable or not plan.integrated_reward):
         raise ValueError('This candidate requires native trainable WEAVER and its integrated uncalibrated Reward head')
     from world_backend_audit import online_world_identity
-    online_world_identity(config)
+    if not model_free:
+        online_world_identity(config)
     from pipeline_budget import PipelineBudgetConfig
-    budget = PipelineBudgetConfig.from_json(pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG'))
+    from model_free_mode import pipeline_configuration
+    from launch import mode_options
+    selected=mode_options(model_free,num_eval_workers)
+    budget = pipeline_configuration(SimpleNamespace(model_free=model_free,pipeline_config=pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG')))
     if os.getuid()!=1004:
         raise RuntimeError('Wrong UID')
-    cost_configuration = cost_scheduler_launch_configuration(cost_scheduler_config)
+    cost_configuration = None if model_free else cost_scheduler_launch_configuration(cost_scheduler_config)
     data.mkdir(parents=True,exist_ok=False)
     pre = safe.preflight()
     rid = RUN_ID_PREFIX+dt.datetime.now(TZ).strftime('%m%d_%H%M%S_')+uuid.uuid4().hex[:8]
@@ -358,9 +376,12 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
              'gpu_save_grace_seconds':900,'error_grace_seconds':120,
              'git_commit':revision(ROOT)}
     state.update(candidate='weaver_integrated_v1', experiment_root=str(safe.MASTER), source_path=str(SOURCE))
+    state.update(selected)
     state['cost_scheduler'] = freeze_cost_scheduler_configuration(data, cost_configuration)
     state['policy_batch_schedule']={'ordinary_micro_GAS':[8,18],'joint_micro_GAS':[4,36],
                                     'joint_interval':5,'global_batch':576,'local_batch':144}
+    if model_free:
+        state['policy_batch_schedule'].update(joint_micro_GAS=None,joint_interval=None)
     state['warmup_steps']={'policy':100,'value':100,'ctrl':20,'reward':20}
     state['world_backend_config'] = config.to_dict()
     state['service_plan'] = plan.to_dict()
@@ -368,7 +389,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     safe.atomic_json(frozen_pipeline, budget.to_dict())
     state['pipeline_config'] = budget.to_dict()
     state['pipeline_config_path'] = str(frozen_pipeline.resolve())
-    if config_path or config.backend != 'ctrl' or config.reward_provider != 'external_vlm':
+    if not model_free and (config_path or config.backend != 'ctrl' or config.reward_provider != 'external_vlm'):
         frozen_config = data / 'world_backend_config.json'
         safe.atomic_json(frozen_config, config.to_dict())
         state['world_backend_config_path'] = str(frozen_config.resolve())
@@ -381,7 +402,8 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            child=subprocess.Popen(['bash',str(SOURCE/'run.sh')],
+            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else [])
+            child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),*launch_args],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
             state['minimum_child_birth_ticks']=state['child']['birth_ticks']
@@ -421,7 +443,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
                     flag=observe_stop_request(data,state)
                     result['policy_batch_mode_validation']=validate_policy_batch_modes_from_db(
                         data/'training/collection.sqlite', run_id=state['run_id'],
-                        steps=result.get('training',{}).get('policy',{}).get('global_updates',0))
+                        steps=result.get('training',{}).get('policy',{}).get('global_updates',0),model_free=model_free)
                     state['policy_batch_mode_validation']=result['policy_batch_mode_validation']
                     if plan.world_trainable:
                         if plan.backend == 'weaver' and state.get('world_backend_config',{}).get('backend_options',{}).get('transport') == 'isolated_online_ddp':
@@ -545,7 +567,7 @@ def validate_manual_completion(result, state, flag):
             raise RuntimeError('Online WEAVER must not masquerade as frozen World or CTRL ZeRO2')
     elif plan.world_trainable:
         validate_world_zero2_receipts(result.get('world_zero2_verified', []))
-    else:
+    elif plan.backend != 'model_free':
         from world_backend_audit import validate_frozen_world_receipts
         validate_frozen_world_receipts(result.get('weaver_frozen_verified', []), state['world_backend_config'])
         if result.get('world_zero2_verified') or result.get('world_memory_policy_verified'):
@@ -585,6 +607,11 @@ def validate_manual_completion(result, state, flag):
                 raise RuntimeError('Integrated WEAVER requires exactly four native WM/RM consumers')
         if any(result.get(kind) for kind in ('fsdp_sharding_verified','reward_features_only_enabled','reward_checkpointing_verified')):
             raise RuntimeError('Integrated WEAVER must not create external Reward training services')
+    if plan.backend == 'model_free':
+        if any(result.get(kind) for kind in ('weaver_frozen_verified','weaver_online_trainer_verified','world_zero2_verified','world_memory_policy_verified','fsdp_sharding_verified','reward_features_only_enabled','reward_checkpointing_verified','split_wm_cohort_validated')):
+            raise RuntimeError('Model-free run emitted disabled World/Reward service receipts')
+        if any(result.get('training',{}).get(kind,{}).get('global_updates',0) for kind in ('ctrl','reward')):
+            raise RuntimeError('Model-free run updated disabled World/Reward models')
     if not plan.world_trainable:
         if d.get('service_plan') != plan.to_dict():
             raise RuntimeError('Completion service plan differs from frozen WEAVER owners')
@@ -618,6 +645,8 @@ if __name__ == '__main__':
     a.add_argument('--world-backend-config', type=Path)
     a.add_argument('--pipeline-config', type=Path)
     a.add_argument('--cost-scheduler-config', type=Path)
+    a.add_argument('--model-free',action='store_true')
+    a.add_argument('--num-eval-workers',type=int)
     args = a.parse_args()
     if args.mode == 'guard':
         guard(args.data, args.run_id)
@@ -626,4 +655,4 @@ if __name__ == '__main__':
     elif args.mode == 'sample':
         safe.sample(args.data, args.run_id)
     else:
-        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config)
+        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers)

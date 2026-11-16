@@ -213,6 +213,14 @@ def validate_cost_scheduler_admission(source):
 
 
 def check_cost_scheduler_state(state, source, root):
+    if state.get('model_free'):
+        from model_free_mode import pipeline_configuration
+        from types import SimpleNamespace
+        expected = pipeline_configuration(SimpleNamespace(model_free=True,pipeline_config=source / PIPELINE_CONFIG)).to_dict()
+        if (state.get('cost_scheduler') is not None or state.get('pipeline_config') != expected
+                or state.get('pipeline_config_path') != str(root / 'formal_v3/pipeline_config.json')):
+            raise ValueError('Model-free runner must activate Real4/Imag0 and disable cost scheduling')
+        return True
     expected = validate_cost_scheduler_admission(source)
     observed = state.get('cost_scheduler', {})
     if (any(observed.get(k) != expected[k] for k in ('profile', 'source_path', 'source_sha256'))
@@ -222,7 +230,9 @@ def check_cost_scheduler_state(state, source, root):
             or any(observed.get('settings', {}).get(k) is not True
                    for k in ('enabled', 'macro_enabled', 'allow_probe'))):
         raise ValueError('Runner did not activate the exact frozen adaptive scheduler')
-    actual = state.get('pipeline_config', {})
+    actual = dict(state.get('pipeline_config', {}))
+    if actual.get('model_free') is False:
+        actual.pop('model_free')
     expected_pipeline = read_json(source / PIPELINE_CONFIG)
     validate_pipeline_admission(expected_pipeline)
     validate_pipeline_admission(actual)
@@ -247,13 +257,13 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
         raise ValueError('Source/root paths must be canonical and not symlinks')
     evidence = verify_git(source, git_commit)
-    scheduler = validate_cost_scheduler_admission(source)
+    scheduler = None if model_free else validate_cost_scheduler_admission(source)
     # This module is CPU-only, and its bytes have just been verified.
     paths = runpy.run_path(str(source / 'candidate_paths.py'))
     paths['experiment_root'](root)
@@ -261,17 +271,30 @@ def validate(source, root, git_commit):
     for name in ('formal_v3', 'queue_receipt.json', 'queue_entry.lock'):
         if os.path.lexists(root / name):
             raise ValueError('Existing output cannot be reused: ' + str(root / name))
-    backend = read_json(root / BACKEND_CONFIG)
-    # Probe the distinct pinned WEAVER interpreter without constructing a CUDA
-    # model. The merged controller environment need not import WEAVER itself.
-    cpu_env = launch_environment(root, source, os.environ)
-    cpu_env['CUDA_VISIBLE_DEVICES'] = ''
-    inspected = subprocess.run([sys.executable, str(source / 'inspect_world_backend.py'),
-                               '--config', str(root / BACKEND_CONFIG),
-                               '--check-local'], cwd=source, env=cpu_env,
-                              capture_output=True, text=True, timeout=90, check=True)
-    admission = json.loads(inspected.stdout)
-    validate_backend_admission(backend, read_json(source / PIPELINE_CONFIG), admission)
+    if model_free:
+        sys.path.insert(0,str(source.parent))
+        from launch import effective_pipeline, mode_options
+        mode_options(True,num_eval_workers)
+        if read_json(root / 'git-pipeline.json') != effective_pipeline(True):
+            raise ValueError('Frozen model-free pipeline differs from source')
+        backend = {'backend':'model_free','world_trainable':False,'reward_provider':'environment'}
+        admission = {'skipped':True,'reason':'model_free_has_no_world_assets'}
+        import tempfile
+        from launch import prepare, check
+        with tempfile.TemporaryDirectory(dir=root,prefix='.policy-admission-') as temp:
+            work=Path(temp)
+            command,environment,resources=prepare(work,['4','5','6','7'],'weaverintegrated_cpu_check',
+                model_free=True,num_eval_workers=num_eval_workers)
+            check(work,command,environment,resources)
+    else:
+        backend = read_json(root / BACKEND_CONFIG)
+        cpu_env = launch_environment(root, source, os.environ)
+        cpu_env['CUDA_VISIBLE_DEVICES'] = ''
+        inspected = subprocess.run([sys.executable, str(source / 'inspect_world_backend.py'),
+                                   '--config', str(root / BACKEND_CONFIG), '--check-local'],
+                                  cwd=source,env=cpu_env,capture_output=True,text=True,timeout=90,check=True)
+        admission = json.loads(inspected.stdout)
+        validate_backend_admission(backend, read_json(source / PIPELINE_CONFIG), admission)
     mps_path = root / 'mps.json'
     if mps_path.is_symlink():
         raise ValueError('MPS receipt must not redirect through a symlink')
@@ -280,10 +303,10 @@ def validate(source, root, git_commit):
     return {**evidence, 'source': str(source), 'experiment_root': str(root),
             'backend': backend, 'mps_receipt_sha256': hashlib.sha256(mps_path.read_bytes()).hexdigest(),
             'world_admission': admission, 'cost_scheduler': scheduler, 'mps_boot_id': authorization['boot_id'],
-            'gpu_access_performed': False}
+            'gpu_access_performed': False,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -299,10 +322,20 @@ def launch_environment(root, source, environ):
                ACCERL_PIPELINE_CONFIG=str(source / PIPELINE_CONFIG),
                PYTHONUNBUFFERED='1', PYTHONDONTWRITEBYTECODE='1',
                OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+    env['ACCERL_MODEL_FREE']=str(int(model_free))
+    if model_free or num_eval_workers is not None:
+        env['ACCERL_NUM_EVAL_WORKERS']=str((0 if model_free else 3) if num_eval_workers is None else num_eval_workers)
+    if model_free:
+        env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
+        env['ACCERL_PIPELINE_CONFIG']=str(root / 'git-pipeline.json')
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None):
+    if model_free is not None:
+        expected_count=(0 if model_free else 3) if num_eval_workers is None else num_eval_workers
+        if state.get('model_free',False)!=model_free or state.get('num_eval_workers',3)!=expected_count:
+            raise ValueError('Runner model-free/Eval mode differs from queued arguments')
     rid = state.get('run_id', '')
     if (not re.fullmatch(r'weaverintegrated_[A-Za-z0-9_-]+', rid)
             or (run_id is not None and rid != run_id)
@@ -317,6 +350,10 @@ def check_state(state, source, root, run_id=None, supervisor=None):
     if supervisor and any(state.get('supervisor', {}).get(k) != supervisor.get(k)
                           for k in ('pid', 'uid', 'birth_ticks')):
         raise ValueError('Runner state supervisor birth identity mismatch')
+    if state.get('model_free'):
+        if state.get('world_backend_config',{}).get('backend') != 'model_free':
+            raise ValueError('Model-free runner activated a World backend')
+        return rid
     fresh = state.get('world_backend_config', {}).get('backend_options', {}).get('fresh', {})
     if (not isinstance(fresh, dict) or set(fresh) != set(FRESH_OPTIONS)
             or any(type(fresh.get(k)) is not type(v) or fresh.get(k) != v for k,v in FRESH_OPTIONS.items())):
@@ -760,8 +797,10 @@ def acceptance(state, report, exit_code, remaining, stop_flag):
     manual = state.get('manual_completion') or {}
     steps = manual.get('steps', {})
     p = steps.get('policy')
+    model_free=state.get('model_free',False)
+    expected_steps={'policy':p} if model_free else {'policy':p,'ctrl':p // 5 if type(p) is int else None}
     if (type(p) is not int or p < 0 or any(type(v) is not int for v in steps.values())
-            or steps != {'policy': p, 'ctrl': p // 5}):
+            or steps != expected_steps):
         reasons.append('policy_joint_world_synchronized_steps_mismatch')
     accepted_reasons = {'final', 'final_before_first_update'} if p == 0 else {'final'}
     audit = state.get('checkpoint_cpu_audit') or {}
@@ -773,13 +812,19 @@ def acceptance(state, report, exit_code, remaining, stop_flag):
         reasons.append('policy_only_monolith_steps_mismatch')
     if 'frozen_world' in audit:
         reasons.append('online_world_cannot_use_frozen_world_audit')
-    world_review = validate_online_world_audit(audit.get('online_world'), rid, p, steps.get('ctrl'))
-    reasons.extend(world_review['reasons'])
+    if model_free:
+        if 'online_world' in audit:
+            reasons.append('model_free_unexpected_world_audit')
+    else:
+        world_review = validate_online_world_audit(audit.get('online_world'), rid, p, steps.get('ctrl'))
+        reasons.extend(world_review['reasons'])
     if (report.get('run_id') != rid or report.get('state') != 'stopped_by_user'
             or report.get('source') != state.get('source_path')):
         reasons.append('final_report_identity_mismatch')
     reported = {k: report.get('training', {}).get(k, {}).get('global_updates')
-                for k in ('policy', 'ctrl')}
+                for k in (('policy',) if model_free else ('policy', 'ctrl'))}
+    if model_free and report.get('training',{}).get('ctrl',{}).get('global_updates',0):
+        reasons.append('model_free_world_has_updates')
     if report.get('training', {}).get('reward', {}).get('global_updates', 0):
         reasons.append('disabled_external_reward_has_updates')
     if reported != steps or not report.get('experiment_completed'):
@@ -792,26 +837,43 @@ def acceptance(state, report, exit_code, remaining, stop_flag):
 
 
 def runner_command(args):
-    return [sys.executable, str(args.source / 'runner.py'), '--mode', 'manual',
-            '--data', str(args.root / 'formal_v3'),
-            '--pipeline-config', str(args.source / PIPELINE_CONFIG),
-            '--world-backend-config', str(args.root / BACKEND_CONFIG),
-            '--cost-scheduler-config', str((args.source / COST_SCHEDULER_CONFIG).resolve())]
+    model_free=getattr(args,'model_free',False)
+    command=[sys.executable,str(args.source/'runner.py'),'--mode','manual',
+             '--data',str(args.root/'formal_v3'),'--pipeline-config',
+             str(args.root/'git-pipeline.json') if model_free else str(args.source/PIPELINE_CONFIG)]
+    if model_free:
+        command += ['--model-free']
+    else:
+        command += ['--world-backend-config',str(args.root/BACKEND_CONFIG),
+                    '--cost-scheduler-config',str((args.source/COST_SCHEDULER_CONFIG).resolve())]
+    count=getattr(args,'num_eval_workers',None)
+    if count is not None:
+        command += ['--num-eval-workers',str(count)]
+    return command
+
+
+def mode_kwargs(args):
+    return dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
+
+
+def preflight_description(args):
+    if getattr(args,'model_free',False):
+        return dict(native_preflight_argv=None,native_preflight_plan={'skipped':True,'reason':'model_free'},native_gpu_preflight_executed=False)
+    return dict(native_preflight_argv=native_preflight_command(args,'weaverintegrated_preflight_plan_only',plan_only=True),
+                native_preflight_plan=native_preflight_plan(args,'weaverintegrated_preflight_plan_only'),native_gpu_preflight_executed=False)
 
 
 def run(args):
     budgets = validate_manual_contract(args.post_stop_grace_seconds)
     if getattr(args, 'stop_control', None) is not None or getattr(args, 'measurement_seconds', None) is not None:
         raise ValueError('Orange deployment is manual-stop only; no inherited calendar/duration')
-    if getattr(args, 'native_gpu_preflight', False) is not True:
+    if not getattr(args,'model_free',False) and getattr(args, 'native_gpu_preflight', False) is not True:
         raise ValueError('This online candidate requires explicit --native-gpu-preflight once after queue admission')
     source, root = args.source, args.root
-    verified = validate(source, root, args.git_commit)
+    verified = validate(source, root, args.git_commit,**mode_kwargs(args))
     if args.validate_only:
         log(validation=verified, budgets=budgets, valid=True, outputs_created=False,
-            native_preflight_argv=native_preflight_command(args, 'weaverintegrated_preflight_plan_only', plan_only=True),
-            native_preflight_plan=native_preflight_plan(args, 'weaverintegrated_preflight_plan_only'),
-            native_gpu_preflight_executed=False)
+            **preflight_description(args))
         return 0
     job_id = os.environ.get('EXPERIMENT_QUEUE_JOB_ID', '')
     if sys.platform != 'linux' or os.getuid() != 1004 or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', job_id):
@@ -826,10 +888,10 @@ def run(args):
         lock.write(job_id + '\n')
     data = root / 'formal_v3'
     receipt_path = root / 'queue_receipt.json'
-    env = launch_environment(root, source, os.environ)
+    env = launch_environment(root, source, os.environ,**mode_kwargs(args))
     command = runner_command(args)
     receipt = {'schema': 3, 'job_id': job_id, 'state': 'starting', 'started_ns': time.time_ns(),
-               'source_validation': verified, 'argv': command, **budgets,
+               'source_validation': verified, 'argv': command, **budgets, **mode_kwargs(args),
                'stop_protocol_reason': 'user_requested_stop',
                'stop_authorization': 'user authorized new JIT GPU training; manual stop with no automatic date or duration',
                'measurement': {'anchor': 'manual_stop', 'four_hour_cutoff_enabled': False, 'stop_at_ns': None},
@@ -851,7 +913,8 @@ def run(args):
     failure = None
     try:
         wait_idle(source, env)
-        receipt['native_gpu_preflight'] = run_native_preflight(args, env, abort=lambda: bool(received))
+        receipt['native_gpu_preflight'] = ({'skipped':True,'reason':'model_free'} if getattr(args,'model_free',False)
+            else run_native_preflight(args, env, abort=lambda: bool(received)))
         atomic_json(receipt_path, receipt)
         child = subprocess.Popen(command, cwd=source, env=supervisor_environment(env), stdin=subprocess.DEVNULL)
         identity = proc_identity(child.pid)
@@ -864,7 +927,7 @@ def run(args):
             now = time.monotonic()
             try:
                 state = read_json(data / 'runnerstatus.json')
-                receipt['run_id'] = check_state(state, source, root, receipt['run_id'], identity)
+                receipt['run_id'] = check_state(state, source, root, receipt['run_id'], identity,**mode_kwargs(args))
                 check_cost_scheduler_state(state, source, root)
                 receipt['last_synchronized_epochs'] = max(receipt['last_synchronized_epochs'],
                                                           synchronized_epochs(data, receipt['run_id']))
@@ -932,7 +995,7 @@ def run(args):
         if child is not None and child.poll() is None and receipt['run_id']:
             try:
                 state = read_json(data / 'runnerstatus.json')
-                check_state(state, source, root, receipt['run_id'], receipt.get('supervisor'))
+                check_state(state, source, root, receipt['run_id'], receipt.get('supervisor'),**mode_kwargs(args))
                 stop_evidence = read_stop_evidence(data, receipt['run_id'], state)
                 runner_failed = state.get('state') in ('stopping_error', 'failed') and bool(state.get('error'))
                 # An error flag belongs to the runner's shutdown protocol. Do
@@ -984,7 +1047,7 @@ def run(args):
         try:
             receipt['final_source_validation'] = verify_git(source, args.git_commit)
             state = read_json(data / 'runnerstatus.json')
-            check_state(state, source, root, receipt['run_id'], receipt.get('supervisor'))
+            check_state(state, source, root, receipt['run_id'], receipt.get('supervisor'),**mode_kwargs(args))
             receipt['runner_final_state'] = state.get('state')
             receipt['runner_error'] = state.get('error')
             receipt['checkpoint_cpu_audit'] = state.get('checkpoint_cpu_audit')
@@ -1013,6 +1076,8 @@ def main():
     parser.add_argument('--git-commit', required=True)
     parser.add_argument('--post-stop-grace-seconds', type=int, default=1800)
     parser.add_argument('--native-gpu-preflight', action='store_true')
+    parser.add_argument('--model-free',action='store_true')
+    parser.add_argument('--num-eval-workers',type=int)
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
     try:

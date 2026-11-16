@@ -41,6 +41,20 @@ cp .weaver.env.example .weaver.env
 
 主曲线 `Eval/_Global/Average_Return` 使用 `Eval worker数×100` 条完成episode，本次300。`--moving-avg-window 1000` 只控制非Eval统计，真实采集、想象奖励及耗时统计不随Eval缩短。`ACCERL_EVAL_MIN_EPISODES=auto` 与实际Eval窗口对齐；显式设置大于窗口的门槛会在创建Actor前拒绝。启动事件 `online_evaluation_config` 记录worker数、逻辑副本、物理GPU、窗口及最低样本数。减少Eval可能改变共享随机数调用顺序及异步数据经历，不承诺学习等价。当前分支配方不代表已有训练已热切换。[Eval3验收说明](docs/eval3-acceptance.md)
 
+## 可选 Model-free 模式
+
+`--model-free` 默认关闭，完整设置与验证边界见[Model-free 模式说明](docs/model-free.md)。启用后只创建四个 Policy trainer 和四个推理副本，四个真实采集 worker 各绑定一张卡的 EGL renderer。在线 Eval 默认关闭；显式 `--num-eval-workers 4` 时连接副本0、1、2、3。训练仍使用 task0、双图像、无 proprio、原 pretrained + distilled Policy 初始化、GIPO 和当前 Value 重算 GAE。真实预算1M步、训练150动作及固定评测220动作保持。
+
+```bash
+./run.sh check --model-free                       # CPU验收，无训练
+./run.sh original --model-free --id model-free-01 # 获得新训练授权后使用
+./run.sh original --model-free --num-eval-workers 4 --id model-free-eval4
+```
+
+原站仍从 `/mnt/data/lcx1/dong/WEAVER/run.sh` 提交，入队前同步并核对同一 Git 分支。模式、有效 pipeline、Eval 数及 `git_commit` 写入实验记录。Model-free 不检查或加载 World/Reward 权重、编码器和独立 native Python，不生成想象数据或 WM replay；当前版本关闭 cost scheduler 与库存补货。仅需原 Policy 资源及控制环境/LIBERO 资源。
+
+TensorBoard 使用含 `ModelFree_Real4_Imag0_Eval0`（或 `Eval4`）的实验名，原站继续写入现有 `AcceRL-scheduler/runs/Libero/` 监控目录。真实采集、Policy/Value 更新与资源曲线保留；不存在的 World/Reward/Imag 和关闭的在线 Eval 不写伪零曲线。固定 checkpoint 评测保持原有独立流程；在线 Eval0 不关闭训练结束后的固定评测。
+
 ## 训练仿真、想象轨迹与评估回放
 
 新任务自动抽样记录两路相机，通过同一入口打开只读观察台：

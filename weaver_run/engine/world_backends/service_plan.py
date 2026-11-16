@@ -39,6 +39,8 @@ class ServicePlan:
 
     @property
     def logical_update_ratio(self) -> str:
+        if self.backend == 'model_free':
+            return '1:0:0'
         return "5:0:1" if not self.world_trainable else ("5:1" if self.integrated_reward else "5:1:1")
 
     @property
@@ -76,7 +78,7 @@ class ServicePlan:
     def to_dict(self) -> dict[str, Any]:
         return {"backend": self.backend, "reward_provider": self.reward_provider,
                 "world_trainable": self.world_trainable,
-                "world_kind": "ctrl", "world_size": self.world_size,
+                "world_kind": None if self.backend == 'model_free' else "ctrl", "world_size": self.world_size,
                 "trainer_kinds": list(self.trainer_kinds), "inference_kinds": list(self.inference_kinds),
                 "wm_consumers": list(self.wm_consumers), "expected_wm_consumers": self.expected_wm_consumers,
                 "gpu_model_processes_per_card": self.gpu_model_processes_per_card,
@@ -97,6 +99,9 @@ def build_service_plan(config: WorldBackendConfig | Mapping[str, Any] | None = N
         config = WorldBackendConfig.from_mapping(config)
     if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size < 1:
         raise ValueError("world_size must be a positive integer")
+    if config.backend == 'model_free':
+        return ServicePlan(config.backend, config.reward_provider, world_size,
+                           ('policy',), ('policy',), (), False)
     inference = ("policy", "ctrl") if config.reward_provider == "world_head" else ("policy", "ctrl", "reward")
     kinds = inference if config.world_trainable else ("policy", "reward")
     consumers = (("ctrl",) if config.reward_provider == "world_head" else ("ctrl", "reward")) if config.world_trainable else ("reward",)

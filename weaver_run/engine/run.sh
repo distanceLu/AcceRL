@@ -14,7 +14,13 @@ FSDP_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ACCERL_REPO_ROOT="${ACCERL_REPO_ROOT:-/mnt/data/lcx1/dong/AcceRL-scheduler}"
 export PYTHONPATH="$FSDP_SOURCE:$ACCERL_REPO_ROOT:$ACCERL_REPO_ROOT/rl/ctrl_world:${PYTHONPATH:-}"
 export ACCERL_PIPELINE_CONFIG="${ACCERL_PIPELINE_CONFIG:-$FSDP_SOURCE/pipeline_default.json}"
-export ACCERL_WORLD_BACKEND_CONFIG="${ACCERL_WORLD_BACKEND_CONFIG:-$FSDP_SOURCE/examples/weaver_integrated_optimized.json}"
+MODEL_FREE="${ACCERL_MODEL_FREE:-0}"
+for argument in "$@"; do
+    [[ "$argument" != --model-free ]] || MODEL_FREE=1
+done
+if [[ "$MODEL_FREE" != 1 ]]; then
+    export ACCERL_WORLD_BACKEND_CONFIG="${ACCERL_WORLD_BACKEND_CONFIG:-$FSDP_SOURCE/examples/weaver_integrated_optimized.json}"
+fi
 export ACCERL_PIPELINE_CONFIG="$(realpath -- "$ACCERL_PIPELINE_CONFIG")"
 CUDA_VISIBLE_DEVICES='' /mnt/data/lcx3/envs/merged-env/bin/python -c 'import os; from pipeline_budget import PipelineBudgetConfig; PipelineBudgetConfig.from_json(os.environ["ACCERL_PIPELINE_CONFIG"])'
 # There is no inherited live-experiment output root in this isolated candidate.
@@ -37,7 +43,7 @@ for argument in "$@"; do
     fi
 done
 [[ "$WORLD_CONFIG_NEXT" == 0 ]] || { echo "--world-backend-config requires a path." >&2; exit 1; }
-if [[ -n "$WORLD_BACKEND_CONFIG" || -n "${ACCERL_WORLD_BACKEND:-}" || -n "${ACCERL_REWARD_PROVIDER:-}" ]]; then
+if [[ "$MODEL_FREE" != 1 ]] && [[ -n "$WORLD_BACKEND_CONFIG" || -n "${ACCERL_WORLD_BACKEND:-}" || -n "${ACCERL_REWARD_PROVIDER:-}" ]]; then
     if [[ -n "$WORLD_BACKEND_CONFIG" ]]; then
         WORLD_BACKEND_CONFIG="$(realpath -- "$WORLD_BACKEND_CONFIG")"
         export ACCERL_WORLD_BACKEND_CONFIG="$WORLD_BACKEND_CONFIG"
@@ -104,7 +110,11 @@ for output in "$ACCERL_TELEMETRY_DB" "$ACCERL_FINAL_CHECKPOINT" "$ACCERL_STOP_FI
         *) echo "Run outputs must remain inside ACCERL_DATA_DIR: $output" >&2; exit 1 ;;
     esac
 done
-echo "Online WEAVER initialized3200 + Policy ZeRO2 + Reward FSDP2 + existing MPS: run=$ACCERL_RUN_ID serial=$ACCERL_SPLIT_TRAIN_SERIAL data=$ACCERL_DATA_DIR pipe=$CUDA_MPS_PIPE_DIRECTORY"
+if [[ "$MODEL_FREE" == 1 ]]; then
+    echo "Model-free Policy ZeRO2 Real4/Imag0 + existing MPS: run=$ACCERL_RUN_ID data=$ACCERL_DATA_DIR pipe=$CUDA_MPS_PIPE_DIRECTORY"
+else
+    echo "Online WEAVER initialized3200 + Policy ZeRO2 + existing MPS: run=$ACCERL_RUN_ID serial=$ACCERL_SPLIT_TRAIN_SERIAL data=$ACCERL_DATA_DIR pipe=$CUDA_MPS_PIPE_DIRECTORY"
+fi
 
 # Use the same checked-in argv and base imports as the portable entry.
 export PYTHONPATH="$FSDP_SOURCE/..:$PYTHONPATH:$FSDP_SOURCE/../vendor/ctrl"

@@ -292,7 +292,7 @@ def parse_args():
     parser.add_argument('--num-inference-actors', type=int, default=1)
     parser.add_argument('--num-rollout-workers', type=int, default=20)
     parser.add_argument("--pipeline-config", default=os.environ.get("ACCERL_PIPELINE_CONFIG"))
-    parser.add_argument('--num-eval-workers', type=int, default=10)
+    parser.add_argument('--num-eval-workers', type=int, default=None)
     parser.add_argument('--eval-inference-replicas', default=None,
                         help='One Policy replica ID per Eval worker, comma-separated; default round-robin. Eval window is workers * 100.')
     parser.add_argument('--rollout-local-buf', type=int, default=64)
@@ -437,7 +437,11 @@ def parse_args():
     parser.add_argument('--debug-wait', action='store_true', default=False,
                         help='Actors wait for VS Code debugger to attach before proceeding')
 
+    parser.add_argument('--model-free', action='store_true',
+                        help='Train Policy from real environment data only; no World/RM/imagined data')
     args = parser.parse_args()
+    from model_free_mode import configure_training_mode
+    model_free = configure_training_mode(args)
     world_config = load_backend_config(args)
     world_config.validate_admission()
     validate_online_schema(world_config, ACTION_DIM)
@@ -451,14 +455,14 @@ def parse_args():
         args.num_step_cond = schema["n_history"] + schema["n_memory_frames"] * schema["t_memory"]
         if float(args.reward_scale) != float(world_config.reward_scale):
             raise ValueError("CLI reward_scale and backend reward_scale must agree")
-    elif not args.ctrl_world_ckpt:
+    elif not model_free and not args.ctrl_world_ckpt:
         raise ValueError("CTRL requires --ctrl-world-ckpt")
 
     if args.num_cams != 2:
         raise ValueError("This AcceRL integration requires agentview + wrist (num_cams=2)")
     if args.num_images_in_input != 2:
         raise ValueError("VLA must receive both generated views (num_images_in_input=2)")
-    if args.use_proprio:
+    if args.use_proprio and not model_free:
         raise ValueError("Imagined proprio is not modeled; run this integration with --use-proprio disabled")
     if world_config.backend == "ctrl" and args.num_frames_pred != 5:
         raise ValueError("The current Ctrl-World checkpoint protocol requires num_frames_pred=5")
@@ -472,7 +476,9 @@ def parse_args():
         raise ValueError('The concurrent per-card service layout requires the existing MPS service')
     if args.gpu_layout in (DUAL_LAYOUT, FOUR_LAYOUT, SPLIT_LAYOUT):
         visible_gpus = parse_gpu_ids(args.cuda_visible_devices)
-        expected = (2, 1, 1, 1) if args.gpu_layout == DUAL_LAYOUT else (4, 4, 0 if world_config.reward_provider == "world_head" else 4, 4)
+        expected = ((4, 4, 0, 0) if model_free else
+                    (2, 1, 1, 1) if args.gpu_layout == DUAL_LAYOUT else
+                    (4, 4, 0 if world_config.reward_provider == "world_head" else 4, 4))
         if (args.num_trainer_gpus, args.num_inference_actors,
                 args.num_reward_inference_actors, args.num_ctrl_inference_actors) != expected:
             raise ValueError(f"{args.gpu_layout} requires actor counts {expected}")
@@ -480,9 +486,9 @@ def parse_args():
             batches = (args.train_batch_size * args.accumulation_steps * 4,
                        args.ctrl_batch_size * args.ctrl_accumulation_steps * 4,
                        args.reward_batch_size * args.reward_accumulation_steps * 4)
-            active_batches = batches if world_config.reward_provider == "external_vlm" else batches[:2]
-            expected_batches = (576, 1024, 1024) if world_config.reward_provider == "external_vlm" else (576, 1024)
-            if active_batches != expected_batches or args.ctrl_ema_decay != 0:
+            active_batches = batches[:1] if model_free else batches if world_config.reward_provider == "external_vlm" else batches[:2]
+            expected_batches = (576,) if model_free else (576, 1024, 1024) if world_config.reward_provider == "external_vlm" else (576, 1024)
+            if active_batches != expected_batches or (not model_free and args.ctrl_ema_decay != 0):
                 raise ValueError("Four-rank experiment preserves active batches " + str(expected_batches) + " and Ctrl EMA=0")
         if args.num_rollout_workers < 1:
             raise ValueError("At least one rollout worker is required")
@@ -491,7 +497,7 @@ def parse_args():
                                + args.num_reward_inference_actors + args.num_ctrl_inference_actors)
         if len(visible_gpus) < required_gpu_actors:
             raise ValueError(f"{required_gpu_actors} GPU actors requested, only {len(visible_gpus)} visible")
-    batch_fields = ('train_batch_size', 'accumulation_steps', 'ctrl_batch_size', 'ctrl_accumulation_steps')
+    batch_fields = ('train_batch_size', 'accumulation_steps') if model_free else ('train_batch_size', 'accumulation_steps', 'ctrl_batch_size', 'ctrl_accumulation_steps')
     if world_config.reward_provider == "external_vlm":
         batch_fields += ('reward_batch_size', 'reward_accumulation_steps')
     for name in batch_fields:
@@ -619,7 +625,7 @@ class StatsActor:
 
     def get_stats(self):
         per_env_stats = {}
-        all_returns, all_lengths, all_step_times = [], [], []
+        all_returns, all_lengths, all_step_times, all_successes = [], [], [], []
         total_episodes_processed = 0
         total_env_steps = 0
         eval_returns, eval_lengths, eval_step_times = [], [], []
@@ -651,9 +657,11 @@ class StatsActor:
                 all_returns.extend(env_data["episode_returns"])
                 all_lengths.extend(env_data["episode_lengths"])
                 all_step_times.extend(env_data["step_times"])
+                all_successes.extend(env_data['successes'])
 
         per_env_stats["_global_rollout_"] = {
             "avg_return": np.mean(all_returns) if all_returns else 0.0,
+            "avg_success_rate": np.mean(all_successes) if all_successes else 0.0,
             "avg_ep_len": np.mean(all_lengths) if all_lengths else 0.0,
             "avg_step_time": np.mean(all_step_times) if all_step_times else 0.0,
             "total_episodes_processed": total_episodes_processed,
@@ -1053,8 +1061,11 @@ class RolloutWorkerActor(BaseWorkerActor):
                  wm_replay_buffer, real_traj_collect_interval, world_config=None,
                  worker_mode="real", pipeline_config=None):
         self.worker_mode = worker_mode
+        self.model_free = (world_config or {}).get('backend') == 'model_free'
         if worker_mode not in ("real", "imagine"):
             raise ValueError("Unknown producer mode")
+        if self.model_free and worker_mode != 'real':
+            raise ValueError('Model-free mode cannot construct imagination workers')
         pipeline = PipelineBudgetConfig.from_json(pipeline_config)
         self.initial_state_enabled = pipeline.initial_state_enabled
         self.pipeline_poll_seconds = pipeline.poll_seconds
@@ -1084,7 +1095,7 @@ class RolloutWorkerActor(BaseWorkerActor):
         # Episode storage belongs to WM Replay; workers retain one in-flight episode only.
         self.num_step_cond = num_step_cond
         self.imagine_horizon = imagine_horizon
-        if self.imagine_horizon % NUM_ACTIONS_CHUNK != 0:
+        if not self.model_free and self.imagine_horizon % NUM_ACTIONS_CHUNK != 0:
             raise ValueError(
                 f"imagine_horizon ({self.imagine_horizon}) must be divisible by "
                 f"NUM_ACTIONS_CHUNK ({NUM_ACTIONS_CHUNK})"
@@ -1095,7 +1106,9 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.ctrl_world_infer = ctrl_world_infer  # Legacy role name retained in telemetry
         self.world_config = WorldBackendConfig.from_mapping(world_config)
         self.fresh_config = FreshConfig.from_world_config(self.world_config)
-        if self.world_config.backend == "weaver":
+        if self.model_free:
+            self.ctrl_world_num_history = self.ctrl_world_infer_stride = self.ctrl_wm_frames = 0
+        elif self.world_config.backend == "weaver":
             geometry = profile_rpc(self, 'ctrl_infer', self.ctrl_world_infer, 'get_context_geometry')
             self.ctrl_world_num_history = geometry["required_context_frames"]
             self.ctrl_world_infer_stride = geometry["horizon"]
@@ -1164,7 +1177,8 @@ class RolloutWorkerActor(BaseWorkerActor):
                 raise ValueError("Live environment timestep differs from the WEAVER checkpoint schema")
         self.capture_real_frame_groups = []
         real_prefix = ()
-        obs_list.append(obs)
+        if not self.model_free:
+            obs_list.append(obs)
         step_count = 0
         reward_sum, time_start, step_count_total = 0.0, time.time(), 0
         fresh_real_segment = []
@@ -1182,17 +1196,20 @@ class RolloutWorkerActor(BaseWorkerActor):
             for i in range(len(action_env)):
                 single_action = action_env[i]
                 nxt, r, term, trunc, info = self.env.step(single_action)
-                obs_list.append(nxt)
-                if len(obs_list) > self.pipeline_max_episode_frames:
+                if not self.model_free:
+                    obs_list.append(nxt)
+                if step_count_total + 2 > self.pipeline_max_episode_frames:
                     raise RuntimeError("Environment exceeded its reserved episode frame budget")
-                reward_list.append(r)
-                done_list.append(term or trunc)
-                terminated_frames.append(bool(term))
-                truncated_frames.append(bool(trunc))
+                if not self.model_free:
+                    reward_list.append(r)
+                    done_list.append(term or trunc)
+                    terminated_frames.append(bool(term))
+                    truncated_frames.append(bool(trunc))
                 if self.world_config.backend == "weaver" and "is_success" not in info:
                     raise ValueError("WEAVER labels require per-frame environment is_success")
-                success_frames.append(bool(info.get("is_success", False)))
-                action_env_list.append(np.asarray(action_env[i], dtype=np.float32))
+                if not self.model_free:
+                    success_frames.append(bool(info.get("is_success", False)))
+                    action_env_list.append(np.asarray(action_env[i], dtype=np.float32))
                 reward_sum += r
                 chunk_reward += r * self.reward_scale
                 step_count_total += 1
@@ -1253,15 +1270,16 @@ class RolloutWorkerActor(BaseWorkerActor):
                         endpoint_value = endpoint['values'][0]
                     self._process_traj(fresh_real_segment, endpoint_value, bootstrap_obs=final_inputs,
                         terminated=learning_terminal,truncated=learning_truncated,source='real')
-                self._process_episode_for_wm(
-                    obs_list,
-                    reward_list,
-                    action_env_list,
-                    self.task_description,
-                    success,
-                    episode_id=self.capture_episode_id,
-                    frame_labels=(terminated_frames, truncated_frames, success_frames),
-                )
+                if self.model_free:
+                    metadata = dict(self.collection_metadata, action_steps=step_count_total,
+                                    success=bool(success))
+                    ray.get(self.wm_replay_buffer.finish_real_episode.remote(self.pipeline_lease,
+                        {'episode_id': self.capture_episode_id, 'metadata': metadata}))
+                else:
+                    self._process_episode_for_wm(
+                        obs_list, reward_list, action_env_list, self.task_description, success,
+                        episode_id=self.capture_episode_id,
+                        frame_labels=(terminated_frames, truncated_frames, success_frames))
                 break
 
     def _obs_to_views(self, obs):
@@ -4045,12 +4063,15 @@ def merge_split_epoch_results(epoch_results, world_size, policy_step, ctrl_inter
                             if key not in ("wm_sample_time", "wm_prep_time", "wm_batch_wait_time")})
         item[10].update(trained_ctrl=ctrl["metrics"]["trained_ctrl"] if ctrl else False,
                         trained_reward=reward["metrics"]["trained_reward"] if reward else False)
-        for key in ("ctrl_sample_unique_episodes", "ctrl_sample_fresh_episode_ratio"):
-            item[10][key] = sample_owner["metrics"][key]
+        if sample_owner is not None:
+            for key in ("ctrl_sample_unique_episodes", "ctrl_sample_fresh_episode_ratio"):
+                item[10][key] = sample_owner["metrics"][key]
         # The preparation owners now run concurrently; retain role timings too.
-        for key in ("wm_sample_time", "wm_prep_time", "wm_batch_wait_time"):
-            item[9][key] = max(role[rank]["performance"][key] for role in auxiliaries.values())
-        item[9]["ctrl_batch_prep_time"] = ctrl["performance"]["wm_prep_time"] if ctrl else 0.0
+        if auxiliaries:
+            for key in ("wm_sample_time", "wm_prep_time", "wm_batch_wait_time"):
+                item[9][key] = max(role[rank]["performance"][key] for role in auxiliaries.values())
+        if ctrl is not None:
+            item[9]["ctrl_batch_prep_time"] = ctrl["performance"]["wm_prep_time"]
         if reward is not None:
             item[9]["reward_batch_prep_time"] = reward["performance"]["wm_prep_time"]
         merged.append(tuple(item))
@@ -4060,14 +4081,18 @@ def merge_split_epoch_results(epoch_results, world_size, policy_step, ctrl_inter
 def main(args):
     """Run the original training recipe with optional evaluation-based stop."""
     from environment_rendering import render_backend, discover_render_bindings, render_worker_options
+    from model_free_mode import configure_training_mode, pipeline_configuration
+    model_free = configure_training_mode(args)
     from evaluation_threshold import resolve_online_evaluation
+    if model_free and serial_enabled(args.gpu_layout, environment=os.environ):
+        raise ValueError('Model-free mode requires concurrent Policy owners; disable ACCERL_SPLIT_TRAIN_SERIAL')
     evaluation_plan = resolve_online_evaluation(
         args.num_eval_workers, args.num_inference_actors,
         getattr(args, 'eval_inference_replicas', None), os.environ.get('ACCERL_EVAL_MIN_EPISODES'))
     world_config = load_backend_config(args)
     fresh_config = FreshConfig.from_world_config(world_config)
     from cost_scheduler_runtime import load_settings, CostAdmissionBroker, source_fingerprint
-    cost_settings=load_settings()
+    cost_settings={'enabled': False} if model_free else load_settings()
     cost_broker=None
     if cost_settings.get('enabled'):
         expected={'dense_reward':True,'signal_telemetry':True,'refresh_gae':True,
@@ -4076,7 +4101,7 @@ def main(args):
         if any(getattr(fresh_config,k)!=v for k,v in expected.items()):
             raise ValueError('Cost scheduling preserves the exact full FRESH learning rules')
     fresh_replay = any((fresh_config.refresh_gae, fresh_config.replay_age_limits, fresh_config.real_policy_replay))
-    if fresh_replay and (args.gpu_layout != SPLIT_LAYOUT or world_config.backend != 'weaver'
+    if fresh_replay and (args.gpu_layout != SPLIT_LAYOUT or world_config.backend not in ('weaver', 'model_free')
             or os.environ.get('ACCERL_CPU_REPLAY_PREFETCH') != '1'):
         raise ValueError('FRESH segment Replay currently requires the audited split WEAVER update boundary')
     world_config.validate_admission()
@@ -4084,7 +4109,7 @@ def main(args):
     service_plan = build_service_plan(world_config, args.num_trainer_gpus)
     online_weaver = isolated_online_weaver(world_config)
     validate_online_runtime_arguments(world_config, args)
-    pipeline_config = PipelineBudgetConfig.from_json(getattr(args, 'pipeline_config', None))
+    pipeline_config = pipeline_configuration(args)
     if pipeline_config.inventory_refill_enabled and (not fresh_replay
             or not fresh_config.replay_age_limits or not fresh_config.real_policy_replay
             or fresh_config.real_fraction != .25
@@ -4094,21 +4119,22 @@ def main(args):
         raise ValueError('Inventory refill requires the reviewed global576, 5:1 mixed FRESH recipe')
     if pipeline_config.bytes_per_frame != 2 * 3 * 224 * 224:
         raise ValueError("Frame budget must use the actual two-camera uint8 geometry")
-    geometry = context_geometry(world_config)
+    geometry = ({'required_context_frames': 0, 'training_window_frames': 0}
+                if model_free else context_geometry(world_config))
     if world_config.backend == 'ctrl':
         geometry = dict(required_context_frames=args.num_history + 1,
                         training_window_frames=args.num_history + args.num_frames_pred)
-    if args.num_step_cond != geometry['required_context_frames']:
+    if not model_free and args.num_step_cond != geometry['required_context_frames']:
         raise ValueError("Producer context must match the loaded World backend")
-    replay_window_frames = (geometry['training_window_frames'] if world_config.world_trainable
+    replay_window_frames = (0 if model_free else geometry['training_window_frames'] if world_config.world_trainable
                             else int(world_config.backend_options.get('external_reward_window_frames', 11)))
-    if not world_config.world_trainable and replay_window_frames != 11:
+    if not model_free and not world_config.world_trainable and replay_window_frames != 11:
         raise ValueError("Frozen WEAVER preserves the existing external Reward 11-frame eligibility")
     if args.gpu_layout != SPLIT_LAYOUT or os.environ.get('ACCERL_CPU_REPLAY_PREFETCH') != '1':
         raise ValueError("Episode pipeline requires split owners and CPU raw Replay prefetch")
-    if args.imagine_horizon % NUM_ACTIONS_CHUNK:
+    if not model_free and args.imagine_horizon % NUM_ACTIONS_CHUNK:
         raise ValueError("Imagination horizon must contain whole Policy chunks")
-    if pipeline_config.initial_policy_credit < args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus:
+    if not model_free and pipeline_config.initial_policy_credit < args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus:
         raise ValueError("Initial imagination budget cannot fill one global Policy batch")
 
     active_kinds = service_plan.active_kinds
@@ -4124,7 +4150,9 @@ def main(args):
     run_policy = TrainingStopPolicy.from_environment(os.environ)
     evaluation_milestones = EvaluationMilestones()
     run_started_ns = int(os.environ.get("ACCERL_RUN_STARTED_NS", now_ns()))
-    eval_target = os.environ.get("ACCERL_EVAL_TARGET")
+    eval_target = os.environ.get("ACCERL_EVAL_TARGET") if args.num_eval_workers else None
+    if not args.num_eval_workers and run_policy.stop_on_target:
+        raise ValueError('Evaluation-based stopping requires online Eval workers')
     threshold_tracker = (ThresholdTracker(
         target=float(eval_target), run_started_ns=run_started_ns,
         required_consecutive=int(os.environ.get("ACCERL_EVAL_CONSECUTIVE", "2")),
@@ -4207,6 +4235,8 @@ def main(args):
     log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
     writer = CaptureSummaryWriter(log_dir, tensorboard=(
         os.environ.get("ACCERL_CAPTURE_ONLY") != "1" or os.environ.get("ACCERL_TENSORBOARD") == "1"))
+    writer.model_free = model_free
+    writer.eval_workers = args.num_eval_workers
     writer.native_world_losses = online_weaver
     writer.native_reward_losses = online_weaver and world_config.reward_provider == "world_head"
     if writer.tensorboard is not None:
@@ -4249,12 +4279,17 @@ def main(args):
             minimum_train_windows=max(args.ctrl_batch_size * args.ctrl_accumulation_steps if "ctrl" in active_kinds else 0,
                 args.reward_batch_size * args.reward_accumulation_steps if "reward" in active_kinds else 0) * args.num_trainer_gpus,
         )
-        for _ in range(replay_count)
+        for _ in range(0 if model_free else replay_count)
     ]
+    if model_free:
+        from real_collection import RealCollectionCoordinator
+        producer_coordinators = [ray.remote(RealCollectionCoordinator).remote(pipeline_config.to_dict())]
+    else:
+        producer_coordinators = wm_replay_buffers
     batch_coordinator = (ray.remote(GlobalBatchCoordinator).remote(
-        replay_buffers[0], wm_replay_buffers[0], args.num_trainer_gpus,
+        replay_buffers[0], wm_replay_buffers[0] if wm_replay_buffers else None, args.num_trainer_gpus,
         wm_consumers=service_plan.wm_consumers if split_training else ("combined",),
-        pipeline_enabled=True, world_streaming=online_weaver,
+        pipeline_enabled=not model_free, world_streaming=online_weaver,
         world_micro_batch=args.ctrl_batch_size) if fixed_layout else None)
 
     ctrl_world_args = {
@@ -4284,7 +4319,7 @@ def main(args):
             policy_train_start_step=args.policy_train_start_step, train_iters=args.train_iters,
             clip_mode=args.clip_mode,
             # World Model 相关参数
-            wm_replay_buffer=wm_replay_buffers[i % replay_count],
+            wm_replay_buffer=wm_replay_buffers[i % replay_count] if wm_replay_buffers else None,
             agent_config_path=agent_config_path,
             trainer_config_path=trainer_config_path,
             reward_batch_size=args.reward_batch_size,
@@ -4379,11 +4414,11 @@ def main(args):
                 args.imagine_horizon,
                 torch_dtype,
                 reward_inference_pool[i % len(reward_inference_pool)] if reward_inference_pool else None,
-                ctrl_world_inference_pool[i % args.num_ctrl_inference_actors],  # ★ 替换
+                ctrl_world_inference_pool[i % args.num_ctrl_inference_actors] if ctrl_world_inference_pool else None,
                 args.reward_scale,
                 args.gamma,
                 args.lambda_,
-                wm_replay_buffers[i % replay_count],
+                producer_coordinators[i % len(producer_coordinators)],
                 args.real_traj_collect_interval, world_config=world_config.to_dict(),
                 worker_mode="real" if i < pipeline_config.real_workers else "imagine",
                 pipeline_config=pipeline_config.to_dict(),
@@ -4485,7 +4520,7 @@ def main(args):
             "backend": "weaver", "world_trainable": True, "reason": "separate_bounded_native_evaluator_required",
             "policy_real_environment_evaluation_unchanged": True, "quality_measured": False})
         experiment.flush()
-    if not world_config.world_trainable:
+    if not model_free and not world_config.world_trainable:
         receipts = ray.get([actor.get_frozen_world_state.remote() for actor in ctrl_world_inference_pool])
         required = ("checkpoint_id", "fixed_step", "bundle_sha256", "weight_dtype", "compute_dtype")
         if (len(receipts) != 4 or len({receipt["actor_id"] for receipt in receipts}) != 4
@@ -4501,7 +4536,7 @@ def main(args):
 
     published_fresh_versions = {'policy':0, 'ctrl':0}
     if fresh_replay:
-        ray.get([replay.configure_fresh.remote(inference_pool, wm_replay_buffers[index],
+        ray.get([replay.configure_fresh.remote(inference_pool, wm_replay_buffers[index] if wm_replay_buffers else None,
                      inventory_refill=pipeline_config.inventory_refill_enabled)
                  for index, replay in enumerate(replay_buffers)])
 
@@ -4560,7 +4595,7 @@ def main(args):
             if fresh_replay:
                 published_fresh_versions[kind] = int(inventories[0]['version'])
                 ray.get([producer.set_fresh_replay_versions.remote(published_fresh_versions['policy'],
-                    published_fresh_versions['ctrl']) for producer in wm_replay_buffers])
+                    published_fresh_versions['ctrl']) for producer in producer_coordinators])
                 ray.get([replay.set_fresh_versions.remote(published_fresh_versions['policy'],
                     published_fresh_versions['ctrl']) for replay in replay_buffers])
         else:
@@ -4594,11 +4629,13 @@ def main(args):
             metadata = {"args": vars(args), "run_id": os.environ.get("ACCERL_RUN_ID"),
                         "stop_policy": run_policy.metadata(), "service_plan": service_plan.to_dict(),
                         "world_backend_config": world_config.to_dict(),
+                        "model_free": model_free, "num_eval_workers": args.num_eval_workers,
+                        "pipeline_config": pipeline_config.to_dict(),
                         "frozen_weights": "Restore original checkpoints in args before applying snapshot"}
             if frozen_world is not None:
                 metadata["frozen_world"] = frozen_world
             if pipeline_config.initial_state_enabled:
-                metadata['initial_state_queue'] = ray.get(wm_replay_buffers[0].initial_state_checkpoint.remote())
+                metadata['initial_state_queue'] = ray.get(producer_coordinators[0].initial_state_checkpoint.remote())
             if split_training and online_weaver:
                 result = save_online_split_snapshot(training_groups, world_config, snapshot_dir, reason, metadata,
                     ray_get=ray.get, save_split_weights=save_split_weights)
@@ -4633,7 +4670,8 @@ def main(args):
         "geometry": geometry, "replay_window_frames": replay_window_frames,
         "real_workers": pipeline_config.real_workers,
         "imagination_workers": pipeline_config.imagination_workers,
-        "canonical_frames": "uint8_episode_once", "wm_projection": "same_draw_per_owner"})
+        "canonical_frames": None if model_free else "uint8_episode_once",
+        "wm_projection": None if model_free else "same_draw_per_owner", "model_free": model_free})
     fill_started = time.time()
     experiment.event("rollout_started", ts_ns=int(fill_started * 1e9),
                      details={"layout": args.gpu_layout, "physical_gpus": args.cuda_visible_devices,
@@ -4662,7 +4700,7 @@ def main(args):
         if stop_requested():
             fill_completion_reason = run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
                 target_reached=False, requested_stop=True)
-            ray.get([buffer.stop_pipeline.remote() for buffer in wm_replay_buffers])
+            ray.get([buffer.stop_pipeline.remote() for buffer in producer_coordinators])
             publish_snapshot("final_before_first_update")
             experiment.event("experiment_completed", details={"global_step": 0, "completed_epochs": 0,
                 "run_started_ns": run_started_ns, "threshold_state": threshold_tracker.as_dict() if threshold_tracker else None,
@@ -4697,7 +4735,8 @@ def main(args):
             last_fill_snapshot = fill_elapsed
             measured_twenty_minutes = measured_twenty_minutes or at_twenty
             writer.add_scalar("Fill/Policy_Resident", min(actor_sizes), int(fill_elapsed))
-            writer.add_scalar("Fill/WM_Resident", min(wm_sizes), int(fill_elapsed))
+            if wm_sizes:
+                writer.add_scalar("Fill/WM_Resident", min(wm_sizes), int(fill_elapsed))
             writer.flush()
 
         if actor_ready and wm_ready:
@@ -4724,6 +4763,7 @@ def main(args):
     start_time = time.time()
     last_log_time = time.time()
     last_log_global_step = 0
+    last_log_real_steps = None
     global_step = 0
     completed_epochs = 0
     measure_stop_epochs = int(os.environ.get("ACCERL_MEASURE_STOP_AFTER_EPOCHS", "0"))
@@ -5082,8 +5122,9 @@ def main(args):
             if 'reward_loss' in wm_metrics:
                 wm_loss_str += f" | reward loss: {wm_metrics['reward_loss']:.4f}"
 
+            eval_message = f'Eval奖励: {eval_avg_return:.2f}' if args.num_eval_workers else '在线 Eval: 关闭'
             print(f"更新步 {global_step}/{args.train_iters} | 时间: {elapsed_time:.1f}s | "
-                  f"全局平均奖励: {avg_return:.2f} | 全局平均幕长: {avg_ep_len:.1f} | Eval奖励: {eval_avg_return:.2f} | "
+                  f"全局平均奖励: {avg_return:.2f} | 全局平均幕长: {avg_ep_len:.1f} | {eval_message} | "
                   f"value loss: {np.mean(v_losses):.4f}{wm_loss_str} | "
                   f"LR(V/P): {current_lrs['value']:.7f}/{current_lrs['policy']:.7f} | "
                   f"Episodes数量: {total_episodes:,} | Step平均时间: {avg_step_time:.3f}s")
@@ -5119,13 +5160,19 @@ def main(args):
             writer.add_scalar('Performance/train_time_total', time.time() - t_train_start, global_step)
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
+            if model_free:
+                writer.add_scalar('Rollout/_Global/Success_Rate', global_stats['avg_success_rate'], global_step)
+                if last_log_real_steps is not None:
+                    writer.add_scalar('Rollout/_Global/Completed_Episode_Env_Steps_Per_Sec',
+                        (total_env_steps-last_log_real_steps)/max(current_time-last_log_time, 1e-9), global_step)
+                last_log_real_steps = total_env_steps
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
             writer.add_scalar('Rollout/_Global/Average_Imagine_Reward', global_stats.get("avg_imagine_reward", 0.0), global_step)
             if threshold_tracker is None:
                 writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
             writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
 
-            pipeline_status = ray.get(wm_replay_buffers[0].pipeline_status.remote())
+            pipeline_status = ray.get(producer_coordinators[0].pipeline_status.remote())
             experiment.event("data_pipeline_status", details={"policy_step": global_step, **pipeline_status})
             for section, fields in pipeline_status.items():
                 if isinstance(fields, dict):
@@ -5172,7 +5219,7 @@ def main(args):
     nsight_windows.close()
     if fresh_replay and pipeline_config.inventory_refill_enabled:
         ray.get([replay.stop_inventory_refill.remote() for replay in replay_buffers])
-    ray.get([buffer.stop_pipeline.remote() for buffer in wm_replay_buffers])
+    ray.get([buffer.stop_pipeline.remote() for buffer in producer_coordinators])
     publish_snapshot("final")
     experiment.event("experiment_completed", details={"global_step": global_step,
                      "completed_epochs": completed_epochs,
@@ -5212,11 +5259,20 @@ class CaptureSummaryWriter:
         self.telemetry = Telemetry("driver", "metrics")
         self.telemetry.config({"args": vars(args), "source": __file__, "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "cwd": os.getcwd(), "python": sys.executable, "torch": torch.__version__, "ray": ray.__version__, "module_paths": {key: getattr(sys.modules.get(key),"__file__",None) for key in ("rl","prismatic","ctrl_world","libero")}})
     def add_scalar(self, tag, value, step, walltime=None, double_precision=False):
+        from model_free_mode import metric_enabled
+        if not metric_enabled(tag, model_free=getattr(self, 'model_free', False),
+                              eval_workers=getattr(self, 'eval_workers', 1)):
+            return
         self.telemetry.event("metric", tag=tag, value=float(value), step=int(step),
                              **({"ts_ns": int(walltime * 1e9)} if walltime is not None else {}))
         world_tag = 'Loss/World_Flow' if self.native_world_losses else 'Loss/CtrlWorld'
         reward_tag = 'Loss/World_RM' if self.native_reward_losses else 'Loss/Reward_Model'
-        if self.tensorboard is not None and (tag in self.TENSORBOARD_TAGS or tag in (world_tag, reward_tag)):
+        model_free_tags = ('Rollout/_Global/Success_Rate',
+            'Rollout/_Global/Completed_Episode_Env_Steps_Per_Sec',
+            'Metrics/Training_Speed_Steps_per_Sec', 'Train/Learning_Rate/Policy',
+            'Train/Learning_Rate/Value', 'System/Total_Env_Steps', 'System/Total_Episodes_Processed')
+        if self.tensorboard is not None and (tag in self.TENSORBOARD_TAGS or tag in (world_tag, reward_tag)
+                or (getattr(self, 'model_free', False) and tag in model_free_tags)):
             self.tensorboard.add_scalar(tag, value, step, walltime=walltime,
                                         new_style=double_precision, double_precision=double_precision)
     def flush(self):

@@ -96,11 +96,16 @@ class WorldBackendConfig:
     def __post_init__(self):
         if type(self.world_trainable) is not bool:
             raise ValueError("world_trainable must be an explicit boolean")
-        if not self.world_trainable and (self.backend != "weaver" or self.reward_provider != "external_vlm"):
+        if self.backend == 'model_free':
+            if self.world_trainable or self.reward_provider != 'environment' or self.reward_semantics != 'delta_success':
+                raise ValueError('Model-free requires no World owner and environment rewards')
+        elif self.reward_provider == 'environment':
+            raise ValueError('Environment-only rewards require model_free')
+        if not self.world_trainable and self.backend != 'model_free' and (self.backend != "weaver" or self.reward_provider != "external_vlm"):
             raise ValueError("Frozen World currently requires WEAVER with the external Reward")
-        if self.backend not in ("ctrl", "weaver"):
+        if self.backend not in ("ctrl", "weaver", "model_free"):
             raise ValueError("Unknown world backend: %s" % self.backend)
-        if self.reward_provider not in ("external_vlm", "world_head"):
+        if self.reward_provider not in ("external_vlm", "world_head", "environment"):
             raise ValueError("Unknown reward provider: %s" % self.reward_provider)
         if self.reward_semantics not in ("delta_success", "native_progress", "delta_native_score"):
             raise ValueError("Unknown reward semantics: %s" % self.reward_semantics)
@@ -150,12 +155,19 @@ class WorldBackendConfig:
     def capabilities(self) -> BackendCapabilities:
         # Capability claims are gated by the same metadata requirements as startup.
         self.validate_admission()
+        if self.backend == 'model_free':
+            return BackendCapabilities(self.backend, provides_decoded_observations=False,
+                                       opaque_rollout_state=False)
         integrated = self.reward_provider == "world_head" and self.reward_semantics != 'delta_native_score'
         return BackendCapabilities(self.backend, requires_state=self.backend == "weaver",
                                    provides_success=integrated, provides_terminal=integrated)
 
     def validate_admission(self) -> None:
         """Fail closed before allocating services or loading GPU models."""
+        if self.backend == 'model_free':
+            from fresh_config import FreshConfig
+            FreshConfig.from_world_config(self).validate_reward_binding(None)
+            return
         if 'fresh' in self.backend_options:
             from fresh_config import FreshConfig
             fresh = FreshConfig.from_mapping(self.backend_options['fresh'])

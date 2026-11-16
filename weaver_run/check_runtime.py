@@ -8,7 +8,6 @@ import sys
 from launch import ENGINE, RECIPE, ROOT, expand, settings
 
 import train
-import ctrl_world.config
 import torch
 from libero.libero import benchmark
 from rl import actor_critic_model_discrete
@@ -21,24 +20,38 @@ from evaluation_threshold import resolve_online_evaluation
 
 def main():
     assert Path(train.__file__).resolve()==ENGINE/"train.py"
-    assert Path(ctrl_world.config.__file__).resolve()==ROOT/"weaver_run/vendor/ctrl/ctrl_world/config.py"
     assert Path(actor_critic_model_discrete.__file__).resolve()==ROOT/"rl/actor_critic_model_discrete.py"
     assert hashlib.sha256(Path(benchmark.__file__).read_bytes()).hexdigest()==json.loads((RECIPE/"reference.json").read_bytes())["libero_benchmark_sha256"], "LIBERO differs. Run ./run.sh setup or use the pinned LIBERO checkout and patch."
     verify_installed_sources()
     before=os.environ["CUDA_VISIBLE_DEVICES"]
     args=train.parse_args()
+    if not args.model_free:
+        import ctrl_world.config
+        assert Path(ctrl_world.config.__file__).resolve()==ROOT/"weaver_run/vendor/ctrl/ctrl_world/config.py"
     os.environ["CUDA_VISIBLE_DEVICES"]=before
     work=Path(os.environ["ACCERL_EXPERIMENT_ROOT"])
     expected=expand(json.loads((RECIPE/"parsed-args.json").read_bytes()),
                     dict(settings(),ids=os.environ["ACCERL_ALLOCATED_GPU_IDS"],checkpoints=str(work/"checkpoints"),
                          world=str(work/"world.json"),pipeline=os.environ["ACCERL_PIPELINE_CONFIG"],
                          agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml")))
+    expected['model_free']=args.model_free
+    if args.model_free:
+        expected.update(num_rollout_workers=4,num_ctrl_inference_actors=0,num_reward_inference_actors=0,
+                        ctrl_eval_interval=0,world_backend_config=None)
+    count=int(os.environ.get('ACCERL_NUM_EVAL_WORKERS',0 if args.model_free else 3))
+    if args.model_free or count!=3:
+        expected.update(num_eval_workers=count,eval_inference_replicas=','.join(map(str,range(count))))
+    if args.model_free:
+        expected['exp_name']=f'OpenVLA_ModelFree_Real4_Imag0_Eval{count}_Budget1M_Manual_gpu47_fresh'
     diff={k:[expected.get(k),vars(args).get(k)] for k in expected.keys()|vars(args).keys() if expected.get(k)!=vars(args).get(k)}
     if diff:
         raise ValueError("Command differs from the observed training run: "+json.dumps(diff))
     online_eval = resolve_online_evaluation(args.num_eval_workers, args.num_inference_actors,
         args.eval_inference_replicas, os.environ.get('ACCERL_EVAL_MIN_EPISODES'))
-    assert load_settings()["training_gangs"]==2
+    if args.model_free:
+        assert load_settings()['enabled'] is False
+    else:
+        assert load_settings()["training_gangs"]==1
     env=LiberoEnvWrapper(benchmark_name="libero_spatial",task_id=0,image_size=224,render_mode="rgb_array")
     try:
         assert len(env.initial_states)==50

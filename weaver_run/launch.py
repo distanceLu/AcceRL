@@ -130,30 +130,88 @@ def expand(data, values):
     return data
 
 
+def mode_options(model_free=False, num_eval_workers=None):
+    count = (0 if model_free else 3) if num_eval_workers is None else num_eval_workers
+    require(type(count) is int and 0 <= count <= 4, 'Online Eval workers must be 0..4')
+    return dict(model_free=bool(model_free), num_eval_workers=count)
+
+
+def training_arguments(values, *, model_free=False, num_eval_workers=None, template=None):
+    options = mode_options(model_free, num_eval_workers)
+    argv = expand(read(RECIPE/'argv.json') if template is None else template, values)
+    changes = {}
+    if model_free or num_eval_workers is not None:
+        count = options['num_eval_workers']
+        replicas='1,2,3' if not model_free and count==3 else ','.join(map(str,range(count)))
+        changes.update({'--num-eval-workers':str(count), '--eval-inference-replicas':replicas})
+    if model_free:
+        changes.update({'--num-rollout-workers':'4', '--num-ctrl-inference-actors':'0',
+                        '--num-reward-inference-actors':'0', '--ctrl-eval-interval':'0',
+                        '--exp-name':f'OpenVLA_ModelFree_Real4_Imag0_Eval{options["num_eval_workers"]}_Budget1M_Manual_gpu47_fresh'})
+    remove = set(changes) | ({'--world-backend-config'} if model_free else set())
+    result=[]
+    index=0
+    while index < len(argv):
+        if argv[index] in remove:
+            index += 2
+        else:
+            result.append(argv[index])
+            index += 1
+    for key,value in changes.items():
+        result += [key,value]
+    if model_free:
+        result.append('--model-free')
+    return result
+
+
+def effective_pipeline(model_free=False):
+    if not model_free:
+        return read(RECIPE/'pipeline_config.json')
+    sys.path.insert(0,str(ENGINE))
+    from types import SimpleNamespace
+    from model_free_mode import pipeline_configuration
+    return pipeline_configuration(SimpleNamespace(model_free=True,pipeline_config=RECIPE/'pipeline_config.json')).to_dict()
+
+
 def exec_managed_driver(overrides=()):
     """Start the real trainer after the site supervisor has set its run identity and paths."""
-    values=dict(settings(), ids="4,5,6,7", world=os.environ["ACCERL_WORLD_BACKEND_CONFIG"],
+    options=argparse.ArgumentParser(add_help=False)
+    options.add_argument('--model-free',action='store_true')
+    options.add_argument('--num-eval-workers',type=int)
+    selected,other=options.parse_known_args(overrides)
+    values=dict(settings(), ids="4,5,6,7", world=os.environ.get("ACCERL_WORLD_BACKEND_CONFIG",''),
                 pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
-    argv=expand(read(RECIPE/"argv.json"),values) + list(overrides)
+    argv=training_arguments(values,model_free=selected.model_free,num_eval_workers=selected.num_eval_workers) + other
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
+    env.update(ACCERL_MODEL_FREE=str(int(selected.model_free)),
+               ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
+    if selected.model_free:
+        env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
+        env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
     # TensorBoard consumers on this host already watch the original runs directory.
     os.chdir(SITE_ENTRY.parent.parent/"AcceRL-scheduler")
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 
-def prepare(work, ids, run_id):
+def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None):
     put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
-    missing=[k+"="+v for k,v in host.items() if not Path(v).exists()]
+    required=('policy','distilled') if model_free else host.keys()
+    missing=[k+"="+host[k] for k in required if not Path(host[k]).exists()]
     require(not missing,"Missing local resources: "+", ".join(missing)+". See .weaver.env.example.")
-    require(Path(host["native"]).is_file() and os.access(host["native"],os.X_OK),"Invalid native Python")
+    if not model_free:
+        require(Path(host["native"]).is_file() and os.access(host["native"],os.X_OK),"Invalid native Python")
     values=dict(host,ids=",".join(ids),weaver=str(HERE/"vendor/weaver"),world=str(work/"world.json"),
                 pipeline=str(RECIPE/"pipeline_config.json"),checkpoints=str(work/"checkpoints"),
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
-    put(work/"world.json", expand(read(RECIPE/"world_backend_config.json"),values))
-    argv=expand(read(RECIPE/"argv.json"),values)
+    if model_free:
+        values['pipeline']=str(work/'pipeline_config.json')
+        put(Path(values['pipeline']),effective_pipeline(True))
+    else:
+        put(work/"world.json", expand(read(RECIPE/"world_backend_config.json"),values))
+    argv=training_arguments(values,model_free=model_free,num_eval_workers=num_eval_workers)
     env={k:v for k,v in os.environ.items() if not k.startswith(("ACCERL_","ACCE_CAPTURE_","NSYS_","CUDA_INJECTION","NVTX_INJECTION","EXPERIMENT_QUEUE_"))}
     for key in ("RAY_ADDRESS","SOFT_STOP_AT","MEASURE_STOP_AFTER_EPOCHS","SHORT_TEST_DEADLINE",
                 "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE","CUDA_MPS_PINNED_DEVICE_MEM_LIMIT","CUDA_MPS_CLIENT_PRIORITY"):
@@ -181,6 +239,10 @@ def prepare(work, ids, run_id):
                ACCERL_PIPELINE_CONFIG=values["pipeline"],ACCERL_WORLD_BACKEND_CONFIG=values["world"],
                ACCERL_COST_SCHEDULER_CONFIG=str(RECIPE/"cost_scheduler_config.json"),
                ACCERL_RAY_TMP=f"/dev/shm/wr_{os.getuid()}_{uuid.uuid4().hex[:10]}",ACCERL_RAY_SPILL=str(work/"ray_spill"))
+    env.update(ACCERL_MODEL_FREE=str(int(model_free)),ACCERL_NUM_EVAL_WORKERS=str(mode_options(model_free,num_eval_workers)['num_eval_workers']))
+    if model_free:
+        env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
+        env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
     return [sys.executable,str(ENGINE/"train.py"),*argv],env,host
 
 
@@ -190,16 +252,19 @@ def check(work, cmd, env, host):
               MUJOCO_GL="osmesa",PYOPENGL_PLATFORM="osmesa")
     safe.pop("MUJOCO_EGL_DEVICE_ID",None)
     safe.pop("ACCERL_RENDER_BINDING",None)
-    for name,h in read(RECIPE/"bundle-checksums.json").items():
+    model_free='--model-free' in cmd
+    for name,h in ({} if model_free else read(RECIPE/"bundle-checksums.json")).items():
         require(checksum(Path(host["bundle"])/name)==h,"native3200 bundle mismatch: "+name)
     for name,h in read(RECIPE/"policy-checksums.json").items():
         p=Path(host["distilled"]) if name=="@distilled" else Path(host["policy"])/name
         require(checksum(p)==h,"Initial policy asset mismatch: "+name)
-    result=subprocess.run([sys.executable,str(ENGINE/"inspect_world_backend.py"),"--config",str(work/"world.json"),"--check-local"],
+    if not model_free:
+        result=subprocess.run([sys.executable,str(ENGINE/"inspect_world_backend.py"),"--config",str(work/"world.json"),"--check-local"],
                           cwd=work,env=safe,text=True,capture_output=True,timeout=150)
-    require(result.returncode==0,"Native WEAVER admission failed: "+(result.stdout+result.stderr)[-2000:])
+        require(result.returncode==0,"Native WEAVER admission failed: "+(result.stdout+result.stderr)[-2000:])
     subprocess.run([sys.executable,str(HERE/"check_runtime.py"),*cmd[2:]],cwd=work,env=safe,check=True,timeout=180)
-    subprocess.run([host["native"],"-c","import sys;sys.path.insert(0,sys.argv[1]);from weaver.wm import model,encoders;import torch;assert not torch.cuda.is_initialized()",
+    if not model_free:
+        subprocess.run([host["native"],"-c","import sys;sys.path.insert(0,sys.argv[1]);from weaver.wm import model,encoders;import torch;assert not torch.cuda.is_initialized()",
                     str(HERE/"vendor/weaver")],cwd=work,env=safe,check=True,timeout=90)
 
 
@@ -227,6 +292,30 @@ def stop(work):
     return dict(run_id=s["run_id"],stop_requested=True)
 
 
+def final_snapshot(directory, run_id, *, model_free=False):
+    manifest=read(directory/"manifest.json")
+    policy_weights=directory/"latest_weights.pt"
+    require(manifest["reason"] in ("final","final_before_first_update")
+            and manifest["metadata"]["run_id"]==run_id
+            and policy_weights.stat().st_size==manifest["weights_bytes"]>0,
+            "Final Policy snapshot identity or files failed validation")
+    if model_free:
+        require(manifest['metadata'].get('model_free') is True
+                and set(manifest['steps'])=={'policy'}
+                and 'online_world' not in manifest['metadata'], 'Final model-free snapshot mode differs')
+        return dict(policy_step=manifest['steps']['policy'],model_free=True)
+    world=manifest["metadata"]["online_world"]
+    world_weights=Path(world["weights_file"]).resolve()
+    require(world["reason"]==manifest["reason"] and world["run_id"]==run_id
+            and world["policy_step"]==manifest["steps"]["policy"]
+            and world["successful_updates"]==world["policy_step"]//5,
+            "Final snapshot boundary mismatch")
+    require(world_weights.is_relative_to(directory/"checkpoints_world")
+            and world_weights.stat().st_size==world["weights_bytes"]
+            and checksum(world_weights)==world["weights_sha256"], "Final World snapshot files failed validation")
+    return dict(policy_step=world['policy_step'],world_updates=world['successful_updates'])
+
+
 def supervise(work, cmd, env, log, run_id):
     child=subprocess.Popen(cmd,cwd=work,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     s=dict(state="running",run_id=run_id,pid=child.pid,started_ns=time.time_ns(),
@@ -239,23 +328,8 @@ def supervise(work, cmd, env, log, run_id):
     result=dict(s,state="failed",exit_code=code,finished_ns=time.time_ns())
     if code==0:
         try:
-            directory=work/"checkpoints"
-            manifest=read(directory/"manifest.json")
-            world=manifest["metadata"]["online_world"]
-            policy_weights=directory/"latest_weights.pt"
-            world_weights=Path(world["weights_file"]).resolve()
-            require(manifest["reason"] in ("final","final_before_first_update")
-                    and world["reason"]==manifest["reason"]
-                    and manifest["metadata"]["run_id"]==world["run_id"]==run_id
-                    and world["policy_step"]==manifest["steps"]["policy"]
-                    and world["successful_updates"]==world["policy_step"]//5,
-                    "Final snapshot boundary mismatch")
-            require(world_weights.is_relative_to(directory/"checkpoints_world")
-                    and world_weights.stat().st_size==world["weights_bytes"]
-                    and checksum(world_weights)==world["weights_sha256"]
-                    and policy_weights.stat().st_size==manifest["weights_bytes"]>0,
-                    "Final snapshot files failed validation")
-            result.update(state="finished",policy_step=world["policy_step"],world_updates=world["successful_updates"])
+            result.update(state="finished", **final_snapshot(work/"checkpoints", run_id,
+                model_free='--model-free' in cmd))
         except (OSError,KeyError,ValueError) as error:
             result["save_error"]=str(error)
     put(work/"status.json",result)
@@ -269,7 +343,11 @@ def main():
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
     parser.add_argument("--root",type=Path,help="Existing output directory (view only)")
     parser.add_argument("--port",type=int,default=8765,help="Loopback viewer port (view only)")
+    parser.add_argument("--model-free",action="store_true")
+    parser.add_argument("--num-eval-workers",type=int)
     args=parser.parse_args()
+    selected=mode_options(args.model_free,args.num_eval_workers)
+    require(args.action in ("original","restore","start","check") or (not args.model_free and args.num_eval_workers is None),"Training mode options are only for start/check")
     host=socket.gethostname()==REFERENCE_SERVER
     if args.action=='view':
         sys.path.insert(0,str(ENGINE))
@@ -287,14 +365,15 @@ def main():
     if host and args.action!="check":
         op="original" if args.action in ("original","restore","start") else args.action
         cli=HERE/"reference_site/cli.py"
-        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else [])])
+        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else [])])
     require(not args.action.startswith('diagnose'),'This saved-checkpoint diagnostic uses the reference site queue and assets')
     if args.action=="check":
         with tempfile.TemporaryDirectory(prefix="weaver-check-") as d:
             ids,_=allocated(True)
-            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check")
+            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check",model_free=args.model_free,num_eval_workers=args.num_eval_workers)
             check(Path(d),cmd,env,paths)
-        print("CHECK PASSED: clone imports, actual parsed training arguments, native bundle and CPU environment.")
+        print("CHECK PASSED: Policy assets, actual parsed training arguments and CPU environment."
+              if args.model_free else "CHECK PASSED: clone imports, actual parsed training arguments, native bundle and CPU environment.")
         return 0
     outputs=Path(os.getenv("WEAVER_OUTPUTS",ROOT/".weaver-runs")).expanduser().resolve()
     outputs.mkdir(exist_ok=True,parents=True)
@@ -316,7 +395,7 @@ def main():
     run_id="weaverintegrated_"+label
     put(work/"status.json",dict(state="checking",run_id=run_id))
     try:
-        cmd,env,paths=prepare(work,ids,run_id)
+        cmd,env,paths=prepare(work,ids,run_id,model_free=args.model_free,num_eval_workers=args.num_eval_workers)
         check(work,cmd,env,paths)
         mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
         # Advisory locks only for this user's explicitly allocated GPUs. Keep through exit.
@@ -328,7 +407,7 @@ def main():
             mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
             env["CUDA_VISIBLE_DEVICES"]=",".join(cards)
             require(published(ROOT)==git_commit,"Revision changed during admission")
-            put(work/"command.json",dict(git_branch=BRANCH,git_commit=git_commit,argv=cmd,gpus=cards,run_id=run_id,recipe="original95",weights_only=True))
+            put(work/"command.json",dict(git_branch=BRANCH,git_commit=git_commit,argv=cmd,gpus=cards,run_id=run_id,recipe="model_free" if args.model_free else "original95",weights_only=True,**selected, pipeline=effective_pipeline(args.model_free)))
             put(outputs/"last.json",label)
             print(f"Starting {run_id}; log: {work/'train.log'}",flush=True)
             with (work/"train.log").open("xb") as log:

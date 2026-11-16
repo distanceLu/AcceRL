@@ -79,7 +79,7 @@ class CriticEndpointTests(unittest.TestCase):
 
 
 class RealCollectorTests(unittest.TestCase):
-    def collect(self, *, steps=10, success=True, budget_cut=False, task_horizon=220):
+    def collect(self, *, steps=10, success=True, budget_cut=False, task_horizon=220, model_free=False):
         segments=[];observed=[];critic_calls=[]
         namespace=dict(np=np,math=math,os=os,time=time,FreshConfig=FreshConfig,PolicySegment=PolicySegment,
             NUM_ACTIONS_CHUNK=8,ACTION_DIM=7,new_id=lambda prefix:prefix+':one',
@@ -103,7 +103,7 @@ class RealCollectorTests(unittest.TestCase):
             critic_calls.append(rows)
             return {'policy_version':4,'values':[.7]}
         assigned={'env_seed':3,'allocation_id':1,'cycle':0,'max_action_steps':steps if budget_cut else task_horizon}
-        owner=SimpleNamespace(wid=0,initial_state_enabled=True,pipeline_job={'initial_state':assigned},
+        owner=SimpleNamespace(wid=0,model_free=model_free,initial_state_enabled=True,pipeline_job={'initial_state':assigned},
             env=env,cfg=None,processor=None,infer=SimpleNamespace(scheduled_evaluate_values=SimpleNamespace(remote=critic)),
             task_description='task',torch_dtype=None,world_config=SimpleNamespace(backend='weaver',schema={'dt_seconds':.05}),
             pipeline_max_episode_frames=221,fresh_config=FreshConfig(real_policy_replay=True),
@@ -112,10 +112,33 @@ class RealCollectorTests(unittest.TestCase):
             stats_actor=SimpleNamespace(add_episode_return=SimpleNamespace(remote=lambda *a,**k:None)),
             replay=SimpleNamespace(add_segment=SimpleNamespace(remote=lambda item:segments.append(item))),
             _process_episode_for_wm=lambda *a,**k:observed.append((a,k)))
+        if model_free:
+            owner.world_config = SimpleNamespace(backend='model_free')
+            owner.fresh_config = FreshConfig.from_world_config(owner.world_config)
+            owner.pipeline_lease = 'real-lease'
+            owner.telemetry = SimpleNamespace(event=lambda *a, **k: None)
+            owner.wm_replay_buffer = SimpleNamespace(finish_real_episode=SimpleNamespace(
+                remote=lambda token, payload: observed.append((token, payload))))
+            def forbidden(*args, **kwargs):
+                raise AssertionError('Model-free collector must not encode WM windows')
+            owner._process_episode_for_wm = forbidden
         owner._process_traj=MethodType(process,owner)
         collect(owner)
         self.assertEqual(len(segments),1)
         return segments[0],observed,owner,critic_calls
+
+    def test_model_free_uses_real_rewards_and_sends_only_episode_metadata(self):
+        item, observed, owner, calls = self.collect(model_free=True, steps=150, success=False,
+                                                    task_horizon=150)
+        self.assertEqual(item.source, 'real')
+        self.assertTrue(item.terminated[-1])
+        self.assertEqual(item.generation_values[-1], 0.)
+        self.assertEqual(calls, [])
+        token, payload = observed[0]
+        self.assertEqual(token, 'real-lease')
+        self.assertEqual(set(payload), {'episode_id', 'metadata'})
+        self.assertEqual(payload['metadata']['action_steps'], 150)
+        self.assertFalse(payload['metadata']['success'])
 
     def test_actual_real_collection_retains_behavior_and_masks_partial_last_chunk(self):
         item,observed,owner,calls=self.collect()

@@ -18,7 +18,7 @@ DEFAULT_MODEL_KINDS = ("policy", "ctrl", "reward")
 def active_model_kinds(active_kinds=None):
     """The legacy ctrl role owns either CTRL or an entire world backend bundle."""
     kinds = DEFAULT_MODEL_KINDS if active_kinds is None else tuple(active_kinds)
-    if kinds not in (DEFAULT_MODEL_KINDS, ("policy", "ctrl"), ("policy", "reward")):
+    if kinds not in (DEFAULT_MODEL_KINDS, ("policy", "ctrl"), ("policy", "reward"), ("policy",)):
         raise ValueError("Active model kinds must be the explicit Policy/World/Reward training plan")
     return kinds
 
@@ -447,7 +447,12 @@ class GlobalBatchCoordinator:
         if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size < 1:
             raise ValueError("Distributed Replay world size must be a positive integer")
         self.wm_consumers = tuple(wm_consumers)
-        if (not self.wm_consumers or len(set(self.wm_consumers)) != len(self.wm_consumers)
+        if not self.wm_consumers:
+            if wm_replay is not None or policy_replay is None or pipeline_enabled or world_streaming:
+                raise ValueError("Policy-only Replay requires no World lane, consumers, pipeline or streaming")
+        elif wm_replay is None:
+            raise ValueError("WM consumers require a World Replay owner")
+        if (len(set(self.wm_consumers)) != len(self.wm_consumers)
                 or any(consumer not in ("combined", "ctrl", "reward") for consumer in self.wm_consumers)
                 or ("combined" in self.wm_consumers and len(self.wm_consumers) != 1)):
             raise ValueError("WM consumers must be combined or distinct split model roles")

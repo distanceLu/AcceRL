@@ -123,18 +123,16 @@ def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochasti
 
 def run(args):
     budgets = validate_budgets(args)
-    if getattr(args, 'native_gpu_preflight', False) is not True:
+    if not getattr(args,'model_free',False) and getattr(args, 'native_gpu_preflight', False) is not True:
         raise ValueError('Online WEAVER requires one explicit --native-gpu-preflight after queue admission')
     for relative in ('policy_eval', 'training_queue_receipt.json'):
         if os.path.lexists(args.root / relative):
             raise ValueError('Existing evaluation output cannot be reused: ' + relative)
     if args.validate_only:
-        verified = training.validate(args.source, args.root, args.git_commit)
+        verified = training.validate(args.source, args.root, args.git_commit,**training.mode_kwargs(args))
         training.log(validation=verified, budgets=budgets,
                      evaluation_argv=evaluation_command(args, args.evaluation_seconds),
-                     native_preflight_argv=training.native_preflight_command(args, 'weaverintegrated_preflight_plan_only', plan_only=True),
-                     native_preflight_plan=training.native_preflight_plan(args, 'weaverintegrated_preflight_plan_only'),
-                     native_gpu_preflight_executed=False,
+                     **training.preflight_description(args),
                      valid=True, outputs_created=False)
         return 0
     started = time.monotonic()
@@ -260,6 +258,8 @@ def main():
     parser.add_argument('--evaluation-seed', type=int, default=20261026)
     parser.add_argument('--evaluation-repeats', type=int, default=1)
     parser.add_argument('--baseline-checkpoint', type=Path)
+    parser.add_argument('--model-free',action='store_true')
+    parser.add_argument('--num-eval-workers',type=int)
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
     if args.evaluation_repeats < 1:

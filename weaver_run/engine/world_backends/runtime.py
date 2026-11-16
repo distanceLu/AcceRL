@@ -22,6 +22,9 @@ def load_backend_config(args=None, environ=None):
     No model imports, subprocesses, downloads, or environment mutation occur.
     """
     env = os.environ if environ is None else environ
+    if _argument(args, 'model_free', False):
+        return WorldBackendConfig(backend='model_free', world_trainable=False,
+                                  reward_provider='environment')
     source = _argument(args, "world_backend_config") or env.get("ACCERL_WORLD_BACKEND_CONFIG")
     if isinstance(source, WorldBackendConfig):
         values = source.to_dict()
