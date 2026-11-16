@@ -61,12 +61,17 @@ def _assert_clean_optimizer(engine):
 class PolicyJointBatchMode:
     """begin/complete wrap the existing Policy epoch outside learning methods."""
 
-    def __init__(self, trainer, *, writer=None, verify_sources=True):
+    def __init__(self, trainer, *, writer=None, verify_sources=True, autotune=False):
         if verify_sources:
             verify_installed_sources()
         self.trainer, self.engine, self.writer = trainer, trainer.model, writer
         self.model_free = getattr(getattr(trainer, 'world_config', None), 'backend', None) == 'model_free'
         self.active = None
+        if type(autotune) is not bool or (autotune and not self.model_free):
+            raise ValueError('Batch autotuning requires explicit model-free mode')
+        self.autotune = autotune
+        self._completed_microsteps = self._completed_updates = 0
+        self._last_mode = (8, 18)
         if (trainer.training_role != 'policy' or trainer.world_size != WORLD_SIZE
                 or trainer.super_batch_size != LOCAL_BATCH
                 or (not self.model_free and (trainer.ctrl_train_interval != 5 or trainer.reward_train_interval != 5))):
@@ -88,15 +93,29 @@ class PolicyJointBatchMode:
                 'world_size': WORLD_SIZE, 'global_batch': GLOBAL_BATCH,
                 'local_batch': LOCAL_BATCH, **details})
 
-    def begin(self, policy_step):
+    def begin(self, policy_step, micro=None):
         engine, trainer = self.engine, self.trainer
         if self.active is not None:
             raise RuntimeError('Policy batch mode is already active')
-        micro, gas = mode_for_step(policy_step, model_free=self.model_free)
+        scheduled = mode_for_step(policy_step, model_free=self.model_free)
+        if self.autotune:
+            micro = self._last_mode[0] if micro is None else micro
+            if type(micro) is not int or micro not in (8, 16, 24):
+                raise ValueError('Autotuned Policy micro must be 8, 16 or 24')
+            gas = LOCAL_BATCH // micro
+        else:
+            if micro is not None:
+                raise ValueError('An explicit micro requires batch autotuning')
+            micro, gas = scheduled
         completed = policy_step - 1
+        expected_microsteps = (self._completed_microsteps if self.autotune else
+                              expected_completed_microsteps(completed, model_free=self.model_free))
+        if self.autotune and (completed != self._completed_updates
+                or int(engine.global_samples) != GLOBAL_BATCH * completed):
+            raise RuntimeError('Autotuned Policy cumulative update/sample counters drifted')
         if (int(engine.global_steps) != completed or int(trainer.global_step) != completed
                 or int(engine.skipped_steps) != 0
-                or int(engine.micro_steps) != expected_completed_microsteps(completed, model_free=self.model_free)):
+                or int(engine.micro_steps) != expected_microsteps):
             raise RuntimeError('Policy engine/trainer cumulative counters do not match this fresh schedule')
         if (int(engine.micro_steps) % gas != 0 or engine._is_gradient_accumulation_boundary is not None
                 or bool(engine.zenflow) or bool(engine.inside_no_sync_ctxt)
@@ -104,7 +123,8 @@ class PolicyJointBatchMode:
             raise RuntimeError('Unsafe GAS switch boundary; counters will never be reset or rebased')
         _assert_clean_optimizer(engine)
         old_micro, old_gas = int(engine.train_micro_batch_size_per_gpu()), int(engine.gradient_accumulation_steps())
-        expected_old = mode_for_step(completed, model_free=self.model_free) if completed else (8, 18)
+        expected_old = (self._last_mode if self.autotune else
+                        mode_for_step(completed, model_free=self.model_free) if completed else (8, 18))
         if (old_micro, old_gas) != expected_old or int(engine.train_batch_size()) != GLOBAL_BATCH:
             raise RuntimeError('Policy batch configuration drifted before the next scheduled mode')
         if int(engine.optimizer.gradient_accumulation_steps) != old_gas:
@@ -124,6 +144,8 @@ class PolicyJointBatchMode:
                        'before_micro_steps': int(engine.micro_steps),
                        'before_global_steps': int(engine.global_steps),
                        'before_global_samples': int(engine.global_samples)}
+        if self.autotune:
+            self.active['autotune'] = True
         self._emit('begin', self.active)
         return dict(self.active)
 
@@ -133,7 +155,8 @@ class PolicyJointBatchMode:
         if record is None or record['policy_step'] != policy_step:
             raise RuntimeError('Policy completion has no matching batch-mode begin')
         if (int(engine.micro_steps) != record['before_micro_steps'] + record['gas']
-                or int(engine.micro_steps) != expected_completed_microsteps(policy_step, model_free=self.model_free)
+                or (not self.autotune and int(engine.micro_steps) !=
+                    expected_completed_microsteps(policy_step, model_free=self.model_free))
                 or int(engine.global_steps) != policy_step or int(trainer.global_step) != policy_step
                 or int(engine.skipped_steps) != 0
                 or int(engine.global_samples) != record['before_global_samples'] + GLOBAL_BATCH):
@@ -142,5 +165,8 @@ class PolicyJointBatchMode:
         self._emit('complete', {**record, 'after_micro_steps': int(engine.micro_steps),
                                'after_global_steps': int(engine.global_steps),
                                'after_global_samples': int(engine.global_samples)})
+        self._completed_updates = policy_step
+        self._completed_microsteps = int(engine.micro_steps)
+        self._last_mode = record['micro'], record['gas']
         self.active = None
 

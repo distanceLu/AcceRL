@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 from launch import (ENGINE, RECIPE, ROOT, expand, settings,
-                    fixed_validation_options, fixed_validation_overrides)
+                    fixed_validation_options, fixed_validation_overrides, batch_autotune_options)
 
 import train
 import torch
@@ -40,6 +40,10 @@ def main():
         expected.update(num_rollout_workers=4,num_ctrl_inference_actors=0,num_reward_inference_actors=0,
                         ctrl_eval_interval=0,world_backend_config=None)
     count=int(os.environ.get('ACCERL_NUM_EVAL_WORKERS',0 if args.model_free else 3))
+    tuning=os.environ.get('ACCERL_BATCH_AUTOTUNE','0')
+    if tuning not in ('0','1'):
+        raise ValueError('ACCERL_BATCH_AUTOTUNE must be 0 or 1')
+    expected['batch_autotune']=batch_autotune_options(args.model_free,count,tuning=='1')
     if args.model_free or count!=3:
         expected.update(num_eval_workers=count,eval_inference_replicas=','.join(map(str,range(count))))
     if args.model_free:

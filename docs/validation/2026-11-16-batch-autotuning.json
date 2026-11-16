@@ -1,0 +1,1574 @@
+{
+  "date": "2026-11-16",
+  "baseline_commit": "f8db10297743c4ffd7433f3f466c24ac5ee8776c",
+  "targeted_checks": {
+    "engine_tests": 142,
+    "launch_tests": 33,
+    "total": 175,
+    "local_windows": "passed",
+    "server_python_3_11_cpu": "passed",
+    "installed_deepspeed_source_hashes": "verified"
+  },
+  "broad_cpu_discovery": {
+    "command": "python -B -m unittest discover -s weaver_run/engine -p 'test_*_cpu.py'",
+    "candidate_initial": {
+      "tests": 1107,
+      "failures": 31,
+      "errors": 353,
+      "skipped": 7
+    },
+    "baseline_archive": {
+      "tests": 1075,
+      "failures": 30,
+      "errors": 354,
+      "skipped": 7
+    },
+    "new_failure": "test_joint_candidate_invariants_cpu.Invariants.test_mode_hook_wraps_whole_policy_phase_outside_learning",
+    "resolution": "Unified mutually exclusive begin calls into one invocation; this test and both enabled/disabled driver-loop tests passed afterward. Remaining failed test names/root causes reproduce in the baseline. A baseline-only Windows temporary-file PermissionError passed isolated reruns on both versions.",
+    "candidate_initial_failed_tests": [
+      {
+        "kind": "ERROR",
+        "test": "test_launcher_retains_default_argv_and_overrides_backend_geometry_last (test_backend_controller_cpu.BackendControllerCPU.test_launcher_retains_default_argv_and_overrides_backend_geometry_last)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_optional_config_is_forwarded_through_clean_environment (test_backend_controller_cpu.BackendControllerCPU.test_optional_config_is_forwarded_through_clean_environment)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_backend_targets_are_reservations_only_and_defaults_keep_tuple5 (test_backend_topology_cpu.CapturePayloadTest.test_backend_targets_are_reservations_only_and_defaults_keep_tuple5)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_two_training_groups_and_inference_make_progress_together (test_cycle_parallel_cpu.ConcurrentAdmissionTests.test_two_training_groups_and_inference_make_progress_together)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_full_inventory_and_censored_production_still_apply_bounded_probe (test_cycle_parallel_cpu.FeedbackBrokerTests.test_full_inventory_and_censored_production_still_apply_bounded_probe)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_gap_or_duplicate_boundary_cannot_fabricate_complete_cycles (test_cycle_parallel_cpu.FeedbackBrokerTests.test_gap_or_duplicate_boundary_cannot_fabricate_complete_cycles)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_inference_grant_keeps_dispatch_weight_after_macro_change (test_cycle_parallel_cpu.FeedbackBrokerTests.test_inference_grant_keeps_dispatch_weight_after_macro_change)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_inventory_depletion_cannot_masquerade_as_speedup (test_cycle_parallel_cpu.FeedbackBrokerTests.test_inventory_depletion_cannot_masquerade_as_speedup)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_macro_disabled_preserves_fixed_weights (test_cycle_parallel_cpu.FeedbackBrokerTests.test_macro_disabled_preserves_fixed_weights)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_phase_advisory_never_applies_weights (test_cycle_parallel_cpu.FeedbackBrokerTests.test_phase_advisory_never_applies_weights)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_probe_holds_two_cycles_then_accepts_measured_improvement (test_cycle_parallel_cpu.FeedbackBrokerTests.test_probe_holds_two_cycles_then_accepts_measured_improvement)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_shortage_prioritizes_admitted_production (test_cycle_parallel_cpu.FeedbackBrokerTests.test_shortage_prioritizes_admitted_production)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_slower_probe_rolls_back_and_does_not_immediately_retry_same_pair (test_cycle_parallel_cpu.FeedbackBrokerTests.test_slower_probe_rolls_back_and_does_not_immediately_retry_same_pair)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_timeout_defers_during_unpublished_training (test_cycle_parallel_cpu.FeedbackBrokerTests.test_timeout_defers_during_unpublished_training)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_timeout_remainder_is_not_a_new_complete_cycle (test_cycle_parallel_cpu.FeedbackBrokerTests.test_timeout_remainder_is_not_a_new_complete_cycle)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_timeout_rolls_back_without_waiting_for_a_starved_update (test_cycle_parallel_cpu.FeedbackBrokerTests.test_timeout_rolls_back_without_waiting_for_a_starved_update)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_warmup_requires_two_additional_complete_cycles (test_cycle_parallel_cpu.FeedbackBrokerTests.test_warmup_requires_two_additional_complete_cycles)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_profiles_do_not_change_learning (test_cycle_parallel_cpu.ProfilesAndReadiness.test_profiles_do_not_change_learning)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_ready_jit_training_at_needs_batch (test_cycle_parallel_cpu.ProfilesAndReadiness.test_ready_jit_training_at_needs_batch)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_paused_gate_includes_lookahead_bypass_and_active_work (test_execution_control_cpu.AuthorityTests.test_paused_gate_includes_lookahead_bypass_and_active_work)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_actor_preserves_order_and_micro_shape_with_fewer_rpcs (test_execution_control_cpu.BlockTests.test_actual_actor_preserves_order_and_micro_shape_with_fewer_rpcs)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_cancel_during_settlement_does_not_double_release_demand (test_execution_control_cpu.BlockTests.test_cancel_during_settlement_does_not_double_release_demand)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_dependency_priority_preserves_waiting_producer_service (test_execution_control_cpu.BlockTests.test_dependency_priority_preserves_waiting_producer_service)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_nonfinite_block_fails_all_waiters_without_consumption (test_execution_control_cpu.BlockTests.test_nonfinite_block_fails_all_waiters_without_consumption)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_urgent_action_returns_unused_block_prefix (test_execution_control_cpu.BlockTests.test_urgent_action_returns_unused_block_prefix)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_parent_share_does_not_depend_on_number_of_active_classes (test_execution_control_cpu.ParentBudgetTests.test_parent_share_does_not_depend_on_number_of_active_classes)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_partial_block_refund_and_duplicate_settlement (test_execution_control_cpu.ParentBudgetTests.test_partial_block_refund_and_duplicate_settlement)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_consumption_moments_mismatch_rejects_before_optimizer (test_fresh_native_reward_cpu.DenseNativeRegression.test_actual_consumption_moments_mismatch_rejects_before_optimizer)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_native_augmentation_has_exact_masked_half_mse (test_fresh_native_reward_cpu.DenseNativeRegression.test_actual_native_augmentation_has_exact_masked_half_mse)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_failure_updates_rm_all_censored_preserves_adam_and_decay (test_fresh_native_reward_cpu.DenseNativeRegression.test_all_failure_updates_rm_all_censored_preserves_adam_and_decay)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_four_rank_two_gas_reduction_matches_global_target_gradient (test_fresh_native_reward_cpu.DenseNativeRegression.test_four_rank_two_gas_reduction_matches_global_target_gradient)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_reported_flow_and_rm_match_actual_objective_with_uneven_rank_masks (test_fresh_native_reward_cpu.DenseNativeRegression.test_reported_flow_and_rm_match_actual_objective_with_uneven_rank_masks)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_uneven_micro_masks_match_one_global_valid_mean_not_micro_means (test_fresh_native_reward_cpu.DenseNativeRegression.test_uneven_micro_masks_match_one_global_valid_mean_not_micro_means)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_fresh_padding_backend_cpu (unittest.loader._FailedTest.test_fresh_padding_backend_cpu)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_frozen_context_requires32_frames_and_pipeline_excludes_terminal_seed (test_frozen_weaver_runtime_cpu.WireRegression.test_frozen_context_requires32_frames_and_pipeline_excludes_terminal_seed)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_native_adapter_freezes_every_parameter_and_rejects_online_learning (test_frozen_weaver_runtime_cpu.WireRegression.test_native_adapter_freezes_every_parameter_and_rejects_online_learning)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_constructor_is_idempotent_and_native_forward_trains_wm_rm_not_critic (test_integrated_backend_cpu.JointBackend.test_actual_constructor_is_idempotent_and_native_forward_trains_wm_rm_not_critic)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_inference_returns_score_fields_and_never_a_success_terminal (test_integrated_backend_cpu.JointBackend.test_actual_inference_returns_score_fields_and_never_a_success_terminal)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_completion_after_snapshot_is_not_produced_again (test_inventory_lookahead_cpu.AdmissionTests.test_completion_after_snapshot_is_not_produced_again)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_configuration_and_malformed_control_messages_fail_closed (test_inventory_lookahead_cpu.AdmissionTests.test_configuration_and_malformed_control_messages_fail_closed) (horizon=-1)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_configuration_and_malformed_control_messages_fail_closed (test_inventory_lookahead_cpu.AdmissionTests.test_configuration_and_malformed_control_messages_fail_closed) (horizon=True)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_configuration_and_malformed_control_messages_fail_closed (test_inventory_lookahead_cpu.AdmissionTests.test_configuration_and_malformed_control_messages_fail_closed) (horizon=5)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_configuration_and_malformed_control_messages_fail_closed (test_inventory_lookahead_cpu.AdmissionTests.test_configuration_and_malformed_control_messages_fail_closed) (horizon=1.5)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_configuration_and_malformed_control_messages_fail_closed (test_inventory_lookahead_cpu.AdmissionTests.test_configuration_and_malformed_control_messages_fail_closed)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_expiry_clear_versions_and_out_of_order_messages (test_inventory_lookahead_cpu.AdmissionTests.test_expiry_clear_versions_and_out_of_order_messages)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_global_inflight_credit_and_reactive_budget_are_shared (test_inventory_lookahead_cpu.AdmissionTests.test_global_inflight_credit_and_reactive_budget_are_shared)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_preemptively_uses_earned_credit_without_reactive_shortage (test_inventory_lookahead_cpu.AdmissionTests.test_preemptively_uses_earned_credit_without_reactive_shortage)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_stop_and_runtime_owner_boundary (test_inventory_lookahead_cpu.AdmissionTests.test_stop_and_runtime_owner_boundary)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_learning_files_and_off_on_profiles_match_frozen_parent (test_inventory_lookahead_cpu.ForecastTests.test_learning_files_and_off_on_profiles_match_frozen_parent)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_replay_pump_supplies_while_next_batch_is_already_ready (test_inventory_lookahead_cpu.RuntimeTests.test_actual_replay_pump_supplies_while_next_batch_is_already_ready)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_rpc_failure_is_owned_and_visible_to_actual_sample (test_inventory_lookahead_cpu.RuntimeTests.test_rpc_failure_is_owned_and_visible_to_actual_sample)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_stop_during_pending_rpc_fences_late_admission (test_inventory_lookahead_cpu.RuntimeTests.test_stop_during_pending_rpc_fences_late_admission)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_plan_rejects_duplicates_wrong_version_and_partial_micro (test_jit_gae_cpu.MathTests.test_plan_rejects_duplicates_wrong_version_and_partial_micro)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_reverse_suffix_matches_full_gae_and_bootstrap (test_jit_gae_cpu.MathTests.test_reverse_suffix_matches_full_gae_and_bootstrap)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_replay_bypasses_inference_and_commits_only_selected (test_jit_gae_cpu.ReplayRuntimeTests.test_actual_replay_bypasses_inference_and_commits_only_selected)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_receipt_relabel_and_wrong_version_are_rejected_without_consumption (test_jit_gae_cpu.ReplayRuntimeTests.test_receipt_relabel_and_wrong_version_are_rejected_without_consumption)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_scheduler_never_forecasts_phantom_inference_refresh (test_jit_gae_cpu.ReplayRuntimeTests.test_scheduler_never_forecasts_phantom_inference_refresh)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_capture_hooks_keep_completed_step_and_selected_identities (test_jit_gae_cpu.RuntimeTests.test_actual_capture_hooks_keep_completed_step_and_selected_identities)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_configuration_does_not_silently_enable_or_disable_ema (test_jit_gae_cpu.RuntimeTests.test_configuration_does_not_silently_enable_or_disable_ema)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_failed_identity_and_active_dropout_fail_before_optimizer (test_jit_gae_cpu.RuntimeTests.test_failed_identity_and_active_dropout_fail_before_optimizer)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_fused_matches_separate_exact_update_and_actual_receipts (test_jit_gae_cpu.RuntimeTests.test_fused_matches_separate_exact_update_and_actual_receipts)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_initialized_ema_uses_one_selected_forward_and_frozen_statistics (test_jit_gae_cpu.RuntimeTests.test_initialized_ema_uses_one_selected_forward_and_frozen_statistics)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_nonfinite_and_mutating_buffer_stop_before_optimizer (test_jit_gae_cpu.RuntimeTests.test_nonfinite_and_mutating_buffer_stop_before_optimizer)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_skip_does_not_initialize_ema_or_emit_consumption_receipts (test_jit_gae_cpu.RuntimeTests.test_skip_does_not_initialize_ema_or_emit_consumption_receipts)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_value_only_warmup_still_records_real_advantages (test_jit_gae_cpu.RuntimeTests.test_value_only_warmup_still_records_real_advantages)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='admission_ctrl.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='admission_weaver_integrated_template.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='analyze_inference_contention.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='analyze_short_measurements.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='baseline_manifest.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='candidate_paths.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='capture_hooks.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='capture_telemetry.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='capture_training.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='checkpoint_evaluation.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='collective_phase_gate.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='cost_scheduler.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='cost_scheduler_runtime.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='cpu_sampler.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='critic_refresh_plan.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='cuda_ipc_weights.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='cycle_service_controller.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='deadline_guard.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='docs/cost_scheduler_design.md')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='docs/inventory_scheduler_design.md')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='docs/OPTIMIZATION_VALIDATION_PLAN.md')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='episode_frame_store.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='evaluation_threshold.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/cost_00_disabled.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/cost_01_fixed.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/cost_02_measured.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/cost_03_adaptive.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/ctrl_external.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/execution_01_adaptive.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/execution_02_block_trim.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/execution_03_dependency.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/execution_parent_cost_03.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_00_baseline.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_01_dense_signal.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_02_replay.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_03_seeds.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_04_real.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_ablate_real_only.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_ablate_replay_only.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/fresh_ablate_seeds_only.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/pipeline_lookahead_00_off.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/pipeline_lookahead_01_two_updates.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/weaver_external.template.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/weaver_frozen_external.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/weaver_integrated.template.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/weaver_integrated_internal.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='examples/weaver_integrated_optimized.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='execution_control.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='execution_gpu_probe.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='execution_parent_provenance.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fresh_config.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fresh_context.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fresh_policy_replay.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fresh_replay_pressure.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fresh_reward_targets.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fresh_seed_scheduler.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fresh_signal.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='FROZEN_POLICY_EVAL.md')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='frozen_policy_eval.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='fsdp_engine.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='gpu47_safety.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='initial_state_env.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='initial_state_scheduler.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='inspect_world_backend.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='installed_deepspeed_boundary_sources.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='inventory_lookahead.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='lineage_trace.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='memory_policy.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='nsight_capture.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='observed_cpu_prefetch.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='parallel_checkpoint.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='parent_provenance.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='pipeline_budget.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='pipeline_default.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='pipeline_imagination.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='pipeline_runtime.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='policy_backend_audit.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='policy_batch_receipts.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='policy_joint_batch_mode.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='policy_service_dispatch.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='profile_plan.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='ray_memory_config.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='README.md')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='replay_projection.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='request_stop.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='resident_cpu_fixture.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='reward_features.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='run.sh')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='run_cost_scheduled.sh')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='run_fresh.sh')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='run_inventory_scheduled.sh')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='runner.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='shared_inference.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='split_serial.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='telemetry.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_analyze_inference_contention_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_analyze_short_measurements.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_backend_controller_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_backend_topology_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_checkpoint_evaluation_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_collective_phase_gate_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_cost_scheduler_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_cost_scheduler_runtime_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_critic_refresh_plan_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_cycle_service_controller_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_deadline_guard.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_episode_frame_store_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_execution_control_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_budget_credit_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_checkpoint_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_contracts_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_native_reward_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_padding_backend_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_policy_replay_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_policy_runtime_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_publication_metadata_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_replay_pressure_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_reward_targets_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_fresh_seed_scheduler_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_frozen_controller_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_frozen_policy_eval_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_frozen_weaver_admission_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_frozen_weaver_runtime_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_initial_state_pipeline_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_initial_state_scheduler_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_inspect_world_backend_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_integrated_backend_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_integrated_main_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_integrated_semantics_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_inventory_lookahead_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_ipc_torch27_envelope_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_joint_candidate_invariants_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_lineage_trace_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_main_startup_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_manual_controller_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_manual_guard_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_manual_measurement_independence_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_manual_stop.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_memory_policy_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_observed_cpu_prefetch.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_online_controller_acceptance_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_online_world_controller_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_online_world_main_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_online_world_stream_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_pipeline_budget_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_pipeline_integration_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_pipeline_none_config_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_pipeline_producers_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_pluggable_main_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_policy_backend_audit_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_policy_batch_receipts_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_policy_joint_batch_mode_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_policy_service_dispatch_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_policy_zero2_gpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_probe_transaction_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_profile_plan_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_profiled_preflight_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_publication_metadata_float_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_ray_socket_path_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_replay_projection_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_reward_features_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_scheduler_backend_adapters_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_scheduler_review_regressions_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_scheduler_world_dispatch_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_short_preflight_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_snapshot_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_backend_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_cached_inference_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_feature_cache_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_integrated_reward_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_layout_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_online_bridge_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_online_cycle_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_online_engine_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_online_smoke_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_online_snapshot_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_optimization_admission_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_optimization_policy_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_optimized_backend_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_process_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_resident_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_resident_runtime_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_weaver_safety_batch_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_workflow_metadata_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_world_backend_audit_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_world_contracts_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_world_data_training_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_world_rollout_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='test_world_runtime_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='tests/fixtures/baseline_train.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='tests/fixtures/baseline_world_rollout.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='train.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='training_stop_policy.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='training_topology.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='validate_candidate_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='validate_cost_scheduler_candidate.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='validate_fresh_candidate.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='validate_pipeline_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='validate_pipeline_ray_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='validate_ray_telemetry_cpu.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='validate_scheduler_serialization.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_cached_inference.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_checkpoint.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_feature_cache.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_gpu_worker.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_inference_actor.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_native_reward.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_online_bridge.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_online_engine.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_online_gpu_worker.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_online_smoke.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_optimization_admission.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_optimizations.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_resident.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='weaver_subprocess.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='workflow_baseline.json')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backend_audit.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backend_runtime.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/__init__.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/contracts.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/data.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/libero.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/reward.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/rollout.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/runtime.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/service_plan.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/sparse_output.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_all_parent_files_remain_frozen (test_jit_parent_cpu.ParentTests.test_all_parent_files_remain_frozen) (file='world_backends/weaver.py')"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_jit_off_keeps_parent_sampling_targets_masks_age_and_use (test_jit_parent_cpu.ParentTests.test_jit_off_keeps_parent_sampling_targets_masks_age_and_use)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_disabled_capture_opens_no_former_or_late_windows (test_manual_controller_cpu.ManualControllerCPU.test_disabled_capture_opens_no_former_or_late_windows)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_manual_continues_beyond_fifteen_85_and_lr_horizon (test_manual_controller_cpu.ManualControllerCPU.test_manual_continues_beyond_fifteen_85_and_lr_horizon)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_polluted_environment_gets_exact_manual_contract (test_manual_controller_cpu.ManualControllerCPU.test_polluted_environment_gets_exact_manual_contract)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_trusted_or_untrusted_measurement_never_enables_injection_or_a_stop (test_manual_controller_cpu.ManualControllerCPU.test_trusted_or_untrusted_measurement_never_enables_injection_or_a_stop) (verified=True)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_trusted_or_untrusted_measurement_never_enables_injection_or_a_stop (test_manual_controller_cpu.ManualControllerCPU.test_trusted_or_untrusted_measurement_never_enables_injection_or_a_stop) (verified=False)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_disabled_service_nvtx_never_calls_torch_for_trusted_or_untrusted_environment (test_manual_measurement_independence_cpu.ManualMeasurementIndependenceCPU.test_disabled_service_nvtx_never_calls_torch_for_trusted_or_untrusted_environment) (verified=True)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_disabled_service_nvtx_never_calls_torch_for_trusted_or_untrusted_environment (test_manual_measurement_independence_cpu.ManualMeasurementIndependenceCPU.test_disabled_service_nvtx_never_calls_torch_for_trusted_or_untrusted_environment) (verified=False)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_inherited_collector_never_creates_stop_or_triggers_guard (test_manual_measurement_independence_cpu.ManualMeasurementIndependenceCPU.test_inherited_collector_never_creates_stop_or_triggers_guard) (verified=True)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_inherited_collector_never_creates_stop_or_triggers_guard (test_manual_measurement_independence_cpu.ManualMeasurementIndependenceCPU.test_inherited_collector_never_creates_stop_or_triggers_guard) (verified=False)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_no_window_timer_marker_or_writer_runs_even_at_old_selected_epochs (test_manual_measurement_independence_cpu.ManualMeasurementIndependenceCPU.test_no_window_timer_marker_or_writer_runs_even_at_old_selected_epochs) (verified=True)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_no_window_timer_marker_or_writer_runs_even_at_old_selected_epochs (test_manual_measurement_independence_cpu.ManualMeasurementIndependenceCPU.test_no_window_timer_marker_or_writer_runs_even_at_old_selected_epochs) (verified=False)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_memory_policy_cpu (unittest.loader._FailedTest.test_memory_policy_cpu)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_main_selects_loss_slots_from_the_configured_backend (test_metric_logging_cpu.MetricLoggingTests.test_main_selects_loss_slots_from_the_configured_backend)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_external_keeps24_and_real_reward_publication (test_pluggable_main_cpu.PluggableMain.test_external_keeps24_and_real_reward_publication)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_integrated_creates_16_models_and_four_replay_consumers (test_pluggable_main_cpu.PluggableMain.test_integrated_creates_16_models_and_four_replay_consumers)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_exact_timer_windows_override_inherited_profile_settings_without_stop_deadline (test_profiled_preflight_cpu.ProfiledManualTest.test_exact_timer_windows_override_inherited_profile_settings_without_stop_deadline)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_ray_socket_path_cpu (unittest.loader._FailedTest.test_ray_socket_path_cpu)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_reward_features_cpu (unittest.loader._FailedTest.test_reward_features_cpu)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_error_handler_skips_or_bounds_wait_without_running_controller (test_short_preflight_cpu.ShortPreflightTest.test_actual_error_handler_skips_or_bounds_wait_without_running_controller)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_cpu_helper_environment_and_call_sites_preserve_same_deadline (test_short_preflight_cpu.ShortPreflightTest.test_cpu_helper_environment_and_call_sites_preserve_same_deadline)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_deadline_window_requests_stop_and_keeps_fixed_plus900_limit (test_short_preflight_cpu.ShortPreflightTest.test_deadline_window_requests_stop_and_keeps_fixed_plus900_limit)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_environment_clears_pollution_and_sets_exact_short_contract (test_short_preflight_cpu.ShortPreflightTest.test_environment_clears_pollution_and_sets_exact_short_contract)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_fifteen_epoch_bound_and_deadline_use_existing_stop_policy (test_short_preflight_cpu.ShortPreflightTest.test_fifteen_epoch_bound_and_deadline_use_existing_stop_policy)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_stop_request_checks_uid_run_and_supervisor_birth_with_mocks (test_short_preflight_cpu.ShortPreflightTest.test_stop_request_checks_uid_run_and_supervisor_birth_with_mocks)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_replay_and_coordinator_shards_keep_trajectories_and_credit_units (test_trajectory_sampling_cpu.ActorTests.test_actual_replay_and_coordinator_shards_keep_trajectories_and_credit_units)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_incomplete_imagined_rank_rejected_without_shortened_gae (test_trajectory_sampling_cpu.BoundaryTests.test_incomplete_imagined_rank_rejected_without_shortened_gae)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_real_selected_chunk_still_depends_on_entire_original_suffix (test_trajectory_sampling_cpu.BoundaryTests.test_real_selected_chunk_still_depends_on_entire_original_suffix)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_terminal_never_forwards_endpoint_and_truncation_keeps_last_action (test_trajectory_sampling_cpu.BoundaryTests.test_terminal_never_forwards_endpoint_and_truncation_keeps_last_action)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_new_profile_changes_only_sampler_and_parent_remains_frozen (test_trajectory_sampling_cpu.ProfileTests.test_new_profile_changes_only_sampler_and_parent_remains_frozen)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_cpu_jit_two_windows_keep_all_targets_masks_and_ema_count (test_trajectory_sampling_cpu.RuntimeTests.test_actual_cpu_jit_two_windows_keep_all_targets_masks_and_ema_count)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_four_successes_then_no_fallback_and_context_not_consumed (test_trajectory_sampling_cpu.SamplingTests.test_four_successes_then_no_fallback_and_context_not_consumed)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_fragmented_chunks_are_neither_ready_nor_macro_supply (test_trajectory_sampling_cpu.SamplingTests.test_fragmented_chunks_are_neither_ready_nor_macro_supply)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_global_and_rank_quotas_intact_and_no_imagined_duplicate_context (test_trajectory_sampling_cpu.SamplingTests.test_global_and_rank_quotas_intact_and_no_imagined_duplicate_context)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_group_flow_one_remaining_use_requires_54_new_groups_for_two_updates (test_trajectory_sampling_cpu.SamplingTests.test_group_flow_one_remaining_use_requires_54_new_groups_for_two_updates)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_one_aged_member_excludes_whole_group_now_and_in_future (test_trajectory_sampling_cpu.SamplingTests.test_one_aged_member_excludes_whole_group_now_and_in_future)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_partial_commit_rejected_without_mutation_cancel_releases (test_trajectory_sampling_cpu.SamplingTests.test_partial_commit_rejected_without_mutation_cancel_releases)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_real_sampling_exact_same_first_uniform_draw (test_trajectory_sampling_cpu.SamplingTests.test_real_sampling_exact_same_first_uniform_draw)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_wrong_geometry_and_config_fail_before_mutation (test_trajectory_sampling_cpu.SamplingTests.test_wrong_geometry_and_config_fail_before_mutation)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_online_evaluation_emits_observed_versions_and_result (test_visualization_cpu.RecorderTests.test_actual_online_evaluation_emits_observed_versions_and_result)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_weaver_backend_cpu (unittest.loader._FailedTest.test_weaver_backend_cpu)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "setUpClass (test_weaver_cached_inference_cpu.NativeCacheTests)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "setUpClass (test_weaver_cached_inference_cpu.NativeSD3DecodeTests)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_full_size_native_rm_count_and_20_state_keys (test_weaver_integrated_reward_cpu.NativeReward.test_actual_full_size_native_rm_count_and_20_state_keys)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_native_class_link_half_brier_exact_and_state_names_unchanged (test_weaver_integrated_reward_cpu.NativeReward.test_actual_native_class_link_half_brier_exact_and_state_names_unchanged)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_actual_native_forward_rm_loss_detaches_world_and_critic (test_weaver_integrated_reward_cpu.NativeReward.test_actual_native_forward_rm_loss_detaches_world_and_critic)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_missing_class_skips_rm_adam_momentum_and_decay_but_world_continues (test_weaver_integrated_reward_cpu.NativeReward.test_missing_class_skips_rm_adam_momentum_and_decay_but_world_continues)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_real_consumed_class_counts_must_match_cohort_before_optimizer (test_weaver_integrated_reward_cpu.NativeReward.test_real_consumed_class_counts_must_match_cohort_before_optimizer)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_weaver_layout_cpu (unittest.loader._FailedTest.test_weaver_layout_cpu)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_four_real_native_bridges_p1_to6_sample_use_commit_ack_and_next_inference (test_weaver_online_cycle_cpu.WholeCycle.test_four_real_native_bridges_p1_to6_sample_use_commit_ack_and_next_inference)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_accumulated_native_gradient_matches_reference_full_batch_adam (test_weaver_online_engine_cpu.NativeEngine.test_accumulated_native_gradient_matches_reference_full_batch_adam)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_native_flow_updates_world_only_and_exact_micro_boundaries (test_weaver_online_engine_cpu.NativeEngine.test_native_flow_updates_world_only_and_exact_micro_boundaries)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_nonfinite_loss_has_no_optimizer_commit (test_weaver_online_engine_cpu.NativeEngine.test_nonfinite_loss_has_no_optimizer_commit)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_publication_hold_and_wrong_schedule_fail_before_learning (test_weaver_online_engine_cpu.NativeEngine.test_publication_hold_and_wrong_schedule_fail_before_learning)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_warmup_matches_actual_offline_lambdalr_then_remains_constant (test_weaver_online_engine_cpu.NativeEngine.test_warmup_matches_actual_offline_lambdalr_then_remains_constant)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_weaver_optimized_backend_cpu (unittest.loader._FailedTest.test_weaver_optimized_backend_cpu)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_nan_gradient_never_commits (test_weaver_safety_batch_cpu.BatchedSafetyTests.test_nan_gradient_never_commits)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_no_grad_parameters_are_skipped_without_skipping_other_elements (test_weaver_safety_batch_cpu.BatchedSafetyTests.test_no_grad_parameters_are_skipped_without_skipping_other_elements)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_nonfinite_post_step_weights_forbid_publication_counter (test_weaver_safety_batch_cpu.BatchedSafetyTests.test_nonfinite_post_step_weights_forbid_publication_counter)"
+      },
+      {
+        "kind": "ERROR",
+        "test": "test_same_actual_adam_update (test_weaver_safety_batch_cpu.BatchedSafetyTests.test_same_actual_adam_update)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_mismatched_pair_fails_new_grants_but_active_group_drains (test_cycle_parallel_cpu.ConcurrentAdmissionTests.test_mismatched_pair_fails_new_grants_but_active_group_drains)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_publication_rejects_training_without_partial_grant (test_cycle_parallel_cpu.ConcurrentAdmissionTests.test_publication_rejects_training_without_partial_grant)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_two_gangs_cannot_silently_consume_all_inference_lanes (test_cycle_parallel_cpu.ConcurrentAdmissionTests.test_two_gangs_cannot_silently_consume_all_inference_lanes)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_authority_revision_and_version_must_match (test_execution_control_cpu.ParentBudgetTests.test_authority_revision_and_version_must_match)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_classes_share_one_parent_account_and_preserve_progress (test_execution_control_cpu.ParentBudgetTests.test_classes_share_one_parent_account_and_preserve_progress)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_paused_zero_production_is_not_fitted_as_service_speed (test_execution_control_cpu.ParentBudgetTests.test_paused_zero_production_is_not_fitted_as_service_speed)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_actual_driver_starts_and_stops_feedback_and_freezes_config (test_inventory_lookahead_cpu.ForecastTests.test_actual_driver_starts_and_stops_feedback_and_freezes_config)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_learning_files_and_off_on_profiles_match_frozen_parent (test_inventory_lookahead_cpu.ForecastTests.test_learning_files_and_off_on_profiles_match_frozen_parent) (file='weaver_online_engine.py')"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_five_core_methods_and_inference_classes_match_parent (test_joint_candidate_invariants_cpu.Invariants.test_five_core_methods_and_inference_classes_match_parent)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_manual_controller_has_uncapped_final_receipt_audit_and_bounded_live_tail (test_joint_candidate_invariants_cpu.Invariants.test_manual_controller_has_uncapped_final_receipt_audit_and_bounded_live_tail)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_mode_hook_wraps_whole_policy_phase_outside_learning (test_joint_candidate_invariants_cpu.Invariants.test_mode_hook_wraps_whole_policy_phase_outside_learning)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_six_workflow_metadata_tags_are_preserved (test_joint_candidate_invariants_cpu.Invariants.test_six_workflow_metadata_tags_are_preserved)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_world_reward_recipe_inference_and_launcher_bytes_match_parent (test_joint_candidate_invariants_cpu.Invariants.test_world_reward_recipe_inference_and_launcher_bytes_match_parent)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_policy_value_gae_ctrl_loss_and_real_eval_bodies_preserved (test_pluggable_main_cpu.PluggableMain.test_policy_value_gae_ctrl_loss_and_real_eval_bodies_preserved)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_exact_frozen_launcher_configuration_reaches_actual_audit_entry (test_policy_backend_audit_cpu.BackendAuditTest.test_exact_frozen_launcher_configuration_reaches_actual_audit_entry)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_collect_and_state_record_requested_and_actual_measurement_configuration (test_profiled_preflight_cpu.ProfiledManualTest.test_collect_and_state_record_requested_and_actual_measurement_configuration)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_metadata_requests_two_windows_without_claiming_hardware_metrics (test_profiled_preflight_cpu.ProfiledManualTest.test_metadata_requests_two_windows_without_claiming_hardware_metrics)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_training_child_stays_bash_and_report_describes_limited_windows (test_profiled_preflight_cpu.ProfiledManualTest.test_training_child_stays_bash_and_report_describes_limited_windows)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_collect_reports_bounded_contract_without_database (test_short_preflight_cpu.ShortPreflightTest.test_collect_reports_bounded_contract_without_database)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_deadline_is_required_integer_without_importing_safety (test_short_preflight_cpu.ShortPreflightTest.test_deadline_is_required_integer_without_importing_safety)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_error_wait_budget_cannot_extend_save_limit (test_short_preflight_cpu.ShortPreflightTest.test_error_wait_budget_cannot_extend_save_limit)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_guard_deadline_and_heartbeat_error_graces (test_short_preflight_cpu.ShortPreflightTest.test_guard_deadline_and_heartbeat_error_graces)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_mode_gate_and_receipts_statically_without_calling_run_or_preflight (test_short_preflight_cpu.ShortPreflightTest.test_mode_gate_and_receipts_statically_without_calling_run_or_preflight)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_actual_sd3_encoder_forward_class_with_cpu_vae_double (test_weaver_feature_cache_cpu.ActualTensorFeatureTests.test_actual_sd3_encoder_forward_class_with_cpu_vae_double)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_pinned_encoder_mode_not_stochastic_sample (test_weaver_feature_cache_cpu.ActualTensorFeatureTests.test_pinned_encoder_mode_not_stochastic_sample)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_no_new_wait_sync_rng_or_model_operations_in_hook_patch (test_workflow_metadata_cpu.WorkflowTests.test_no_new_wait_sync_rng_or_model_operations_in_hook_patch)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_removing_six_metadata_kwargs_restores_the_worker_method_AST (test_workflow_metadata_cpu.WorkflowTests.test_removing_six_metadata_kwargs_restores_the_worker_method_AST)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_exact_launcher_reaches_actual_setup_and_controller_acceptance (test_world_backend_audit_cpu.WorldBackendAuditTest.test_exact_launcher_reaches_actual_setup_and_controller_acceptance)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_missing_duplicate_cross_rank_or_stale_receipts_fail (test_world_backend_audit_cpu.WorldBackendAuditTest.test_missing_duplicate_cross_rank_or_stale_receipts_fail)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_policy8_and_reward16_recipe_kept (test_world_backend_audit_cpu.WorldBackendAuditTest.test_policy8_and_reward16_recipe_kept)"
+      },
+      {
+        "kind": "FAIL",
+        "test": "test_real_controller_acceptance_entry_checks_world_receipts (test_world_backend_audit_cpu.WorldBackendAuditTest.test_real_controller_acceptance_entry_checks_world_receipts)"
+      }
+    ]
+  },
+  "independent_review": "approved; no remaining critical or important findings",
+  "gpu_validation": {
+    "executed": false,
+    "measured_speedup": null,
+    "memory_prediction": "heuristic with reserve; not an OOM guarantee"
+  },
+  "active_experiment": "not interrupted or changed; pinned runtime remains on baseline commit"
+}

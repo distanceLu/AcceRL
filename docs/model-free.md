@@ -95,6 +95,27 @@ TensorBoard 使用 `FixedValidation/Success_Rate`、`Success_Count`、`Budget_En
 
 固定验证及排空阶段有独立时限；runner仅在本次run的有效时限内暂停优化器更新看门狗。自动结束仍必须通过完整四rank更新计数、Replay曝光账、最终权重CPU审计和进程清理。原站结束后的独立初始/最终checkpoint对比评测保持原协议，它与训练中50例greedy验证分别记录。
 
+## 显存感知的 batch 校准（默认关闭）
+
+在新实验中显式加入 `--batch-autotune`：
+
+```bash
+cd /mnt/data/lcx1/dong/WEAVER
+./run.sh original --model-free --batch-autotune --id model-free-batch-tuned
+```
+
+这个开关只接受 model-free、常驻在线 Eval0。未提供开关时仍使用训练 micro8/GAS18 和原来的同步 critic micro2；开关不会改变已经运行的固定源码实验。启动仍须同步并核对同一 GitHub 分支，实验记录、runner状态和实际命令均冻结 `batch_autotune` 与 `git_commit`。
+
+校准使用新实验前期的正常训练更新，不会额外抽取一批 Replay 数据做隐藏更新。先比较 critic 刷新 batch2/4/8，选定后重新测训练 micro8 的基准，再比较 micro16/GAS9、micro24/GAS6；全部配置保持四卡 global576、每卡 local144。每个候选窗口包含6次完整更新，首轮用于预热，其余测量取中位数；无跳过时共36次更新，之后固定选择。预算、人工停止或固定验证平台期依然可以提前结束实验。
+
+每次放大前，统一检查四张卡的预计峰值，预留 `max(显存总量的15%, 8 GiB)`，对观测到的激活增量使用1.25倍系数；没有有效测量或预计空间不足时跳过候选。这个预测不能证明下一批一定不会 OOM，不在某个分布式 rank 内捕获 OOM 后擅自减 batch 重跑。
+
+刷新耗时按观测数量归一化，训练耗时按固定576个样本的一次更新计算；另记录获准更新后至权重发布完成的耗时（包含刷新、训练、发布，不含等待 Replay 补货及固定验证）。端到端收益仍需结合原有采集速度和总墙钟记录比较。候选还要通过真实动作推理延迟约束；达到显存上限并不是选择目标。训练 loss 保留原来连续8个样本一组的有效动作归一化权重，再合并成更大的 micro，以避免部分动作 chunk 改变隐含样本权重。浮点计算和随机算子的执行顺序仍可能不同，不能承诺逐位一致。
+
+开启后 critic 使用按 chunk 让出执行机会的刷新端点，保持同一个已发布 Policy 版本与观测顺序。真实 rollout 仍然是一卡一个worker，动作推理上限不会因为这个开关自动增加；固定验证保持原来的50例、greedy、batch1、EGL和220动作上限，不纳入校准。
+
+配置选择、显存保护与跳过原因通过 `BatchAutotune` 遥测、TensorBoard以及实验内JSON记录。CPU测试能够验证边界、权重计算和参数传递；真实GPU上的显存峰值、四卡ZeRO行为和提速幅度仍需要首次开启后的实验测量。
+
 ## 验证范围
 
 CPU 测试覆盖开关与旧模式回归、真实采集/150步失败、真实数据独立成批、当前Value GAE、四rank分片、四卡映射、Eval0/4、TensorBoard筛选、预算并发、Policy-only保存/读取/最终审计，以及受管/可移植启动参数传递。实际 GPU 模型加载、EGL上下文、首个 NCCL/ZeRO 更新和长训吞吐仍需新实验验收；本次不占用现有训练资源。

@@ -5,6 +5,9 @@ driver loop, including ordinary step five, metrics, publication and final stop.
 It does not construct models, launch Ray, access a simulator or use a GPU.
 """
 from types import SimpleNamespace
+from pathlib import Path
+import json
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -35,8 +38,17 @@ class SixEpochStopPolicy(startup.Policy):
 
 class ModelFreeDriverLoop(unittest.TestCase):
     def test_six_epochs_log_publish_save_and_stop_without_world_owners(self):
+        self.run_loop(autotune=False)
+
+    def test_enabled_autotune_configures_all_ranks_and_records_a_real_window(self):
+        self.run_loop(autotune=True)
+
+    def run_loop(self, *, autotune):
         context = startup.Context()
         namespace = context.namespace()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        namespace['os'].environ['ACCERL_DATA_DIR'] = temporary.name
         namespace.update(TrainingStopPolicy=SixEpochStopPolicy, np=np,
                          combine_wm_metrics=combine_wm_metrics, epoch_groups=epoch_groups,
                          # Real shard identities are covered by resource tests;
@@ -61,9 +73,25 @@ class ModelFreeDriverLoop(unittest.TestCase):
         original = startup.Actor.call
 
         def call(actor, method, args, kwargs):
+            if method == 'configure_batch_autotune':
+                actor.autotune_choice = args
+                context.actions.append(('autotune_configure',actor.name,actor.rank,args))
+                if actor.name == 'ReplayBufferActor':return args[0]
+                key='micro' if actor.name == 'TrainerActor' else 'refresh_micro'
+                return dict(rank=actor.rank,policy_step=args[0],**{key:args[1]})
+            if method == 'get_batch_autotune_stats':
+                step,micro=actor.autotune_choice
+                self.assertEqual(step,args[0])
+                memory=dict(total_bytes=140*2**30,peak_used_bytes=70*2**30,activation_bytes=10*2**30)
+                if actor.name == 'TrainerActor':
+                    return dict(rank=actor.rank,policy_step=step,micro=micro,train_seconds=40.,memory=memory)
+                return dict(rank=actor.rank,policy_step=step,refresh_micro=micro,refresh_seconds=20.,
+                            refresh_observations=100,action_latencies=[.1,.3],memory=memory)
             if method in ('configure_fresh', 'set_fresh_versions', 'set_fresh_replay_versions', 'stop_pipeline'):
                 return True
             if method == 'run_training_epoch':
+                if autotune:
+                    self.assertEqual(actor.autotune_choice,(args[0],8))
                 actor.step = args[0]
                 return ResultRef((0., 0., 0., 0., 0., {'policy': 1e-5, 'value': 1e-4},
                                   actor.step, 0., 0., {'policy_sample_time': 0.,
@@ -89,7 +117,8 @@ class ModelFreeDriverLoop(unittest.TestCase):
                     'hash': 'a' * 64, 'bytes': 64, 'tensor_count': 1}
 
         args = startup.arguments(overrides=('--model-free', '--num-eval-workers', '0',
-                                             '--fixed-validation-interval-env-steps', '0'))
+                                             '--fixed-validation-interval-env-steps', '0')
+                                            + (('--batch-autotune',) if autotune else ()))
         args.log_interval_seconds = -1  # Exercise logging on every completed epoch.
         args.pipeline_config = startup.HERE.parent/'recipe/pipeline_config.json'
         with patch.object(startup.Actor, 'call', call), patch.object(startup.Actor, 'inventory', inventory), \
@@ -116,6 +145,16 @@ class ModelFreeDriverLoop(unittest.TestCase):
         for tag in ('Loss/Policy', 'Loss/Value', 'Rollout/_Global/Success_Rate'):
             self.assertEqual([row[0][2] for row in scalars if row[0][0] == tag], list(range(1, 7)))
         self.assertTrue(context.summaries[0].closed)
+        observations=[fields['details'] for kind,fields in events if kind == 'batch_autotune_observation']
+        if autotune:
+            self.assertEqual([x['policy_step'] for x in observations],list(range(1,7)))
+            record=json.loads((Path(temporary.name)/'batch_autotune.json').read_text())
+            self.assertEqual(record['decision']['next'],{'train_micro':8,'refresh_micro':4})
+            self.assertEqual(record['decision']['window']['measured_updates'],5)
+            configurations=[x for x in context.actions if x[0]=='autotune_configure']
+            self.assertEqual(len(configurations),6*9)  # Four trainers, four infer, one Replay per update.
+        else:
+            self.assertEqual(observations,[])
 
 
 if __name__ == '__main__':

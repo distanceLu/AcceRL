@@ -136,6 +136,14 @@ def mode_options(model_free=False, num_eval_workers=None):
     return dict(model_free=bool(model_free), num_eval_workers=count)
 
 
+def batch_autotune_options(model_free=False, num_eval_workers=None, batch_autotune=False):
+    require(type(batch_autotune) is bool, 'batch autotune must be bool')
+    count = mode_options(model_free, num_eval_workers)['num_eval_workers']
+    require(not batch_autotune or (model_free and count == 0),
+            'batch autotune requires --model-free and --num-eval-workers 0')
+    return batch_autotune
+
+
 FIXED_VALIDATION_DEFAULTS = dict(interval_env_steps=100000, patience=3,
                                  min_env_steps=300000, min_delta_successes=1)
 
@@ -172,8 +180,9 @@ def fixed_validation_arguments(config):
             for part in ('--fixed-validation-'+key.replace('_','-'),str(value))]
 
 
-def training_arguments(values, *, model_free=False, num_eval_workers=None, template=None, fixed_validation=None):
+def training_arguments(values, *, model_free=False, num_eval_workers=None, template=None, fixed_validation=None, batch_autotune=False):
     options = mode_options(model_free, num_eval_workers)
+    batch_autotune_options(model_free, num_eval_workers, batch_autotune)
     validation = fixed_validation_options(model_free,num_eval_workers,fixed_validation)
     argv = expand(read(RECIPE/'argv.json') if template is None else template, values)
     changes = {}
@@ -199,6 +208,8 @@ def training_arguments(values, *, model_free=False, num_eval_workers=None, templ
     if model_free:
         result.append('--model-free')
     result += fixed_validation_arguments(validation)
+    if batch_autotune:
+        result.append('--batch-autotune')
     return result
 
 
@@ -216,16 +227,17 @@ def exec_managed_driver(overrides=()):
     options=argparse.ArgumentParser(add_help=False)
     options.add_argument('--model-free',action='store_true')
     options.add_argument('--num-eval-workers',type=int)
+    options.add_argument('--batch-autotune',action='store_true')
     add_fixed_validation_arguments(options)
     selected,other=options.parse_known_args(overrides)
     values=dict(settings(), ids="4,5,6,7", world=os.environ.get("ACCERL_WORLD_BACKEND_CONFIG",''),
                 pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
     argv=training_arguments(values,model_free=selected.model_free,num_eval_workers=selected.num_eval_workers,
-                            fixed_validation=fixed_validation_overrides(selected)) + other
+                            fixed_validation=fixed_validation_overrides(selected),batch_autotune=selected.batch_autotune) + other
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
-    env.update(ACCERL_MODEL_FREE=str(int(selected.model_free)),
+    env.update(ACCERL_BATCH_AUTOTUNE=str(int(selected.batch_autotune)),ACCERL_MODEL_FREE=str(int(selected.model_free)),
                ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
     if selected.model_free:
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
@@ -235,7 +247,8 @@ def exec_managed_driver(overrides=()):
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 
-def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None):
+def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False):
+    batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
     required=('policy','distilled') if model_free else host.keys()
@@ -251,7 +264,7 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
         put(Path(values['pipeline']),effective_pipeline(True))
     else:
         put(work/"world.json", expand(read(RECIPE/"world_backend_config.json"),values))
-    argv=training_arguments(values,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation)
+    argv=training_arguments(values,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune)
     env={k:v for k,v in os.environ.items() if not k.startswith(("ACCERL_","ACCE_CAPTURE_","NSYS_","CUDA_INJECTION","NVTX_INJECTION","EXPERIMENT_QUEUE_"))}
     for key in ("RAY_ADDRESS","SOFT_STOP_AT","MEASURE_STOP_AFTER_EPOCHS","SHORT_TEST_DEADLINE",
                 "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE","CUDA_MPS_PINNED_DEVICE_MEM_LIMIT","CUDA_MPS_CLIENT_PRIORITY"):
@@ -279,7 +292,7 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
                ACCERL_PIPELINE_CONFIG=values["pipeline"],ACCERL_WORLD_BACKEND_CONFIG=values["world"],
                ACCERL_COST_SCHEDULER_CONFIG=str(RECIPE/"cost_scheduler_config.json"),
                ACCERL_RAY_TMP=f"/dev/shm/wr_{os.getuid()}_{uuid.uuid4().hex[:10]}",ACCERL_RAY_SPILL=str(work/"ray_spill"))
-    env.update(ACCERL_MODEL_FREE=str(int(model_free)),ACCERL_NUM_EVAL_WORKERS=str(mode_options(model_free,num_eval_workers)['num_eval_workers']))
+    env.update(ACCERL_BATCH_AUTOTUNE=str(int(batch_autotune)),ACCERL_MODEL_FREE=str(int(model_free)),ACCERL_NUM_EVAL_WORKERS=str(mode_options(model_free,num_eval_workers)['num_eval_workers']))
     if model_free:
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
@@ -385,11 +398,13 @@ def main():
     parser.add_argument("--port",type=int,default=8765,help="Loopback viewer port (view only)")
     parser.add_argument("--model-free",action="store_true")
     parser.add_argument("--num-eval-workers",type=int)
+    parser.add_argument("--batch-autotune",action="store_true")
     add_fixed_validation_arguments(parser)
     args=parser.parse_args()
     selected=mode_options(args.model_free,args.num_eval_workers)
+    selected['batch_autotune']=batch_autotune_options(args.model_free,args.num_eval_workers,args.batch_autotune)
     validation=fixed_validation_options(args.model_free,args.num_eval_workers,fixed_validation_overrides(args))
-    require(args.action in ("original","restore","start","check") or (not args.model_free and args.num_eval_workers is None),"Training mode options are only for start/check")
+    require(args.action in ("original","restore","start","check") or (not args.model_free and args.num_eval_workers is None and not args.batch_autotune),"Training mode options are only for start/check")
     host=socket.gethostname()==REFERENCE_SERVER
     if args.action=='view':
         sys.path.insert(0,str(ENGINE))
@@ -407,12 +422,12 @@ def main():
     if host and args.action!="check":
         op="original" if args.action in ("original","restore","start") else args.action
         cli=HERE/"reference_site/cli.py"
-        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else []),*fixed_validation_arguments(validation)])
+        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else []),*fixed_validation_arguments(validation),*(['--batch-autotune'] if args.batch_autotune else [])])
     require(not args.action.startswith('diagnose'),'This saved-checkpoint diagnostic uses the reference site queue and assets')
     if args.action=="check":
         with tempfile.TemporaryDirectory(prefix="weaver-check-") as d:
             ids,_=allocated(True)
-            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check",model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation)
+            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check",model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune)
             check(Path(d),cmd,env,paths)
         print("CHECK PASSED: Policy assets, actual parsed training arguments and CPU environment."
               if args.model_free else "CHECK PASSED: clone imports, actual parsed training arguments, native bundle and CPU environment.")
@@ -437,7 +452,7 @@ def main():
     run_id="weaverintegrated_"+label
     put(work/"status.json",dict(state="checking",run_id=run_id))
     try:
-        cmd,env,paths=prepare(work,ids,run_id,model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation)
+        cmd,env,paths=prepare(work,ids,run_id,model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune)
         check(work,cmd,env,paths)
         mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
         # Advisory locks only for this user's explicitly allocated GPUs. Keep through exit.

@@ -257,12 +257,15 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
         raise ValueError('Source/root paths must be canonical and not symlinks')
     evidence = verify_git(source, git_commit)
+    sys.path.insert(0,str(source.parent))
+    from launch import batch_autotune_options
+    batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     scheduler = None if model_free else validate_cost_scheduler_admission(source)
     # This module is CPU-only, and its bytes have just been verified.
     paths = runpy.run_path(str(source / 'candidate_paths.py'))
@@ -284,7 +287,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
         with tempfile.TemporaryDirectory(dir=root,prefix='.policy-admission-') as temp:
             work=Path(temp)
             command,environment,resources=prepare(work,['4','5','6','7'],'weaverintegrated_cpu_check',
-                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation)
+                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune)
             check(work,command,environment,resources)
     else:
         backend = read_json(root / BACKEND_CONFIG)
@@ -303,10 +306,10 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     return {**evidence, 'source': str(source), 'experiment_root': str(root),
             'backend': backend, 'mps_receipt_sha256': hashlib.sha256(mps_path.read_bytes()).hexdigest(),
             'world_admission': admission, 'cost_scheduler': scheduler, 'mps_boot_id': authorization['boot_id'],
-            'gpu_access_performed': False,'model_free':model_free,'num_eval_workers':num_eval_workers}
+            'gpu_access_performed': False,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -322,6 +325,7 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
                ACCERL_PIPELINE_CONFIG=str(source / PIPELINE_CONFIG),
                PYTHONUNBUFFERED='1', PYTHONDONTWRITEBYTECODE='1',
                OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+    env['ACCERL_BATCH_AUTOTUNE']=str(int(batch_autotune))
     env['ACCERL_MODEL_FREE']=str(int(model_free))
     if model_free or num_eval_workers is not None:
         env['ACCERL_NUM_EVAL_WORKERS']=str((0 if model_free else 3) if num_eval_workers is None else num_eval_workers)
@@ -331,8 +335,10 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False):
     if model_free is not None:
+        if state.get('batch_autotune',False) != batch_autotune:
+            raise ValueError('Runner batch autotune mode differs from queued arguments')
         expected_count=(0 if model_free else 3) if num_eval_workers is None else num_eval_workers
         if state.get('model_free',False)!=model_free or state.get('num_eval_workers',3)!=expected_count:
             raise ValueError('Runner model-free/Eval mode differs from queued arguments')
@@ -867,16 +873,19 @@ def runner_command(args):
     if count is not None:
         command += ['--num-eval-workers',str(count)]
     sys.path.insert(0,str(args.source.parent))
-    from launch import fixed_validation_options, fixed_validation_overrides, fixed_validation_arguments
+    from launch import fixed_validation_options, fixed_validation_overrides, fixed_validation_arguments, batch_autotune_options
     command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args)))
+    if batch_autotune_options(model_free,count,getattr(args,'batch_autotune',False)):
+        command += ['--batch-autotune']
     return command
 
 
 def mode_kwargs(args):
     sys.path.insert(0,str(args.source.parent))
-    from launch import fixed_validation_options, fixed_validation_overrides
+    from launch import fixed_validation_options, fixed_validation_overrides, batch_autotune_options
     selected=dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
     selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args))
+    selected['batch_autotune']=batch_autotune_options(selected['model_free'],selected['num_eval_workers'],getattr(args,'batch_autotune',False))
     return selected
 
 
@@ -1102,6 +1111,7 @@ def main():
     parser.add_argument('--native-gpu-preflight', action='store_true')
     parser.add_argument('--model-free',action='store_true')
     parser.add_argument('--num-eval-workers',type=int)
+    parser.add_argument('--batch-autotune',action='store_true')
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
     from launch import add_fixed_validation_arguments
     add_fixed_validation_arguments(parser)

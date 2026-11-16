@@ -126,6 +126,7 @@ def collect(data, state):
     result['model_free']=state.get('model_free',False)
     result['num_eval_workers']=state.get('num_eval_workers',3)
     result['fixed_validation_config']=state.get('fixed_validation_config')
+    result['batch_autotune']=state.get('batch_autotune',False)
     activity=data/'training/fixed_validation_activity.json'
     if activity.exists():
         result['fixed_validation_activity']=json.loads(activity.read_text())
@@ -247,6 +248,8 @@ def report(data, state):
                     '每25次Policy更新保存weights；Policy100、Value100预热，使用真实环境奖励和当前Value GAE。',
                     '在线Eval workers='+str(state.get('num_eval_workers',0))+'；固定验证配置='+str(state.get('fixed_validation_config'))+'。',
                     '真实预算1000000步，训练150动作，评测220动作；双图像、无proprio、GIPO，cost scheduler关闭。']
+        if state.get('batch_autotune'):
+            lines[3]='Real4 / Imag0，Policy 四卡 ZeRO2 global576；前期按六更新窗口校准 refresh batch 与训练 micro/GAS，之后冻结。实际配置见 BatchAutotune 遥测。'
         lines += ['', '预算耗尽或固定验证平台期可自动结束；停止证据、最终权重与清理均须验收。']
     for key in ('error', 'checkpoint_cpu_audit', 'sampled_gpu_peaks', 'cleanup'):
         if key in state:
@@ -312,6 +315,7 @@ def formal_environment(state, data, pre):
     if state.get('experiment_root'):
         env['ACCERL_EXPERIMENT_ROOT'] = state['experiment_root']
     env.update(cost_scheduler_environment_configuration(state, data))
+    env['ACCERL_BATCH_AUTOTUNE']=str(int(state.get('batch_autotune',False)))
     if state.get('model_free'):
         env['ACCERL_MODEL_FREE']='1'
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
@@ -345,7 +349,7 @@ def enforce_stop_window(data, state, child, now=None):
         raise SaveGraceExpired('Manual-stop GPU save grace of900seconds expired')
 
 
-def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None):
+def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False):
     if mode != 'manual' or stop_on_target:
         raise RuntimeError('This source only permits a fresh manual-stop formal run')
     if data.resolve() != (safe.MASTER/'formal_v3').resolve():
@@ -364,8 +368,9 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
         online_world_identity(config)
     from pipeline_budget import PipelineBudgetConfig
     from model_free_mode import pipeline_configuration
-    from launch import mode_options, fixed_validation_options, fixed_validation_arguments
+    from launch import mode_options, fixed_validation_options, fixed_validation_arguments, batch_autotune_options
     selected=mode_options(model_free,num_eval_workers)
+    selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     validation=fixed_validation_options(model_free,num_eval_workers,fixed_validation)
     budget = pipeline_configuration(SimpleNamespace(model_free=model_free,pipeline_config=pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG')))
     if os.getuid()!=1004:
@@ -389,6 +394,9 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
                                     'joint_interval':5,'global_batch':576,'local_batch':144}
     if model_free:
         state['policy_batch_schedule'].update(joint_micro_GAS=None,joint_interval=None)
+    if batch_autotune:
+        state['policy_batch_schedule'].update(autotune=True,candidates_micro_GAS=[[8,18],[16,9],[24,6]],
+            critic_refresh_candidates=[2,4,8],window_updates=6)
     state['warmup_steps']={'policy':100,'value':100,'ctrl':20,'reward':20}
     state['world_backend_config'] = config.to_dict()
     state['service_plan'] = plan.to_dict()
@@ -409,7 +417,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation)
+            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else [])
             child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),*launch_args],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
@@ -450,7 +458,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
                     flag=observe_stop_request(data,state)
                     result['policy_batch_mode_validation']=validate_policy_batch_modes_from_db(
                         data/'training/collection.sqlite', run_id=state['run_id'],
-                        steps=result.get('training',{}).get('policy',{}).get('global_updates',0),model_free=model_free)
+                        steps=result.get('training',{}).get('policy',{}).get('global_updates',0),model_free=model_free,autotune=batch_autotune)
                     state['policy_batch_mode_validation']=result['policy_batch_mode_validation']
                     if plan.world_trainable:
                         if plan.backend == 'weaver' and state.get('world_backend_config',{}).get('backend_options',{}).get('transport') == 'isolated_online_ddp':
@@ -657,6 +665,8 @@ def validate_manual_completion(result, state, flag, *, automatic=False):
             if cohort.get('wm_consumers') != ['ctrl'] or cohort.get('expected_wm_consumers') != 4:
                 raise RuntimeError('Integrated World cohort must confirm exactly four consumers')
     dynamic=result.get('policy_batch_mode_validation',{})
+    if dynamic.get('autotune',False) is not state.get('batch_autotune',False):
+        raise RuntimeError('Policy batch autotune receipts differ from the frozen launch mode')
     if (dynamic.get('valid') is not True or dynamic.get('run_id')!=state['run_id']
         or dynamic.get('steps')!=steps['policy'] or dynamic.get('mode_receipts')!=8*steps['policy']
         or dynamic.get('global_exposures')!=576*steps['policy']):
@@ -678,6 +688,7 @@ if __name__ == '__main__':
     a.add_argument('--cost-scheduler-config', type=Path)
     a.add_argument('--model-free',action='store_true')
     a.add_argument('--num-eval-workers',type=int)
+    a.add_argument('--batch-autotune',action='store_true')
     from launch import add_fixed_validation_arguments, fixed_validation_overrides
     add_fixed_validation_arguments(a)
     args = a.parse_args()
@@ -688,4 +699,4 @@ if __name__ == '__main__':
     elif args.mode == 'sample':
         safe.sample(args.data, args.run_id)
     else:
-        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args))
+        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune)

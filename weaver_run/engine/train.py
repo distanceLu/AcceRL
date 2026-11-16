@@ -443,9 +443,13 @@ def parse_args():
 
     parser.add_argument('--model-free', action='store_true',
                         help='Train Policy from real environment data only; no World/RM/imagined data')
+    parser.add_argument('--batch-autotune', action='store_true',
+                        help='Calibrate model-free refresh and training batches in finite early update windows')
     args = parser.parse_args()
     from model_free_mode import configure_training_mode
     model_free = configure_training_mode(args)
+    if args.batch_autotune and (not model_free or args.num_eval_workers != 0):
+        raise ValueError('--batch-autotune requires --model-free with online Eval0')
     world_config = load_backend_config(args)
     world_config.validate_admission()
     validate_online_schema(world_config, ACTION_DIM)
@@ -712,6 +716,15 @@ class ReplayBufferActor:
         self.fresh_refresh_prune = dependency_pruning_enabled()
         self.fresh_refresh_micro = 2
 
+    def configure_batch_autotune(self, policy_step):
+        if (not self.fresh_enabled or not self.fresh_config.real_only
+                or getattr(self, 'cost_scheduler_enabled', False)
+                or type(policy_step) is not int or policy_step != self.fresh_store.versions[0]+1
+                or getattr(self, '_model_free_admission', None) is None):
+            raise ValueError('Autotuned Replay requires an admitted model-free cohort at the next version')
+        self._autobatch_policy_step = policy_step
+        return policy_step
+
     def configure_fresh(self, critics, production_budget=None, inventory_refill=False):
         if not self.fresh_enabled:
             return False
@@ -900,9 +913,14 @@ class ReplayBufferActor:
                         if not group:
                             continue
                         inputs = [obs for _, observations in group for obs in observations]
-                        calls.append(critic.scheduled_evaluate_values.remote(inputs, version)
-                                     if getattr(self, 'cost_scheduler_enabled', False)
-                                     else critic.evaluate_values.remote(inputs, version))
+                        if getattr(self, '_autobatch_policy_step', None) is not None:
+                            if self._autobatch_policy_step != version+1:
+                                raise RuntimeError('Replay autotune configuration belongs to another update')
+                            calls.append(critic.autotuned_evaluate_values.remote(inputs, version))
+                        else:
+                            calls.append(critic.scheduled_evaluate_values.remote(inputs, version)
+                                         if getattr(self, 'cost_scheduler_enabled', False)
+                                         else critic.evaluate_values.remote(inputs, version))
                         maps.append([(sid, len(observations)) for sid, observations in group])
                     answers = await asyncio.gather(*calls)
                     refreshed = {}
@@ -1694,7 +1712,23 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 raise
         self.requests.append((inputs_t, deterministic))
         self.promises.append(fut)
-        return await fut
+        from batch_autotune_runtime import action_timer, finish_action
+        token = action_timer(self, current_request_metadata())
+        answer = await fut
+        finish_action(token)
+        return answer
+
+    def configure_batch_autotune(self, policy_step, refresh_micro):
+        from batch_autotune_runtime import configure_inference
+        return configure_inference(self, policy_step, refresh_micro)
+
+    async def autotuned_evaluate_values(self, inputs, expected_version):
+        from batch_autotune_runtime import refresh_values
+        return await refresh_values(self, inputs, expected_version)
+
+    def get_batch_autotune_stats(self, policy_step):
+        from batch_autotune_runtime import inference_report
+        return inference_report(self, policy_step)
 
     def evaluate_values(self, inputs, expected_version=None, *, batch_sizes=None):
         """Bounded critic-only forward; never sample actions or advance RNG."""
@@ -1737,6 +1771,8 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 'shared_model':True,'maximum_refresh_micro':settings['refresh_micro']}
 
     async def apply_rank_weights(self, payload, kind):
+        if getattr(self, '_autobatch_refresh_active', False):
+            raise RuntimeError('Cannot publish weights during a pinned autotuned critic refresh')
         dispatcher = getattr(self, '_policy_dispatch', None)
         if kind == 'policy' and dispatcher is not None:
             from cost_scheduler_runtime import publish_after_refresh
@@ -2581,11 +2617,12 @@ class TrainerActor(TrainerActorCom):
                  ctrl_world_args=None,
                  ctrl_batch_size=1, ctrl_accumulation_steps=8, ctrl_lr=1e-5,
                  ctrl_warmup_steps=500, ctrl_train_interval=10, batch_coordinator=None,
-                 training_role='combined', split_train_serial=False):
+                 training_role='combined', split_train_serial=False, batch_autotune=False):
         super().__init__()
         if training_role not in ('combined', 'policy', 'ctrl', 'reward'):
             raise ValueError('Unknown training process role: ' + str(training_role))
         self.training_role = training_role
+        self._batch_autotune_enabled = bool(batch_autotune)
         self.world_config = WorldBackendConfig.from_mapping((ctrl_world_args or {}).get("world_backend_config"))
         self.fresh_config = FreshConfig.from_world_config(self.world_config)
         self.fresh_policy_replay = any((self.fresh_config.refresh_gae,
@@ -2598,6 +2635,9 @@ class TrainerActor(TrainerActorCom):
             raise ValueError('Serial split training requires an independent model owner')
         self.split_train_serial = bool(split_train_serial)
         self.cpu_replay_prefetch = bool(split_train_serial or os.environ.get("ACCERL_CPU_REPLAY_PREFETCH") == "1")
+        if self._batch_autotune_enabled and (training_role != 'policy' or self.world_config.backend != 'model_free'
+                                            or not self.cpu_replay_prefetch):
+            raise ValueError('Batch autotuning requires model-free Policy owners with CPU Replay preparation')
         self._serial_phase = SerialPhase(training_role, rank, world_size) if self.cpu_replay_prefetch else None
         self._serial_prefetch = None
         setup_debugger("trainer", rank)
@@ -2975,7 +3015,8 @@ class TrainerActor(TrainerActorCom):
         self._policy_slot_freed = asyncio.Event()
         self._wm_slot_freed = asyncio.Event()
         if self.cpu_replay_prefetch and self.training_role == "policy":
-            self._policy_joint_batch_mode = PolicyJointBatchMode(self, writer=self.telemetry)
+            self._policy_joint_batch_mode = PolicyJointBatchMode(self, writer=self.telemetry,
+                                                                autotune=self._batch_autotune_enabled)
         if self.cpu_replay_prefetch and not (self.training_role == 'policy' and self.fresh_policy_replay):
             self._serial_prefetch = ObservedCpuReplayPrefetch(
                 self._serial_fetch_cpu_batch, writer=self.telemetry, model=self.training_role,
@@ -3032,6 +3073,9 @@ class TrainerActor(TrainerActorCom):
                 mini_inputs = {k: v[start:end] for k, v in inputs_batch.items()}
                 action_mask = mini_inputs.pop('_fresh_action_mask', None)
                 def token_mean(value):
+                    if getattr(self, '_batch_autotune_enabled', False):
+                        from batch_loss import token_mean_preserving_groups
+                        return token_mean_preserving_groups(value, action_mask)
                     if action_mask is None:
                         return torch.mean(value)
                     if value.shape != action_mask.shape:
@@ -3045,6 +3089,9 @@ class TrainerActor(TrainerActorCom):
 
                 normalized_adv = (mini_adv - global_mean) / (global_std + 1e-8)
                 capture_micro = micro_begin(self, "policy_train", self.model, len(mini_adv), start, end)
+                if getattr(self, '_batch_autotune_enabled', False):
+                    from batch_autotune_runtime import begin_training_micro
+                    begin_training_micro(self, torch)
                 action_logits, value = self.model.forward(mini_inputs)
                 value = value.to(torch.float32)
 
@@ -3117,12 +3164,18 @@ class TrainerActor(TrainerActorCom):
                 epoch_ent.append(ent.item())
                 epoch_kl_divs.append(kl_div)
                 micro_end(self, capture_micro, self.model)
+                if getattr(self, '_batch_autotune_enabled', False):
+                    from batch_autotune_runtime import end_training_micro
+                    end_training_micro(self)
                 _trim_cuda_cache("micro")
                 self.global_step += successful_updates(micro_steps_before, micro_skips_before, self.model)
 
             self._verify_optimizer_update(self.model, "policy", before_steps, before_skips)
             _trim_cuda_cache("idle")
             policy_train_time = time.time() - t_policy_train_start
+            if getattr(self, '_batch_autotune_enabled', False):
+                from batch_autotune_runtime import finish_training
+                finish_training(self, policy_train_time)
 
             return {
                 'epoch_losses': epoch_losses,
@@ -3762,12 +3815,31 @@ class TrainerActor(TrainerActorCom):
                 "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
                 "peak_reserved_bytes": torch.cuda.max_memory_reserved(), "free_bytes": free, "total_bytes": total}
 
+    def configure_batch_autotune(self, policy_step, micro):
+        from batch_autotune_runtime import configure_training
+        return configure_training(self, policy_step, micro)
+
+    def get_batch_autotune_stats(self, policy_step):
+        from batch_autotune_runtime import training_report
+        return training_report(self, policy_step)
+
     async def _run_serial_epoch(self, policy_step):
         key = self._serial_phase.begin(policy_step)
         try:
             self._serial_key_barrier(key, 0)
             if self.training_role == "policy":
-                self._policy_joint_batch_mode.begin(policy_step)
+                batch_options = {}
+                if getattr(self, '_batch_autotune_enabled', False):
+                    choice = getattr(self, '_autobatch_next', None)
+                    if choice is None or choice[0] != policy_step:
+                        raise RuntimeError('Missing driver batch choice before the training collective')
+                    token = torch.tensor(choice, dtype=torch.int64, device='cuda')
+                    tokens = [torch.empty_like(token) for _ in range(self.world_size)]
+                    distributed.all_gather(tokens, token)
+                    if any(item.cpu().tolist() != list(choice) for item in tokens):
+                        raise RuntimeError('Four ranks disagree on autotuned Policy micro-batch')
+                    batch_options['micro'] = choice[1]
+                self._policy_joint_batch_mode.begin(policy_step, **batch_options)
             torch.cuda.reset_peak_memory_stats()
             self.telemetry.event("split_serial_phase_begin", details={
                 "policy_step": policy_step, "model": self.training_role, "rank": self.rank,
@@ -4121,6 +4193,9 @@ def main(args):
     from environment_rendering import render_backend, discover_render_bindings, render_worker_options
     from model_free_mode import configure_training_mode, pipeline_configuration
     model_free = configure_training_mode(args)
+    batch_autotune = bool(getattr(args, 'batch_autotune', False))
+    if batch_autotune and (not model_free or args.num_eval_workers != 0):
+        raise ValueError('--batch-autotune requires --model-free with online Eval0')
     from model_free_control import ModelFreeControlConfig
     fixed_validation_config = ModelFreeControlConfig.from_args(args) if model_free else None
     model_free_runtime = None
@@ -4378,6 +4453,7 @@ def main(args):
             ctrl_warmup_steps=args.ctrl_warmup_steps,
             ctrl_train_interval=args.ctrl_train_interval,
             batch_coordinator=batch_coordinator, training_role=training_role, split_train_serial=split_train_serial,
+            **({'batch_autotune': True} if batch_autotune else {}),
         )
 
     if split_training:
@@ -4833,6 +4909,12 @@ def main(args):
     measure_stop_epochs = int(os.environ.get("ACCERL_MEASURE_STOP_AFTER_EPOCHS", "0"))
     nsight_windows = NsightCaptureWindows(experiment)
     automatic_completion_reason = None
+    autotune_runtime = None
+    if batch_autotune:
+        from batch_autotune_runtime import BatchAutotuneRuntime
+        autotune_runtime = BatchAutotuneRuntime(ray=ray, trainers=training_groups['policy'],
+            inference_pool=inference_pool,replay=replay_buffers[0],writer=writer,
+            experiment=experiment,directory=os.environ['ACCERL_DATA_DIR'])
     while run_policy.should_continue(global_step=global_step, train_iters=args.train_iters,
             target_reached=target_reached, requested_stop=stop_requested(),
             completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs):
@@ -4842,6 +4924,8 @@ def main(args):
                 if boundary_reason != 'requested_stop':
                     automatic_completion_reason = boundary_reason
                 break
+        if autotune_runtime is not None:
+            autotune_runtime.before_update(global_step+1)
         ready, _ = ray.wait(worker_run_refs, timeout=0, num_returns=1)
         if ready:
             ray.get(ready[0])
@@ -4998,6 +5082,8 @@ def main(args):
         experiment.flush()
 
         epoch_stats = None
+        if autotune_runtime is not None:
+            autotune_runtime.after_update(global_step)
         if threshold_tracker is not None:
             epoch_stats = ray.get(stats_actor.get_stats.remote())
             evaluation = epoch_stats["_global_eval_"]

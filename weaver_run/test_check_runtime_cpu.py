@@ -37,8 +37,9 @@ def execute(node, namespace):
 
 
 class RuntimeArgumentAdmissionTests(unittest.TestCase):
-    def parsed(self, *, model_free=True, num_eval_workers=None, fixed_validation=None):
+    def parsed(self, *, model_free=True, num_eval_workers=None, fixed_validation=None, batch_autotune=False):
         environment = {'ACCERL_EXPERIMENT_ROOT': '/cpu-admission',
+                       'ACCERL_BATCH_AUTOTUNE': str(int(batch_autotune)),
                        'ACCERL_PIPELINE_CONFIG': '/cpu-admission/pipeline.json',
                        'ACCERL_ALLOCATED_GPU_IDS': '4,5,6,7',
                        'ACCERL_NUM_EVAL_WORKERS': str(
@@ -51,7 +52,7 @@ class RuntimeArgumentAdmissionTests(unittest.TestCase):
                       agent=str(launch.ROOT / 'envs/config/agent.yaml'),
                       trainer=str(launch.ROOT / 'envs/config/trainer.yaml'))
         argv = launch.training_arguments(values, model_free=model_free,
-            num_eval_workers=num_eval_workers, fixed_validation=fixed_validation)
+            num_eval_workers=num_eval_workers, fixed_validation=fixed_validation, batch_autotune=batch_autotune)
         parser = definition(HERE / 'engine/train.py', 'parse_args')
         # Stop before hardware bindings/model admission; retain the real argparse declarations.
         parser.body = parser.body[:assignment_index(parser.body, 'args') + 1]
@@ -85,6 +86,15 @@ class RuntimeArgumentAdmissionTests(unittest.TestCase):
 
     def test_model_based_recipe_remains_admitted(self):
         self.assertEqual(self.admit(self.parsed(model_free=False)), {})
+
+    def test_batch_autotune_launch_is_admitted(self):
+        self.assertEqual(self.admit(self.parsed(batch_autotune=True)), {})
+
+    def test_batch_autotune_cannot_drift_from_frozen_launch_environment(self):
+        args=self.parsed(batch_autotune=True)
+        args.batch_autotune=False
+        with self.assertRaisesRegex(ValueError, 'batch_autotune'):
+            self.admit(args)
 
     def test_unrelated_recipe_drift_is_still_rejected(self):
         args = self.parsed()
