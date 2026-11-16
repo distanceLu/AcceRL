@@ -24,6 +24,7 @@ class RealCollectionCoordinator:
         self.initial_state_scheduler = None
         self.initial_state_pool = None
         self.pipeline_stopped = False
+        self._paused = False
         self._leases = {}
         self._next_token = 0
         self._completed_ids = set()
@@ -77,9 +78,11 @@ class RealCollectionCoordinator:
         for row in self._leases.values():
             if row['worker_id'] == worker_id:
                 return deepcopy(row)
+        if self._paused:
+            return None
         if owner is not None:
             status = owner.status()
-            if status['available_env_steps'] <= initial_state_pool['reset_steps'] and not status['episodes_inflight']:
+            if self._budget_exhausted(status):
                 return {'budget_exhausted': True, 'status': status}
         active_count = owner.status()['episodes_inflight'] if owner is not None else len(self._leases)
         if active_count >= self.pipeline_config.max_real_in_flight:
@@ -158,12 +161,32 @@ class RealCollectionCoordinator:
                     scheduler=self.initial_state_scheduler.snapshot() if self.initial_state_scheduler else None)
 
     def pipeline_status(self):
+        self._check_leases()
+        states = self.initial_state_scheduler.status() if self.initial_state_scheduler else {}
         return dict(budget=dict(config=self.pipeline_config.to_dict(),
                     active_real=len(self._leases), active_imagine=0,
                     reserved_frame_bytes=0, pending_episode_count=0, pending_seed_count=0,
-                    stopped=self.pipeline_stopped, failure=self._failure, **self._counts),
-                    initial_states=self.initial_state_scheduler.status() if self.initial_state_scheduler else {},
+                    stopped=self.pipeline_stopped, failure=self._failure, paused=self._paused,
+                    budget_exhausted=self._budget_exhausted(states),
+                    reset_steps=self.initial_state_pool['reset_steps'] if self.initial_state_pool else None,
+                    **self._counts), initial_states=states,
                     frames={'resident_frame_bytes': 0}, train_windows=0, eval_windows=0, pending_draws=0)
+
+    def _budget_exhausted(self, states):
+        return bool(states and self.initial_state_pool and not self._failure
+            and not self._leases and not states['episodes_inflight']
+            and not states['reserved_env_steps'] and not states['episodes_cancelled']
+            and not states['conservative_unknown_env_steps']
+            and not states['recovery_required_tokens']
+            and states['available_env_steps'] <= self.initial_state_pool['reset_steps'])
+
+    def set_paused(self, paused):
+        """Pause new admissions; existing leases retain identity and can finish."""
+        if type(paused) is not bool:
+            raise ValueError('paused must be boolean')
+        self._check_leases()
+        self._paused = paused
+        return self.pipeline_status()
 
     def stop_pipeline(self):
         # A stop cannot prove how far an active simulator stepped. Charge every

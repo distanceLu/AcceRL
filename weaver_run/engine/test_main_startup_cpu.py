@@ -181,6 +181,10 @@ class Actor:
                     'worker':child.get('ACCERL_RENDER_WORKER')}
         if method == "size":
             return 10000 if self.name == "ReplayBufferActor" else 50000
+        if method == 'pipeline_status' and self.name == 'RealCollectionCoordinator':
+            return {}
+        if method == 'initial_state_checkpoint' and self.name == 'RealCollectionCoordinator':
+            return {'enabled': True, 'pool': None, 'scheduler': None}
         if method == "set_training_batch_limit":
             self.context.limits.append((self.name, self.rank, args[0]))
             return args[0]
@@ -218,6 +222,8 @@ class Policy:
         return cls()
     def metadata(self):
         return {"manual": True}
+    def deadline_reached(self):
+        return False
 
 
 class Context:

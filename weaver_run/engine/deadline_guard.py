@@ -13,7 +13,7 @@ import math
 SAVE_GRACE_SECONDS = 900
 ERROR_GRACE_SECONDS = 120
 HEARTBEAT_STALE_SECONDS = 120
-TERMINAL = frozenset({'completed', 'stopped_by_user', 'failed'})
+TERMINAL = frozenset({'completed', 'stopped_by_user', 'completed_automatically', 'failed'})
 
 
 def _seconds_from_ns(value):

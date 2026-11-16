@@ -15,6 +15,8 @@ class ModelFreeStartupTests(unittest.TestCase):
     def run_startup(self, evaluation=0):
         args = startup.arguments(overrides=(
             '--model-free', '--num-eval-workers', str(evaluation),
+            '--fixed-validation-interval-env-steps', '0',
+            '--pipeline-config', str(startup.HERE.parent/'recipe/pipeline_config.json'),
             '--eval-inference-replicas', '', '--world-backend-config', 'DOES_NOT_EXIST.json'))
         context = startup.Context()
         original = startup.Actor.call
@@ -22,7 +24,7 @@ class ModelFreeStartupTests(unittest.TestCase):
             if method in ('configure_fresh', 'set_fresh_versions', 'set_fresh_replay_versions'):
                 return True
             return original(actor, method, args, kwargs)
-        with patch.object(startup.Actor, 'call', call):
+        with patch.object(startup.Actor, 'call', call), patch('checkpoint_evaluation.preserve_initial_checkpoint'):
             state = startup.execute_definition(startup.startup_ast(), context.namespace())(args)
         return context, state
 
@@ -50,6 +52,14 @@ class ModelFreeStartupTests(unittest.TestCase):
         namespace['serial_enabled'] = lambda *a, **k: True
         with self.assertRaisesRegex(ValueError, 'concurrent Policy'):
             startup.execute_definition(startup.startup_ast(), namespace)(args)
+        self.assertEqual(context.actors, [])
+
+    def test_unaccounted_model_free_collection_is_rejected_before_loading_models(self):
+        args = startup.arguments(overrides=('--model-free', '--num-eval-workers', '0'))
+        args.pipeline_config = {'initial_state_enabled': False}
+        context = startup.Context()
+        with self.assertRaisesRegex(ValueError, 'initial-state.*budget'):
+            startup.execute_definition(startup.startup_ast(), context.namespace())(args)
         self.assertEqual(context.actors, [])
 
     def test_real_only_startup_reaches_first_fill_and_policy_snapshot(self):

@@ -22,7 +22,7 @@ from world_backend_audit import validate_world_zero2_receipts
 from policy_batch_receipts import validate_policy_batch_modes_from_db
 DEADLINE_UNIX = None  # Compatibility metadata only; never a wall-clock stop.
 TZ = dt.timezone(dt.timedelta(hours=8))
-TERMINAL = {'completed', 'failed', 'stopped_by_user'}
+TERMINAL = {'completed', 'failed', 'stopped_by_user', 'completed_automatically'}
 
 
 def stamp():
@@ -125,6 +125,10 @@ def collect(data, state):
               'stop_on_target': False, 'mps_active_thread_caps': None}
     result['model_free']=state.get('model_free',False)
     result['num_eval_workers']=state.get('num_eval_workers',3)
+    result['fixed_validation_config']=state.get('fixed_validation_config')
+    activity=data/'training/fixed_validation_activity.json'
+    if activity.exists():
+        result['fixed_validation_activity']=json.loads(activity.read_text())
     result['policy_batch_schedule']=state.get('policy_batch_schedule',{'ordinary_micro_GAS':[8,18],'joint_micro_GAS':[4,36],
                                     'joint_interval':5,'global_batch':576,'local_batch':144})
     result['warmup_steps']={kind: value for kind, value in {'policy':100,'value':100,'ctrl':20,'reward':20}.items()
@@ -241,8 +245,9 @@ def report(data, state):
         lines[0]='# GPU4–7 Model-free Policy 训练记录'
         lines[3:7]=['Real4 / Imag0，Policy 四卡 ZeRO2 micro8/GAS18/global576；没有 World/Reward 模型。',
                     '每25次Policy更新保存weights；Policy100、Value100预热，使用真实环境奖励和当前Value GAE。',
-                    '在线Eval workers='+str(state.get('num_eval_workers',0))+'；固定checkpoint评测独立执行。',
+                    '在线Eval workers='+str(state.get('num_eval_workers',0))+'；固定验证配置='+str(state.get('fixed_validation_config'))+'。',
                     '真实预算1000000步，训练150动作，评测220动作；双图像、无proprio、GIPO，cost scheduler关闭。']
+        lines += ['', '预算耗尽或固定验证平台期可自动结束；停止证据、最终权重与清理均须验收。']
     for key in ('error', 'checkpoint_cpu_audit', 'sampled_gpu_peaks', 'cleanup'):
         if key in state:
             lines += ['', key+':', '```json', json.dumps(state[key], ensure_ascii=False, indent=2), '```']
@@ -340,7 +345,7 @@ def enforce_stop_window(data, state, child, now=None):
         raise SaveGraceExpired('Manual-stop GPU save grace of900seconds expired')
 
 
-def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None):
+def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None):
     if mode != 'manual' or stop_on_target:
         raise RuntimeError('This source only permits a fresh manual-stop formal run')
     if data.resolve() != (safe.MASTER/'formal_v3').resolve():
@@ -359,8 +364,9 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
         online_world_identity(config)
     from pipeline_budget import PipelineBudgetConfig
     from model_free_mode import pipeline_configuration
-    from launch import mode_options
+    from launch import mode_options, fixed_validation_options, fixed_validation_arguments
     selected=mode_options(model_free,num_eval_workers)
+    validation=fixed_validation_options(model_free,num_eval_workers,fixed_validation)
     budget = pipeline_configuration(SimpleNamespace(model_free=model_free,pipeline_config=pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG')))
     if os.getuid()!=1004:
         raise RuntimeError('Wrong UID')
@@ -377,6 +383,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
              'git_commit':revision(ROOT)}
     state.update(candidate='weaver_integrated_v1', experiment_root=str(safe.MASTER), source_path=str(SOURCE))
     state.update(selected)
+    state['fixed_validation_config']=validation
     state['cost_scheduler'] = freeze_cost_scheduler_configuration(data, cost_configuration)
     state['policy_batch_schedule']={'ordinary_micro_GAS':[8,18],'joint_micro_GAS':[4,36],
                                     'joint_interval':5,'global_batch':576,'local_batch':144}
@@ -402,7 +409,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else [])
+            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation)
             child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),*launch_args],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
@@ -451,8 +458,12 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
                             validate_online_world_receipts(result.get('weaver_online_trainer_verified', []), state['world_backend_config'])
                         else:
                             validate_world_zero2_receipts(result.get('world_zero2_verified', []))
-                    state['manual_completion']=validate_manual_completion(result,state,flag or {})
-                    state.update(return_code=0,state='stopped_by_user')
+                    completed=result.get('experiment_completed',[])
+                    automatic=bool(model_free and len(completed)==1 and completed[0]['details'].get('stop_reason')
+                                   in ('real_budget_exhausted','fixed_validation_plateau'))
+                    state['automatic_completion' if automatic else 'manual_completion']=validate_manual_completion(
+                        result,state,flag or {},automatic=automatic)
+                    state.update(return_code=0,state='completed_automatically' if automatic else 'stopped_by_user')
                     break
                 time.sleep(8)
         except Exception as exc:
@@ -467,7 +478,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
             state['state']='failed'
         finally:
             safe.cleanup(state,data,grace=15)
-            if state['state']=='stopped_by_user':
+            if state['state'] in ('stopped_by_user','completed_automatically'):
                 try:
                     state['report']=collect(data,state)
                     state['checkpoint_cpu_audit']=safe.audit_final_weights(data,state)
@@ -510,18 +521,32 @@ def check_update_watchdogs(result, state, now_ns=None):
     if state.get('stop_requested_ns') is not None:
         return
     now_ns = time.time_ns() if now_ns is None else now_ns
+    activity=result.get('fixed_validation_activity') or {}
+    if activity.get('active'):
+        import math
+        start,deadline=activity.get('started_unix_seconds'),activity.get('deadline_unix_seconds')
+        if (state.get('model_free') is not True or activity.get('run_id') != state.get('run_id')
+                or any(type(value) not in (int,float) or not math.isfinite(value) for value in (start,deadline))
+                or not state['started_ns']/1e9 <= start <= now_ns/1e9 <= deadline
+                or not 0 < deadline-start <= 5400
+                or activity.get('phase') not in ('drain','evaluate')
+                or type(activity.get('policy_step')) is not int or activity['policy_step'] < 0):
+            raise RuntimeError('Invalid or expired fixed validation watchdog window')
+        state['validation_watchdog_floor_ns']=now_ns
+        return
     for model in service_plan_from_state(state).active_kinds:
         ranks = result.get('training', {}).get(model, {}).get('ranks', {})
         latest = min((row.get('last_success_ns') or state['started_ns'] for row in ranks.values()), default=state['started_ns'])
+        latest=max(latest,state.get('validation_watchdog_floor_ns',0))
         cap = 3600 if len(ranks)==4 and all(row.get('successful_updates', 0)>0 for row in ranks.values()) else 7200
         if (now_ns-latest)/1e9 > cap:
             raise RuntimeError(model+' successful-update watchdog expired')
 
 
-def validate_manual_completion(result, state, flag):
+def validate_manual_completion(result, state, flag, *, automatic=False):
     from world_backends.runtime import service_plan_from_state
     plan = service_plan_from_state(state)
-    if flag.get('reason') != 'user_requested_stop' or flag.get('run_id') != state['run_id'] or flag.get('uid') != 1004:
+    if not automatic and (flag.get('reason') != 'user_requested_stop' or flag.get('run_id') != state['run_id'] or flag.get('uid') != 1004):
         raise RuntimeError('Exit0 without an explicit matching user stop is not completion')
     steps = {model:result.get('training', {}).get(model, {}).get('global_updates', 0) for model in plan.active_kinds}
     if (any(isinstance(value, bool) or not isinstance(value, int) or value<0 for value in steps.values())
@@ -529,9 +554,12 @@ def validate_manual_completion(result, state, flag):
         raise RuntimeError('Manual final updates do not match synchronized '+plan.logical_update_ratio+' boundaries')
     completed = result.get('experiment_completed', [])
     d = completed[0]['details'] if len(completed)==1 else {}
+    if automatic:
+        from model_free_completion import validate_automatic_completion
+        validate_automatic_completion(d,state,flag)
     policy = d.get('stop_policy', {})
     if (not completed or completed[0].get('ts_ns',0)<flag.get('requested_ns',0)
-        or d.get('stop_reason') != 'scheduled_stop' or d.get('global_step') != steps['policy']
+        or (not automatic and d.get('stop_reason') != 'scheduled_stop') or d.get('global_step') != steps['policy']
         or d.get('completed_epochs') != steps['policy'] or d.get('run_started_ns') != state['started_ns']
         or d.get('stop_on_target') is not False or d.get('until_deadline') is not False or d.get('deadline_unix_seconds') is not None
         or policy.get('until_manual_stop') is not True or policy.get('until_deadline') is not False
@@ -633,7 +661,10 @@ def validate_manual_completion(result, state, flag):
         or dynamic.get('steps')!=steps['policy'] or dynamic.get('mode_receipts')!=8*steps['policy']
         or dynamic.get('global_exposures')!=576*steps['policy']):
         raise RuntimeError('Complete dynamic Policy mode receipts do not match this manual run')
-    return {'steps':steps,'checkpoint_reason':expected_reason,'stopped_before_first_update':steps['policy']==0}
+    receipt={'steps':steps,'checkpoint_reason':expected_reason,'stopped_before_first_update':steps['policy']==0}
+    if automatic:
+        receipt['stop_reason']=d['stop_reason']
+    return receipt
 
 
 if __name__ == '__main__':
@@ -647,6 +678,8 @@ if __name__ == '__main__':
     a.add_argument('--cost-scheduler-config', type=Path)
     a.add_argument('--model-free',action='store_true')
     a.add_argument('--num-eval-workers',type=int)
+    from launch import add_fixed_validation_arguments, fixed_validation_overrides
+    add_fixed_validation_arguments(a)
     args = a.parse_args()
     if args.mode == 'guard':
         guard(args.data, args.run_id)
@@ -655,4 +688,4 @@ if __name__ == '__main__':
     elif args.mode == 'sample':
         safe.sample(args.data, args.run_id)
     else:
-        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers)
+        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args))

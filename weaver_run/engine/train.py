@@ -293,6 +293,10 @@ def parse_args():
     parser.add_argument('--num-rollout-workers', type=int, default=20)
     parser.add_argument("--pipeline-config", default=os.environ.get("ACCERL_PIPELINE_CONFIG"))
     parser.add_argument('--num-eval-workers', type=int, default=None)
+    parser.add_argument('--fixed-validation-interval-env-steps', type=int, default=None)
+    parser.add_argument('--fixed-validation-patience', type=int, default=None)
+    parser.add_argument('--fixed-validation-min-env-steps', type=int, default=None)
+    parser.add_argument('--fixed-validation-min-delta-successes', type=int, default=None)
     parser.add_argument('--eval-inference-replicas', default=None,
                         help='One Policy replica ID per Eval worker, comma-separated; default round-robin. Eval window is workers * 100.')
     parser.add_argument('--rollout-local-buf', type=int, default=64)
@@ -746,6 +750,9 @@ class ReplayBufferActor:
 
     def set_fresh_versions(self, policy, world):
         if self.fresh_enabled:
+            admission = getattr(self, '_model_free_admission', None)
+            if admission is not None and list((policy, world)) != admission['versions']:
+                raise RuntimeError('Cannot change Policy version with an admitted model-free cohort')
             self.fresh_store.set_versions(policy, world)
             pump = getattr(self, 'inventory_refill', None)
             if pump is not None and world == policy//5:
@@ -812,10 +819,41 @@ class ReplayBufferActor:
             return len(self.fresh_store.samples)
         return len(self.buffer)
 
+    def admit_model_free_batch(self, batch_size):
+        """Atomically protect one complete cohort before any rank enters NCCL.
+
+        Only the driver owns this admission. FRESH has no background prefetch;
+        the next GlobalBatchCoordinator draw consumes exactly this reservation.
+        """
+        from fresh_replay_pressure import shortage
+        from fresh_policy_replay import FreshReplayNotReady
+        if not self.fresh_enabled or not self.fresh_config.real_only:
+            raise ValueError('Driver admission requires real-only FRESH Replay')
+        previous = getattr(self, '_model_free_admission', None)
+        if previous is not None:
+            if previous['batch_size'] != batch_size:
+                raise ValueError('Admitted cohort size cannot change')
+            return {key: value for key, value in previous.items() if key != 'sample_ids'}
+        snapshot = shortage(self.fresh_store, batch_size)
+        try:
+            token, sample_ids = self.fresh_store.reserve(batch_size)
+        except FreshReplayNotReady:
+            return dict(snapshot, ready=False, batch_size=batch_size)
+        self._model_free_admission = dict(snapshot, ready=True, batch_size=batch_size,
+                                         reservation_token=token, sample_ids=sample_ids)
+        return {key: value for key, value in self._model_free_admission.items() if key != 'sample_ids'}
+
     async def sample(self, batch_size):
         if self.fresh_enabled:
             from fresh_replay_pressure import reserve_with_production_pressure
-            token, sample_ids = await reserve_with_production_pressure(self, batch_size)
+            admission = getattr(self, '_model_free_admission', None)
+            if admission is not None:
+                if admission['batch_size'] != batch_size:
+                    raise ValueError('Global draw size differs from admitted model-free cohort')
+                token, sample_ids = admission['reservation_token'], admission['sample_ids']
+                self._model_free_admission = None
+            else:
+                token, sample_ids = await reserve_with_production_pressure(self, batch_size)
             if getattr(self, 'inventory_refill', None) is not None:
                 import time
                 self.inventory_refill.timing.reserved(self.fresh_store.versions, time.monotonic())
@@ -4083,6 +4121,9 @@ def main(args):
     from environment_rendering import render_backend, discover_render_bindings, render_worker_options
     from model_free_mode import configure_training_mode, pipeline_configuration
     model_free = configure_training_mode(args)
+    from model_free_control import ModelFreeControlConfig
+    fixed_validation_config = ModelFreeControlConfig.from_args(args) if model_free else None
+    model_free_runtime = None
     from evaluation_threshold import resolve_online_evaluation
     if model_free and serial_enabled(args.gpu_layout, environment=os.environ):
         raise ValueError('Model-free mode requires concurrent Policy owners; disable ACCERL_SPLIT_TRAIN_SERIAL')
@@ -4110,6 +4151,8 @@ def main(args):
     online_weaver = isolated_online_weaver(world_config)
     validate_online_runtime_arguments(world_config, args)
     pipeline_config = pipeline_configuration(args)
+    if model_free and not pipeline_config.initial_state_enabled:
+        raise ValueError('Model-free stopping requires explicit initial-state allocation and budget accounting')
     if pipeline_config.inventory_refill_enabled and (not fresh_replay
             or not fresh_config.replay_age_limits or not fresh_config.real_policy_replay
             or fresh_config.real_fraction != .25
@@ -4632,6 +4675,8 @@ def main(args):
                         "model_free": model_free, "num_eval_workers": args.num_eval_workers,
                         "pipeline_config": pipeline_config.to_dict(),
                         "frozen_weights": "Restore original checkpoints in args before applying snapshot"}
+            if model_free_runtime is not None:
+                metadata.update(model_free_runtime.completion_fields())
             if frozen_world is not None:
                 metadata["frozen_world"] = frozen_world
             if pipeline_config.initial_state_enabled:
@@ -4678,6 +4723,18 @@ def main(args):
                               "world_replicas": args.num_ctrl_inference_actors})
     experiment.flush()
     worker_run_refs = []
+    if model_free:
+        from model_free_runtime import ModelFreeRuntime, ValidationInterrupted
+        model_free_runtime = ModelFreeRuntime(ray=ray, collector=producer_coordinators[0],
+            replay=replay_buffers[0], inference_pool=inference_pool, worker_refs=worker_run_refs,
+            cfg=cfg, benchmark=benchmark, dtype=torch_dtype, render_bindings=render_bindings,
+            environment=os.environ, config=fixed_validation_config, writer=writer, experiment=experiment,
+            requested_stop=lambda: stop_requested() or run_policy.deadline_reached(),
+            global_batch_size=args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus)
+        try:
+            model_free_runtime.validate(0)
+        except ValidationInterrupted:
+            pass
     for w in rollout_workers:
         worker_run_refs.append(w.run.remote())
     for w in eval_workers:
@@ -4697,9 +4754,15 @@ def main(args):
     last_fill_snapshot = -float("inf")
     measured_twenty_minutes = False
     while True:
-        if stop_requested():
-            fill_completion_reason = run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
+        budget_finished = False
+        if model_free_runtime is not None:
+            model_free_runtime.status()
+            budget_finished = model_free_runtime.last_budget['budget_exhausted']
+        deadline_finished = model_free and run_policy.deadline_reached()
+        if stop_requested() or deadline_finished or budget_finished:
+            fill_completion_reason = 'real_budget_exhausted' if budget_finished else run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
                 target_reached=False, requested_stop=True)
+            completion_fields = model_free_runtime.finish(0) if model_free_runtime is not None else {}
             ray.get([buffer.stop_pipeline.remote() for buffer in producer_coordinators])
             publish_snapshot("final_before_first_update")
             experiment.event("experiment_completed", details={"global_step": 0, "completed_epochs": 0,
@@ -4708,7 +4771,8 @@ def main(args):
                 "service_plan": service_plan.to_dict(), "world_backend_config": world_config.to_dict(),
                 "stop_on_target": run_policy.stop_on_target, "until_deadline": run_policy.until_deadline,
                 "deadline_unix_seconds": run_policy.deadline_unix_seconds, "stop_policy": run_policy.metadata(),
-                "states": ray.get([trainer.get_training_state.remote() for trainer in all_trainers])})
+                "states": ray.get([trainer.get_training_state.remote() for trainer in all_trainers]),
+                **completion_fields})
             experiment.close()
             print("Scheduled stop during initial replay fill; no optimizer update completed", flush=True)
             writer.close()
@@ -4768,9 +4832,16 @@ def main(args):
     completed_epochs = 0
     measure_stop_epochs = int(os.environ.get("ACCERL_MEASURE_STOP_AFTER_EPOCHS", "0"))
     nsight_windows = NsightCaptureWindows(experiment)
+    automatic_completion_reason = None
     while run_policy.should_continue(global_step=global_step, train_iters=args.train_iters,
             target_reached=target_reached, requested_stop=stop_requested(),
             completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs):
+        if model_free_runtime is not None:
+            boundary_reason = model_free_runtime.before_update(global_step)
+            if boundary_reason is not None:
+                if boundary_reason != 'requested_stop':
+                    automatic_completion_reason = boundary_reason
+                break
         ready, _ = ray.wait(worker_run_refs, timeout=0, num_returns=1)
         if ready:
             ray.get(ready[0])
@@ -5211,9 +5282,10 @@ def main(args):
             last_log_time = current_time
             last_log_global_step = global_step
 
-    completion_reason = run_policy.stop_reason(global_step=global_step, train_iters=args.train_iters,
+    completion_reason = automatic_completion_reason or run_policy.stop_reason(global_step=global_step, train_iters=args.train_iters,
         target_reached=target_reached, requested_stop=stop_requested(),
         completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs)
+    completion_fields = model_free_runtime.finish(global_step) if model_free_runtime is not None else {}
     if cost_broker is not None:
         ray.get(cost_broker.stop_eval_admission.remote(), timeout=10)
     nsight_windows.close()
@@ -5230,7 +5302,8 @@ def main(args):
                      "stop_on_target": run_policy.stop_on_target, "until_deadline": run_policy.until_deadline,
                      "deadline_unix_seconds": run_policy.deadline_unix_seconds,
                      "stop_policy": run_policy.metadata(),
-                     "states": ray.get([trainer.get_training_state.remote() for trainer in all_trainers])})
+                     "states": ray.get([trainer.get_training_state.remote() for trainer in all_trainers]),
+                     **completion_fields})
     experiment.close()
     print(f"\n完成 {global_step} 次训练与同步循环；scheduled_stop={stop_requested()}", flush=True)
     writer.close()
@@ -5249,6 +5322,8 @@ class CaptureSummaryWriter:
         'Metrics/Entropy', 'Metrics/KL_Divergence',
         'Performance/policy_train_time', 'Performance/ctrl_train_time', 'Performance/sync_time',
         'System/Replay_Buffer_Size_Total', 'System/WM_Replay_Buffer_Size_Total',
+        'FixedValidation/Success_Rate', 'FixedValidation/Success_Count',
+        'FixedValidation/Budget_Env_Steps', 'FixedValidation/Duration_Seconds',
     })
 
     def __init__(self, path, tensorboard=False):

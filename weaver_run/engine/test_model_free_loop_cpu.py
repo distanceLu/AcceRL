@@ -21,6 +21,8 @@ class ResultRef:
 
 
 class SixEpochStopPolicy(startup.Policy):
+    def deadline_reached(self):
+        return False
     def should_continue(self, **state):
         return state['global_step'] < 6
 
@@ -74,6 +76,8 @@ class ModelFreeDriverLoop(unittest.TestCase):
                 return {'_global_rollout_': dict(values), '_global_eval_': dict(values)}
             if method == 'pipeline_status':
                 return {}
+            if method == 'admit_model_free_batch':
+                return {'ready': True, 'batch_size': args[0]}
             result = original(actor, method, args, kwargs)
             if method == 'get_training_state':
                 result['policy_steps'] = actor.__dict__.get('step', 0)
@@ -84,9 +88,12 @@ class ModelFreeDriverLoop(unittest.TestCase):
             return {'kind': kind, 'version': actor.__dict__.get('step', 0),
                     'hash': 'a' * 64, 'bytes': 64, 'tensor_count': 1}
 
-        args = startup.arguments(overrides=('--model-free', '--num-eval-workers', '0'))
+        args = startup.arguments(overrides=('--model-free', '--num-eval-workers', '0',
+                                             '--fixed-validation-interval-env-steps', '0'))
         args.log_interval_seconds = -1  # Exercise logging on every completed epoch.
-        with patch.object(startup.Actor, 'call', call), patch.object(startup.Actor, 'inventory', inventory):
+        args.pipeline_config = startup.HERE.parent/'recipe/pipeline_config.json'
+        with patch.object(startup.Actor, 'call', call), patch.object(startup.Actor, 'inventory', inventory), \
+                patch('checkpoint_evaluation.preserve_initial_checkpoint'):
             startup.execute_definition(startup.definition(startup.TREE, 'main'), namespace)(args)
 
         events = [(kind, fields) for writer in context.telemetries for kind, fields in writer.events]

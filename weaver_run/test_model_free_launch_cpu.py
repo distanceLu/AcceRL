@@ -1,6 +1,7 @@
 """CPU launch contracts: no model construction, queue submission or GPU work."""
 import importlib.util
 import ast
+import copy
 import datetime
 import json
 import os
@@ -33,6 +34,150 @@ site = module('model_free_site_cli', HERE / 'reference_site/cli.py')
 
 
 class ModelFreeLaunchTests(unittest.TestCase):
+    def automatic_case(self, reason='real_budget_exhausted', steps=5):
+        from test_manual_controller_cpu import result, RUN
+        from world_backends import build_service_plan
+        config={'backend':'model_free','world_trainable':False,'reward_provider':'environment'}
+        plan=build_service_plan(config).to_dict()
+        report=result(steps)
+        report['training']={'policy':report['training']['policy']}
+        report['replay']=report['replay'][:1]
+        for kind in ('world_zero2_verified','fsdp_sharding_verified','reward_features_only_enabled',
+                     'reward_checkpointing_verified','world_memory_policy_verified','split_wm_cohort_validated'):
+            report[kind]=[]
+        validation=dict(interval_env_steps=100000,patience=3,min_env_steps=300000,min_delta_successes=1)
+        budget=dict(initialized=True,max_env_steps=1000000,consumed_env_steps=999995,
+            available_env_steps=5,reset_steps=10,reserved_env_steps=0,active_real=0,episodes_inflight=0,
+            conservative_unknown_env_steps=0,episodes_cancelled=0,budget_exhausted=True,failure=None)
+        from model_free_control import ModelFreeControl, ModelFreeControlConfig
+        controller=ModelFreeControl(ModelFreeControlConfig(**validation))
+        for step,consumed in ((0,1000),(1,101000),(3,201000),(5,301000)):
+            controller.observe(38,policy_step=step,consumed_env_steps=consumed)
+        summary=controller.summary()
+        report['experiment_completed'][0]['details'].update(model_free=True,service_plan=plan,
+            stop_reason=reason,budget_status=budget,fixed_validation=summary)
+        state=dict(run_id=RUN,started_ns=100,model_free=True,world_backend_config=config,service_plan=plan,
+            pipeline_config={'real_env_step_budget':1000000},fixed_validation_config=validation)
+        return state,report
+
+    def test_automatic_completion_accepts_exhausted_budget_without_manual_flag(self):
+        from test_manual_controller_cpu import load
+        state,report=self.automatic_case()
+        validate=load('runner.py','validate_manual_completion',{})
+        with self.assertRaises(RuntimeError):
+            validate(report,state,{})
+        try:
+            receipt=validate(report,state,{},automatic=True)
+        except TypeError as exc:
+            self.fail('Runner does not support audited automatic completion: '+str(exc))
+        self.assertEqual(receipt['stop_reason'],'real_budget_exhausted')
+        zero_state,zero_report=self.automatic_case(steps=0)
+        zero=validate(zero_report,zero_state,{},automatic=True)
+        self.assertTrue(zero['stopped_before_first_update'])
+        self.assertEqual(zero['checkpoint_reason'],'final_before_first_update')
+        for mutation in ('legacy','inflight','cancelled','unknown','failure','capacity','flag'):
+            modified=copy.deepcopy(report)
+            changed=copy.deepcopy(state)
+            flag={}
+            budget=modified['experiment_completed'][0]['details']['budget_status']
+            if mutation=='legacy': changed['model_free']=False
+            if mutation=='inflight': budget['active_real']=1
+            if mutation=='cancelled': budget['episodes_cancelled']=1
+            if mutation=='unknown': budget['conservative_unknown_env_steps']=1
+            if mutation=='failure': budget['failure']='worker crashed'
+            if mutation=='capacity': budget['max_env_steps']=2
+            if mutation=='flag': flag={'reason':'worker_failed'}
+            with self.subTest(mutation=mutation),self.assertRaises(RuntimeError):
+                validate(modified,changed,flag,automatic=True)
+
+    def test_plateau_completion_requires_matching_validation_and_final_policy(self):
+        from test_manual_controller_cpu import load
+        state,report=self.automatic_case('fixed_validation_plateau')
+        validate=load('runner.py','validate_manual_completion',{})
+        try:
+            receipt=validate(report,state,{},automatic=True)
+        except TypeError as exc:
+            self.fail('Runner does not support audited plateau completion: '+str(exc))
+        self.assertEqual(receipt['stop_reason'],'fixed_validation_plateau')
+        for key,value in [('stale_count',2),('plateau_reached',False),('enabled',False),('case_count',49)]:
+            modified=copy.deepcopy(report)
+            modified['experiment_completed'][0]['details']['fixed_validation'][key]=value
+            with self.subTest(key=key),self.assertRaises(RuntimeError):
+                validate(modified,state,{},automatic=True)
+        modified=copy.deepcopy(report)
+        modified['experiment_completed'][0]['details']['fixed_validation']['last']['policy_step']=4
+        with self.assertRaises(RuntimeError):
+            validate(modified,state,{},automatic=True)
+        modified=copy.deepcopy(report)
+        modified['experiment_completed'][0]['details']['fixed_validation']['validations'][-1]['successes']=50
+        with self.assertRaises(RuntimeError):
+            validate(modified,state,{},automatic=True)
+
+    def test_watchdog_validation_pause_is_bounded_and_resumes_after_completion(self):
+        from test_manual_controller_cpu import load
+        state,report=self.automatic_case()
+        state['started_ns']=1000_000_000_000
+        for row in report['training']['policy']['ranks'].values():
+            row['last_success_ns']=1000_000_000_000
+        watchdog=load('runner.py','check_update_watchdogs',{})
+        report['fixed_validation_activity']=dict(run_id=state['run_id'],active=True,
+            started_unix_seconds=4000,deadline_unix_seconds=9400,policy_step=5,phase='evaluate')
+        try:
+            watchdog(report,state,now_ns=5000_000_000_000)
+        except RuntimeError as exc:
+            self.fail('Finite validation should suspend the optimizer watchdog: '+str(exc))
+        for field,value in [('deadline_unix_seconds',999999),('run_id','another-run')]:
+            changed=copy.deepcopy(report)
+            changed['fixed_validation_activity'][field]=value
+            with self.assertRaises(RuntimeError):
+                watchdog(changed,state,now_ns=5000_000_000_000)
+        with self.assertRaises(RuntimeError):
+            watchdog(report,state,now_ns=9401_000_000_000)
+        report['fixed_validation_activity']['active']=False
+        watchdog(report,state,now_ns=5001_000_000_000)
+        with self.assertRaises(RuntimeError):
+            watchdog(report,state,now_ns=8601_000_000_000)
+
+    def test_queue_automatic_acceptance_requires_independent_stop_evidence(self):
+        state,report=self.automatic_case()
+        completion=dict(steps={'policy':5},checkpoint_reason='final',stop_reason='real_budget_exhausted')
+        state.update(state='completed_automatically',training_stopped=True,cleanup={'survivors':[]},
+            source_path='/source',automatic_completion=completion,
+            checkpoint_cpu_audit=dict(valid=True,steps={'policy':5},monolith_steps={'policy':5},manifest_reason='final'))
+        report.update(run_id=state['run_id'],state=state['state'],source='/source',synchronized_epoch_completed=[{}])
+        self.assertTrue(training.acceptance(state,report,0,[],None)['passed'])
+        report['experiment_completed'][0]['details']['budget_status']['reserved_env_steps']=1
+        self.assertFalse(training.acceptance(state,report,0,[],None)['passed'])
+
+    def test_fixed_validation_defaults_and_overrides_are_carried_by_training_arguments(self):
+        defaults = launch.training_arguments({}, model_free=True, template=[])
+        for option, value in [('interval-env-steps', '100000'), ('patience', '3'),
+                              ('min-env-steps', '300000'), ('min-delta-successes', '1')]:
+            self.assertIn('--fixed-validation-' + option, defaults)
+            self.assertEqual(defaults[defaults.index('--fixed-validation-' + option) + 1], value)
+        changed = launch.training_arguments({}, model_free=True, template=[],
+            fixed_validation={'interval_env_steps':200000,'patience':4})
+        self.assertEqual(changed[changed.index('--fixed-validation-interval-env-steps')+1], '200000')
+        self.assertEqual(changed[changed.index('--fixed-validation-patience')+1], '4')
+        online = launch.training_arguments({}, model_free=True, num_eval_workers=4, template=[])
+        self.assertEqual(online[online.index('--fixed-validation-interval-env-steps')+1], '0')
+        with self.assertRaises(ValueError):
+            launch.training_arguments({}, model_free=False, template=[],fixed_validation={'patience':3})
+        with self.assertRaises(ValueError):
+            launch.training_arguments({}, model_free=True,num_eval_workers=4,template=[],
+                fixed_validation={'interval_env_steps':100000})
+
+    def test_fixed_validation_configuration_reaches_managed_runner(self):
+        args=types.SimpleNamespace(source=HERE/'engine',root=Path('/output'),model_free=True,
+            num_eval_workers=0,fixed_validation_interval_env_steps=200000,
+            fixed_validation_patience=5,fixed_validation_min_env_steps=400000,
+            fixed_validation_min_delta_successes=2)
+        command=training.runner_command(args)
+        self.assertIn('--fixed-validation-patience',command)
+        self.assertEqual(command[command.index('--fixed-validation-patience')+1],'5')
+        selected=training.mode_kwargs(args)
+        self.assertEqual(selected['fixed_validation']['interval_env_steps'],200000)
+
     def test_actual_runner_startup_freezes_policy_only_state_without_world_assets(self):
         from test_manual_controller_cpu import load
         tree=ast.parse((HERE/'engine/runner.py').read_text(encoding='utf8'))
@@ -61,6 +206,8 @@ class ModelFreeLaunchTests(unittest.TestCase):
             self.assertNotIn('world_backend_config_path',state)
             self.assertNotIn('ACCERL_WORLD_BACKEND_CONFIG',env)
             self.assertEqual(env['ACCERL_NUM_EVAL_WORKERS'],'4')
+            self.assertEqual(state['fixed_validation_config'],dict(interval_env_steps=0,patience=3,
+                min_env_steps=300000,min_delta_successes=1))
             self.assertFalse((root/'formal_v3/world_backend_config.json').exists())
 
     def test_model_free_cpu_admission_only_checks_policy_and_control_runtime(self):
@@ -146,10 +293,14 @@ class ModelFreeLaunchTests(unittest.TestCase):
                     raise AssertionError('model-free spec must not read World recipe')
                 return original_read(path)
             with patch.object(site,'PARENT',stage),patch.object(site,'PROFILES',profiles),patch.object(site,'revision',return_value='a'*40),patch.object(Path,'read_bytes',guarded_read):
-                record=site.make_spec('restore','model-free',stage,stage,checkout=HERE.parent,model_free=True,num_eval_workers=4)
+                record=site.make_spec('restore','model-free',stage,stage,checkout=HERE.parent,model_free=True,num_eval_workers=4,
+                    fixed_validation={'patience':5})
             self.assertEqual(record['git_commit'],'a'*40)
             self.assertTrue(record['model_free'])
             self.assertEqual(record['num_eval_workers'],4)
+            self.assertEqual(record['fixed_validation_config'],dict(interval_env_steps=0,patience=5,
+                min_env_steps=300000,min_delta_successes=1))
+            self.assertEqual(record['job']['argv'][record['job']['argv'].index('--fixed-validation-patience')+1],'5')
             self.assertEqual(record['pipeline']['real_workers'],4)
             self.assertEqual(record['pipeline']['imagination_workers'],0)
             self.assertFalse(record['cost_scheduler_enabled'])

@@ -1,8 +1,8 @@
 """Foreground manual Policy/WEAVER-native-RM training with exact queue ownership.
 
-This deployment runs until an explicit manual boundary stop or a detected failure.
+Model-free training also accepts verified budget exhaustion or fixed validation plateau.
 The queue itself has no hard process timeout. The native server supervisor retains its error/stall protections.
-Only an explicit manual stop (or failure) ends training. Saving/audit and the
+Legacy WEAVER still requires an explicit manual stop. Saving/audit and the
 following fixed-checkpoint policy evaluation have separate bounded phases.
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ OPTIMIZATIONS = {'selected_frame_encoding': True, 'kv_cache': True, 'decode_mode
                  'feature_cache_max_bytes': 67108864, 'resident_rollout_state': True,
                  'resident_max_sessions': 8, 'resident_max_bytes': 67108864,
                  'validate_on_cpu': True, 'task_cache_entries': 64, 'safety_checks': 'batched'}
-TERMINAL = {'stopped_by_user', 'failed', 'completed'}
+TERMINAL = {'stopped_by_user', 'completed_automatically', 'failed', 'completed'}
 POST_STOP_GRACE_SECONDS = 1800
 # Error work is bounded by the runner's 120s allowance. This separate envelope
 # only lets its exact cleanup, helper joins and final CPU report finish before
@@ -257,7 +257,7 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
@@ -284,7 +284,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
         with tempfile.TemporaryDirectory(dir=root,prefix='.policy-admission-') as temp:
             work=Path(temp)
             command,environment,resources=prepare(work,['4','5','6','7'],'weaverintegrated_cpu_check',
-                model_free=True,num_eval_workers=num_eval_workers)
+                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation)
             check(work,command,environment,resources)
     else:
         backend = read_json(root / BACKEND_CONFIG)
@@ -306,7 +306,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
             'gpu_access_performed': False,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -331,11 +331,15 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None):
     if model_free is not None:
         expected_count=(0 if model_free else 3) if num_eval_workers is None else num_eval_workers
         if state.get('model_free',False)!=model_free or state.get('num_eval_workers',3)!=expected_count:
             raise ValueError('Runner model-free/Eval mode differs from queued arguments')
+        if model_free:
+            from launch import fixed_validation_options
+            if state.get('fixed_validation_config') != fixed_validation_options(model_free,num_eval_workers,fixed_validation):
+                raise ValueError('Runner fixed validation configuration differs from queued arguments')
     rid = state.get('run_id', '')
     if (not re.fullmatch(r'weaverintegrated_[A-Za-z0-9_-]+', rid)
             or (run_id is not None and rid != run_id)
@@ -786,15 +790,28 @@ def validate_online_world_audit(world, run_id, policy_step, updates):
 
 def acceptance(state, report, exit_code, remaining, stop_flag):
     reasons = []
-    if exit_code != 0 or state.get('state') != 'stopped_by_user' or state.get('error'):
+    automatic=state.get('model_free') is True and state.get('state') == 'completed_automatically'
+    expected_state='completed_automatically' if automatic else 'stopped_by_user'
+    if exit_code != 0 or state.get('state') != expected_state or state.get('error'):
         reasons.append('runner_not_cleanly_stopped')
     if state.get('training_stopped') is not True or state.get('cleanup', {}).get('survivors') != [] or remaining:
         reasons.append('cleanup_not_confirmed')
     rid = state.get('run_id')
-    if (not stop_flag or stop_flag.get('run_id') != rid or stop_flag.get('uid') != 1004
+    if automatic:
+        sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'engine'))
+        from model_free_completion import validate_automatic_completion
+        completed=report.get('experiment_completed',[])
+        details=completed[0].get('details',{}) if len(completed)==1 else {}
+        try:
+            validate_automatic_completion(details,state,stop_flag)
+            if state.get('automatic_completion',{}).get('stop_reason') != details.get('stop_reason'):
+                raise RuntimeError('automatic reason differs from completion event')
+        except RuntimeError as exc:
+            reasons.append('automatic_completion_evidence_invalid: '+str(exc))
+    elif (not stop_flag or stop_flag.get('run_id') != rid or stop_flag.get('uid') != 1004
             or stop_flag.get('reason') != 'user_requested_stop'):
         reasons.append('exact_manual_stop_evidence_missing')
-    manual = state.get('manual_completion') or {}
+    manual = state.get('automatic_completion' if automatic else 'manual_completion') or {}
     steps = manual.get('steps', {})
     p = steps.get('policy')
     model_free=state.get('model_free',False)
@@ -818,7 +835,7 @@ def acceptance(state, report, exit_code, remaining, stop_flag):
     else:
         world_review = validate_online_world_audit(audit.get('online_world'), rid, p, steps.get('ctrl'))
         reasons.extend(world_review['reasons'])
-    if (report.get('run_id') != rid or report.get('state') != 'stopped_by_user'
+    if (report.get('run_id') != rid or report.get('state') != expected_state
             or report.get('source') != state.get('source_path')):
         reasons.append('final_report_identity_mismatch')
     reported = {k: report.get('training', {}).get(k, {}).get('global_updates')
@@ -833,7 +850,7 @@ def acceptance(state, report, exit_code, remaining, stop_flag):
         reasons.append('synchronized_completion_receipt_missing')
     return {'passed': not reasons, 'reasons': reasons, 'observed_steps': steps,
             'stopped_before_first_update': p == 0,
-            'scope': 'manual boundary checkpoint and cleanup; no minimum update or model-quality claim'}
+            'scope': 'boundary checkpoint, stop evidence and cleanup; no model-quality claim'}
 
 
 def runner_command(args):
@@ -849,11 +866,18 @@ def runner_command(args):
     count=getattr(args,'num_eval_workers',None)
     if count is not None:
         command += ['--num-eval-workers',str(count)]
+    sys.path.insert(0,str(args.source.parent))
+    from launch import fixed_validation_options, fixed_validation_overrides, fixed_validation_arguments
+    command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args)))
     return command
 
 
 def mode_kwargs(args):
-    return dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
+    sys.path.insert(0,str(args.source.parent))
+    from launch import fixed_validation_options, fixed_validation_overrides
+    selected=dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
+    selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args))
+    return selected
 
 
 def preflight_description(args):
@@ -1078,6 +1102,9 @@ def main():
     parser.add_argument('--native-gpu-preflight', action='store_true')
     parser.add_argument('--model-free',action='store_true')
     parser.add_argument('--num-eval-workers',type=int)
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+    from launch import add_fixed_validation_arguments
+    add_fixed_validation_arguments(parser)
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
     try:

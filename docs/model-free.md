@@ -1,6 +1,6 @@
 # Model-free 模式说明（2026-11-16）
 
-这次修改在现有受管训练入口增加 `--model-free`。不开开关仍使用原 WEAVER 配方。开关默认关闭在线 Eval，这是用户确认后的选择；可明确设为 4。代码修改不启动训练，也不切换已运行进程。
+现有受管训练入口使用 `--model-free`。不开开关仍使用原 WEAVER 配方。model-free 默认关闭常驻在线 Eval，并在固定间隔运行有限的50例验证；仍可明确设为4个在线 Eval。代码修改不启动训练，也不切换已运行进程。
 
 ## 实际训练什么
 
@@ -17,7 +17,8 @@ model-free 不创建 World/Reward 模型、想象 worker、WM Replay、WM 训练
 | Policy Trainer / Inference | 各4，四卡各一份 | 保留 |
 | World Trainer / Inference | 各4，含集成 RM | 都不创建 |
 | Real / Imagine worker | 1 / 4 | 4 / 0 |
-| 在线 Eval worker | 3，推理副本1/2/3 | 0；可选4，对应副本0/1/2/3 |
+| 常驻在线 Eval worker | 3，推理副本1/2/3 | 0；可选4，对应副本0/1/2/3 |
+| 训练中固定验证 | 无新增 | 默认每消耗10万仿真步；P0基线及最终版本也验证 |
 | Policy batch 来源 | 144 real + 432 imagined | 576 real |
 | Policy 微批次/累积 | 普通8/18；每5步4/36 | 恒8/18，全局576 |
 | World 更新 | 每5次 Policy 更新一次 | 无 |
@@ -66,9 +67,33 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 TensorBoard 原站仍写到 `AcceRL-scheduler/runs/Libero/` 的监控目录，实验名明确包含 `ModelFree_Real4_Imag0_Eval0` 或 `Eval4`。保留 Policy/Value loss、真实平均回报与幕长、Policy熵/KL，新增显式真实成功率、Policy/Value学习率、累计真实动作数、完成回合的动作吞吐及更新速度。完成回合动作吞吐按两次日志间已完成回合累计动作数计算，可能随回合完成出现波动，不是逐动作即时计时。
 
-Eval0 不写伪造的0% Eval曲线；不存在的 World/RM/Imagine 服务也不写伪零曲线。终端明确显示在线 Eval 关闭。低频抽样双相机预览沿用现有设置，不额外调用世界模型。
+Eval0 不写伪造的0%在线 Eval曲线；固定验证只有完整跑完50例才记录成功率。不存在的 World/RM/Imagine 服务也不写伪零曲线。终端明确显示在线 Eval 关闭。低频抽样双相机预览沿用现有设置，不额外调用世界模型。
 
 每25次 Policy 更新保存现有权重快照；初始快照和最终保存流程保留。model-free manifest 只包含 Policy，外层验收按 Policy-only 服务与四rank计数检查，固定评测读取同一权重格式。保存权重不等于精确续训状态。
+
+## 自动停止与固定验证
+
+model-free 在实际采集预算耗尽后自动保存、审计并结束。预算包含动作与 reset settling；先等待所有已发出的回合收齐，确认没有在途预算或失败后才认定完成。最后不足一次 reset 加一个动作的零头也属于无法继续采集的耗尽。退出原因记录为 `real_budget_exhausted`，不能把 worker 错误、未知消费或取消的回合当作成功完成。启动前必须启用显式初态分配和预算记账。
+
+默认在Real worker开始采集前先测P0，然后每累计消耗10万仿真步，在完整 Policy 更新边界暂停新采集、排空现有回合并固定当前策略版本，用同一 spatial task0 的50初态、greedy、推理batch1、EGL、220动作上限验证。单个临时验证worker串行调用GPU4的推理副本0；全部Policy副本继续常驻。验证不加入 Replay或训练统计，不参与训练梯度，也不消耗100万步训练预算，但会增加实际运行时间。完成后释放临时验证环境、恢复推理批次上限及训练，常驻在线 Eval仍为0。
+
+至少消耗30万训练仿真步后，若连续3次验证没有达到相对改善参考值至少多成功1例，则以 `fixed_validation_plateau` 保存并结束。P0不计入这3次。部分评测、超时或错误不能消耗 patience，重复策略版本也不计数；最终版本已经测过时复用其结果。成功数的历史最好值只用于记录和判定，checkpoint继续覆盖 `latest_weights.pt`，不切换到best权重。
+
+四项参数通过原入口传递，并冻结到实验记录及runner状态。例如未来获得启动授权后可以使用：
+
+```bash
+./run.sh original --model-free --id model-free-fixed \
+  --fixed-validation-interval-env-steps 100000 \
+  --fixed-validation-patience 3 \
+  --fixed-validation-min-env-steps 300000 \
+  --fixed-validation-min-delta-successes 1
+```
+
+`--fixed-validation-interval-env-steps 0` 关闭训练中固定验证及平台期停止，预算停止仍生效。显式启用常驻在线 Eval时，固定验证默认关闭；不接受同时开启两者。原WEAVER模式不接收这些参数，也不放宽原手动停止验收。
+
+TensorBoard 使用 `FixedValidation/Success_Rate`、`Success_Count`、`Budget_Env_Steps` 和 `Duration_Seconds`；每次完整验证的50例明细保存在本次训练数据目录的 `fixed_validation/P<版本>.json`，另覆盖 `latest.json`。这50个初态仍来自训练使用的初态池，验证用于选择停止时机，不代表未见初态上的泛化测试。50例中1例对应2个百分点，平台期规则不是统计显著性检验。
+
+固定验证及排空阶段有独立时限；runner仅在本次run的有效时限内暂停优化器更新看门狗。自动结束仍必须通过完整四rank更新计数、Replay曝光账、最终权重CPU审计和进程清理。原站结束后的独立初始/最终checkpoint对比评测保持原协议，它与训练中50例greedy验证分别记录。
 
 ## 验证范围
 
