@@ -31,12 +31,18 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def make_record(checkout, root, label, commit, training_seconds=7200):
+def make_record(checkout, root, label, commit, training_seconds=0,
+                target_success_rate=0.99,target_success_window=1000):
     """Pure payload builder, also used to freeze the delayed handoff plan."""
     checkout, root = Path(checkout), Path(root)
     require(LABEL.fullmatch(label), 'Invalid legacy experiment label')
     require(re.fullmatch('[0-9a-f]{40}',commit), 'Full Git commit required')
-    require(math.isfinite(training_seconds) and training_seconds > 0, 'Training seconds must be finite and positive')
+    require(math.isfinite(training_seconds) and training_seconds >= 0, 'Training seconds must be finite and nonnegative')
+    require(math.isfinite(target_success_rate) and 0 <= target_success_rate <= 1,
+            'Target success rate must be finite and in 0..1')
+    require(type(target_success_window) is int and target_success_window > 0,
+            'Target success window must be a positive integer')
+    require(training_seconds > 0 or target_success_rate > 0,'A training duration or success target is required')
     require(checkout.is_absolute() and root.is_absolute(), 'Absolute checkout/output required')
     seconds = float(training_seconds)
     training = root/'training'
@@ -57,18 +63,23 @@ def make_record(checkout, root, label, commit, training_seconds=7200):
         '--num-images-in-input':'2','--pretrained-checkpoint':POLICY,'--checkpoint2':DISTILLED,
         '--clip-mode':'gipo','--exp-name':run_id,'--baseline-output-dir':str(training),
         '--max-train-seconds':str(seconds),'--ray-temp-dir':str(ray_temp),
+        '--target-success-rate':str(float(target_success_rate)),
+        '--target-success-window':str(target_success_window),
         '--stop-file':str(training/'stop.flag')}
     driver = [PYTHON,'-B','-m','rl.ds_libero_ppo_discrete',
               *[part for pair in options.items() for part in pair],'--use-bf16']
     wrapper = checkout/'weaver_run/reference_site/legacy_queue_entry.py'
     argv = ['/usr/bin/env','PYTHONNOUSERSITE=1','PYTHONDONTWRITEBYTECODE=1',PYTHON,
             str(wrapper),'--checkout',str(checkout),'--root',str(root),
-            '--git-commit',commit,'--training-seconds',str(seconds)]
+            '--git-commit',commit,'--training-seconds',str(seconds),
+            '--target-success-rate',str(float(target_success_rate)),
+            '--target-success-window',str(target_success_window)]
     return dict(schema=1,profile=PROFILE,label=label,root=str(root),checkout=str(checkout),
         source=str(checkout),run_id=run_id,git_commit=commit,
         ray_temp_dir=str(ray_temp),
         model_free=True,num_eval_workers=0,batch_autotune=False,gpu_layout='legacy3+1',
         git_branch='codex/weaver-original95-runnable',training_seconds=seconds,
+        target_success_rate=float(target_success_rate),target_success_window=target_success_window,
         configuration=dict(trainer_gpus=3,inference_actors=1,physical_gpus=[4,5,6,7],
             cuda_visible_gpu_uuids=list(GPUS),
             benchmark='libero_spatial',task_ids=[0],eval_workers=0,rollout_workers=10,
@@ -113,7 +124,9 @@ def validate_source(checkout, commit):
 def _main_unlocked(argv=None):
     parser = argparse.ArgumentParser(prog='./run.sh legacy-baseline')
     parser.add_argument('--id',required=True)
-    parser.add_argument('--training-seconds',type=float,default=7200)
+    parser.add_argument('--training-seconds',type=float,default=0)
+    parser.add_argument('--target-success-rate',type=float,default=0.99)
+    parser.add_argument('--target-success-window',type=int,default=1000)
     parser.add_argument('--check-only',action='store_true')
     args = parser.parse_args(argv)
     # Import Linux/server helpers only at the actual entry point.
@@ -125,7 +138,8 @@ def _main_unlocked(argv=None):
     commit = published(CHECKOUT)
     runtime = HOME/'.legacy-runtime'/commit
     root = EXPERIMENTS/args.id
-    record = make_record(runtime,root,args.id,commit,args.training_seconds)
+    record = make_record(runtime,root,args.id,commit,args.training_seconds,
+                         args.target_success_rate,args.target_success_window)
     validation = validate_source(CHECKOUT,commit)
     if args.check_only:
         print(json.dumps(dict(valid=True,production_submission=False,validation=validation,record=record)))

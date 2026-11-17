@@ -4,7 +4,8 @@ This baseline executes `rl/ds_libero_ppo_discrete.py`, the actual trainer called
 by `run_ppo_training_example.sh`. It does not invoke the newer WEAVER model-free
 training engine. The teacher's requested changes are Eval0 and GIPO.
 
-For the first bounded measurement, the user selected:
+The user selected the following comparison, then replaced the initial two-hour
+limit with a success target:
 
 | Setting | Value |
 | --- | --- |
@@ -17,11 +18,14 @@ For the first bounded measurement, the user selected:
 | Clip mode | GIPO; sigma1 matches the legacy loss and diagnostics |
 | Renderer | Original OSMesa software rendering |
 | Episode horizon | Original spatial limit of 220 actions |
-| Duration | 7200 seconds from entry to the training update loop |
+| Stop target | First >=99% over a complete rolling window of 1000 real episodes; save at the next completed update boundary |
+| Milestones | Latch first >=98% and >=99% as episodes are recorded, with counts and elapsed times |
+| Time limit | Disabled; two hours is no longer a stopping condition |
 | Final save | Inference weights, once at the completed update/publication boundary |
 
-The user explicitly selected task/checkpoint/four-GPU alignment and a two-hour
-duration. The original shell example uses a different configuration: it uses
+The user explicitly selected task/checkpoint/four-GPU alignment and subsequently
+requested learning to 98/99% instead of stopping after two hours.
+The original shell example uses a different configuration: it uses
 two GPUs, object tasks, another checkpoint, proprio input, and global batch252.
 
 ## Submission and isolation
@@ -30,7 +34,8 @@ On the reference server, the authorized entry is:
 
 ```bash
 /mnt/data/lcx1/dong/WEAVER/run.sh legacy-baseline \
-  --id legacy-gipo-baseline-20261117-a --training-seconds 7200
+  --id legacy-gipo-baseline-20261117-a --training-seconds 0 \
+  --target-success-rate 0.99 --target-success-window 1000
 ```
 
 The CPU-only `--check-only` path constructs and validates the frozen record
@@ -62,11 +67,22 @@ the outer `queue_receipt.json` records child exit, finite CPU tensor checks,
 artifact hashes and
 scoped process cleanup before declaring overall success.
 
-Report both end-to-end wall time and update-loop time. The two-hour bound excludes
-model loading and initial Replay fill, and permits the already running update,
-publication and final save to finish. A stalled or failed operation is a fault,
-not a successful duration stop. Saved weights do not provide exact optimizer,
-Replay or RNG continuation.
+Report both end-to-end wall time from driver launch and time since updates began.
+Each completed episode is recorded by the training statistics actor; it latches
+the first >=98% and >=99% windows, including the episode-observation timestamp.
+A window smaller than 1000 cannot trigger a target. These latches survive a later
+decline in the rolling window. At the next completed training/publication boundary,
+the driver records the milestones and first >=99% triggers save and stop with
+`success_target_reached`. Milestone time and checkpoint-boundary time are recorded
+separately; a boundary step does not identify the policy that generated every
+episode. This is the training actor's episode-arrival order, not a frozen
+checkpoint's success probability. The same-task window may contain trajectories
+from several policy versions, matching the earlier training-curve comparison.
+
+The old 30000-update cap and explicit stop requests still apply, and their
+completion reasons must not be relabeled as target achievement. Startup,
+stalled-update and final-save fault bounds remain; a healthy run has no two-hour
+time limit. Saved weights do not provide exact optimizer, Replay or RNG continuation.
 
 Training samples/s is global batch576 times successful updates per second.
 These are consumed **action chunks**, not new simulator actions. Legacy Replay
@@ -87,7 +103,7 @@ ablation. In addition to three-trainer/one-inference placement, it retains:
 - The original trajectory sampling/reuse and old-value GAE path, without FRESH
   policy-age/use-count admission or the new current-critic refresh stage.
 - Original action-chunk handling, learning-rate warmup, and NCCL weight broadcast.
-- Eval0 without periodic fixed validation in this short speed measurement.
+- Eval0 without periodic fixed validation in this legacy baseline.
 
 Faster updates alone do not establish faster learning or equal data efficiency.
 Use produced data, consumed data, sample reuse, update timing and reward together

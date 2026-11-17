@@ -186,6 +186,10 @@ def parse_args():
                         help='Ray temporary directory (legacy default: /dev/shm)')
     parser.add_argument('--stop-file', type=str, default=None,
                         help='Stop at a completed update/publication boundary when this file exists')
+    parser.add_argument('--target-success-rate', type=float, default=0,
+                        help='Stop when a full real-rollout success window reaches this rate; 0 disables')
+    parser.add_argument('--target-success-window', type=int, default=1000,
+                        help='Completed real-rollout episodes required for success milestones (default: 1000)')
     
     args = parser.parse_args()
     if not math.isfinite(args.max_train_seconds) or args.max_train_seconds < 0:
@@ -237,6 +241,16 @@ def parse_args():
         print("-" * 80)
         print(f"✓ 参数加载完成，将从步数 {resume_step} 继续训练\n")
     
+    if not math.isfinite(args.target_success_rate) or not 0 <= args.target_success_rate <= 1:
+        parser.error('--target-success-rate must be finite and between 0 and 1')
+    if args.target_success_window <= 0:
+        parser.error('--target-success-window must be positive')
+    if args.target_success_rate:
+        if not args.baseline_output_dir:
+            parser.error('--target-success-rate requires --baseline-output-dir')
+        if len(args.task_ids.split(',')) != 1 or not args.task_ids.strip():
+            parser.error('--target-success-rate requires exactly one task ID')
+
     # 设置 CUDA_VISIBLE_DEVICES 环境变量
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     
@@ -280,7 +294,7 @@ class Experience:
 # ================================================================
 @ray.remote
 class StatsActor:
-    def __init__(self, window_size):
+    def __init__(self, window_size, success_window_size=0, target_success_rate=0):
         self.stats = defaultdict(lambda: {
             "episode_returns": deque(maxlen=window_size),
             "step_times": deque(maxlen=window_size),
@@ -295,6 +309,11 @@ class StatsActor:
         self.active_window_seconds = 600
         self.total_samples_produced = 0
         self.window_size = window_size
+        self.success_window_size = success_window_size
+        self.success_windows = defaultdict(lambda: deque(maxlen=success_window_size))
+        self.success_window_sums = defaultdict(int)
+        self.success_crossings = defaultdict(dict)
+        self.target_success_rate = target_success_rate
 
     def add_episode_return(
         self,
@@ -306,6 +325,14 @@ class StatsActor:
         actor_id: Optional[int] = None,
         step_num: int = 0,
     ):
+        if self.success_window_size and not env_name.startswith('eval_'):
+            if success not in (0, 1):
+                raise ValueError('Real-rollout success must be binary')
+            history = self.success_windows[env_name]
+            if len(history) == self.success_window_size:
+                self.success_window_sums[env_name] -= history[0]
+            history.append(int(success))
+            self.success_window_sums[env_name] += int(success)
         env_stats = self.stats[env_name]
         env_stats["episode_returns"].append(ep_return)
         env_stats["step_times"].append(step_time)
@@ -319,6 +346,40 @@ class StatsActor:
             self.total_samples_produced += step_num
             if actor_id is not None:
                 self.actor_last_active[actor_id] = time.time()
+            if self.success_window_size and len(self.success_windows[env_name]) == self.success_window_size:
+                snapshot = self._task_success_snapshot(env_name, time.time())
+                crossings = self.success_crossings[env_name]
+                for threshold in (98, 99):
+                    if snapshot['window_successes'] * 100 >= threshold * self.success_window_size:
+                        crossings.setdefault(str(threshold), dict(snapshot))
+                if self.target_success_rate and snapshot['success_rate'] >= self.target_success_rate:
+                    crossings.setdefault('target', dict(snapshot))
+
+    def _task_success_snapshot(self, env_name, observed_unix):
+        episodes = len(self.success_windows[env_name])
+        successes = self.success_window_sums[env_name]
+        data = self.stats[env_name]
+        return {'window_episodes': episodes, 'window_successes': successes,
+                'success_rate': successes / episodes if episodes else 0.,
+                'window_size': self.success_window_size,
+                'total_episodes_processed': data['total_episodes_processed'],
+                'total_env_steps': data['total_env_steps'], 'observed_unix': observed_unix}
+
+    def get_success_snapshot(self, window_size):
+        """Exact single-task training outcomes, excluding all evaluation episodes."""
+        if type(window_size) is not int or not 0 < window_size == self.success_window_size:
+            raise ValueError('Requested success window is unavailable')
+        tasks = [(name, data) for name, data in self.stats.items()
+                 if not name.startswith('eval_') and data['total_episodes_processed'] > 0]
+        if len(tasks) > 1:
+            raise ValueError('Success-target stopping cannot aggregate multiple task windows')
+        if not tasks:
+            return {'window_episodes': 0, 'window_successes': 0, 'success_rate': 0.,
+                    'window_size': window_size, 'total_episodes_processed': 0,
+                    'total_env_steps': 0, 'observed_unix': time.time(), 'crossings': {}}
+        name = tasks[0][0]
+        return dict(self._task_success_snapshot(name, time.time()),
+                    crossings={key: dict(value) for key, value in self.success_crossings[name].items()})
 
     def add_timing_metric(self, metric_name: str, value: float):
         """记录系统性能相关的计时指标"""
@@ -1765,7 +1826,9 @@ def main(args):
     baseline = None
     if args.baseline_output_dir:
         from rl.legacy_baseline_control import LegacyBaselineControl, validate_rank_steps
-        baseline = LegacyBaselineControl(args.baseline_output_dir, args.max_train_seconds, args.stop_file)
+        baseline = LegacyBaselineControl(args.baseline_output_dir, args.max_train_seconds, args.stop_file,
+                                         target_success_rate=args.target_success_rate,
+                                         target_success_window=args.target_success_window)
     
     if not os.path.exists(args.pretrained_checkpoint):
         if baseline:
@@ -1793,7 +1856,9 @@ def main(args):
     with open(args_file, 'w', encoding='utf-8') as f:
         json.dump(vars(args), f, indent=2, ensure_ascii=False)
     print(f"命令行参数已保存到: {args_file}")
-    stats_actor = StatsActor.remote(window_size=args.moving_avg_window)
+    stats_actor = StatsActor.remote(window_size=args.moving_avg_window,
+                                   success_window_size=args.target_success_window if args.target_success_rate else 0,
+                                   target_success_rate=args.target_success_rate)
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
     cfg = build_openvla_cfg(args)
@@ -1993,9 +2058,12 @@ def main(args):
         sync_time = time.time() - t_sync_start
         stop_at_boundary = False
         if baseline:
+            success_snapshot = (ray.get(stats_actor.get_success_snapshot.remote(args.target_success_window))
+                                if args.target_success_rate else None)
             stop_at_boundary = baseline.after_update(
                 global_step, train_seconds=train_time, publication_seconds=sync_time,
-                samples=args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus)
+                samples=args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus,
+                success_snapshot=success_snapshot)
 
         if global_step > 0 and global_step % args.ckpt_every_steps == 0:
             ray.get(trainer_group[0].save_agent.remote(args.ckpt_dir, global_step))

@@ -2,6 +2,8 @@
 import argparse
 import hashlib
 import json
+import math
+from fractions import Fraction
 import os
 from pathlib import Path
 import signal
@@ -81,9 +83,36 @@ def audit_completion(record, *, weights_auditor=None):
     require(type(result.get('global_step')) is int and result['global_step'] > 0
             and type(result.get('completed_updates')) is int and result['completed_updates'] > 0,
             'Legacy driver has no completed update')
-    require(result.get('reason') in ('deadline','stop_file','train_iters')
+    require(result.get('reason') in ('deadline','stop_file','train_iters','success_target_reached')
             and result.get('checkpoint_kind') == 'inference_weights_only'
             and result.get('exact_resume') is False,'Legacy final boundary/save contract differs')
+    target_reached = False
+    if record['target_success_rate'] > 0:
+        require(result.get('target_success_rate') == record['target_success_rate']
+                and result.get('target_success_window') == record['target_success_window'],
+                'Legacy completion target differs from frozen target')
+        if result.get('reason') == 'success_target_reached':
+            snapshot = result.get('success_snapshot',{})
+            episodes, successes = snapshot.get('window_episodes'), snapshot.get('window_successes')
+            rate = snapshot.get('success_rate')
+            require(type(episodes) is int and episodes == record['target_success_window']
+                    and snapshot.get('window_size') == episodes and type(successes) is int
+                    and 0 <= successes <= episodes and isinstance(rate,(float,int))
+                    and math.isfinite(rate) and abs(rate-successes/episodes) <= 1e-12
+                    and Fraction(successes,episodes) >= Fraction(str(record['target_success_rate']))
+                    and snapshot.get('policy_step') == result['global_step']
+                    and snapshot.get('boundary_policy_step') == result['global_step'],
+                    'Legacy target completion lacks a full crossing window at the final safe boundary')
+            milestone = result.get('milestones',{}).get('99',{})
+            require(record['target_success_rate'] != 0.99 or all(milestone.get(key) == value for key,value in snapshot.items()),
+                'Legacy 99 percent milestone snapshot differs')
+            require(record['target_success_rate'] != 0.99 or milestone.get('policy_step') == result['global_step'],
+                    'Legacy 99 percent milestone does not match final step')
+            target_reached = True
+    else:
+        require(result.get('reason') != 'success_target_reached','Legacy completion fabricated a disabled target')
+    require(result.get('reason') != 'deadline' or record['training_seconds'] > 0,
+            'Legacy completion fabricated a disabled duration limit')
     metadata = read(root/'training/driver_metadata.json')
     require(metadata.get('run_id') == record['run_id'] and metadata.get('git_commit') == record['git_commit']
             and metadata.get('global_batch_size') == 576,'Legacy metadata identity/global batch differs')
@@ -98,6 +127,20 @@ def audit_completion(record, *, weights_auditor=None):
                     and row.get('samples_per_update') == 576 for row in updates)
             and result.get('consumed_training_samples') == 576*len(updates),
             'Legacy update ledger disagrees with final boundary')
+    if target_reached:
+        require(updates[-1].get('success_snapshot') == result['success_snapshot'],
+                'Legacy target snapshot disagrees with the final update ledger')
+        if record['target_success_rate'] == 0.99:
+            require(updates[-1].get('milestones',{}).get('99') == result['milestones']['99'],
+                    'Legacy first 99 percent crossing disagrees with the final update ledger')
+    first_crossings = {}
+    for update in updates:
+        for threshold, milestone in update.get('milestones',{}).items():
+            if threshold in ('98','99'):
+                require(first_crossings.setdefault(threshold,milestone) == milestone,
+                        'Legacy first success crossing was overwritten in the update ledger')
+    require(all(result.get('milestones',{}).get(key) == value for key,value in first_crossings.items()),
+            'Legacy first success crossing was overwritten in the completion receipt')
     directory = Path(result['checkpoint_dir'])
     expected = root/'training/checkpoints/latest'/('agent_checkpoint_epoch_'+str(result['global_step']))
     require(directory == expected and directory.resolve() == expected and directory.is_dir(),
@@ -120,7 +163,7 @@ def audit_completion(record, *, weights_auditor=None):
             for chunk in iter(lambda:handle.read(4*1024*1024),b''):
                 digest.update(chunk)
         audited.append(dict(path=str(path.relative_to(root)),bytes=path.stat().st_size,sha256=digest.hexdigest()))
-    return dict(passed=True,driver=result,files=audited,tensor_audit=tensor_audit,
+    return dict(passed=True,driver=result,files=audited,tensor_audit=tensor_audit,target_reached=target_reached,
                 scope='CPU tensor finite audit and SHA256; weights-only, not exact resume')
 
 
@@ -138,6 +181,9 @@ def supervise(record, env, safety, *, popen=subprocess.Popen, clock=time.monoton
     owned = []
     started = clock()
     training_started = None
+    last_progress = None
+    last_step = 0
+    finalizing = None
     stop_requested = None
     received = []
     old_handlers = {}
@@ -146,7 +192,10 @@ def supervise(record, env, safety, *, popen=subprocess.Popen, clock=time.monoton
             old_handlers[signum] = signal.signal(signum,lambda number,frame:received.append(number))
         atomic(root/'queue_receipt.json',receipt)
         with (root/'train.log').open('xb') as log:
-            child = popen(record['driver_argv'],cwd=root,env=env,stdin=subprocess.DEVNULL,
+            launch_unix = time.time()
+            child_env = dict(env,WEAVER_LEGACY_STARTED_UNIX=str(launch_unix))
+            receipt['launch_started_unix'] = launch_unix
+            child = popen(record['driver_argv'],cwd=root,env=child_env,stdin=subprocess.DEVNULL,
                           stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             identity = safety.proc_identity(child.pid)
             uid_matches = identity and (not hasattr(os,'getuid') or identity['uid'] == os.getuid())
@@ -166,8 +215,15 @@ def supervise(record, env, safety, *, popen=subprocess.Popen, clock=time.monoton
                             'Legacy driver status provenance differs')
                 if training_started is None and state.get('training_started_unix') is not None:
                     training_started = now
+                    last_progress = now
                     receipt['training_observed_ns'] = time.time_ns()
                     atomic(root/'queue_receipt.json',receipt)
+                step = state.get('global_step',0)
+                if training_started is not None and type(step) is int and step > last_step:
+                    last_step,last_progress = step,now
+                if finalizing is None and (state.get('phase') in ('final_save','completed')
+                        or state.get('reason') in ('success_target_reached','deadline','stop_file','train_iters')):
+                    finalizing = now
                 if received and stop_requested is None:
                     stop = root/'training/stop.flag'
                     stop.parent.mkdir(exist_ok=True)
@@ -177,8 +233,13 @@ def supervise(record, env, safety, *, popen=subprocess.Popen, clock=time.monoton
                     atomic(root/'queue_receipt.json',receipt)
                 require(training_started is not None or now-started <= startup_seconds,
                         'Legacy startup/replay-fill exceeded its fault bound')
-                require(training_started is None or now-training_started <= record['training_seconds']+grace_seconds,
+                require(training_started is None or record['training_seconds'] == 0
+                        or now-training_started <= record['training_seconds']+grace_seconds,
                         'Legacy training boundary/final save exceeded its fault bound')
+                require(last_progress is None or finalizing is not None or now-last_progress <= grace_seconds,
+                        'Legacy training made no completed-update progress within its fault bound')
+                require(finalizing is None or now-finalizing <= grace_seconds,
+                        'Legacy final save exceeded its grace')
                 require(stop_requested is None or now-stop_requested <= grace_seconds,
                         'Legacy requested boundary stop/final save exceeded its grace')
                 sleep(1)
@@ -193,6 +254,7 @@ def supervise(record, env, safety, *, popen=subprocess.Popen, clock=time.monoton
         receipt['cleanup'] = cleanup
         require(not cleanup['survivors'],'Legacy owned processes survived cleanup')
         receipt['checkpoint_audit'] = audit_completion(record)
+        receipt['target_reached'] = receipt['checkpoint_audit']['target_reached']
         receipt.update(state='succeeded',all_owned_exited=True)
     except BaseException as exc:
         receipt.update(state='failed',error=repr(exc),traceback=traceback.format_exc())
@@ -242,7 +304,8 @@ def run(args):
     require(args.checkout.resolve() == args.checkout and args.root.resolve() == args.root,
             'Canonical legacy checkout/output required')
     require(args.checkout == Path(__file__).resolve().parents[2], 'Legacy wrapper source identity differs')
-    expected = make_record(args.checkout,args.root,args.root.name,args.git_commit,args.training_seconds)
+    expected = make_record(args.checkout,args.root,args.root.name,args.git_commit,args.training_seconds,
+                           args.target_success_rate,args.target_success_window)
     match_record(read(args.root/'experiment.json'),expected)
     validation = validate_source(args.checkout,args.git_commit)
     sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -289,6 +352,8 @@ def main(argv=None):
     parser.add_argument('--root',type=Path,required=True)
     parser.add_argument('--git-commit',required=True)
     parser.add_argument('--training-seconds',type=float,required=True)
+    parser.add_argument('--target-success-rate',type=float,default=0.99)
+    parser.add_argument('--target-success-window',type=int,default=1000)
     args = parser.parse_args(argv)
     try:
         return run(args)

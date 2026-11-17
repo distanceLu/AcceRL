@@ -114,10 +114,28 @@ class LegacyBaselineControlTests(unittest.TestCase):
             args = namespace['parse_args']()
         self.assertEqual((args.max_train_seconds, args.baseline_output_dir, args.ray_temp_dir, args.stop_file),
                          (0, None, '/dev/shm', None))
+        self.assertEqual((args.target_success_rate, args.target_success_window), (0, 1000))
         for argv in (['--max-train-seconds', '20'], ['--max-train-seconds', 'nan']):
             with patch('sys.argv', ['driver'] + argv), patch('sys.stderr'):
                 with self.assertRaises(SystemExit):
                     namespace['parse_args']()
+        invalid_targets = [
+            ['--target-success-rate', '.99'],
+            ['--baseline-output-dir', str(self.root), '--target-success-rate', 'nan'],
+            ['--baseline-output-dir', str(self.root), '--target-success-rate', '1.1'],
+            ['--baseline-output-dir', str(self.root), '--target-success-rate', '-.1'],
+            ['--baseline-output-dir', str(self.root), '--target-success-rate', '.99'],
+            ['--baseline-output-dir', str(self.root), '--target-success-rate', '.99', '--task-ids', '0', '--target-success-window', '0'],
+        ]
+        for argv in invalid_targets:
+            with patch('sys.argv', ['driver'] + argv), patch('sys.stderr'):
+                with self.assertRaises(SystemExit):
+                    namespace['parse_args']()
+        with patch('sys.argv', ['driver', '--baseline-output-dir', str(self.root),
+                               '--target-success-rate', '.99', '--task-ids', '0']), patch.dict(os.environ):
+            args = namespace['parse_args']()
+        self.assertEqual(args.target_success_rate, .99)
+        self.assertEqual(args.max_train_seconds, 0)
 
     def test_bounded_import_preserves_parent_tmpdir_legacy_import_keeps_default(self):
         source = Path(__file__).with_name('ds_libero_ppo_discrete.py').read_text(encoding='utf-8')
@@ -175,11 +193,218 @@ class LegacyBaselineControlTests(unittest.TestCase):
                         loop_source.index('broadcast_task ='))
         self.assertLess(loop_source.index('ray.get([broadcast_task] + receive_tasks)'),
                         loop_source.index('baseline.after_update'))
+        self.assertLess(loop_source.index('ray.get([broadcast_task] + receive_tasks)'),
+                        loop_source.index('stats_actor.get_success_snapshot.remote'))
         main_source = ast.unparse(main)
         self.assertLess(main_source.index('baseline.complete'), main_source.index('ray.shutdown()'))
         self.assertIn('raise FileNotFoundError', main_source)
         self.assertIn("args.num_eval_workers > 0", main_source)
         self.assertIn("os.path.join(args.baseline_output_dir, 'tensorboard')", main_source)
+
+    def target_control(self, **kwargs):
+        return LegacyBaselineControl(self.root, clock=self.clock, wall_clock=lambda: 1000 + self.clock.now,
+                                     target_success_rate=.99, target_success_window=1000, **kwargs)
+
+    def snapshot(self, successes=990, episodes=1000, **kwargs):
+        result = dict(window_episodes=episodes, window_successes=successes, window_size=1000,
+                      success_rate=successes / episodes if episodes else 0.,
+                      total_episodes_processed=episodes + 50, total_env_steps=123000,
+                      observed_unix=1000 + self.clock.now, **kwargs)
+        result['crossings'] = {str(threshold): dict(result) for threshold in (98, 99)
+                               if episodes == 1000 and successes * 100 >= threshold * 1000}
+        return result
+
+    def target_update(self, control, step, snapshot):
+        return control.after_update(step, train_seconds=1, publication_seconds=.1,
+                                    samples=576, success_snapshot=snapshot)
+
+    def test_target_requires_full_window_and_exact_counts(self):
+        control = self.target_control()
+        control.start_training()
+        self.assertFalse(self.target_update(control, 1, self.snapshot(99, 99)))
+        self.assertFalse(control.milestones)
+        self.assertFalse(self.target_update(control, 2, self.snapshot(989)))
+        self.assertIn('98', control.milestones)
+        self.assertNotIn('99', control.milestones)
+        self.assertTrue(self.target_update(control, 3, self.snapshot(990)))
+        self.assertEqual(control.reason, 'success_target_reached')
+
+    def test_first_crossing_milestones_are_immutable_and_include_launch_time(self):
+        with patch.dict(os.environ, {'WEAVER_LEGACY_STARTED_UNIX': '1000'}):
+            control = self.target_control()
+        self.clock.now += 5
+        control.start_training()
+        self.clock.now += 8
+        self.assertTrue(self.target_update(control, 7, self.snapshot(995)))
+        first = json.loads(json.dumps(control.milestones))
+        self.assertEqual(first['98'], first['99'])
+        self.assertEqual(first['99']['policy_step'], 7)
+        self.assertEqual(first['99']['elapsed_seconds'], 13)
+        self.assertEqual(first['99']['training_seconds'], 8)
+        self.assertEqual(first['99']['launch_elapsed_seconds'], 23)
+        self.clock.now += 100
+        self.assertTrue(self.target_update(control, 8, self.snapshot(900)))
+        self.assertEqual(control.milestones, first)
+        with self.assertRaises(RuntimeError):
+            control.complete(8, lambda: self.root)
+        receipt = control.complete(7, lambda: self.root)
+        self.assertEqual(receipt['reason'], 'success_target_reached')
+        self.assertEqual(receipt['milestones'], first)
+        status = json.loads((self.root / 'driver_status.json').read_text())
+        self.assertEqual(status['reason'], 'success_target_reached')
+        updates = [json.loads(line) for line in (self.root / 'updates.jsonl').read_text().splitlines()]
+        self.assertEqual(updates[0]['reason'], 'success_target_reached')
+        self.assertEqual(len(updates), 1)
+
+    def test_malformed_snapshot_cannot_count_an_update_or_complete(self):
+        control = self.target_control()
+        control.start_training()
+        for bad in (dict(success_rate=float('nan')), dict(window_successes=1001),
+                    dict(window_episodes=True), dict(window_successes=990.0),
+                    dict(success_rate=.989), dict(window_size=999),
+                    dict(total_episodes_processed=1), dict(total_env_steps=0),
+                    dict(observed_unix=float('inf'))):
+            snapshot = self.snapshot()
+            snapshot.update(bad)
+            with self.assertRaises(ValueError):
+                self.target_update(control, 1, snapshot)
+        with self.assertRaises(ValueError):
+            self.target_update(control, 1, None)
+        self.assertEqual(control.completed_updates, 0)
+        self.assertFalse((self.root / 'driver_complete.json').exists())
+
+    def test_manual_stop_precedes_target_and_target_precedes_deadline(self):
+        stop = self.root / 'stop'
+        control = self.target_control(max_train_seconds=1, stop_file=stop)
+        control.start_training()
+        self.clock.now += 2
+        stop.touch()
+        self.assertTrue(self.target_update(control, 1, self.snapshot()))
+        self.assertEqual(control.reason, 'stop_file')
+        self.assertIn('99', control.milestones)
+        with tempfile.TemporaryDirectory() as other:
+            control = LegacyBaselineControl(other, max_train_seconds=1, target_success_rate=.99,
+                                            clock=self.clock)
+            control.start_training()
+            self.clock.now += 2
+            self.assertTrue(self.target_update(control, 1, self.snapshot()))
+            self.assertEqual(control.reason, 'success_target_reached')
+
+    def test_target_step_cap_is_truthful_without_full_success_window(self):
+        control = self.target_control()
+        control.start_training()
+        self.target_update(control, 30000, self.snapshot(980))
+        receipt = control.complete(30000, lambda: self.root)
+        self.assertEqual(receipt['reason'], 'train_iters')
+        self.assertNotIn('99', receipt['milestones'])
+        self.assertEqual(json.loads((self.root / 'driver_status.json').read_text())['reason'], 'train_iters')
+
+    def test_stats_snapshot_excludes_eval_and_refuses_multiple_task_windows(self):
+        from collections import deque, defaultdict
+        from typing import Dict, Optional
+        import time
+        source = Path(__file__).with_name('ds_libero_ppo_discrete.py').read_text(encoding='utf-8')
+        actor = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)
+                     and node.name == 'StatsActor')
+        actor.decorator_list = []
+        namespace = dict(deque=deque, defaultdict=defaultdict, Dict=Dict, Optional=Optional, time=time)
+        exec(compile(ast.Module(body=[actor], type_ignores=[]), '<stats>', 'exec'), namespace)
+        stats = namespace['StatsActor'](window_size=2, success_window_size=3)
+        empty = stats.get_success_snapshot(3)
+        self.assertEqual((empty['window_episodes'], empty['window_successes'], empty['success_rate']), (0, 0, 0.))
+        with self.assertRaises(ValueError):
+            stats.get_success_snapshot(4)
+        with self.assertRaises(ValueError):
+            stats.add_episode_return('task0', 1., .1, 10, float('nan'))
+        for success in (1., 0., 1., 1.):
+            stats.add_episode_return('task0', 1., .1, 10, success)
+        stats.add_episode_return('eval_task0', 1., .1, 10, 1.)
+        snapshot = stats.get_success_snapshot(3)
+        self.assertEqual(snapshot['window_successes'], 2)
+        self.assertEqual(snapshot['window_episodes'], 3)
+        self.assertEqual(snapshot['total_episodes_processed'], 4)
+        self.assertEqual(snapshot['total_env_steps'], 40)
+        stats.add_episode_return('task1', 1., .1, 10, 1.)
+        with self.assertRaises(ValueError):
+            stats.get_success_snapshot(3)
+
+    def test_target_metadata_keeps_first_milestones_and_exact_window(self):
+        control = self.target_control()
+        control.record_metadata(dict(train_batch_size=12, accumulation_steps=16, num_trainer_gpus=3), [])
+        control.start_training()
+        self.target_update(control, 1, self.snapshot(985))
+        first = json.loads((self.root / 'driver_metadata.json').read_text())
+        self.assertEqual(first['milestones']['98']['policy_step'], 1)
+        self.assertEqual(first['success_snapshot']['window_successes'], 985)
+        self.target_update(control, 2, self.snapshot())
+        final = json.loads((self.root / 'driver_metadata.json').read_text())
+        self.assertEqual(final['milestones']['98'], first['milestones']['98'])
+        self.assertEqual(final['milestones']['99']['policy_step'], 2)
+
+    def test_latched_crossing_stops_after_regression_with_actual_event_times(self):
+        with patch.dict(os.environ, {'WEAVER_LEGACY_STARTED_UNIX': '1000'}):
+            control = self.target_control()
+        crossing = self.snapshot()
+        crossing['observed_unix'] = 1012.
+        crossing = {key: value for key, value in crossing.items() if key != 'crossings'}
+        self.clock.now = 15
+        control.start_training()
+        self.clock.now = 25
+        latest = self.snapshot(989)
+        latest['crossings'] = {'98': dict(crossing), '99': dict(crossing)}
+        self.assertTrue(self.target_update(control, 9, latest))
+        milestone = control.milestones['99']
+        self.assertEqual(milestone['observed_unix'], 1012.)
+        self.assertEqual(milestone['launch_elapsed_seconds'], 12.)
+        self.assertEqual(milestone['elapsed_seconds'], 2.)
+        self.assertEqual(milestone['training_seconds'], 0.)
+        self.assertEqual(milestone['training_time_scope'], 'before_training_loop')
+        self.assertEqual(milestone['boundary_policy_step'], 9)
+        self.assertEqual(milestone['boundary_observed_unix'], 1025.)
+        receipt = control.complete(9, lambda: self.root)
+        self.assertEqual(receipt['success_snapshot']['window_successes'], 990)
+        self.assertEqual(receipt['current_success_snapshot']['window_successes'], 989)
+
+    def test_training_crossing_time_excludes_delay_until_safe_boundary(self):
+        control = self.target_control()
+        self.clock.now = 15
+        control.start_training()
+        event = {key: value for key, value in self.snapshot().items() if key != 'crossings'}
+        event['observed_unix'] = 1018.
+        self.clock.now = 25
+        latest = self.snapshot(989)
+        latest['crossings'] = {'98': dict(event), '99': dict(event)}
+        self.assertTrue(self.target_update(control, 5, latest))
+        self.assertEqual(control.milestones['99']['training_seconds'], 3.)
+        self.assertEqual(control.milestones['99']['training_time_scope'], 'training_loop')
+        self.assertEqual(control.milestones['99']['boundary_observed_unix'], 1025.)
+
+    def test_stats_latches_first_990_before_decline_between_queries(self):
+        from collections import deque, defaultdict
+        from typing import Dict, Optional
+        from types import SimpleNamespace
+        source = Path(__file__).with_name('ds_libero_ppo_discrete.py').read_text(encoding='utf-8')
+        actor = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)
+                     and node.name == 'StatsActor')
+        actor.decorator_list = []
+        namespace = dict(deque=deque, defaultdict=defaultdict, Dict=Dict, Optional=Optional,
+                         time=SimpleNamespace(time=lambda: 1000 + self.clock.now))
+        exec(compile(ast.Module(body=[actor], type_ignores=[]), '<stats>', 'exec'), namespace)
+        stats = namespace['StatsActor'](window_size=2, success_window_size=1000)
+        for success in [1] * 990 + [0] * 10:
+            stats.add_episode_return('task0', 1., .1, 10, success)
+        first = stats.get_success_snapshot(1000)['crossings']
+        self.assertEqual(first['99']['window_successes'], 990)
+        self.clock.now += 10
+        stats.add_episode_return('eval_task0', 1., .1, 10, 1)
+        stats.add_episode_return('task0', 1., .1, 10, 0)
+        latest = stats.get_success_snapshot(1000)
+        self.assertEqual(latest['window_successes'], 989)
+        self.assertEqual(latest['crossings'], first)
+        self.assertEqual(first['99']['total_episodes_processed'], 1000)
+        control = self.target_control()
+        control.start_training()
+        self.assertTrue(self.target_update(control, 1, latest))
 
 
 if __name__ == '__main__':
