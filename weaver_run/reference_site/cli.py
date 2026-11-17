@@ -291,6 +291,11 @@ def stop(record,job):
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=='legacy-baseline':
+        sys.path.insert(0,str(CHECKOUT))
+        from weaver_run.reference_site.legacy_baseline import main as legacy_main
+        legacy_main(sys.argv[2:])
+        return
     if len(sys.argv)>1 and sys.argv[1]=='view':
         p=argparse.ArgumentParser(prog='./run.sh view',description='CPU-only read-only three-view dashboard')
         p.add_argument('--id',dest='label')

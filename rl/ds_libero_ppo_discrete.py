@@ -4,7 +4,10 @@ import argparse
 os.environ["MUJOCO_GL"] = "osmesa"           # 强制软件渲染
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"   # 保险起见，给 PyOpenGL 也指明
 # 设置临时文件目录，避免磁盘I/O瓶颈
-os.environ["TMPDIR"] = "/dev/shm"
+if os.environ.get('WEAVER_LEGACY_GIT_COMMIT'):
+    os.environ.setdefault('TMPDIR', '/dev/shm')
+else:
+    os.environ["TMPDIR"] = "/dev/shm"
 # 为了让 Ray 能看到所有可用的 GPU，我们在脚本开头设置。
 # 注意: CUDA_VISIBLE_DEVICES 现在通过命令行参数设置
 # os.environ["CUDA_VISIBLE_DEVICES"] = "6,7"
@@ -175,8 +178,20 @@ def parse_args():
                         help='Use deterministic actions during evaluation (default: True)')
     parser.add_argument('--no-eval-deterministic', action='store_false', dest='eval_deterministic',
                         help='Use stochastic actions during evaluation')
+    parser.add_argument('--baseline-output-dir', type=str, default=None,
+                        help='Opt-in operational records for a legacy speed baseline')
+    parser.add_argument('--max-train-seconds', type=float, default=0,
+                        help='Stop at a completed update/publication boundary; 0 disables the deadline')
+    parser.add_argument('--ray-temp-dir', type=str, default='/dev/shm',
+                        help='Ray temporary directory (legacy default: /dev/shm)')
+    parser.add_argument('--stop-file', type=str, default=None,
+                        help='Stop at a completed update/publication boundary when this file exists')
     
     args = parser.parse_args()
+    if not math.isfinite(args.max_train_seconds) or args.max_train_seconds < 0:
+        parser.error('--max-train-seconds must be finite and nonnegative')
+    if (args.max_train_seconds or args.stop_file) and not args.baseline_output_dir:
+        parser.error('--max-train-seconds and --stop-file require --baseline-output-dir')
     
     # 如果是 resume 模式，加载保存的参数
     if args.resume_from:
@@ -719,6 +734,10 @@ class InferenceActor(InferenceActorCom):
         sd = self.model.state_dict()
         res = {k: float(v.abs().sum().item()) for k, v in sd.items()}
         return res
+
+    def get_placement(self):
+        from rl.legacy_baseline_control import actor_placement
+        return actor_placement(torch, ray, role='inference', index=self.actor_id)
     
     def receive_and_update_weights(self, group_name):
         """覆盖基类方法，接收权重后自增策略版本"""
@@ -880,6 +899,10 @@ class TrainerActor(TrainerActorCom):
     def get_node_ip(self):
         return ray.util.get_node_ip_address()
 
+    def get_placement(self):
+        from rl.legacy_baseline_control import actor_placement
+        return actor_placement(torch, ray, role='trainer', index=self.rank)
+
     def setup_deepspeed_group(self, master_addr, master_port):
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(self.world_size)
@@ -936,6 +959,7 @@ class TrainerActor(TrainerActorCom):
         os.makedirs(ckpt_dir, exist_ok=True)
         self.base_model.save_model(ckpt_dir, epoch=step)
         print(f"[Trainer {self.rank}] 已保存 checkpoint -> {ckpt_dir}/agent_lora_epoch_{step}, agent_extra_layers_epoch_{step}.pt")
+        return os.path.abspath(os.path.join(ckpt_dir, f'agent_checkpoint_epoch_{step}'))
     
     async def save_checkpoint(self, ckpt_dir: str, step: int):
         """保存完整的训练状态（包含优化器和训练进度）"""
@@ -1738,21 +1762,30 @@ def main(args):
     """
     torch_dtype = torch.bfloat16 if args.use_bf16 else torch.float32
     benchmark = args.benchmark
+    baseline = None
+    if args.baseline_output_dir:
+        from rl.legacy_baseline_control import LegacyBaselineControl, validate_rank_steps
+        baseline = LegacyBaselineControl(args.baseline_output_dir, args.max_train_seconds, args.stop_file)
     
     if not os.path.exists(args.pretrained_checkpoint):
+        if baseline:
+            raise FileNotFoundError(f'Pretrained checkpoint does not exist: {args.pretrained_checkpoint}')
         print(f"错误: OpenVLA checkpoint 路径 '{args.pretrained_checkpoint}' 不存在。请更新 PRETRAINED_CHECKPOINT。")
         return
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
     object_store_memory_bytes = int(args.object_store_memory_gb * 1024 * 1024 * 1024)
     print(f"正在初始化 Ray，并为对象存储分配 {args.object_store_memory_gb} GB 内存...")
+    if baseline:
+        baseline.status('ray_startup')
     ray.init(
         ignore_reinit_error=True, 
-        _temp_dir='/dev/shm',
+        _temp_dir=args.ray_temp_dir,
         object_store_memory=object_store_memory_bytes
     )
 
-    log_dir = f"runs/Libero/{args.benchmark}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}_{args.clip_mode}"
+    log_dir = (os.path.join(args.baseline_output_dir, 'tensorboard') if baseline else
+               f"runs/Libero/{args.benchmark}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{args.exp_name}_{args.clip_mode}")
     writer = SummaryWriter(log_dir)
 
     # 保存命令行参数到log_dir中的json文件
@@ -1764,6 +1797,8 @@ def main(args):
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
     cfg = build_openvla_cfg(args)
+    if baseline:
+        baseline.status('actor_startup')
 
     print("--- 步骤 1: 创建 Actors ---")
     replay_buffers = [ReplayBufferActor.remote(capacity=args.replay_capacity) for _ in range(args.num_trainer_gpus)]
@@ -1807,6 +1842,8 @@ def main(args):
         broadcast_group_port = find_free_port()
 
     print(f"\n--- 步骤 2: 预先建立共享广播组 ({args.broadcast_group_name}) ---")
+    if baseline:
+        baseline.status('group_startup')
     broadcast_participants = [trainer_group[0]] + inference_pool
     broadcast_group_world_size = len(broadcast_participants)
     broadcast_master_addr = ray.get(trainer_group[0].get_node_ip.remote())
@@ -1862,6 +1899,9 @@ def main(args):
     forward_test_tasks = [inf.forward_test.remote() for inf in inference_pool]
     ray.get(forward_test_tasks)
     print("推理器前向测试完成 (广播后)。")
+    if baseline:
+        placements = ray.get([actor.get_placement.remote() for actor in trainer_group + inference_pool])
+        baseline.record_metadata(vars(args), placements)
 
     print("\n--- 步骤 4: 启动 Rollout Workers 进行数据收集 ---")
     for w in rollout_workers: w.run.remote()
@@ -1871,6 +1911,9 @@ def main(args):
     # Resume 逻辑：恢复训练状态
     # ================================================================
     start_global_step = 0
+    fill_start = time.monotonic()
+    if baseline:
+        baseline.status('replay_fill')
     if hasattr(args, 'resume_step') and args.resume_step is not None:
         print(f"\n{'='*80}")
         print(f"Resume 模式：从步数 {args.resume_step} 恢复训练")
@@ -1919,6 +1962,8 @@ def main(args):
             total_steps_list = ray.get([rb.total_steps.remote() for rb in replay_buffers])
             traj_counts = ray.get([rb.size.remote() for rb in replay_buffers])
             print(f"等待所有经验池填充初始数据 (目标步数: {min_buffer_steps_for_start})... (当前步数: {total_steps_list}, 轨迹数: {traj_counts})")
+            if baseline:
+                baseline.status('replay_fill', buffer_steps=total_steps_list, buffer_trajectories=traj_counts)
             time.sleep(5)
         print("远程经验池已准备好，训练器将按需获取数据。")
 
@@ -1927,10 +1972,17 @@ def main(args):
     last_log_time = time.time()
     last_log_global_step = start_global_step
     global_step = start_global_step
+    if baseline:
+        baseline.record_metadata(vars(args), placements, replay_fill_seconds=time.monotonic() - fill_start)
+        baseline.start_training()
     while global_step < args.train_iters:
+        if baseline:
+            baseline.status('training', global_step=global_step)
         t_train_start = time.time()
         train_tasks = [trainer.run_training_epoch.remote() for trainer in trainer_group]
         results = ray.get(train_tasks)
+        if baseline:
+            validate_rank_steps(results, global_step)
         _, _, _, _, _, _, global_step, _, _, _ = results[0]
         train_time = time.time() - t_train_start
 
@@ -1939,6 +1991,11 @@ def main(args):
         receive_tasks = [inf.receive_and_update_weights.remote(args.broadcast_group_name) for inf in inference_pool]
         ray.get([broadcast_task] + receive_tasks)
         sync_time = time.time() - t_sync_start
+        stop_at_boundary = False
+        if baseline:
+            stop_at_boundary = baseline.after_update(
+                global_step, train_seconds=train_time, publication_seconds=sync_time,
+                samples=args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus)
 
         if global_step > 0 and global_step % args.ckpt_every_steps == 0:
             ray.get(trainer_group[0].save_agent.remote(args.ckpt_dir, global_step))
@@ -2146,16 +2203,18 @@ def main(args):
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             writer.add_scalar('Rollout/_Global/Average_Episode_Length', avg_ep_len, global_step)
             writer.add_scalar('Rollout/_Global/Average_Step_Reward', avg_step_reward, global_step)
-            writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
-            writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
-            writer.add_scalar('Eval/_Global/Average_Step_Reward', eval_avg_step_reward, global_step)
+            if not baseline or args.num_eval_workers > 0:
+                writer.add_scalar('Eval/_Global/Average_Return', eval_avg_return, global_step)
+                writer.add_scalar('Eval/_Global/Average_Episode_Length', eval_avg_ep_len, global_step)
+                writer.add_scalar('Eval/_Global/Average_Step_Reward', eval_avg_step_reward, global_step)
             writer.add_scalar('System/Replay_Buffer_Size_Total', total_buffer_size, global_step)
             writer.add_scalar('System/Total_Episodes_Processed', total_episodes, global_step)
             writer.add_scalar('System/Total_Env_Steps', total_env_steps, global_step)
             writer.add_scalar('System/Avg_Step_Time', avg_step_time, global_step)
-            writer.add_scalar('System/Eval_Total_Episodes_Processed', eval_total_episodes, global_step)
-            writer.add_scalar('System/Eval_Total_Env_Steps', eval_env_steps, global_step)
-            writer.add_scalar('System/Eval_Avg_Step_Time', eval_avg_step_time, global_step)
+            if not baseline or args.num_eval_workers > 0:
+                writer.add_scalar('System/Eval_Total_Episodes_Processed', eval_total_episodes, global_step)
+                writer.add_scalar('System/Eval_Total_Env_Steps', eval_env_steps, global_step)
+                writer.add_scalar('System/Eval_Avg_Step_Time', eval_avg_step_time, global_step)
             writer.add_scalar('System/Active_Rollout_Actors', global_stats.get("active_actor_count", 0), global_step)
             writer.add_scalar('System/Total_Samples_Produced', global_stats.get("total_samples_produced", 0), global_step)
 
@@ -2175,8 +2234,14 @@ def main(args):
 
             last_log_time = current_time
             last_log_global_step = global_step
+        if stop_at_boundary:
+            break
 
-    print(f"\n成功完成 {args.train_iters} 次训练与同步循环！")
+    if baseline:
+        baseline.complete(global_step, lambda: ray.get(trainer_group[0].save_agent.remote(args.ckpt_dir, global_step)))
+        print(f"\nLegacy baseline stopped after {global_step} updates; final inference weights saved.")
+    else:
+        print(f"\n成功完成 {args.train_iters} 次训练与同步循环！")
     writer.close()
     ray.shutdown()
 

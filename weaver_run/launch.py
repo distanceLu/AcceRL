@@ -391,6 +391,11 @@ def supervise(work, cmd, env, log, run_id):
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=='legacy-baseline':
+        sys.path.insert(0,str(ROOT))
+        from weaver_run.reference_site.legacy_baseline import main as legacy_main
+        legacy_main(sys.argv[2:])
+        return
     parser=argparse.ArgumentParser(prog="./run.sh")
     parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","view"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
