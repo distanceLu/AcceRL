@@ -1,0 +1,38 @@
+{
+  "feature": "Stop enabled model-free fixed validation at the first complete 50/50",
+  "base_commit": "91ad9c3a98ad859e3fbe0c9ee5dcf0637ace312d",
+  "behavior": {
+    "stop_reason": "fixed_validation_target_reached",
+    "cases": 50,
+    "successes": 50,
+    "p0_supported": true,
+    "minimum_training_budget_required": false,
+    "new_training_admission_after_target": false,
+    "saved_policy_equals_validated_policy": true,
+    "final_evaluation_protocol_changed": false
+  },
+  "local_cpu_verification": [
+    {"suite": "target stop, model-free runtime/driver/checkpoint, real P0 budget initialization, periodic validation, batch autotune/loss/mode regression", "tests": 124, "passed": true},
+    {"suite": "weaver_run top-level CPU discovery", "tests": 37, "passed": true},
+    {"suite": "reference-site queue wrapper CPU discovery", "tests": 16, "passed": true},
+    {"suite": "parallel evaluation CPU discovery", "tests": 112, "passed": true},
+    {"suite": "all model-free engine CPU tests", "tests": 88, "passed": true, "overlaps_above": true, "note": "One transient Windows os.replace PermissionError in an existing collection test passed on isolated retry and the subsequent complete 88-test run."}
+  ],
+  "red_green_evidence": [
+    "Initial controller/runtime target tests failed before implementation",
+    "P0 driver test failed because old main entered Replay fill before stopping",
+    "Checkpoint test failed because old save allowed a different validated policy and overwrote the existing file",
+    "Manual-stop and worker-fault precedence tests failed before reordering target checks",
+    "Actual runner child-exit test failed before extending the automatic-completion reason allowlist",
+    "Fresh review reproduced P0 completion rejection with the real uninitialized collection coordinator; metadata-only initialization now passes the actual completion validator without collecting a lease or charging budget"
+  ],
+  "broader_engine_discovery": {
+    "tests": 1123,
+    "failures": 30,
+    "errors": 353,
+    "skipped": 7,
+    "passed": false,
+    "note": "This broad run preceded the final P0 metadata-initialization fix. The repository-wide engine suite remains non-green. Available failures include missing archived assets, legacy fixture/config attributes and frozen AST contracts. Tool output was truncated, so the available report is not a complete failure inventory and is not evidence that every broad failure is unchanged. The focused feature and all model-free suites were rerun successfully after the fix."
+  },
+  "runtime_limits": "CPU tests exercise the actual driver with inert transport/model fixtures. An already running old-code experiment uses its existing graceful-stop path; it does not retroactively become a target-stop execution. New GPU target-stop behavior awaits an eligible full-score result in the new-code experiment."
+}

@@ -13,7 +13,8 @@ def validate_automatic_completion(details, state, stop_flag=None):
     require(state.get('model_free') is True and details.get('model_free') is True,
             'mode evidence missing')
     require(not stop_flag and not state.get('error'), 'stop/fault evidence takes precedence')
-    require(reason in ('real_budget_exhausted','fixed_validation_plateau'), 'unsupported stop reason')
+    require(reason in ('real_budget_exhausted','fixed_validation_plateau','fixed_validation_target_reached'),
+            'unsupported stop reason')
     budget=details.get('budget_status') or {}
     fields=('max_env_steps','consumed_env_steps','available_env_steps','reset_steps',
             'reserved_env_steps','active_real','episodes_inflight',
@@ -29,6 +30,7 @@ def validate_automatic_completion(details, state, stop_flag=None):
         require(budget.get('budget_exhausted') is True
                 and budget['available_env_steps'] <= budget['reset_steps'], 'budget is not exhausted')
     else:
+        target = reason == 'fixed_validation_target_reached'
         summary=details.get('fixed_validation') or {}
         config=summary.get('config') or {}
         require(config == state.get('fixed_validation_config'), 'validation configuration changed')
@@ -36,27 +38,35 @@ def validate_automatic_completion(details, state, stop_flag=None):
                     ('interval_env_steps','patience','min_env_steps','min_delta_successes'))
                 and config['interval_env_steps'] > 0 and config['patience'] > 0
                 and 1 <= config['min_delta_successes'] <= 50, 'invalid plateau configuration')
-        require(summary.get('enabled') is True and summary.get('plateau_reached') is True
-                and summary.get('case_count') == 50, 'plateau decision missing')
+        require(summary.get('enabled') is True and summary.get('case_count') == 50
+                and summary.get('target_reached' if target else 'plateau_reached') is True,
+                'target decision missing' if target else 'plateau decision missing')
         require(all(natural(summary.get(key)) for key in
                     ('completed_validations','post_baseline_validations','stale_count','best_successes','best_policy_step')),
                 'incomplete validation counters')
-        require(summary['completed_validations'] == summary['post_baseline_validations']+1
-                and config['patience'] <= summary['stale_count'] <= summary['post_baseline_validations'],
-                'patience was not reached')
+        require(summary['completed_validations'] == summary['post_baseline_validations']+1,
+                'validation counts do not match baseline')
+        if not target:
+            require(config['patience'] <= summary['stale_count'] <= summary['post_baseline_validations'],
+                    'patience was not reached')
         baseline,last=summary.get('baseline') or {},summary.get('last') or {}
         for row in (baseline,last):
             require(all(natural(row.get(key)) for key in ('successes','cases','policy_step','consumed_env_steps'))
                     and row['cases'] == 50 and row['successes'] <= 50, 'incomplete fixed validation result')
         require(baseline['policy_step'] == 0 and baseline['consumed_env_steps'] <= last['consumed_env_steps'],
                 'initial Policy baseline missing')
-        require(last['policy_step'] == details.get('global_step')
-                and config['min_env_steps'] <= last['consumed_env_steps'] <= budget['consumed_env_steps'],
-                'plateau does not cover the final Policy/minimum budget')
-        require(baseline['successes'] <= summary['best_successes'] <= 50
-                and summary['best_policy_step'] <= last['policy_step']
-                and last['successes'] < summary['best_successes']+config['min_delta_successes'],
-                'best validation result conflicts with plateau')
+        require(natural(details.get('global_step')) and last['policy_step'] == details['global_step']
+                and last['consumed_env_steps'] <= budget['consumed_env_steps'],
+                'validation does not cover the final Policy/budget')
+        if target:
+            require(last['successes'] == 50, 'target requires all 50 completed cases to succeed')
+        else:
+            require(last['consumed_env_steps'] >= config['min_env_steps'],
+                    'plateau does not cover the minimum budget')
+            require(baseline['successes'] <= summary['best_successes'] <= 50
+                    and summary['best_policy_step'] <= last['policy_step']
+                    and last['successes'] < summary['best_successes']+config['min_delta_successes'],
+                    'best validation result conflicts with plateau')
         from model_free_control import ModelFreeControl, ModelFreeControlConfig
         history=summary.get('validations')
         require(isinstance(history,list) and len(history) == summary['completed_validations'],
@@ -67,5 +77,5 @@ def validate_automatic_completion(details, state, stop_flag=None):
                 replay.observe(**row)
         except (TypeError,ValueError) as exc:
             raise RuntimeError('Model-free automatic completion: invalid validation history') from exc
-        require(replay.summary() == summary, 'validation history disagrees with plateau decision')
+        require(replay.summary() == summary, 'validation history disagrees with stop decision')
     return {'stop_reason':reason}

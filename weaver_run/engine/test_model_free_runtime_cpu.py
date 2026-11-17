@@ -81,6 +81,7 @@ class RuntimeTests(unittest.TestCase):
         self.pauses, self.limits, self.killed = [], [], []
         runtime.collector.set_paused = Method(lambda value: self.pauses.append(value))
         runtime.collector.initial_state_checkpoint = Method(lambda: {'pool': None})
+        runtime.collector.initialize_initial_state_pool = Method(lambda pool: None)
         runtime.inference_pool = [SimpleNamespace(set_training_batch_limit=Method(
             lambda value: self.limits.append(value)))]
         result = result or dict(complete=True, num_cases=50, completed_cases=50,

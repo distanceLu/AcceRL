@@ -48,6 +48,8 @@ class ModelFreeRuntime:
                 return 'requested_stop'
             self.check_workers()
             self.status()
+            if self.control.target_reached:
+                return 'fixed_validation_target_reached'
             if self.last_budget['budget_exhausted']:
                 return 'real_budget_exhausted'
             validation_started = time.monotonic()
@@ -58,10 +60,12 @@ class ModelFreeRuntime:
             # Collection is deliberately paused for validation; its independent
             # drain/evaluation deadlines must not consume the Replay supply grace.
             started += time.monotonic() - validation_started
-            if self.control.plateau_reached:
-                return 'fixed_validation_plateau'
             if self.requested_stop():
                 return 'requested_stop'
+            if self.control.target_reached:
+                return 'fixed_validation_target_reached'
+            if self.control.plateau_reached:
+                return 'fixed_validation_plateau'
             # Validation may have drained the last budget leases.
             self.status()
             if self.last_budget['budget_exhausted']:
@@ -149,6 +153,8 @@ class ModelFreeRuntime:
                     result['initial_state_pool'][key] != self.last_result['initial_state_pool'][key]
                     for key in ('count', 'shape', 'sha256')):
                 raise RuntimeError('Fixed validation initial-state asset changed between checkpoints')
+            self.ray.get(self.collector.initialize_initial_state_pool.remote(
+                result['initial_state_pool']), timeout=15)
             self.status()
             summary = self.control.observe(result['success_count'], policy_step=policy_step,
                 consumed_env_steps=self.last_budget['consumed_env_steps'], cases=50)
@@ -176,7 +182,8 @@ class ModelFreeRuntime:
                 self.ray.get([infer.set_training_batch_limit.remote(2)
                               for infer in self.inference_pool], timeout=15)
             finally:
-                resume = completed and not force and not self.control.plateau_reached and not self.requested_stop()
+                resume = (completed and not force and not self.control.target_reached
+                          and not self.control.plateau_reached and not self.requested_stop())
                 self.ray.get(self.collector.set_paused.remote(not resume), timeout=15)
                 activity.update(active=False, finished_unix_seconds=time.time())
                 atomic_json(directory / 'fixed_validation_activity.json', activity)

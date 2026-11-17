@@ -69,6 +69,25 @@ class RealCollectionCoordinator:
             self._failure = 'Real collection leases expired; refusing silent retry: %s' % stale
             raise LeaseExpiredError(self._failure)
 
+    def initialize_initial_state_pool(self, pool):
+        """Register validated simulator metadata without allocating a real episode."""
+        self._check_leases()
+        if not isinstance(pool, dict):
+            raise ValueError('Explicit initial-state allocation requires simulator pool metadata')
+        training_pool = deepcopy(pool)
+        horizon = self.pipeline_config.real_training_action_horizon
+        if horizon is not None:
+            benchmark_horizon = training_pool.get('benchmark_action_horizon',
+                                                 training_pool.get('max_action_steps'))
+            if type(benchmark_horizon) is not int or horizon > benchmark_horizon:
+                raise ValueError('Real training horizon exceeds the validated benchmark horizon')
+            # Match initial_state_pool_metadata after the real worker applies
+            # set_real_training_action_horizon, retaining benchmark provenance.
+            training_pool['benchmark_action_horizon'] = benchmark_horizon
+            training_pool['max_action_steps'] = horizon
+        self._initial_state_owner(training_pool)
+        return self.initial_state_checkpoint()
+
     def acquire_real(self, worker_id, initial_state_pool=None):
         if self.pipeline_stopped:
             return {'stopped': True}

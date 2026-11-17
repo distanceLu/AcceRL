@@ -144,6 +144,32 @@ class PolicyOnlyCheckpoint(unittest.TestCase):
                 checkpoint.save_split_weights(bad_components, directory,
                     active_kinds=('policy',), metadata=metadata())
 
+    def test_full_success_checkpoint_requires_the_exact_validated_policy_before_overwrite(self):
+        meta = metadata()
+        meta['fixed_validation'] = {'target_reached': True, 'last': {
+            'policy_step': 7, 'cases': 50, 'successes': 50}}
+        meta['fixed_validation']['target_validation'] = dict(meta['fixed_validation']['last'])
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = checkpoint.save_split_weights(self.components, directory,
+                reason='final', active_kinds=('policy',), metadata=meta)
+            self.assertEqual(manifest['steps']['policy'], 7)
+            target = Path(directory) / 'latest_weights.pt'
+            saved = target.read_bytes()
+            for changed in ({'policy_step': 6}, {'policy_step': 8},
+                            {'successes': 49}, {'cases': 49}):
+                invalid = copy.deepcopy(meta)
+                invalid['fixed_validation']['last'].update(changed)
+                with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, 'validated Policy'):
+                    checkpoint.save_split_weights(self.components, directory,
+                        reason='final', active_kinds=('policy',), metadata=invalid)
+                self.assertEqual(target.read_bytes(), saved)
+            invalid = copy.deepcopy(meta)
+            invalid['fixed_validation']['target_validation']['policy_step'] = 6
+            with self.assertRaisesRegex(ValueError, 'validated Policy'):
+                checkpoint.save_split_weights(self.components, directory,
+                    reason='final', active_kinds=('policy',), metadata=invalid)
+            self.assertEqual(target.read_bytes(), saved)
+
     def test_online_weaver_still_requires_the_native_artifact_and_matching_boundary(self):
         meta = {'run_id': 'online', 'service_plan': {
             'trainer_kinds': ['policy', 'ctrl'], 'inference_kinds': ['policy', 'ctrl'],

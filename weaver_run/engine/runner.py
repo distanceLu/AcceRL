@@ -468,7 +468,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
                             validate_world_zero2_receipts(result.get('world_zero2_verified', []))
                     completed=result.get('experiment_completed',[])
                     automatic=bool(model_free and len(completed)==1 and completed[0]['details'].get('stop_reason')
-                                   in ('real_budget_exhausted','fixed_validation_plateau'))
+                                   in ('real_budget_exhausted','fixed_validation_plateau','fixed_validation_target_reached'))
                     state['automatic_completion' if automatic else 'manual_completion']=validate_manual_completion(
                         result,state,flag or {},automatic=automatic)
                     state.update(return_code=0,state='completed_automatically' if automatic else 'stopped_by_user')
@@ -577,6 +577,9 @@ def validate_manual_completion(result, state, flag, *, automatic=False):
     accepted_reasons = {'final'} if steps['policy'] else {'final_before_first_update', 'final'}
     if expected_reason not in accepted_reasons:
         raise RuntimeError('Expected final weights checkpoint is missing: '+str(expected_reason))
+    if (automatic and d['stop_reason'] == 'fixed_validation_target_reached'
+            and result.get('checkpoint',{}).get('steps') != steps):
+        raise RuntimeError('Target validation Policy does not match the final saved checkpoint')
     sharding = result.get('fsdp_sharding_verified', [])
     if 'reward' in plan.active_kinds and (len(sharding)!=4 or {int(x['actor_id']) for x in sharding}!=set(range(4))
         or len({x['pid'] for x in sharding})!=4

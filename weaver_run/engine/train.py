@@ -4811,10 +4811,15 @@ def main(args):
             model_free_runtime.validate(0)
         except ValidationInterrupted:
             pass
-    for w in rollout_workers:
-        worker_run_refs.append(w.run.remote())
-    for w in eval_workers:
-        worker_run_refs.append(w.run.remote())
+    # A fully successful P0 needs no collection or Replay fill. The common
+    # pre-update completion path below still saves and audits that exact policy.
+    initial_validation_target = bool(model_free_runtime is not None
+                                    and model_free_runtime.control.target_reached)
+    if not initial_validation_target:
+        for w in rollout_workers:
+            worker_run_refs.append(w.run.remote())
+        for w in eval_workers:
+            worker_run_refs.append(w.run.remote())
 
     print("\n--- 步骤 5: 等待远程经验池填充初始数据 ---")
     shard_factor = args.num_trainer_gpus if fixed_layout else 1
@@ -4831,13 +4836,20 @@ def main(args):
     measured_twenty_minutes = False
     while True:
         budget_finished = False
+        validation_target_finished = False
         if model_free_runtime is not None:
             model_free_runtime.status()
             budget_finished = model_free_runtime.last_budget['budget_exhausted']
+            validation_target_finished = model_free_runtime.control.target_reached
         deadline_finished = model_free and run_policy.deadline_reached()
-        if stop_requested() or deadline_finished or budget_finished:
-            fill_completion_reason = 'real_budget_exhausted' if budget_finished else run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
-                target_reached=False, requested_stop=True)
+        fill_requested_stop = stop_requested() or deadline_finished
+        if fill_requested_stop or validation_target_finished or budget_finished:
+            if fill_requested_stop:
+                fill_completion_reason = run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
+                    target_reached=False, requested_stop=True)
+            else:
+                fill_completion_reason = ('fixed_validation_target_reached' if validation_target_finished
+                                          else 'real_budget_exhausted')
             completion_fields = model_free_runtime.finish(0) if model_free_runtime is not None else {}
             ray.get([buffer.stop_pipeline.remote() for buffer in producer_coordinators])
             publish_snapshot("final_before_first_update")

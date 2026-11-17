@@ -113,6 +113,121 @@ class ModelFreeLaunchTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             validate(modified,state,{},automatic=True)
 
+    def target_case(self, steps=5):
+        from model_free_control import ModelFreeControl, ModelFreeControlConfig
+        state,report=self.automatic_case('fixed_validation_target_reached',steps=steps)
+        controller=ModelFreeControl(ModelFreeControlConfig(**state['fixed_validation_config']))
+        if steps:
+            controller.observe(38,policy_step=0,consumed_env_steps=0)
+        summary=controller.observe(50,policy_step=steps,consumed_env_steps=steps*1000)
+        details=report['experiment_completed'][0]['details']
+        details['fixed_validation']=summary
+        details['budget_status'].update(consumed_env_steps=steps*1000,
+            available_env_steps=1000000-steps*1000,budget_exhausted=False)
+        report['checkpoint']['steps']={'policy':steps}
+        return state,report
+
+    def test_target_completion_accepts_exact_saved_policy_before_plateau_minimum_including_p0(self):
+        from test_manual_controller_cpu import load
+        from policy_batch_receipts import validate_policy_batch_mode_receipts
+        validate=load('runner.py','validate_manual_completion',{})
+        for steps in (0,5):
+            with self.subTest(steps=steps):
+                state,report=self.target_case(steps)
+                if steps == 0:
+                    state['batch_autotune']=True
+                    report['policy_batch_mode_validation']=validate_policy_batch_mode_receipts(
+                        [],run_id=state['run_id'],steps=0,model_free=True,autotune=True)
+                receipt=validate(report,state,{},automatic=True)
+                self.assertEqual(receipt['stop_reason'],'fixed_validation_target_reached')
+                self.assertEqual(receipt['steps'],{'policy':steps})
+                self.assertEqual(receipt['stopped_before_first_update'],steps == 0)
+
+    def test_runner_child_exit_routes_target_to_automatic_completion(self):
+        from test_manual_controller_cpu import load
+        from world_backends import build_service_plan
+        tree=ast.parse((HERE/'engine/runner.py').read_text(encoding='utf8'))
+        run=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name == 'run')
+        exited=next(node for node in ast.walk(run) if isinstance(node,ast.If)
+            and isinstance(node.test,ast.Compare) and isinstance(node.test.left,ast.Name)
+            and node.test.left.id == 'rc')
+        # Execute the actual child-exit branch with CPU reports in place of
+        # subprocess/SQLite transports; preserve its automatic routing and audit.
+        entry=ast.parse('for unused in (0,):\n    pass').body[0]
+        entry.body=[exited]
+        for steps in (0,5):
+            with self.subTest(steps=steps):
+                state,result=self.target_case(steps)
+                ns=dict(rc=0,model_free=True,batch_autotune=False,state=state,data=Path('/cpu'),
+                    plan=build_service_plan(state['world_backend_config']),
+                    report=lambda *_:result,observe_stop_request=lambda *_:None,
+                    validate_policy_batch_modes_from_db=lambda *a,**kw:result['policy_batch_mode_validation'],
+                    validate_manual_completion=load('runner.py','validate_manual_completion',{}))
+                try:
+                    exec(compile(ast.fix_missing_locations(ast.Module(body=[entry],type_ignores=[])),
+                        '<actual runner child-exit branch>','exec'),ns)
+                except RuntimeError as exc:
+                    self.fail('Complete target should route to automatic completion: '+str(exc))
+                self.assertEqual(state['state'],'completed_automatically')
+                self.assertEqual(state['automatic_completion']['stop_reason'],'fixed_validation_target_reached')
+
+    def test_target_completion_rejects_partial_forged_or_wrong_saved_version(self):
+        from test_manual_controller_cpu import load
+        validate=load('runner.py','validate_manual_completion',{})
+        for mutation in ('partial','not_full','no_target','history_missing','history_forged',
+                         'continued_after_target','wrong_checkpoint','missing_checkpoint',
+                         'wrong_event_step','fault','stop','undrained','disabled'):
+            with self.subTest(mutation=mutation):
+                state,report=self.target_case()
+                details=report['experiment_completed'][0]['details']
+                summary=details['fixed_validation']
+                flag={}
+                if mutation == 'partial': summary['last']['cases']=49
+                if mutation == 'not_full': summary['last']['successes']=49
+                if mutation == 'no_target': summary['target_reached']=False
+                if mutation == 'history_missing': summary.pop('validations')
+                if mutation == 'history_forged': summary['validations'][-1]['successes']=49
+                if mutation == 'continued_after_target':
+                    summary['validations'][0]['successes']=50
+                    summary['baseline']['successes']=50
+                if mutation == 'wrong_checkpoint': report['checkpoint']['steps']={'policy':6}
+                if mutation == 'missing_checkpoint': report['checkpoint'].pop('steps')
+                if mutation == 'wrong_event_step': details['global_step']=6
+                if mutation == 'fault': state['error']='evaluation failed'
+                if mutation == 'stop': flag={'reason':'worker_failed'}
+                if mutation == 'undrained': details['budget_status']['active_real']=1
+                if mutation == 'disabled': summary['enabled']=False
+                with self.assertRaises(RuntimeError):
+                    validate(report,state,flag,automatic=True)
+
+    def test_queue_target_acceptance_binds_saved_and_reported_policy_to_complete_validation(self):
+        for steps in (0,5):
+            with self.subTest(steps=steps):
+                state,report=self.target_case(steps)
+                reason='final' if steps else 'final_before_first_update'
+                state.update(state='completed_automatically',training_stopped=True,cleanup={'survivors':[]},
+                    source_path='/source',automatic_completion=dict(steps={'policy':steps},
+                        checkpoint_reason=reason,stop_reason='fixed_validation_target_reached'),
+                    checkpoint_cpu_audit=dict(valid=True,steps={'policy':steps},
+                        monolith_steps={'policy':steps},manifest_reason=reason))
+                report.update(run_id=state['run_id'],state=state['state'],source='/source',
+                    synchronized_epoch_completed=[{}] if steps else [])
+                self.assertTrue(training.acceptance(state,report,0,[],None)['passed'])
+                wrong=copy.deepcopy(report)
+                wrong['experiment_completed'][0]['details']['fixed_validation']['last']['cases']=49
+                self.assertFalse(training.acceptance(state,wrong,0,[],None)['passed'])
+                # Even internally matching runner/report/audit counters cannot
+                # substitute a later policy for the complete successful one.
+                wrong_state,wrong=copy.deepcopy((state,report))
+                wrong_state['automatic_completion']['steps']={'policy':steps+1}
+                wrong_state['checkpoint_cpu_audit'].update(steps={'policy':steps+1},
+                    monolith_steps={'policy':steps+1},manifest_reason='final')
+                wrong_state['automatic_completion']['checkpoint_reason']='final'
+                wrong['training']['policy']['global_updates']=steps+1
+                wrong['checkpoint'].update(reason='final',steps={'policy':steps+1})
+                wrong['synchronized_epoch_completed']=[{}]
+                self.assertFalse(training.acceptance(wrong_state,wrong,0,[],None)['passed'])
+
     def test_watchdog_validation_pause_is_bounded_and_resumes_after_completion(self):
         from test_manual_controller_cpu import load
         state,report=self.automatic_case()

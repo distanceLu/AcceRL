@@ -118,6 +118,39 @@ class FixedValidationControlTests(unittest.TestCase):
         self.assertFalse(ctrl.should_validate(200020, 1, force=True))
         self.assertTrue(ctrl.should_validate(100021, 2, force=True))
 
+    def test_p0_full_score_stops_immediately_without_minimum_steps_or_patience(self):
+        ctrl = self.control()
+        summary = ctrl.observe(50, policy_step=0, consumed_env_steps=0)
+        self.assertTrue(getattr(ctrl, 'target_reached', False))
+        self.assertFalse(ctrl.plateau_reached)
+        self.assertTrue(summary['target_reached'])
+        self.assertEqual(summary['target_validation'], dict(
+            successes=50, cases=50, policy_step=0, consumed_env_steps=0))
+        self.assertFalse(ctrl.should_validate(1000000, 1, force=True))
+
+    def test_first_later_full_score_stops_below_minimum_even_without_delta_improvement(self):
+        ctrl = self.control(min_delta_successes=2)
+        ctrl.observe(49, policy_step=0, consumed_env_steps=0)
+        self.assertFalse(getattr(ctrl, 'target_reached', False))
+        summary = ctrl.observe(50, policy_step=1, consumed_env_steps=100000)
+        self.assertTrue(getattr(ctrl, 'target_reached', False))
+        self.assertEqual(summary['stale_count'], 1)
+        self.assertFalse(ctrl.plateau_reached)
+        self.assertEqual(summary['target_validation']['policy_step'], 1)
+        with self.assertRaisesRegex(ValueError, 'target'):
+            ctrl.observe(49, policy_step=2, consumed_env_steps=200000)
+        self.assertEqual(ctrl.summary(), summary)
+        summary['target_validation']['successes'] = 0
+        self.assertEqual(ctrl.summary()['target_validation']['successes'], 50)
+
+    def test_49_successes_never_trigger_full_score_stop(self):
+        ctrl = self.control()
+        for step in range(4):
+            summary = ctrl.observe(49, policy_step=step, consumed_env_steps=100000 * step)
+            self.assertFalse(summary.get('target_reached', True))
+            self.assertIsNone(summary['target_validation'])
+        self.assertTrue(ctrl.plateau_reached)
+
     def test_default_plateau_requires_three_completed_postbaseline_validations(self):
         ctrl = self.control()
         ctrl.observe(10, policy_step=0, consumed_env_steps=0)
@@ -168,6 +201,8 @@ class FixedValidationControlTests(unittest.TestCase):
         ctrl.observe(10, policy_step=0, consumed_env_steps=0)
         before = ctrl.summary()
         invalid = [dict(successes=1, cases=49, policy_step=1, consumed_env_steps=100000),
+                   dict(successes=50, cases=49, policy_step=1, consumed_env_steps=100000),
+                   dict(successes=50, policy_step=0, consumed_env_steps=100000),
                    dict(successes=1, policy_step=0, consumed_env_steps=100000),
                    dict(successes=51, policy_step=1, consumed_env_steps=100000),
                    dict(successes=True, policy_step=1, consumed_env_steps=100000),

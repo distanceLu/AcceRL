@@ -58,6 +58,7 @@ class ModelFreeControl:
         self._best_policy_step = None
         self._improvement_reference = None
         self._stale_count = 0
+        self._target_validation = None
 
     @property
     def enabled(self):
@@ -68,7 +69,7 @@ class ModelFreeControl:
         _integer('policy_step', policy_step)
         if type(force) is not bool:
             raise ValueError('force must be boolean')
-        if not self.enabled:
+        if not self.enabled or self.target_reached:
             return False
         if not self._validations:
             return policy_step == 0
@@ -83,6 +84,8 @@ class ModelFreeControl:
     def observe(self, successes, *, policy_step, consumed_env_steps, cases=50):
         if not self.enabled:
             raise ValueError('fixed validation is disabled')
+        if self.target_reached:
+            raise ValueError('fixed validation target already reached; no later observations are allowed')
         for name, value in (('successes', successes), ('policy_step', policy_step),
                             ('consumed_env_steps', consumed_env_steps), ('cases', cases)):
             _integer(name, value)
@@ -110,7 +113,13 @@ class ModelFreeControl:
         else:
             self._stale_count += 1
         self._validations.append(row)
+        if successes == self.CASE_COUNT:
+            self._target_validation = row
         return self.summary()
+
+    @property
+    def target_reached(self):
+        return self._target_validation is not None
 
     @property
     def plateau_reached(self):
@@ -126,6 +135,8 @@ class ModelFreeControl:
                     best_successes=self._best_successes, best_policy_step=self._best_policy_step,
                     improvement_reference_successes=self._improvement_reference,
                     stale_count=self._stale_count, plateau_reached=self.plateau_reached,
+                    target_reached=self.target_reached,
+                    target_validation=deepcopy(self._target_validation),
                     baseline=deepcopy(self._validations[0]) if self._validations else None,
                     last=deepcopy(self._validations[-1]) if self._validations else None,
                     validations=deepcopy(self._validations))

@@ -820,6 +820,9 @@ def acceptance(state, report, exit_code, remaining, stop_flag):
     manual = state.get('automatic_completion' if automatic else 'manual_completion') or {}
     steps = manual.get('steps', {})
     p = steps.get('policy')
+    if (automatic and details.get('stop_reason') == 'fixed_validation_target_reached'
+            and details.get('global_step') != p):
+        reasons.append('target_validation_final_checkpoint_step_mismatch')
     model_free=state.get('model_free',False)
     expected_steps={'policy':p} if model_free else {'policy':p,'ctrl':p // 5 if type(p) is int else None}
     if (type(p) is not int or p < 0 or any(type(v) is not int for v in steps.values())

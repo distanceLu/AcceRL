@@ -188,6 +188,13 @@ def save_split_weights(components, checkpoint_dir, *, reason="periodic", metadat
         raise ValueError("Split checkpoint components have different Policy boundaries")
     if model_free and (kinds != ('policy',) or world_sizes != {4}):
         raise ValueError('Model-free snapshots require exactly four Policy ranks and no World owners')
+    validation = (metadata or {}).get('fixed_validation') or {}
+    if model_free and validation.get('target_reached') is True:
+        target = validation.get('target_validation') or {}
+        if (target != validation.get('last') or target.get('cases') != 50
+                or target.get('successes') != 50
+                or target.get('policy_step') != components['policy']['policy_step']):
+            raise ValueError('Full-success checkpoint must preserve the exact validated Policy')
     if kinds == ('policy',) and not model_free and (native.get('policy_step') != components['policy']['policy_step']
             or native.get('successful_updates') != components['policy']['policy_step'] // 5
             or native.get('model_version') != native.get('successful_updates')):
