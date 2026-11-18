@@ -201,27 +201,44 @@ def apply_cpu_weights(module, payload, kind):
             "bytes": nbytes, "tensor_count": len(selected)}
 
 
-def _install_mps_nvml_mapping(physical_index):
+def _install_single_gpu_nvml_mapping(physical_index):
     """Keep DeepSpeed's free-memory query on this already verified physical card.
 
-    DeepSpeed 0.19 converts CUDA_VISIBLE_DEVICES to integers. MPS needs UUIDs
-    to avoid server ordinal remapping, so replace only the current process's
-    accelerator instance lookup. Do not edit the installed package or daemon.
+    DeepSpeed 0.19 converts CUDA_VISIBLE_DEVICES to integers. UUID masks need
+    an explicit lookup on the current process's accelerator instance.
     """
     from deepspeed.accelerator import get_accelerator
     accelerator = get_accelerator()
     if not callable(getattr(accelerator, "_get_nvml_gpu_id", None)):
-        raise RuntimeError("The MPS binding requires DeepSpeed's CUDA NVML mapper")
+        raise RuntimeError("The UUID binding requires DeepSpeed's CUDA NVML mapper")
     if not isinstance(physical_index, str) or not physical_index.isdigit():
-        raise RuntimeError("Missing numeric physical GPU identity for the MPS actor")
+        raise RuntimeError("Missing numeric physical GPU identity for the bound actor")
     physical_index = int(physical_index)
 
     def physical_nvml_id(local_index):
         if local_index != 0:
-            raise RuntimeError("An MPS model actor may query only its bound CUDA device 0")
+            raise RuntimeError("A bound model actor may query only its CUDA device 0")
         return physical_index
 
     accelerator._get_nvml_gpu_id = physical_nvml_id
+
+
+def configure_ray_trainer_nvml(torch):
+    """Resolve the one GPU assigned to a legacy Ray trainer with a UUID mask."""
+    mask = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not mask.startswith("GPU-"):
+        return
+    if torch.cuda.device_count() != 1:
+        raise RuntimeError("A UUID-bound trainer must see exactly one GPU")
+    actual = str(torch.cuda.get_device_properties(0).uuid).removeprefix("GPU-")
+    if actual.lower() != mask[4:].lower():
+        raise RuntimeError(f"GPU binding mismatch: Ray assigned {mask}, CUDA reported {actual}")
+    physical_index = subprocess.check_output(
+        ["nvidia-smi", "--id=" + mask, "--query-gpu=index", "--format=csv,noheader,nounits"],
+        text=True, timeout=10,
+    ).strip()
+    _install_single_gpu_nvml_mapping(physical_index)
+    print(f"[GPU binding] cuda:0 {mask} -> NVML {physical_index}", flush=True)
 
 
 def verify_bound_gpu():
@@ -237,7 +254,7 @@ def verify_bound_gpu():
         raise RuntimeError("GPU binding mismatch: expected %s, got %s" % (expected, actual))
     if os.environ.get("ACCERL_USE_MPS") == "1":
         _mps_runtime_env()
-        _install_mps_nvml_mapping(os.environ.get("ACCERL_PHYSICAL_GPU"))
+        _install_single_gpu_nvml_mapping(os.environ.get("ACCERL_PHYSICAL_GPU"))
     binding = {"physical_gpu": os.environ["ACCERL_PHYSICAL_GPU"], "uuid": actual,
                "cuda_local_device": 0}
     print("[GPU binding] %s" % binding, flush=True)

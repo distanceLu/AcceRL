@@ -965,6 +965,8 @@ class TrainerActor(TrainerActorCom):
         return actor_placement(torch, ray, role='trainer', index=self.rank)
 
     def setup_deepspeed_group(self, master_addr, master_port):
+        from rl.ctrl_world.training_topology import configure_ray_trainer_nvml
+        configure_ray_trainer_nvml(torch)
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(self.world_size)
         os.environ["MASTER_ADDR"] = master_addr
