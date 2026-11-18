@@ -887,12 +887,9 @@ class ReplayBufferActor:
                     scheduled = getattr(self, 'cost_scheduler_enabled', False)
                     if autotune_step is not None and autotune_step != version + 1:
                         raise RuntimeError('Replay autotune configuration belongs to another update')
-                    # Admission establishes the model-free training boundary. The
-                    # direct actor uses micro 2 here; calibration configures its
-                    # chosen width on Replay and every replica before this draw.
+                    # 普通 model-free 刷新每批 2 个观测；autobatch 在抽样前把本轮批大小同步给各副本。
                     micro = self.fresh_refresh_micro if scheduled or autotune_step is not None else 2
-                    # A caller using the old one-argument calibration RPC has
-                    # not declared its width. Let the actor batch the full input.
+                    # 旧接口没有提供批大小，沿用完整刷新，由推理副本分批。
                     prune = self.fresh_refresh_prune and micro is not None and (scheduled or admission is not None)
                     if prune:
                         selected = {sid:[] for sid in unique}

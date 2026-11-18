@@ -125,9 +125,11 @@ def dependency_refresh_groups(segments, selected_indices, replicas, micro=2):
         def required(position):
             sid, i = position
             s = by_id[sid]
+            # GAE 从最早抽中的动作块向后依赖；真终止的末值为零，提前截断仍需估计末值。
             return i >= first[sid] and (i < s.count or not s.terminated[-1])
         for offset in range(0, len(positions), micro):
             batch = positions[offset:offset+micro]
+            # 只要有一个观测参与 GAE，就保留整批，维持原来的输入形状和顺序。
             if any(required(p) for p in batch):
                 kept.extend(batch)
                 inputs.extend(by_id[sid].observations[i] for sid, i in batch)

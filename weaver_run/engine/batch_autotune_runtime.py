@@ -146,7 +146,7 @@ async def refresh_values(owner, inputs, expected_version, *, batch_sizes=None, t
                 raise ValueError('Critic refresh must return finite ordered per-observation Values')
             values.extend(current)
             offset += count
-            # Release chunk tensors before letting the action loop use this model.
+            # 每批刷新完先释放张量，让同一副本有机会处理 rollout 动作请求。
             del prepared,value,_
             await asyncio.sleep(0)
         if owner.capture_model_version != expected_version:
