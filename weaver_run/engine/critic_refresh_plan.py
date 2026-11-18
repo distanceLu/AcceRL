@@ -47,6 +47,7 @@ class DependencyRefreshGroup:
     original_observations: int
     original_batches: int
     required_observations: int
+    micro: int = 2
 
     def restore(self, values):
         if (not isinstance(values, (list, tuple)) or len(values) != len(self.positions)
@@ -102,8 +103,8 @@ def refresh_plan_receipt(groups):
 
 def dependency_refresh_groups(segments, selected_indices, replicas, micro=2):
     """Filter whole ORIGINAL micro blocks, never repack or rebalance retained rows."""
-    if type(micro) is not int or micro not in (1, 2):
-        raise ValueError('Reviewed critic dependency micro must be 1 or 2')
+    if type(micro) is not int or micro not in (1, 2, 4, 8):
+        raise ValueError('Critic dependency micro must match a supported refresh batch size')
     items = list(segments)
     ids = [s.segment_id for s in items]
     if len(set(ids)) != len(ids) or set(ids) != set(selected_indices):
@@ -133,14 +134,16 @@ def dependency_refresh_groups(segments, selected_indices, replicas, micro=2):
                 sizes.append(len(batch))
         result.append(DependencyRefreshGroup(tuple(inputs), tuple(kept), tuple(sizes),
             tuple((sid,first[sid],by_id[sid].count,bool(by_id[sid].terminated[-1])) for sid,obs in group),
-            len(positions), (len(positions)+micro-1)//micro, sum(required(p) for p in positions)))
+            len(positions), (len(positions)+micro-1)//micro, sum(required(p) for p in positions), micro))
     return tuple(result)
 
 
 def dependency_refresh_receipt(groups):
+    micro = groups[0].micro if groups else 2
     evaluated = [len(g.inputs) for g in groups]
     original = [g.original_observations for g in groups]
-    return {'strategy':'original_micro_pairs_dependency_pruned',
+    return {'strategy':('original_micro_pairs_dependency_pruned' if micro <= 2
+                        else 'original_micro_batches_dependency_pruned'),
             'observations_by_replica':evaluated,
             'original_observations_by_replica':original,
             'segments_by_replica':[len(g.segments) for g in groups],
@@ -149,4 +152,5 @@ def dependency_refresh_receipt(groups):
             'executed_batches_by_replica':[len(g.batch_sizes) for g in groups],
             'stored_k_plus_one_preserved':True, 'required_dependencies_covered':True,
             'all_k_plus_one_observations_preserved':evaluated == original,
-            'original_micro_pairs_preserved':True, 'independent_replicas':True}
+            'original_micro_pairs_preserved':micro <= 2,
+            'original_micro_batches_preserved':True, 'independent_replicas':True}

@@ -8,7 +8,7 @@
 
 ## 启用与回退
 
-通用引擎缺省 `ACCERL_CRITIC_DEPENDENCY_PRUNING=0`。维护配方的 `weaver_run/recipe/env.json` 显式设置为 `"1"`，且只在 cooperative cost dispatcher 启用时使用裁剪；其它路径沿用完整刷新。开关在 Replay actor 创建时读取。
+通用引擎缺省 `ACCERL_CRITIC_DEPENDENCY_PRUNING=0`。维护配方的 `weaver_run/recipe/env.json` 设为 `"1"`。Replay actor 在创建时读取开关。带世界模型的维护配方通过 cost dispatcher 执行裁剪。WEAVER model-free 对已准入的真实样本使用同一算法，覆盖常规同步刷新和 `--batch-autotune` 刷新。普通配方的刷新 micro 为 2，autobatch 使用该次更新选定的 2、4 或 8。每个副本保留原分组内的样本顺序和末批大小。
 
 要回退，修改该 JSON 为 `"0"`，测试、提交并推送，然后仍从根目录 `./run.sh` 启动新实验。启动器会清理继承的 `ACCERL_*` 并加载配方，因此只在 shell 里 export 不能覆盖这个配方。运行中的旧进程不会在线切换。
 
@@ -16,13 +16,14 @@
 
 实际请求携带显式 `batch_sizes`，dispatcher 按原边界执行，登记和结算的额度只包含保留的观察。原版本锁、发布等待、已提交请求的安全完成及失败清理仍生效。返回的当前版本、位置覆盖、长度和有限值必须匹配；缺失依赖时释放样本预留并报错，不回退到生成时的 Value。
 
-`fresh_critic_refresh_plan` 的策略名为 `original_micro_pairs_dependency_pruned`。其中：
+`fresh_critic_refresh_plan` 按副本记录计划。micro 为 1 或 2 的裁剪沿用策略名 `original_micro_pairs_dependency_pruned`，4 或 8 使用 `original_micro_batches_dependency_pruned`。
 
 - `original_observations_by_replica` / `original_batches_by_replica`：原完整计划。
 - `observations_by_replica` / `executed_batches_by_replica`：本次实际请求的观察和 micro 数。
 - `required_observations_by_replica`：GAE 必需的观察数，不包含仅为保持配对而计算的伙伴。
 - `stored_k_plus_one_preserved` 与 `required_dependencies_covered`：存储和依赖合同。
 - `all_k_plus_one_observations_preserved`：是否实际评估了所有观察。裁剪生效时可以为 false，不能用此旧字段替代存储完整性检查。
+- `refresh_endpoint` 标明同步、autobatch 或 dispatcher 路径，分别取 `direct`、`autotuned`、`scheduled`。`refresh_micro` 是本次计划使用的微批大小。model-free 可用各副本完成事件 `fresh_critic_refresh` 的 `actual_batch`、`details.executed_batches` 和 `details.refresh_seconds` 核查实际执行量与耗时。
 
 ## 验证与限制
 
@@ -33,4 +34,6 @@ cd weaver_run/engine
 WEAVER_TEST_UPSTREAM="$(cd ../vendor/weaver && pwd)" python -B validate_cost_scheduler_candidate.py
 ```
 
-同一保留 micro 的输入形状虽然保持，OpenVLA / Ray / CUDA 的实际数值与梯度等价性尚未验证。异步时序变化也可能改变后续采集和学习轨迹。被跳过的无关预测不再执行原有限值检查，因此不能声称失败行为完全相同。本次提交不启动训练。
+model-free 的配对测试使用同一批样本 ID 和固定 CPU 模型参数，对照完整刷新与裁剪的 GAE、value target、动作掩码、损失、参数梯度，以及四个副本实际执行的每个 micro。在 `weaver_run/engine` 下运行 `python -B -m unittest test_model_free_critic_pruning_cpu`。历史 model-free 的 P184 和 P373 两批各抽取 576 个动作块，按实际分组重建后，需前向的观测分别从 3,591 降到 2,426、从 3,177 降到 2,344。
+
+OpenVLA 在 Ray/CUDA 上的梯度与整机提速需分别实测。比较系统速度时记录完整更新至发布的墙钟、真实动作请求 p95 和环境步吞吐，并对齐固定评测协议。异步时序变化可能改变后续采集和学习轨迹。被跳过的预测不再执行有限值检查。

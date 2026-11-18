@@ -109,7 +109,7 @@ def finish_action(token):
         owner._autobatch_action_latencies.append(max(0., (time.time_ns()-submitted)/1e9))
 
 
-async def refresh_values(owner, inputs, expected_version, *, torch_module=None):
+async def refresh_values(owner, inputs, expected_version, *, batch_sizes=None, torch_module=None):
     owner._check_inference_health()
     stats = getattr(owner,'_autobatch_inference',None)
     if (stats is None or type(expected_version) is not int
@@ -122,6 +122,8 @@ async def refresh_values(owner, inputs, expected_version, *, torch_module=None):
     if torch_module is None:
         import torch as torch_module
     micro = stats['refresh_micro']
+    from policy_service_dispatch import refresh_batch_sizes
+    sizes = refresh_batch_sizes(len(inputs), micro, batch_sizes)
     meter = stats['meter']
     if meter is None:
         meter = stats['meter'] = DeviceMemoryMeter(torch_module.cuda)
@@ -129,19 +131,21 @@ async def refresh_values(owner, inputs, expected_version, *, torch_module=None):
     started = time.perf_counter()
     values = []
     try:
-        for offset in range(0,len(inputs),micro):
+        offset = 0
+        for count in sizes:
             owner._check_inference_health()
             if owner.capture_model_version != expected_version:
                 raise RuntimeError('Critic version changed during autotuned refresh')
             meter.begin_micro()
             with torch_module.inference_mode():
-                prepared = owner.model.prepare_inputs_batch(inputs[offset:offset+micro])
+                prepared = owner.model.prepare_inputs_batch(list(inputs[offset:offset+count]))
                 _,value = owner.model(prepared)
                 current = value.detach().float().reshape(-1).cpu().tolist()
             meter.end_micro()
-            if len(current) != min(micro,len(inputs)-offset) or any(not math.isfinite(v) for v in current):
+            if len(current) != count or any(not math.isfinite(v) for v in current):
                 raise ValueError('Critic refresh must return finite ordered per-observation Values')
             values.extend(current)
+            offset += count
             # Release chunk tensors before letting the action loop use this model.
             del prepared,value,_
             await asyncio.sleep(0)
@@ -152,7 +156,7 @@ async def refresh_values(owner, inputs, expected_version, *, torch_module=None):
         stats['refresh_observations'] += len(values)
         owner.telemetry.event('fresh_critic_refresh',actual_batch=len(values),model_version=expected_version,
             details=dict(action_sampling=False,maximum_micro_batch=micro,batch_autotune=True,
-                         cooperatively_scheduled=True,refresh_seconds=elapsed))
+                         cooperatively_scheduled=True,refresh_seconds=elapsed,executed_batches=len(sizes)))
         return dict(policy_version=expected_version,values=values)
     finally:
         owner._autobatch_refresh_active = False
@@ -218,7 +222,7 @@ class BatchAutotuneRuntime:
         if (sorted(x['rank'] for x in results) != list(range(4))
                 or any((x['policy_step'],x['refresh_micro']) != (policy_step,chosen['refresh_micro']) for x in results)):
             raise RuntimeError('Four critic replicas failed to acknowledge one batch choice')
-        self.ray.get(self.replay.configure_batch_autotune.remote(policy_step),timeout=30)
+        self.ray.get(self.replay.configure_batch_autotune.remote(policy_step,chosen['refresh_micro']),timeout=30)
         self.experiment.event('batch_autotune_applied',details=dict(policy_step=policy_step,**chosen))
         self.started = time.perf_counter()
 

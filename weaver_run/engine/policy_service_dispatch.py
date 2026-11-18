@@ -54,7 +54,9 @@ def dispatch_settings(settings):
 
 
 def refresh_batch_sizes(count, micro, batch_sizes=None):
-    if type(count) is not int or not 1 <= count <= 4096 or type(micro) is not int or micro not in (1,2):
+    # The dispatcher validates its 1/2 cap in dispatch_settings. Model-free
+    # autotuning also uses this boundary validator with its chosen 4/8 cap.
+    if type(count) is not int or not 1 <= count <= 4096 or type(micro) is not int or micro not in (1,2,4,8):
         raise ValueError('Refresh batch geometry is outside the reviewed bound')
     if batch_sizes is None:
         return tuple(min(micro,count-start) for start in range(0,count,micro))

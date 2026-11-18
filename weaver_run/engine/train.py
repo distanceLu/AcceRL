@@ -716,13 +716,16 @@ class ReplayBufferActor:
         self.fresh_refresh_prune = dependency_pruning_enabled()
         self.fresh_refresh_micro = 2
 
-    def configure_batch_autotune(self, policy_step):
+    def configure_batch_autotune(self, policy_step, refresh_micro=None):
         if (not self.fresh_enabled or not self.fresh_config.real_only
                 or getattr(self, 'cost_scheduler_enabled', False)
                 or type(policy_step) is not int or policy_step != self.fresh_store.versions[0]+1
+                or (refresh_micro is not None and
+                    (type(refresh_micro) is not int or refresh_micro not in (2, 4, 8)))
                 or getattr(self, '_model_free_admission', None) is None):
             raise ValueError('Autotuned Replay requires an admitted model-free cohort at the next version')
         self._autobatch_policy_step = policy_step
+        self.fresh_refresh_micro = refresh_micro
         return policy_step
 
     def configure_fresh(self, critics, production_budget=None, inventory_refill=False):
@@ -879,10 +882,18 @@ class ReplayBufferActor:
                     from critic_refresh_plan import (balanced_refresh_groups, refresh_plan_receipt,
                         dependency_refresh_groups, dependency_refresh_receipt)
                     unique = list(dict.fromkeys(self.fresh_store.samples[sid]['segment_id'] for sid in sample_ids))
-                    # The reviewed micro geometry is known only for the enabled
-                    # cooperative dispatcher. Other endpoints keep full refresh.
-                    prune = (getattr(self, 'cost_scheduler_enabled', False) and
-                             self.fresh_refresh_prune)
+                    version = self.fresh_store.versions[0]
+                    autotune_step = getattr(self, '_autobatch_policy_step', None)
+                    scheduled = getattr(self, 'cost_scheduler_enabled', False)
+                    if autotune_step is not None and autotune_step != version + 1:
+                        raise RuntimeError('Replay autotune configuration belongs to another update')
+                    # Admission establishes the model-free training boundary. The
+                    # direct actor uses micro 2 here; calibration configures its
+                    # chosen width on Replay and every replica before this draw.
+                    micro = self.fresh_refresh_micro if scheduled or autotune_step is not None else 2
+                    # A caller using the old one-argument calibration RPC has
+                    # not declared its width. Let the actor batch the full input.
+                    prune = self.fresh_refresh_prune and micro is not None and (scheduled or admission is not None)
                     if prune:
                         selected = {sid:[] for sid in unique}
                         for sample_id in sample_ids:
@@ -890,14 +901,21 @@ class ReplayBufferActor:
                             selected[sample['segment_id']].append(sample['index'])
                         groups = dependency_refresh_groups(
                             [self.fresh_store.segments[sid] for sid in unique], selected,
-                            len(self.fresh_critics), getattr(self, 'fresh_refresh_micro', 2))
+                            len(self.fresh_critics), micro)
                         receipt = dependency_refresh_receipt(groups)
                     else:
                         groups = balanced_refresh_groups(
                             [(sid, self.fresh_store.segments[sid].observations) for sid in unique],
                             len(self.fresh_critics))
                         receipt = refresh_plan_receipt(groups)
-                    version = self.fresh_store.versions[0]
+                    if autotune_step is not None:
+                        endpoint = 'autotuned'
+                    elif scheduled:
+                        endpoint = 'scheduled'
+                    else:
+                        endpoint = 'direct'
+                    if scheduled or admission is not None:
+                        receipt.update(refresh_endpoint=endpoint, refresh_micro=micro)
                     self.telemetry.event('fresh_critic_refresh_plan', details={
                         **receipt, 'policy_version':version,
                         'reserved_samples':len(sample_ids)})
@@ -906,22 +924,22 @@ class ReplayBufferActor:
                         if prune:
                             if not group.inputs:
                                 continue
-                            calls.append(critic.scheduled_evaluate_values.remote(
-                                group.inputs, version, batch_sizes=group.batch_sizes))
+                            inputs = group.inputs
+                            boundaries = {'batch_sizes':group.batch_sizes}
                             maps.append(group)
-                            continue
-                        if not group:
-                            continue
-                        inputs = [obs for _, observations in group for obs in observations]
-                        if getattr(self, '_autobatch_policy_step', None) is not None:
-                            if self._autobatch_policy_step != version+1:
-                                raise RuntimeError('Replay autotune configuration belongs to another update')
-                            calls.append(critic.autotuned_evaluate_values.remote(inputs, version))
                         else:
-                            calls.append(critic.scheduled_evaluate_values.remote(inputs, version)
-                                         if getattr(self, 'cost_scheduler_enabled', False)
-                                         else critic.evaluate_values.remote(inputs, version))
-                        maps.append([(sid, len(observations)) for sid, observations in group])
+                            if not group:
+                                continue
+                            inputs = [obs for _, observations in group for obs in observations]
+                            boundaries = {}
+                            maps.append([(sid, len(observations)) for sid, observations in group])
+                        if endpoint == 'autotuned':
+                            call = critic.autotuned_evaluate_values.remote(inputs, version, **boundaries)
+                        elif endpoint == 'scheduled':
+                            call = critic.scheduled_evaluate_values.remote(inputs, version, **boundaries)
+                        else:
+                            call = critic.evaluate_values.remote(inputs, version, **boundaries)
+                        calls.append(call)
                     answers = await asyncio.gather(*calls)
                     refreshed = {}
                     for answer, group in zip(answers, maps):
@@ -1722,9 +1740,9 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         from batch_autotune_runtime import configure_inference
         return configure_inference(self, policy_step, refresh_micro)
 
-    async def autotuned_evaluate_values(self, inputs, expected_version):
+    async def autotuned_evaluate_values(self, inputs, expected_version, *, batch_sizes=None):
         from batch_autotune_runtime import refresh_values
-        return await refresh_values(self, inputs, expected_version)
+        return await refresh_values(self, inputs, expected_version, batch_sizes=batch_sizes)
 
     def get_batch_autotune_stats(self, policy_step):
         from batch_autotune_runtime import inference_report
@@ -1742,11 +1760,13 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         limit = min(2, max(1, int(getattr(self, 'training_batch_limit', 2))))
         from policy_service_dispatch import refresh_batch_sizes
         sizes = refresh_batch_sizes(len(inputs), limit, batch_sizes)
+        from time import perf_counter
+        started = perf_counter()
         values = []
         with torch.inference_mode():
             start = 0
             for count in sizes:
-                batch = self.model.prepare_inputs_batch(inputs[start:start+count])
+                batch = self.model.prepare_inputs_batch(list(inputs[start:start+count]))
                 _, value = self.model(batch)
                 current = value.detach().float().reshape(-1).cpu().numpy()
                 if len(current) != count or not np.isfinite(current).all():
@@ -1756,7 +1776,8 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         if self.capture_model_version != expected_version:
             raise RuntimeError('FRESH critic changed version during ordered segment evaluation')
         self.telemetry.event('fresh_critic_refresh', actual_batch=len(values), model_version=expected_version,
-            details={'action_sampling':False,'maximum_micro_batch':limit})
+            details={'action_sampling':False,'maximum_micro_batch':limit,
+                     'executed_batches':len(sizes),'refresh_seconds':perf_counter()-started})
         return {'policy_version':expected_version,'values':values}
 
     def configure_cost_scheduler(self, broker, settings):

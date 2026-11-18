@@ -23,7 +23,7 @@ model-free 不创建 World/Reward 模型、想象 worker、WM Replay、WM 训练
 | Policy 微批次/累积 | 普通8/18；每5步4/36 | 恒8/18，全局576 |
 | World 更新 | 每5次 Policy 更新一次 | 无 |
 | cost scheduler、想象库存补货 | 开启 | 关闭 |
-| Value 刷新 | 当前 critic，支持依赖裁剪 | 当前 critic 完整刷新；没有 cost dispatcher 时不走裁剪路径 |
+| Value 刷新 | 当前 critic，经 cost dispatcher 裁剪 | 当前 critic，普通与 autobatch 均按所选动作块的 GAE 依赖裁剪，详见[裁剪与回退](critic-dependency-pruning.md) |
 | 渲染/物理 | EGL / CPU | 保留 |
 | 训练任务/初态 | spatial task0、50初态 | 保留 |
 | 训练动作上限 | 150；到限失败 | 保留 |
