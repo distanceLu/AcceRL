@@ -1,4 +1,4 @@
-"""CPU-only, exactly-once continuation after training, final evaluation and cleanup."""
+"""CPU-only, exactly-once continuation after the predecessor's acceptance and cleanup."""
 import argparse
 from contextlib import closing
 import hashlib
@@ -56,6 +56,9 @@ def same_job(row, expected):
 
 def evaluate(plan, rows, now):
     target = plan['target']
+    training = plan['training']
+    receipt_kind = training.get('receipt_kind', 'weaver')
+    require(receipt_kind in ('weaver', 'legacy'), 'Unknown training receipt kind')
     existing = [r for r in rows if r['submission_id'] == target['submission_id']]
     require(len(existing) <= 1, 'Duplicate target submission identity')
     if existing:
@@ -81,7 +84,6 @@ def evaluate(plan, rows, now):
     for key in ('training',):
         if jobs[key]['state'] != 'succeeded':
             return dict(state='waiting_'+key)
-    training = plan['training']
     receipt = load(Path(training['root'])/'queue_receipt.json')
     if receipt is None:
         return dict(state='waiting_training_receipt')
@@ -89,11 +91,19 @@ def evaluate(plan, rows, now):
         and receipt.get('source_validation', {}).get('git_commit') == training['git_commit'],
         'Training final receipt identity changed')
     require(receipt.get('state') != 'failed', 'Training final receipt failed')
-    for key in ('training_acceptance','evaluation_acceptance'):
-        require(receipt.get(key, {}).get('passed') is not False, 'Training/final evaluation rejected')
+    acceptance = ('training_acceptance', 'evaluation_acceptance')
+    if receipt_kind == 'legacy':
+        # 旧版训练器在退出时审计最终 checkpoint，不生成固定评测回执。
+        acceptance = ('checkpoint_audit',)
+        if receipt.get('state') == 'succeeded':
+            require(receipt.get('git_commit') == training['git_commit']
+                    and receipt.get('final_source_validation', {}).get('git_commit') == training['git_commit'],
+                    'Legacy final source validation changed')
+            require(receipt.get('exit_code') == 0, 'Legacy driver did not exit successfully')
+    for key in acceptance:
+        require(receipt.get(key, {}).get('passed') is not False, 'Predecessor rejected: '+key)
     if not (receipt.get('state') == 'succeeded' and receipt.get('all_owned_exited') is True
-            and all(receipt.get(k, {}).get('passed') is True
-                    for k in ('training_acceptance','evaluation_acceptance'))):
+            and all(receipt.get(k, {}).get('passed') is True for k in acceptance)):
         return dict(state='waiting_training_receipt')
     require(jobs['training']['started_ns'] <= receipt['finished_ns'] <= jobs['training']['finished_ns'] <= now,
         'Training final receipt time invalid')

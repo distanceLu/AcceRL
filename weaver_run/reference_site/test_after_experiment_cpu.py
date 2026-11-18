@@ -52,6 +52,36 @@ class ContinuationTests(unittest.TestCase):
         self.row.update(state='running', id='replaced')
         with self.assertRaises(RuntimeError): self.gate()
 
+    def legacy_receipt(self):
+        return dict(job_id='old', run_id='run-old', git_commit='old-sha',
+                    source_validation={'git_commit': 'old-sha'},
+                    final_source_validation={'git_commit': 'old-sha'},
+                    state='succeeded', exit_code=0, all_owned_exited=True,
+                    checkpoint_audit={'passed': True}, target_reached=False, finished_ns=100)
+
+    def test_legacy_receipt_requires_explicit_selection(self):
+        self.complete()
+        self.write('queue_receipt.json', self.legacy_receipt())
+        self.assertEqual(self.gate(), 'waiting_training_receipt')
+        self.plan['training']['receipt_kind'] = 'legacy'
+        self.assertEqual(self.gate(), 'ready')
+        self.plan['training']['receipt_kind'] = 'typo'
+        with self.assertRaises(RuntimeError): self.gate()
+
+    def test_legacy_receipt_requires_successful_audit_exit_and_matching_commit(self):
+        self.complete()
+        self.plan['training']['receipt_kind'] = 'legacy'
+        receipt = self.legacy_receipt()
+        for field, value in [('checkpoint_audit', {'passed': False}), ('exit_code', 1),
+                             ('git_commit', 'other'), ('final_source_validation', {'git_commit': 'other'})]:
+            with self.subTest(field=field):
+                self.write('queue_receipt.json', dict(receipt, **{field: value}))
+                with self.assertRaises(RuntimeError): self.gate()
+        for field, value in [('all_owned_exited', False), ('checkpoint_audit', {})]:
+            with self.subTest(field=field):
+                self.write('queue_receipt.json', dict(receipt, **{field: value}))
+                self.assertEqual(self.gate(), 'waiting_training_receipt')
+
     def test_failed_acceptance_is_not_a_retryable_wait(self):
         self.complete()
         self.receipt['evaluation_acceptance'] = {'passed': False}
