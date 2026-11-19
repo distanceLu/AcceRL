@@ -254,7 +254,11 @@ def report(data, state):
                     '真实预算1000000步，训练150动作，评测220动作；双图像、无proprio、GIPO，cost scheduler关闭。']
         if state.get('batch_autotune'):
             lines[3]='Real4 / Imag0，Policy 四卡 ZeRO2 global576；前期按六更新窗口校准 refresh batch 与训练 micro/GAS，之后冻结。实际配置见 BatchAutotune 遥测。'
-        lines += ['', '预算耗尽或固定验证平台期可自动结束；停止证据、最终权重与清理均须验收。']
+        target = state.get('model_free_success_target')
+        if target:
+            lines += ['', f"最近 {target['window_size']} 个有效真实训练回合首次达到 {target['window_successes']} 次成功即停止更新并保存。固定评测用于诊断，实际预算耗尽也会停止。"]
+        else:
+            lines += ['', '本次归档沿用当时的固定验证和预算判停规则。']
     for key in ('error', 'checkpoint_cpu_audit', 'sampled_gpu_peaks', 'cleanup'):
         if key in state:
             lines += ['', key+':', '```json', json.dumps(state[key], ensure_ascii=False, indent=2), '```']
