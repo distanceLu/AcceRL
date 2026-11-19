@@ -1,5 +1,14 @@
 """CPU-only evidence checks shared by the training and queue supervisors."""
 
+ROLLOUT_TARGET_REASON = 'rollout_success_target_reached'
+LEGACY_VALIDATION_REASONS = ('fixed_validation_plateau', 'fixed_validation_target_reached')
+AUTOMATIC_REASONS = ('real_budget_exhausted', ROLLOUT_TARGET_REASON, *LEGACY_VALIDATION_REASONS)
+
+
+def rollout_target_config():
+    from model_free_success import WINDOW_SIZE, TARGET_SUCCESSES
+    return {'window_size': WINDOW_SIZE, 'window_successes': TARGET_SUCCESSES}
+
 
 def validate_automatic_completion(details, state, stop_flag=None):
     def require(condition, message):
@@ -13,8 +22,7 @@ def validate_automatic_completion(details, state, stop_flag=None):
     require(state.get('model_free') is True and details.get('model_free') is True,
             'mode evidence missing')
     require(not stop_flag and not state.get('error'), 'stop/fault evidence takes precedence')
-    require(reason in ('real_budget_exhausted','fixed_validation_plateau','fixed_validation_target_reached'),
-            'unsupported stop reason')
+    require(reason in AUTOMATIC_REASONS, 'unsupported stop reason')
     budget=details.get('budget_status') or {}
     fields=('max_env_steps','consumed_env_steps','available_env_steps','reset_steps',
             'reserved_env_steps','active_real','episodes_inflight',
@@ -26,10 +34,29 @@ def validate_automatic_completion(details, state, stop_flag=None):
             and budget['max_env_steps'] == state.get('pipeline_config',{}).get('real_env_step_budget')
             and budget['consumed_env_steps']+budget['available_env_steps'] == budget['max_env_steps'],
             'budget does not match frozen capacity')
+    receipt = {'stop_reason': reason}
+    if ('model_free_success_target' in state or 'model_free_success' in details
+            or reason == ROLLOUT_TARGET_REASON):
+        from model_free_success import validate_model_free_success
+        require(state.get('model_free_success_target') == rollout_target_config(),
+                'frozen rollout target differs')
+        require(reason not in LEGACY_VALIDATION_REASONS, 'fixed validation is diagnostic')
+        try:
+            snapshot = validate_model_free_success(details.get('model_free_success'))
+        except ValueError as exc:
+            raise RuntimeError('Model-free automatic completion: invalid rollout statistics') from exc
+        require(snapshot['run_started_ns'] == state.get('started_ns') == details.get('run_started_ns'),
+                'rollout statistics belong to a different run')
+        require(snapshot['total_env_steps'] + snapshot['total_episodes_processed'] * budget['reset_steps']
+                <= budget['consumed_env_steps'], 'rollout actions and resets exceed consumed budget')
+        require(('99' in snapshot['crossings']) == (reason == ROLLOUT_TARGET_REASON),
+                'rollout crossing disagrees with stop decision')
+        require(natural(details.get('global_step')), 'missing final Policy step')
+        receipt['model_free_success'] = snapshot
     if reason == 'real_budget_exhausted':
         require(budget.get('budget_exhausted') is True
                 and budget['available_env_steps'] <= budget['reset_steps'], 'budget is not exhausted')
-    else:
+    elif reason in LEGACY_VALIDATION_REASONS:
         target = reason == 'fixed_validation_target_reached'
         summary=details.get('fixed_validation') or {}
         config=summary.get('config') or {}
@@ -74,8 +101,10 @@ def validate_automatic_completion(details, state, stop_flag=None):
         replay=ModelFreeControl(ModelFreeControlConfig(**config))
         try:
             for row in history:
+                if replay.target_reached:
+                    raise ValueError('Historical validation continued after its terminal full score')
                 replay.observe(**row)
         except (TypeError,ValueError) as exc:
             raise RuntimeError('Model-free automatic completion: invalid validation history') from exc
         require(replay.summary() == summary, 'validation history disagrees with stop decision')
-    return {'stop_reason':reason}
+    return receipt

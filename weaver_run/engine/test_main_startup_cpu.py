@@ -181,6 +181,11 @@ class Actor:
                     'worker':child.get('ACCERL_RENDER_WORKER')}
         if method == "size":
             return 10000 if self.name == "ReplayBufferActor" else 50000
+        if method == 'get_model_free_success':
+            from test_model_free_runtime_cpu import rollout_snapshot
+            return rollout_snapshot()
+        if method == 'set_paused' and self.name == 'RealCollectionCoordinator':
+            return {}
         if method == 'pipeline_status' and self.name == 'RealCollectionCoordinator':
             return {}
         if method == 'initial_state_checkpoint' and self.name == 'RealCollectionCoordinator':

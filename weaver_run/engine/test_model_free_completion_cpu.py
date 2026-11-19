@@ -81,12 +81,13 @@ class ModelFreeFinalAudit(unittest.TestCase):
             world_backend_config=copy.deepcopy(CONFIG),
             report={'training': {'policy': {'global_updates': steps}}})
 
-    def save(self, root, steps=6):
+    def save(self, root, steps=6, **extra_metadata):
         owner = SimpleNamespace(rank=0, world_size=4, training_role='policy',
                                 global_step=steps, model=TinyPolicy())
         meta = metadata()
         meta['stop_policy'] = dict(until_manual_stop=True, until_deadline=False,
                                   deadline_unix_seconds=None, stop_on_target=False)
+        meta.update(extra_metadata)
         return save_split_weights({'policy': export_split_component(owner, 'policy')},
             root / 'training/checkpoints', reason='final', metadata=meta, active_kinds=('policy',))
 
@@ -126,6 +127,36 @@ class ModelFreeFinalAudit(unittest.TestCase):
                 manifest = dict(payload['manifest'], weights_file='latest_weights.pt', weights_bytes=path.stat().st_size)
                 (folder / 'manifest.json').write_text(json.dumps(manifest))
                 self.assertFalse(self.audit(root, self.state(6))['valid'])
+
+    def test_latched_rollout_receipt_survives_checkpoint_save_and_independent_cpu_audit(self):
+        from model_free_success import ModelFreeSuccess
+        from model_free_completion import rollout_target_config
+        tracker = ModelFreeSuccess(run_started_ns=100)
+        for index in range(1011):
+            tracker.observe(index < 1000, actions=20, observed_ns=101 + index)
+        snapshot = tracker.snapshot()
+        self.assertEqual(snapshot['window_successes'], 989)
+        for steps in (0, 6):
+            with self.subTest(steps=steps), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                # A perfect earlier diagnostic remains in history after the Policy changes.
+                diagnostics = {'target_reached': True, 'target_validation': {'policy_step': 0,
+                    'cases': 50, 'successes': 50}, 'last': {'policy_step': steps, 'cases': 50, 'successes': 41}}
+                reason = 'rollout_success_target_reached'
+                self.save(root, steps, global_step=steps, model_free_success=snapshot,
+                          stop_reason=reason, fixed_validation=diagnostics)
+                state = dict(self.state(steps), started_ns=100, model_free_success_target=rollout_target_config(),
+                             automatic_completion={'model_free_success': copy.deepcopy(snapshot), 'stop_reason': reason})
+                audit = self.audit(root, state)
+                self.assertTrue(audit['valid'], audit)
+                self.assertEqual(audit['model_free_success'], snapshot)
+                with self.assertRaises(ValueError):
+                    self.save(root, steps, global_step=steps+1, model_free_success=snapshot, stop_reason=reason)
+                with self.assertRaises(ValueError):
+                    self.save(root, steps, global_step=steps, model_free_success=snapshot,
+                              stop_reason='fixed_validation_target_reached')
+                del state['automatic_completion']['model_free_success']['crossings']['99']
+                self.assertFalse(self.audit(root, state)['valid'])
 
     def test_placement_requires_eight_policy_processes_and_no_ghost_world(self):
         rows = []

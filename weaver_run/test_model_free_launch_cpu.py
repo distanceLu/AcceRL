@@ -143,6 +143,84 @@ class ModelFreeLaunchTests(unittest.TestCase):
                 self.assertEqual(receipt['steps'],{'policy':steps})
                 self.assertEqual(receipt['stopped_before_first_update'],steps == 0)
 
+    def rollout_case(self, steps=5):
+        state, report = self.automatic_case('rollout_success_target_reached', steps=steps)
+        state['model_free_success_target'] = {'window_size': 1000, 'window_successes': 990}
+        start = state['started_ns']
+        def observation(episodes, successes):
+            return dict(window_size=1000, window_episodes=1000, window_successes=successes,
+                        success_rate=successes / 1000, total_episodes_processed=episodes,
+                        total_env_steps=episodes * 20, observed_ns=start+episodes,
+                        elapsed_seconds=episodes / 1e9, run_started_ns=start)
+        snapshot = dict(observation(1002, 989), crossings={
+            '98': observation(1000, 989), '99': observation(1001, 990)})
+        details = report['experiment_completed'][0]['details']
+        details['model_free_success'] = snapshot
+        details['budget_status'].update(consumed_env_steps=30060, available_env_steps=969940,
+                                       budget_exhausted=False)
+        report['checkpoint'].update(steps={'policy': steps}, model_free_success=copy.deepcopy(snapshot))
+        return state, report
+
+    def test_rollout_target_requires_a_latched_full_window_and_its_exact_final_checkpoint(self):
+        from test_manual_controller_cpu import load
+        validate = load('runner.py', 'validate_manual_completion', {})
+        for steps in (0, 5):
+            with self.subTest(steps=steps):
+                state, report = self.rollout_case(steps)
+                receipt = validate(report, state, {}, automatic=True)
+                snapshot = report['experiment_completed'][0]['details']['model_free_success']
+                self.assertEqual(receipt['model_free_success'], snapshot)
+                state.update(state='completed_automatically', training_stopped=True,
+                             cleanup={'survivors': []}, source_path='/source', automatic_completion=receipt,
+                             checkpoint_cpu_audit=dict(valid=True, steps={'policy': steps},
+                                monolith_steps={'policy': steps}, manifest_reason=receipt['checkpoint_reason'],
+                                model_free_success=copy.deepcopy(snapshot)))
+                report.update(run_id=state['run_id'], state=state['state'], source='/source',
+                              synchronized_epoch_completed=[{}] if steps else [])
+                self.assertTrue(training.acceptance(state, report, 0, [], None)['passed'])
+                del state['checkpoint_cpu_audit']['model_free_success']['crossings']['99']
+                self.assertFalse(training.acceptance(state, report, 0, [], None)['passed'])
+                report['checkpoint']['steps'] = {'policy': steps+1}
+                with self.assertRaises(RuntimeError):
+                    validate(report, state, {}, automatic=True)
+
+    def test_new_stop_contract_rejects_fixed_scores_and_invalid_rollout_evidence(self):
+        from test_manual_controller_cpu import load
+        validate = load('runner.py', 'validate_manual_completion', {})
+        for key in ('fixed_target', 'plateau', 'partial', '98_only', 'wrong_start',
+                    'inflight', 'charged_actions', 'wrong_snapshot'):
+            with self.subTest(key=key):
+                state, report = self.rollout_case()
+                details = report['experiment_completed'][0]['details']
+                if key == 'fixed_target':
+                    state, report = self.target_case()
+                    state['model_free_success_target'] = {'window_size': 1000, 'window_successes': 990}
+                elif key == 'plateau': details['stop_reason'] = 'fixed_validation_plateau'
+                elif key == 'partial': details['model_free_success']['crossings']['99']['window_episodes'] = 999
+                elif key == '98_only': del details['model_free_success']['crossings']['99']
+                elif key == 'wrong_start': details['model_free_success']['run_started_ns'] += 1
+                elif key == 'inflight': details['budget_status']['episodes_inflight'] = 1
+                elif key == 'charged_actions':
+                    details['budget_status'].update(consumed_env_steps=1, available_env_steps=999999)
+                elif key == 'wrong_snapshot': del report['checkpoint']['model_free_success']['crossings']['99']
+                with self.assertRaises(RuntimeError):
+                    validate(report, state, {}, automatic=True)
+
+    def test_new_budget_stop_records_the_98_crossing_without_claiming_99(self):
+        from test_manual_controller_cpu import load
+        validate = load('runner.py', 'validate_manual_completion', {})
+        state, report = self.rollout_case()
+        details = report['experiment_completed'][0]['details']
+        details['stop_reason'] = 'real_budget_exhausted'
+        details['budget_status'].update(consumed_env_steps=999999, available_env_steps=1, budget_exhausted=True)
+        with self.assertRaises(RuntimeError):
+            validate(report, state, {}, automatic=True)
+        del details['model_free_success']['crossings']['99']
+        report['checkpoint']['model_free_success'] = copy.deepcopy(details['model_free_success'])
+        receipt = validate(report, state, {}, automatic=True)
+        self.assertEqual(receipt['stop_reason'], 'real_budget_exhausted')
+        self.assertEqual(set(receipt['model_free_success']['crossings']), {'98'})
+
     def test_runner_child_exit_routes_target_to_automatic_completion(self):
         from test_manual_controller_cpu import load
         from world_backends import build_service_plan
@@ -155,9 +233,10 @@ class ModelFreeLaunchTests(unittest.TestCase):
         # subprocess/SQLite transports; preserve its automatic routing and audit.
         entry=ast.parse('for unused in (0,):\n    pass').body[0]
         entry.body=[exited]
-        for steps in (0,5):
-            with self.subTest(steps=steps):
-                state,result=self.target_case(steps)
+        for make_case, steps in ((self.target_case, 0), (self.target_case, 5),
+                                 (self.rollout_case, 0), (self.rollout_case, 5)):
+            with self.subTest(case=make_case.__name__, steps=steps):
+                state,result=make_case(steps)
                 ns=dict(rc=0,model_free=True,batch_autotune=False,state=state,data=Path('/cpu'),
                     plan=build_service_plan(state['world_backend_config']),
                     report=lambda *_:result,observe_stop_request=lambda *_:None,
@@ -169,7 +248,8 @@ class ModelFreeLaunchTests(unittest.TestCase):
                 except RuntimeError as exc:
                     self.fail('Complete target should route to automatic completion: '+str(exc))
                 self.assertEqual(state['state'],'completed_automatically')
-                self.assertEqual(state['automatic_completion']['stop_reason'],'fixed_validation_target_reached')
+                self.assertEqual(state['automatic_completion']['stop_reason'],
+                                 result['experiment_completed'][0]['details']['stop_reason'])
 
     def test_target_completion_rejects_partial_forged_or_wrong_saved_version(self):
         from test_manual_controller_cpu import load
@@ -412,6 +492,8 @@ class ModelFreeLaunchTests(unittest.TestCase):
                     fixed_validation={'patience':5})
             self.assertEqual(record['git_commit'],'a'*40)
             self.assertTrue(record['model_free'])
+            self.assertEqual(record['stop_policy'], 'real_rollout_success_or_budget_or_explicit_stop_or_fault')
+            self.assertEqual(record['model_free_success_target'], dict(window_size=1000, window_successes=990))
             self.assertEqual(record['num_eval_workers'],4)
             self.assertEqual(record['fixed_validation_config'],dict(interval_env_steps=0,patience=5,
                 min_env_steps=300000,min_delta_successes=1))
@@ -455,6 +537,26 @@ class ModelFreeLaunchTests(unittest.TestCase):
             self.assertNotIn('world_updates',result)
             with self.assertRaises((ValueError,KeyError)):
                 launch.final_snapshot(directory,'weaverintegrated_test',model_free=False)
+
+    def test_portable_status_reports_rollout_stop_only_with_matching_final_weights(self):
+        from model_free_success import ModelFreeSuccess
+        stats = ModelFreeSuccess(1)
+        for i in range(1000):
+            stats.observe(i < 990, 10, i + 2)
+        metadata = dict(run_id='portable', model_free=True, global_step=73,
+                        stop_reason='rollout_success_target_reached', model_free_success=stats.snapshot())
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / 'latest_weights.pt').write_bytes(b'weights')
+            manifest = dict(reason='final', steps={'policy':73}, weights_bytes=7, metadata=metadata)
+            launch.put(directory / 'manifest.json', manifest)
+            receipt = launch.final_snapshot(directory, 'portable', model_free=True)
+            self.assertEqual(receipt['stop_reason'], metadata['stop_reason'])
+            self.assertEqual(receipt['model_free_success']['crossings']['99']['window_successes'], 990)
+            manifest['steps']['policy'] += 1
+            launch.put(directory / 'manifest.json', manifest)
+            with self.assertRaises(ValueError):
+                launch.final_snapshot(directory, 'portable', model_free=True)
 
     def test_managed_environment_and_runner_command_carry_mode_without_world(self):
         root, source = Path('/output'), HERE / 'engine'

@@ -566,12 +566,16 @@ class WMExperience:
 
 
 # ================================================================
-# 1.5 统计模块 (StatsActor) — 与原版完全一致
+# 1.5 统计模块（StatsActor）
 # ================================================================
 @ray.remote
 class StatsActor:
-    def __init__(self, window_size, eval_window_size=None):
+    def __init__(self, window_size, eval_window_size=None, model_free_run_started_ns=None):
         setup_debugger("stats")
+        self.model_free_success = None
+        if model_free_run_started_ns is not None:
+            from model_free_success import ModelFreeSuccess
+            self.model_free_success = ModelFreeSuccess(model_free_run_started_ns)
         self.eval_window_size = window_size if eval_window_size is None else eval_window_size
         self.stats = defaultdict(lambda: self._episode_stats(window_size))
         self.timings = defaultdict(lambda: deque(maxlen=window_size))
@@ -593,6 +597,8 @@ class StatsActor:
 
     def add_episode_return(self, env_name, ep_return, step_time, ep_length, success,
                            actor_id=None, step_num=0, completed_ns=None, evaluation_versions=None):
+        if self.model_free_success is not None and not env_name.startswith("eval_"):
+            self.model_free_success.observe(success, ep_length, now_ns())
         if env_name.startswith("eval_") and env_name not in self.stats:
             self.stats[env_name] = self._episode_stats(self.eval_window_size)
         env_stats = self.stats[env_name]
@@ -617,6 +623,11 @@ class StatsActor:
             self.total_samples_produced += step_num
             if actor_id is not None:
                 self.actor_last_active[actor_id] = time.time()
+
+    def get_model_free_success(self):
+        if self.model_free_success is None:
+            raise RuntimeError('Model-free training success tracking is disabled')
+        return self.model_free_success.snapshot()
 
     def add_timing_metric(self, metric_name, value):
         self.timings[metric_name].append(value)
@@ -858,6 +869,14 @@ class ReplayBufferActor:
         self._model_free_admission = dict(snapshot, ready=True, batch_size=batch_size,
                                          reservation_token=token, sample_ids=sample_ids)
         return {key: value for key, value in self._model_free_admission.items() if key != 'sample_ids'}
+
+    def cancel_model_free_admission(self, token):
+        """Release the protected cohort if the driver stops before starting its epoch."""
+        admission = getattr(self, '_model_free_admission', None)
+        if admission is None or admission['reservation_token'] != token:
+            raise ValueError('Cannot cancel a different or already consumed admission')
+        self.fresh_store.cancel(token)
+        self._model_free_admission = None
 
     async def sample(self, batch_size):
         if self.fresh_enabled:
@@ -1319,9 +1338,12 @@ class RolloutWorkerActor(BaseWorkerActor):
                         allocation_id=assigned['allocation_id'], allocation_cycle=assigned['cycle'])
                 self.env_outcome[self.current_env_idx].append(1.0 - success)
                 if not budget_cut:
-                    self.stats_actor.add_episode_return.remote(
+                    stats_ref = self.stats_actor.add_episode_return.remote(
                         self.current_env_name, reward_sum, step_time,
                         step_count_total, success, actor_id=self.wid, step_num=step_count)
+                    if self.model_free:
+                        # 先确认回合已计数，再释放采集配额，避免排空时漏判达标。
+                        ray.get(stats_ref)
                 if self.fresh_config.real_policy_replay:
                     final_inputs = prepare_one_obs(self.cfg, self.processor, nxt, self.task_description, self.torch_dtype)
                     # LIBERO's complete finite task horizon is an observed
@@ -4287,7 +4309,7 @@ def main(args):
     evaluation_milestones = EvaluationMilestones()
     run_started_ns = int(os.environ.get("ACCERL_RUN_STARTED_NS", now_ns()))
     eval_target = os.environ.get("ACCERL_EVAL_TARGET") if args.num_eval_workers else None
-    if not args.num_eval_workers and run_policy.stop_on_target:
+    if not model_free and not args.num_eval_workers and run_policy.stop_on_target:
         raise ValueError('Evaluation-based stopping requires online Eval workers')
     threshold_tracker = (ThresholdTracker(
         target=float(eval_target), run_started_ns=run_started_ns,
@@ -4391,7 +4413,8 @@ def main(args):
         'metric_tag': 'Eval/_Global/Average_Return', 'greedy': True})
     writer.flush()
     stats_actor = StatsActor.remote(window_size=args.moving_avg_window,
-                                   eval_window_size=evaluation_plan['window_size'])
+                                   eval_window_size=evaluation_plan['window_size'],
+                                   **({'model_free_run_started_ns': run_started_ns} if model_free else {}))
     print(f"TensorBoard 日志将保存在: {log_dir}")
 
     cfg = build_openvla_cfg(args)
@@ -4761,7 +4784,7 @@ def main(args):
     print("Actor 推理器前向测试完成 (广播后)。")
 
     snapshot_dir = os.environ.get("ACCERL_FINAL_CHECKPOINT") if fixed_layout else None
-    def publish_snapshot(reason):
+    def publish_snapshot(reason, completion=None):
         if snapshot_dir:
             metadata = {"args": vars(args), "run_id": os.environ.get("ACCERL_RUN_ID"),
                         "stop_policy": run_policy.metadata(), "service_plan": service_plan.to_dict(),
@@ -4770,7 +4793,7 @@ def main(args):
                         "pipeline_config": pipeline_config.to_dict(),
                         "frozen_weights": "Restore original checkpoints in args before applying snapshot"}
             if model_free_runtime is not None:
-                metadata.update(model_free_runtime.completion_fields())
+                metadata.update(completion if completion is not None else model_free_runtime.completion_fields())
             if frozen_world is not None:
                 metadata["frozen_world"] = frozen_world
             if pipeline_config.initial_state_enabled:
@@ -4820,7 +4843,7 @@ def main(args):
     if model_free:
         from model_free_runtime import ModelFreeRuntime, ValidationInterrupted
         model_free_runtime = ModelFreeRuntime(ray=ray, collector=producer_coordinators[0],
-            replay=replay_buffers[0], inference_pool=inference_pool, worker_refs=worker_run_refs,
+            replay=replay_buffers[0], stats_actor=stats_actor, inference_pool=inference_pool, worker_refs=worker_run_refs,
             cfg=cfg, benchmark=benchmark, dtype=torch_dtype, render_bindings=render_bindings,
             environment=os.environ, config=fixed_validation_config, writer=writer, experiment=experiment,
             requested_stop=lambda: stop_requested() or run_policy.deadline_reached(),
@@ -4829,11 +4852,7 @@ def main(args):
             model_free_runtime.validate(0)
         except ValidationInterrupted:
             pass
-    # A fully successful P0 needs no collection or Replay fill. The common
-    # pre-update completion path below still saves and audits that exact policy.
-    initial_validation_target = bool(model_free_runtime is not None
-                                    and model_free_runtime.control.target_reached)
-    if not initial_validation_target:
+    if model_free_runtime is None or not model_free_runtime.requested_stop():
         for w in rollout_workers:
             worker_run_refs.append(w.run.remote())
         for w in eval_workers:
@@ -4850,27 +4869,29 @@ def main(args):
     )
     assert wm_min_buffer_size < args.wm_replay_capacity, "WM初始填充量必须小于WM回放池总容量"
 
+    def finish_collection(reason, policy_step, completed_epochs):
+        if model_free_runtime is None:
+            ray.get([buffer.stop_pipeline.remote() for buffer in producer_coordinators])
+            fields = {}
+        else:
+            fields = model_free_runtime.finish(policy_step)
+            if model_free_runtime.requested_stop():
+                reason = 'requested_stop'
+        if reason == 'requested_stop':
+            reason = run_policy.stop_reason(global_step=policy_step, train_iters=args.train_iters,
+                target_reached=False, requested_stop=True, completed_epochs=completed_epochs)
+        if model_free_runtime is not None:
+            fields.update(global_step=policy_step, stop_reason=reason)
+        return reason, fields
+
     last_fill_snapshot = -float("inf")
     measured_twenty_minutes = False
     while True:
-        budget_finished = False
-        validation_target_finished = False
-        if model_free_runtime is not None:
-            model_free_runtime.status()
-            budget_finished = model_free_runtime.last_budget['budget_exhausted']
-            validation_target_finished = model_free_runtime.control.target_reached
-        deadline_finished = model_free and run_policy.deadline_reached()
-        fill_requested_stop = stop_requested() or deadline_finished
-        if fill_requested_stop or validation_target_finished or budget_finished:
-            if fill_requested_stop:
-                fill_completion_reason = run_policy.stop_reason(global_step=0, train_iters=args.train_iters,
-                    target_reached=False, requested_stop=True)
-            else:
-                fill_completion_reason = ('fixed_validation_target_reached' if validation_target_finished
-                                          else 'real_budget_exhausted')
-            completion_fields = model_free_runtime.finish(0) if model_free_runtime is not None else {}
-            ray.get([buffer.stop_pipeline.remote() for buffer in producer_coordinators])
-            publish_snapshot("final_before_first_update")
+        fill_reason = (model_free_runtime.boundary_reason() if model_free_runtime is not None
+                       else 'requested_stop' if stop_requested() else None)
+        if fill_reason is not None:
+            fill_completion_reason, completion_fields = finish_collection(fill_reason, 0, 0)
+            publish_snapshot("final_before_first_update", completion_fields)
             experiment.event("experiment_completed", details={"global_step": 0, "completed_epochs": 0,
                 "run_started_ns": run_started_ns, "threshold_state": threshold_tracker.as_dict() if threshold_tracker else None,
                 "stop_reason": fill_completion_reason, "target_reached": False,
@@ -4949,13 +4970,11 @@ def main(args):
             target_reached=target_reached, requested_stop=stop_requested(),
             completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs):
         if model_free_runtime is not None:
-            boundary_reason = model_free_runtime.before_update(global_step)
+            boundary_reason = model_free_runtime.before_update(global_step,
+                prepare_update=autotune_runtime.before_update if autotune_runtime is not None else None)
             if boundary_reason is not None:
-                if boundary_reason != 'requested_stop':
-                    automatic_completion_reason = boundary_reason
+                automatic_completion_reason = boundary_reason
                 break
-        if autotune_runtime is not None:
-            autotune_runtime.before_update(global_step+1)
         ready, _ = ray.wait(worker_run_refs, timeout=0, num_returns=1)
         if ready:
             ray.get(ready[0])
@@ -5149,7 +5168,7 @@ def main(args):
                                   global_step, walltime=milestone["completed_ns"] / 1e9, double_precision=True)
                 writer.add_scalar(f"TimeTo85/{label}_Completion_Unix_Seconds", milestone["completed_ns"] / 1e9,
                                   global_step, walltime=milestone["completed_ns"] / 1e9, double_precision=True)
-            target_reached = threshold_tracker.should_stop
+            target_reached = not model_free and threshold_tracker.should_stop
             if evaluation_milestones.announce_target(target_reached):
                 experiment.event("accuracy_target_reached", ts_ns=evaluation_ns, details={
                     "state": threshold_state, "global_step": int(global_step),
@@ -5348,7 +5367,8 @@ def main(args):
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             if model_free:
-                writer.add_scalar('Rollout/_Global/Success_Rate', global_stats['avg_success_rate'], global_step)
+                writer.add_scalar('Rollout/_Global/Success_Rate',
+                    model_free_runtime.rollout_success()['success_rate'], global_step)
                 if last_log_real_steps is not None:
                     writer.add_scalar('Rollout/_Global/Completed_Episode_Env_Steps_Per_Sec',
                         (total_env_steps-last_log_real_steps)/max(current_time-last_log_time, 1e-9), global_step)
@@ -5401,14 +5421,13 @@ def main(args):
     completion_reason = automatic_completion_reason or run_policy.stop_reason(global_step=global_step, train_iters=args.train_iters,
         target_reached=target_reached, requested_stop=stop_requested(),
         completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs)
-    completion_fields = model_free_runtime.finish(global_step) if model_free_runtime is not None else {}
     if cost_broker is not None:
         ray.get(cost_broker.stop_eval_admission.remote(), timeout=10)
     nsight_windows.close()
     if fresh_replay and pipeline_config.inventory_refill_enabled:
         ray.get([replay.stop_inventory_refill.remote() for replay in replay_buffers])
-    ray.get([buffer.stop_pipeline.remote() for buffer in producer_coordinators])
-    publish_snapshot("final")
+    completion_reason, completion_fields = finish_collection(completion_reason, global_step, completed_epochs)
+    publish_snapshot("final", completion_fields)
     experiment.event("experiment_completed", details={"global_step": global_step,
                      "completed_epochs": completed_epochs,
                      "service_plan": service_plan.to_dict(), "world_backend_config": world_config.to_dict(),

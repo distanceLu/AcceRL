@@ -32,6 +32,14 @@ class ModelFreeAdmissionTests(unittest.TestCase):
         self.assertEqual(result[-1]['fresh_reservation_token'], first['reservation_token'])
         self.assertIsNone(owner._model_free_admission)
 
+    def test_stopping_after_admission_releases_unconsumed_samples(self):
+        owner = self.owner()
+        owner.add_segment(segment('real', source='real', count=2))
+        first = owner.admit_model_free_batch(2)
+        owner.cancel_model_free_admission(first['reservation_token'])
+        self.assertEqual(owner.fresh_store.reservations, {})
+        self.assertTrue(owner.admit_model_free_batch(2)['ready'])
+
     def test_cannot_change_count_or_version_of_admitted_cohort(self):
         owner = self.owner()
         owner.add_segment(segment('real', source='real', count=2))

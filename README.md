@@ -43,6 +43,8 @@ cp .weaver.env.example .weaver.env
 
 ## 可选 Model-free 模式
 
+`--model-free` 从四个真实采集 worker 最近完成的 1,000 个有效训练回合计算成功率。首次达到 980 次成功时记录时间，首次达到 990 次成功时在安全更新边界保存权重并停止训练。固定 50 初态评测继续记录冻结策略的表现。
+
 `--model-free` 默认关闭，完整设置与验证边界见[Model-free 模式说明](docs/model-free.md)。启用后只创建四个 Policy trainer 和四个推理副本，四个真实采集 worker 各绑定一张卡的 EGL renderer。在线 Eval 默认关闭；显式 `--num-eval-workers 4` 时连接副本0、1、2、3。训练仍使用 task0、双图像、无 proprio、原 pretrained + distilled Policy 初始化、GIPO 和当前 Value 重算 GAE。真实预算1M步、训练150动作及固定评测220动作保持。
 
 ```bash

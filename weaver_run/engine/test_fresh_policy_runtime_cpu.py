@@ -117,8 +117,23 @@ class RealCollectorTests(unittest.TestCase):
             owner.fresh_config = FreshConfig.from_world_config(owner.world_config)
             owner.pipeline_lease = 'real-lease'
             owner.telemetry = SimpleNamespace(event=lambda *a, **k: None)
+            owner.counted_episodes = []
+            pending_stats = []
+            def add_stats(env, ep_return, step_time, length, success, **kwargs):
+                record = (length, success)
+                pending_stats.append(record)
+                return record
+            def get(ref):
+                if pending_stats and ref is pending_stats[0]:
+                    owner.counted_episodes.append(pending_stats.pop())
+                return ref
+            def finish(token, payload):
+                self.assertFalse(pending_stats, 'lease released before episode stats acknowledgement')
+                observed.append((token, payload))
+            namespace['ray'] = SimpleNamespace(get=get)
+            owner.stats_actor = SimpleNamespace(add_episode_return=SimpleNamespace(remote=add_stats))
             owner.wm_replay_buffer = SimpleNamespace(finish_real_episode=SimpleNamespace(
-                remote=lambda token, payload: observed.append((token, payload))))
+                remote=finish))
             def forbidden(*args, **kwargs):
                 raise AssertionError('Model-free collector must not encode WM windows')
             owner._process_episode_for_wm = forbidden
@@ -139,6 +154,13 @@ class RealCollectorTests(unittest.TestCase):
         self.assertEqual(set(payload), {'episode_id', 'metadata'})
         self.assertEqual(payload['metadata']['action_steps'], 150)
         self.assertFalse(payload['metadata']['success'])
+        self.assertEqual(owner.counted_episodes, [(150, 0.)])
+
+    def test_model_free_budget_censored_episode_skips_training_success_window(self):
+        _, observed, owner, _ = self.collect(model_free=True, steps=10, success=False,
+                                              budget_cut=True, task_horizon=150)
+        self.assertTrue(observed[0][1]['metadata']['budget_censored'])
+        self.assertEqual(owner.counted_episodes, [])
 
     def test_actual_real_collection_retains_behavior_and_masks_partial_last_chunk(self):
         item,observed,owner,calls=self.collect()

@@ -1,6 +1,6 @@
 """Foreground manual Policy/WEAVER-native-RM training with exact queue ownership.
 
-Model-free training also accepts verified budget exhaustion or fixed validation plateau.
+Model-free training also accepts verified budget exhaustion or a full real-rollout 99% window.
 The queue itself has no hard process timeout. The native server supervisor retains its error/stall protections.
 Legacy WEAVER still requires an explicit manual stop. Saving/audit and the
 following fixed-checkpoint policy evaluation have separate bounded phases.
@@ -344,6 +344,11 @@ def check_state(state, source, root, run_id=None, supervisor=None, *, model_free
             raise ValueError('Runner model-free/Eval mode differs from queued arguments')
         if model_free:
             from launch import fixed_validation_options
+            if str(source) not in sys.path:
+                sys.path.insert(0, str(source))
+            from model_free_completion import rollout_target_config
+            if state.get('model_free_success_target') != rollout_target_config():
+                raise ValueError('Runner rollout success target differs from queued training')
             if state.get('fixed_validation_config') != fixed_validation_options(model_free,num_eval_workers,fixed_validation):
                 raise ValueError('Runner fixed validation configuration differs from queued arguments')
     rid = state.get('run_id', '')
@@ -809,9 +814,20 @@ def acceptance(state, report, exit_code, remaining, stop_flag):
         completed=report.get('experiment_completed',[])
         details=completed[0].get('details',{}) if len(completed)==1 else {}
         try:
-            validate_automatic_completion(details,state,stop_flag)
-            if state.get('automatic_completion',{}).get('stop_reason') != details.get('stop_reason'):
+            verified = validate_automatic_completion(details,state,stop_flag)
+            supervisor = state.get('automatic_completion') or {}
+            if supervisor.get('stop_reason') != verified['stop_reason']:
                 raise RuntimeError('automatic reason differs from completion event')
+            if 'model_free_success' in verified:
+                snapshot = verified['model_free_success']
+                audit = state.get('checkpoint_cpu_audit') or {}
+                checkpoint = report.get('checkpoint') or {}
+                if (supervisor.get('model_free_success') != snapshot
+                        or audit.get('model_free_success') != snapshot
+                        or checkpoint.get('model_free_success') != snapshot
+                        or checkpoint.get('steps') != {'policy': details['global_step']}
+                        or supervisor.get('steps') != checkpoint['steps']):
+                    raise RuntimeError('rollout statistics or saved Policy differ across completion receipts')
         except RuntimeError as exc:
             reasons.append('automatic_completion_evidence_invalid: '+str(exc))
     elif (not stop_flag or stop_flag.get('run_id') != rid or stop_flag.get('uid') != 1004

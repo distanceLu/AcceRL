@@ -32,6 +32,7 @@ def env(inherited=None, verified=True, state=None):
     # archived imports/preflight. formal_environment now delegates to it.
     cleaner=load('gpu47_safety.py','cpu_helper_environment',{'os':os})
     namespace={'os':os,'ROOT':Path('/repo'),
+               'cost_scheduler_environment_configuration':load('runner.py','cost_scheduler_environment_configuration',{}),
                'safe':SimpleNamespace(cpu_helper_environment=cleaner)}
     identity=state if state is not None else {'run_id':RUN,'started_ns':100}
     trusted=Mock(return_value={'NSYS_FRESH_INJECTION':'fresh','CUDA_INJECTION64_PATH':'fresh'})

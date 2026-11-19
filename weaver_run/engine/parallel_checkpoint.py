@@ -189,7 +189,18 @@ def save_split_weights(components, checkpoint_dir, *, reason="periodic", metadat
     if model_free and (kinds != ('policy',) or world_sizes != {4}):
         raise ValueError('Model-free snapshots require exactly four Policy ranks and no World owners')
     validation = (metadata or {}).get('fixed_validation') or {}
-    if model_free and validation.get('target_reached') is True:
+    if model_free and 'model_free_success' in metadata:
+        from model_free_success import validate_model_free_success
+        snapshot = validate_model_free_success(metadata['model_free_success'])
+        if reason in ('final', 'final_before_first_update'):
+            from model_free_completion import LEGACY_VALIDATION_REASONS, ROLLOUT_TARGET_REASON
+            if _counter(metadata.get('global_step'), 'Final Policy step') != components['policy']['policy_step']:
+                raise ValueError('Final rollout statistics must accompany the synchronized Policy')
+            stop_reason = metadata.get('stop_reason')
+            if (not isinstance(stop_reason, str) or not stop_reason or stop_reason in LEGACY_VALIDATION_REASONS
+                    or (stop_reason == ROLLOUT_TARGET_REASON and '99' not in snapshot['crossings'])):
+                raise ValueError('Final stop reason disagrees with rollout statistics')
+    elif model_free and validation.get('target_reached') is True:
         target = validation.get('target_validation') or {}
         if (target != validation.get('last') or target.get('cases') != 50
                 or target.get('successes') != 50

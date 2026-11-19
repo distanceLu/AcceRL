@@ -69,7 +69,7 @@ class ModelFreeControl:
         _integer('policy_step', policy_step)
         if type(force) is not bool:
             raise ValueError('force must be boolean')
-        if not self.enabled or self.target_reached:
+        if not self.enabled:
             return False
         if not self._validations:
             return policy_step == 0
@@ -84,8 +84,6 @@ class ModelFreeControl:
     def observe(self, successes, *, policy_step, consumed_env_steps, cases=50):
         if not self.enabled:
             raise ValueError('fixed validation is disabled')
-        if self.target_reached:
-            raise ValueError('fixed validation target already reached; no later observations are allowed')
         for name, value in (('successes', successes), ('policy_step', policy_step),
                             ('consumed_env_steps', consumed_env_steps), ('cases', cases)):
             _integer(name, value)
@@ -113,7 +111,7 @@ class ModelFreeControl:
         else:
             self._stale_count += 1
         self._validations.append(row)
-        if successes == self.CASE_COUNT:
+        if successes == self.CASE_COUNT and self._target_validation is None:
             self._target_validation = row
         return self.summary()
 

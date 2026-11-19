@@ -126,6 +126,8 @@ def collect(data, state):
     result['model_free']=state.get('model_free',False)
     result['num_eval_workers']=state.get('num_eval_workers',3)
     result['fixed_validation_config']=state.get('fixed_validation_config')
+    if 'model_free_success_target' in state:
+        result['model_free_success_target'] = state['model_free_success_target']
     result['batch_autotune']=state.get('batch_autotune',False)
     activity=data/'training/fixed_validation_activity.json'
     if activity.exists():
@@ -213,6 +215,8 @@ def collect(data, state):
         result['checkpoint'] = {k: m[k] for k in ['reason', 'steps', 'world_size', 'weights_only']}
         if 'online_world' in m.get('metadata', {}):
             result['checkpoint']['online_world'] = m['metadata']['online_world']
+        if 'model_free_success' in m.get('metadata', {}):
+            result['checkpoint']['model_free_success'] = m['metadata']['model_free_success']
     return result
 
 
@@ -393,6 +397,8 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     state['policy_batch_schedule']={'ordinary_micro_GAS':[8,18],'joint_micro_GAS':[4,36],
                                     'joint_interval':5,'global_batch':576,'local_batch':144}
     if model_free:
+        from model_free_completion import rollout_target_config
+        state['model_free_success_target'] = rollout_target_config()
         state['policy_batch_schedule'].update(joint_micro_GAS=None,joint_interval=None)
     if batch_autotune:
         state['policy_batch_schedule'].update(autotune=True,candidates_micro_GAS=[[8,18],[16,9],[24,6]],
@@ -467,8 +473,9 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
                         else:
                             validate_world_zero2_receipts(result.get('world_zero2_verified', []))
                     completed=result.get('experiment_completed',[])
+                    from model_free_completion import AUTOMATIC_REASONS
                     automatic=bool(model_free and len(completed)==1 and completed[0]['details'].get('stop_reason')
-                                   in ('real_budget_exhausted','fixed_validation_plateau','fixed_validation_target_reached'))
+                                   in AUTOMATIC_REASONS)
                     state['automatic_completion' if automatic else 'manual_completion']=validate_manual_completion(
                         result,state,flag or {},automatic=automatic)
                     state.update(return_code=0,state='completed_automatically' if automatic else 'stopped_by_user')
@@ -564,7 +571,7 @@ def validate_manual_completion(result, state, flag, *, automatic=False):
     d = completed[0]['details'] if len(completed)==1 else {}
     if automatic:
         from model_free_completion import validate_automatic_completion
-        validate_automatic_completion(d,state,flag)
+        automatic_receipt = validate_automatic_completion(d,state,flag)
     policy = d.get('stop_policy', {})
     if (not completed or completed[0].get('ts_ns',0)<flag.get('requested_ns',0)
         or (not automatic and d.get('stop_reason') != 'scheduled_stop') or d.get('global_step') != steps['policy']
@@ -577,9 +584,14 @@ def validate_manual_completion(result, state, flag, *, automatic=False):
     accepted_reasons = {'final'} if steps['policy'] else {'final_before_first_update', 'final'}
     if expected_reason not in accepted_reasons:
         raise RuntimeError('Expected final weights checkpoint is missing: '+str(expected_reason))
-    if (automatic and d['stop_reason'] == 'fixed_validation_target_reached'
-            and result.get('checkpoint',{}).get('steps') != steps):
-        raise RuntimeError('Target validation Policy does not match the final saved checkpoint')
+    if automatic:
+        checkpoint = result.get('checkpoint', {})
+        if 'model_free_success' in automatic_receipt:
+            if (checkpoint.get('steps') != steps
+                    or checkpoint.get('model_free_success') != automatic_receipt['model_free_success']):
+                raise RuntimeError('Final checkpoint does not match the synchronized Policy and rollout statistics')
+        elif d['stop_reason'] == 'fixed_validation_target_reached' and checkpoint.get('steps') != steps:
+            raise RuntimeError('Target validation Policy does not match the final saved checkpoint')
     sharding = result.get('fsdp_sharding_verified', [])
     if 'reward' in plan.active_kinds and (len(sharding)!=4 or {int(x['actor_id']) for x in sharding}!=set(range(4))
         or len({x['pid'] for x in sharding})!=4
@@ -676,7 +688,7 @@ def validate_manual_completion(result, state, flag, *, automatic=False):
         raise RuntimeError('Complete dynamic Policy mode receipts do not match this manual run')
     receipt={'steps':steps,'checkpoint_reason':expected_reason,'stopped_before_first_update':steps['policy']==0}
     if automatic:
-        receipt['stop_reason']=d['stop_reason']
+        receipt.update(automatic_receipt)
     return receipt
 
 

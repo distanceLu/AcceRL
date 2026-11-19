@@ -260,6 +260,17 @@ def audit_final_weights(data, state, *, torch_module=None, persist=True):
                     or config.get('world_trainable') is not False or config.get('reward_provider') != 'environment'
                     or 'online_world' in metadata or 'frozen_world' in metadata):
                 raise ValueError('Model-free final checkpoint must contain only its environment-only Policy identity')
+            if 'model_free_success_target' in state or 'model_free_success' in metadata:
+                from model_free_success import validate_model_free_success
+                snapshot = validate_model_free_success(metadata.get('model_free_success'))
+                if (type(metadata.get('global_step')) is not int or metadata['global_step'] != expected['policy']
+                        or snapshot['run_started_ns'] != state.get('started_ns')):
+                    raise ValueError('Checkpoint rollout statistics differ from final Policy or run identity')
+                receipt = state.get('automatic_completion')
+                if receipt and (receipt.get('model_free_success') != snapshot
+                                or receipt.get('stop_reason') != metadata.get('stop_reason')):
+                    raise ValueError('Checkpoint stop reason or rollout statistics differ from the accepted completion event')
+                result['model_free_success'] = snapshot
         if online_world:
             from world_backend_audit import validate_online_descriptor
             if (manifest.get('metadata', {}).get('service_plan') != plan.to_dict()

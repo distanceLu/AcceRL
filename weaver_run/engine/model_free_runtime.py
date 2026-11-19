@@ -3,6 +3,7 @@ from pathlib import Path
 import time
 
 from model_free_control import ModelFreeControl, collection_budget
+from model_free_success import validate_model_free_success
 
 
 class ValidationInterrupted(Exception):
@@ -10,10 +11,12 @@ class ValidationInterrupted(Exception):
 
 
 class ModelFreeRuntime:
-    def __init__(self, *, ray, collector, replay, inference_pool, worker_refs, cfg,
+    def __init__(self, *, ray, collector, replay, stats_actor, inference_pool, worker_refs, cfg,
                  benchmark, dtype, render_bindings, environment, config, writer,
                  experiment, requested_stop, global_batch_size):
         self.ray, self.collector, self.replay = ray, collector, replay
+        self.stats_actor = stats_actor
+        self.reported_thresholds = set()
         self.inference_pool, self.worker_refs = inference_pool, worker_refs
         self.cfg, self.benchmark, self.dtype = cfg, benchmark, dtype
         self.render_bindings, self.environment = render_bindings, environment
@@ -35,49 +38,87 @@ class ModelFreeRuntime:
                 self.ray.get(ready[0])
                 raise RuntimeError('A real collection worker exited at the pre-update boundary')
 
+    def rollout_success(self):
+        snapshot = validate_model_free_success(
+            self.ray.get(self.stats_actor.get_model_free_success.remote(), timeout=15))
+        for label, crossing in snapshot['crossings'].items():
+            if label not in self.reported_thresholds:
+                self.experiment.event('model_free_rollout_success_milestone', ts_ns=crossing['observed_ns'],
+                    details=dict(crossing, threshold_percent=int(label)))
+                self.experiment.flush()
+                self.reported_thresholds.add(label)
+        return snapshot
+
     def completion_fields(self):
         self.status()
         return dict(model_free=True, budget_status=self.last_budget,
-                    fixed_validation=self.control.summary())
+                    fixed_validation=self.control.summary(), model_free_success=self.rollout_success())
 
-    def before_update(self, policy_step):
-        """Only return None after one full cohort is atomically reserved."""
+    def boundary_reason(self):
+        self.check_workers()
+        self.status()
+        success = self.rollout_success()
+        if self.requested_stop():
+            return 'requested_stop'
+        if '99' in success['crossings']:
+            return 'rollout_success_target_reached'
+        if self.last_budget['budget_exhausted']:
+            return 'real_budget_exhausted'
+        return None
+
+    def before_update(self, policy_step, prepare_update=None):
+        """Only return None after one full cohort is reserved and safe to dispatch."""
         started = time.monotonic()
         while True:
-            if self.requested_stop():
-                return 'requested_stop'
-            self.check_workers()
-            self.status()
-            if self.control.target_reached:
-                return 'fixed_validation_target_reached'
-            if self.last_budget['budget_exhausted']:
-                return 'real_budget_exhausted'
-            validation_started = time.monotonic()
-            try:
-                self.validate(policy_step)
-            except ValidationInterrupted:
-                return 'requested_stop'
-            # Collection is deliberately paused for validation; its independent
-            # drain/evaluation deadlines must not consume the Replay supply grace.
-            started += time.monotonic() - validation_started
-            if self.requested_stop():
-                return 'requested_stop'
-            if self.control.target_reached:
-                return 'fixed_validation_target_reached'
-            if self.control.plateau_reached:
-                return 'fixed_validation_plateau'
-            # Validation may have drained the last budget leases.
-            self.status()
-            if self.last_budget['budget_exhausted']:
-                return 'real_budget_exhausted'
+            reason = self.boundary_reason()
+            if reason is not None:
+                return reason
+            if self.control.should_validate(self.last_budget['consumed_env_steps'], policy_step):
+                validation_started = time.monotonic()
+                try:
+                    self.validate(policy_step)
+                except ValidationInterrupted:
+                    return 'requested_stop'
+                # The validation pause has independent simulator and drain deadlines.
+                started += time.monotonic() - validation_started
+                reason = self.boundary_reason()
+                if reason is not None:
+                    return reason
             admission = self.ray.get(
                 self.replay.admit_model_free_batch.remote(self.global_batch_size), timeout=30)
             if admission['ready']:
-                self.experiment.event('model_free_update_admitted', details={
-                    'policy_step': policy_step + 1, **admission})
-                return None
+                dispatch = False
+                try:
+                    if prepare_update is not None:
+                        prepare_update(policy_step + 1)
+                # 校准期间采集还在继续。若刚达标，归还已预留的这一批。
+                    reason = self.boundary_reason()
+                    if reason is None:
+                        self.experiment.event('model_free_update_admitted', details={
+                            'policy_step': policy_step + 1, **admission})
+                        dispatch = True
+                    return reason
+                finally:
+                    if not dispatch:
+                        self.ray.get(self.replay.cancel_model_free_admission.remote(
+                            admission['reservation_token']), timeout=30)
             if time.monotonic() - started > 3600:
                 raise TimeoutError('Model-free Replay did not supply a complete eligible cohort in 3600 seconds')
+            self.sleep(.25)
+
+    def drain(self):
+        """Wait for every admitted real lease, including its acknowledged statistics."""
+        deadline = time.monotonic() + 1800
+        while True:
+            if self.requested_stop():
+                raise ValidationInterrupted()
+            self.check_workers()
+            self.status()
+            if all(self.last_budget[key] == 0 for key in
+                   ('active_real', 'episodes_inflight', 'reserved_env_steps')):
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Existing real episodes did not drain at the Policy boundary')
             self.sleep(.25)
 
     def validate(self, policy_step, *, force=False):
@@ -109,18 +150,7 @@ class ModelFreeRuntime:
         self.ray.get(self.collector.set_paused.remote(True), timeout=15)
         completed = False
         try:
-            drain_deadline = time.monotonic() + 1800
-            while True:
-                if self.requested_stop():
-                    raise ValidationInterrupted()
-                self.check_workers()
-                self.status()
-                if all(self.last_budget[key] == 0 for key in
-                       ('active_real', 'episodes_inflight', 'reserved_env_steps')):
-                    break
-                if time.monotonic() >= drain_deadline:
-                    raise TimeoutError('Existing real episodes did not drain for fixed validation')
-                self.sleep(.25)
+            self.drain()
             # No Real requests, no online Eval, and no update/critic refresh can
             # submit inference while this driver owns the validation boundary.
             self.ray.get([infer.set_training_batch_limit.remote(1)
@@ -146,7 +176,7 @@ class ModelFreeRuntime:
                     raise TimeoutError('Periodic fixed validation exceeded 3600 seconds')
             if (result.get('complete') is not True or result.get('completed_cases') != 50
                     or result.get('num_cases') != 50 or result.get('policy_version') != policy_step):
-                raise RuntimeError('Incomplete or wrong-version fixed validation cannot drive early stopping')
+                raise RuntimeError('Incomplete or wrong-version fixed validation')
             if self.last_result is not None and result['protocol_sha256'] != self.last_result['protocol_sha256']:
                 raise RuntimeError('Fixed validation case protocol changed between checkpoints')
             if self.last_result is not None and any(
@@ -182,16 +212,21 @@ class ModelFreeRuntime:
                 self.ray.get([infer.set_training_batch_limit.remote(2)
                               for infer in self.inference_pool], timeout=15)
             finally:
-                resume = (completed and not force and not self.control.target_reached
-                          and not self.control.plateau_reached and not self.requested_stop())
+                resume = (completed and not force and not self.requested_stop()
+                          and '99' not in self.rollout_success()['crossings'])
                 self.ray.get(self.collector.set_paused.remote(not resume), timeout=15)
                 activity.update(active=False, finished_unix_seconds=time.time())
                 atomic_json(directory / 'fixed_validation_activity.json', activity)
 
     def finish(self, policy_step):
-        if not self.requested_stop():
-            try:
-                self.validate(policy_step, force=True)
-            except ValidationInterrupted:
-                pass
+        # Disable new leases even when fixed validation is disabled or this
+        # version has already been evaluated. stop_pipeline cancels live leases.
+        self.ray.get(self.collector.set_paused.remote(True), timeout=15)
+        try:
+            self.drain()
+            self.validate(policy_step, force=True)
+        except ValidationInterrupted:
+            pass
+        self.check_workers()
+        self.ray.get(self.collector.stop_pipeline.remote(), timeout=30)
         return self.completion_fields()

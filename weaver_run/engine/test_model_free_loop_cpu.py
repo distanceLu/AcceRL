@@ -100,7 +100,7 @@ class ModelFreeDriverLoop(unittest.TestCase):
                 return {}
             if method == 'get_stats':
                 values = dict(avg_return=0., avg_ep_len=150, total_episodes_processed=10,
-                              total_env_steps=1500, avg_step_time=.01, avg_success_rate=0.)
+                              total_env_steps=1500, avg_step_time=.01, avg_success_rate=.17)
                 return {'_global_rollout_': dict(values), '_global_eval_': dict(values)}
             if method == 'pipeline_status':
                 return {}
@@ -144,6 +144,8 @@ class ModelFreeDriverLoop(unittest.TestCase):
         scalars = context.summaries[0].scalars
         for tag in ('Loss/Policy', 'Loss/Value', 'Rollout/_Global/Success_Rate'):
             self.assertEqual([row[0][2] for row in scalars if row[0][0] == tag], list(range(1, 7)))
+        self.assertEqual([row[0][1] for row in scalars if row[0][0] == 'Rollout/_Global/Success_Rate'],
+                         [0.] * 6)  # Strict cross-task window, independently of legacy per-task averages.
         self.assertTrue(context.summaries[0].closed)
         observations=[fields['details'] for kind,fields in events if kind == 'batch_autotune_observation']
         if autotune:

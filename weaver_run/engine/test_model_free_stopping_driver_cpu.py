@@ -12,6 +12,7 @@ import numpy as np
 
 import test_main_startup_cpu as startup
 from test_model_free_loop_cpu import ResultRef
+from test_model_free_runtime_cpu import rollout_snapshot
 from model_free_runtime import ModelFreeRuntime
 from split_serial import epoch_groups
 from training_topology import combine_wm_metrics
@@ -77,6 +78,10 @@ class ModelFreeStoppingDriverTests(unittest.TestCase):
         def call(actor, method, args, kwargs):
             if method in ('configure_fresh', 'set_fresh_versions', 'set_fresh_replay_versions'):
                 return True
+            if method == 'get_model_free_success':
+                crossed = (scenario == 'fill_rollout' and state['fill_reads'] > 0 or
+                           scenario in ('plateau', 'target_p0', 'target_later') and state['step'] >= 4)
+                return rollout_snapshot(99 if crossed else 0)
             if method == 'pipeline_status':
                 return pipeline_status()
             if method == 'initial_state_checkpoint':
@@ -91,7 +96,7 @@ class ModelFreeStoppingDriverTests(unittest.TestCase):
                 return pipeline_status()
             if method == 'size' and actor.name == 'ReplayBufferActor':
                 state['fill_reads'] += 1
-                if scenario == 'fill_budget':
+                if scenario in ('fill_budget', 'fill_rollout'):
                     state['consumed'] = 1000000
                     return 0
                 if scenario == 'boundary_budget':
@@ -106,7 +111,7 @@ class ModelFreeStoppingDriverTests(unittest.TestCase):
             if method == 'run_training_epoch':
                 actor.step = state['step'] = args[0]
                 state['epochs'].append((actor.rank, args[0]))
-                if scenario in ('plateau', 'target_later'):
+                if scenario in ('plateau', 'target_later', 'target_p0'):
                     state['consumed'] = args[0] * 100000
                 return ResultRef((0., 0., 0., 0., 0., {'policy': 1e-5, 'value': 1e-4},
                     actor.step, 0., 0., {'policy_sample_time': 0., 'policy_prep_time': 0.,
@@ -136,7 +141,7 @@ class ModelFreeStoppingDriverTests(unittest.TestCase):
                 runtime.last_result = {'success_count': successes, 'policy_version': policy_step}
                 state['validations'].append(policy_step)
                 context.actions.append(('validation', policy_step))
-            if force or runtime.control.plateau_reached or getattr(runtime.control, 'target_reached', False):
+            if force:
                 state['paused'] = True
             return runtime.last_result
 
@@ -186,59 +191,34 @@ class ModelFreeStoppingDriverTests(unittest.TestCase):
         self.assertEqual(complete['global_step'], 0)
         self.assertEqual([row[2]['reason'] for row in context.snapshots], ['initial', 'final'])
 
-    def test_plateau_stops_before_fourth_update_and_final_snapshot_keeps_latest_policy(self):
-        context, state, events, complete = self.run_driver('plateau')
-        self.assertEqual(state['validations'], [0, 1, 2, 3])
-        self.assertEqual(state['epochs'], [(rank, step) for step in (1, 2, 3) for rank in range(4)])
-        self.assertEqual(state['admissions'], [576, 576, 576])
-        self.assertEqual(complete['stop_reason'], 'fixed_validation_plateau')
-        self.assertEqual((complete['global_step'], complete['completed_epochs']), (3, 3))
-        self.assertEqual([row['policy_steps'] for row in complete['states']], [3] * 4)
-        final = context.snapshots[-1][2]
-        self.assertEqual(final['reason'], 'final')
-        self.assertEqual(final['metadata']['fixed_validation']['last']['policy_step'], 3)
-        self.assertEqual(final['metadata']['fixed_validation']['best_policy_step'], 0)
-        self.assertLess(context.actions.index(('validation', 3)), context.actions.index(('stop_pipeline',)))
-        self.assertLess(context.actions.index(('snapshot', 'final')),
-                        context.actions.index(('event', 'experiment_completed')))
+    def test_plateau_and_fixed_perfect_results_allow_updates_until_first_rollout_99(self):
+        for scenario in ('plateau', 'target_p0', 'target_later'):
+            with self.subTest(scenario=scenario):
+                context, state, events, complete = self.run_driver(scenario)
+                self.assertEqual(state['validations'], [0, 1, 2, 3, 4])
+                self.assertEqual(state['epochs'], [(r, step) for step in range(1, 5) for r in range(4)])
+                self.assertEqual(state['admissions'], [576] * 4)
+                self.assertEqual(complete['stop_reason'], 'rollout_success_target_reached')
+                self.assertEqual([row['policy_steps'] for row in complete['states']], [4] * 4)
+                self.assertEqual(complete['fixed_validation']['last']['policy_step'], 4)
+                final = context.snapshots[-1][2]['metadata']
+                self.assertEqual(final['global_step'], 4)
+                self.assertEqual(final['stop_reason'], complete['stop_reason'])
+                self.assertEqual(final['model_free_success'], complete['model_free_success'])
+                self.assertEqual(complete['model_free_success']['crossings']['99']['window_successes'], 990)
+                self.assertLess(context.actions.index(('snapshot', 'final')),
+                                context.actions.index(('event', 'experiment_completed')))
 
-    def test_p0_full_score_saves_before_any_worker_fill_admission_or_update(self):
-        context, state, events, complete = self.run_driver('target_p0')
-        self.assertEqual(state['validations'], [0])
+    def test_crossing_during_initial_fill_saves_p0_and_outranks_simultaneous_exhaustion(self):
+        context, state, events, complete = self.run_driver('fill_rollout')
         self.assertEqual(state['epochs'], [])
         self.assertEqual(state['admissions'], [])
-        self.assertEqual(state['fill_reads'], 0)
-        self.assertEqual([call for call in context.calls if call[2] == 'run'], [])
-        self.assertEqual((complete['global_step'], complete['completed_epochs']), (0, 0))
-        self.assertEqual(complete['stop_reason'], 'fixed_validation_target_reached')
-        self.assertTrue(state['paused'])
-        self.assertTrue(state['stopped'])
-        self.assertEqual([row[2]['reason'] for row in context.snapshots],
-                         ['initial', 'final_before_first_update'])
-        final_components, _, final = context.snapshots[-1]
-        self.assertEqual(final_components['policy']['policy_steps'], 0)
-        self.assertTrue(final['metadata']['fixed_validation']['target_reached'])
-        self.assertEqual(final['metadata']['fixed_validation']['last']['policy_step'], 0)
-        self.assertLess(context.actions.index(('snapshot', 'final_before_first_update')),
-                        context.actions.index(('event', 'experiment_completed')))
-
-    def test_first_later_full_score_blocks_next_cohort_and_saves_evaluated_policy(self):
-        context, state, events, complete = self.run_driver('target_later')
-        self.assertEqual(state['validations'], [0, 1])
-        self.assertEqual(state['epochs'], [(rank, 1) for rank in range(4)])
-        self.assertEqual(state['admissions'], [576])
-        self.assertEqual(complete['stop_reason'], 'fixed_validation_target_reached')
-        self.assertEqual((complete['global_step'], complete['completed_epochs']), (1, 1))
-        self.assertEqual([row['policy_steps'] for row in complete['states']], [1] * 4)
-        self.assertTrue(state['paused'])
-        final_components, _, final = context.snapshots[-1]
-        self.assertEqual(final['reason'], 'final')
-        self.assertEqual(final_components['policy']['policy_steps'], 1)
-        self.assertEqual(final['metadata']['fixed_validation']['last']['policy_step'], 1)
-        self.assertEqual(final['metadata']['fixed_validation']['target_validation']['policy_step'], 1)
-        self.assertLess(context.actions.index(('validation', 1)), context.actions.index(('stop_pipeline',)))
-        self.assertLess(context.actions.index(('snapshot', 'final')),
-                        context.actions.index(('event', 'experiment_completed')))
+        self.assertEqual(complete['stop_reason'], 'rollout_success_target_reached')
+        self.assertEqual(context.snapshots[-1][2]['reason'], 'final_before_first_update')
+        metadata = context.snapshots[-1][2]['metadata']
+        self.assertEqual(metadata['global_step'], 0)
+        self.assertEqual(metadata['stop_reason'], complete['stop_reason'])
+        self.assertEqual(metadata['model_free_success'], complete['model_free_success'])
 
     def test_regression_removing_preupdate_gate_is_detected_by_actual_driver(self):
         with self.assertRaisesRegex(AssertionError, 'Automatic stop never reached'):

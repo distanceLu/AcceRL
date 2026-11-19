@@ -118,7 +118,7 @@ class FixedValidationControlTests(unittest.TestCase):
         self.assertFalse(ctrl.should_validate(200020, 1, force=True))
         self.assertTrue(ctrl.should_validate(100021, 2, force=True))
 
-    def test_p0_full_score_stops_immediately_without_minimum_steps_or_patience(self):
+    def test_p0_full_score_is_recorded_and_later_validations_are_still_due(self):
         ctrl = self.control()
         summary = ctrl.observe(50, policy_step=0, consumed_env_steps=0)
         self.assertTrue(getattr(ctrl, 'target_reached', False))
@@ -126,9 +126,9 @@ class FixedValidationControlTests(unittest.TestCase):
         self.assertTrue(summary['target_reached'])
         self.assertEqual(summary['target_validation'], dict(
             successes=50, cases=50, policy_step=0, consumed_env_steps=0))
-        self.assertFalse(ctrl.should_validate(1000000, 1, force=True))
+        self.assertTrue(ctrl.should_validate(1000000, 1, force=True))
 
-    def test_first_later_full_score_stops_below_minimum_even_without_delta_improvement(self):
+    def test_first_full_score_is_retained_even_if_a_later_result_declines(self):
         ctrl = self.control(min_delta_successes=2)
         ctrl.observe(49, policy_step=0, consumed_env_steps=0)
         self.assertFalse(getattr(ctrl, 'target_reached', False))
@@ -137,9 +137,9 @@ class FixedValidationControlTests(unittest.TestCase):
         self.assertEqual(summary['stale_count'], 1)
         self.assertFalse(ctrl.plateau_reached)
         self.assertEqual(summary['target_validation']['policy_step'], 1)
-        with self.assertRaisesRegex(ValueError, 'target'):
-            ctrl.observe(49, policy_step=2, consumed_env_steps=200000)
-        self.assertEqual(ctrl.summary(), summary)
+        ctrl.observe(50, policy_step=2, consumed_env_steps=200000)
+        ctrl.observe(49, policy_step=3, consumed_env_steps=300000)
+        self.assertEqual(ctrl.summary()['target_validation'], summary['target_validation'])
         summary['target_validation']['successes'] = 0
         self.assertEqual(ctrl.summary()['target_validation']['successes'], 50)
 

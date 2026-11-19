@@ -7,7 +7,23 @@ import unittest
 from unittest.mock import patch
 
 from model_free_runtime import ModelFreeRuntime
-from model_free_control import ModelFreeControlConfig
+from model_free_control import ModelFreeControl, ModelFreeControlConfig
+
+
+def rollout_snapshot(percent=0, run_started_ns=1000000000):
+    def row(episodes, successes):
+        return dict(window_size=1000, window_episodes=min(episodes, 1000),
+                    window_successes=successes, success_rate=successes / 1000,
+                    total_episodes_processed=episodes, total_env_steps=episodes,
+                    observed_ns=run_started_ns + episodes * 1000000,
+                    run_started_ns=run_started_ns, elapsed_seconds=episodes / 1000)
+    crossings = {}
+    if percent >= 98:
+        crossings['98'] = row(1000, 980)
+    if percent >= 99:
+        crossings['99'] = row(1010, 990)
+    return dict(row(1030, 989) if percent == 99 else row(1000, 980) if percent == 98
+                else row(0, 0), crossings=crossings)
 
 
 class Method:
@@ -33,12 +49,78 @@ class RuntimeTests(unittest.TestCase):
         replay = SimpleNamespace(admit_model_free_batch=Method(admit))
         ray = SimpleNamespace(get=lambda value, **kw: value, wait=lambda refs, **kw: ([], refs))
         runtime = ModelFreeRuntime(ray=ray, collector=collector, replay=replay,
+            stats_actor=SimpleNamespace(get_model_free_success=Method(rollout_snapshot)),
             inference_pool=[], worker_refs=[], cfg=None, benchmark='libero_spatial', dtype=None,
             render_bindings=[], environment={}, config=ModelFreeControlConfig(interval_env_steps=0),
             writer=SimpleNamespace(add_scalar=lambda *a: None, flush=lambda: None),
             experiment=SimpleNamespace(event=lambda *a, **k: self.events.append((a, k)), flush=lambda: None),
             requested_stop=lambda: False, global_batch_size=576)
+        self.cancelled = []
+        runtime.replay.cancel_model_free_admission = Method(self.cancelled.append)
+        runtime.collector.set_paused = Method(lambda paused: None)
+        runtime.collector.stop_pipeline = Method(lambda: None)
         return runtime
+
+    def test_latched_99_during_successful_admission_cancels_reservation(self):
+        runtime = self.runtime()
+        runtime.stats_actor.get_model_free_success = Method(
+            lambda: rollout_snapshot(99 if self.admissions else 98))
+        def admit(count):
+            self.admissions.append(count)
+            return dict(ready=True, reservation_token='cohort')
+        runtime.replay.admit_model_free_batch = Method(admit)
+        self.assertEqual(runtime.before_update(7), 'rollout_success_target_reached')
+        self.assertEqual(self.cancelled, ['cohort'])
+        self.assertEqual(self.admissions, [576])
+        self.assertEqual([event[1]['details']['threshold_percent'] for event in self.events
+                          if event[0] == ('model_free_rollout_success_milestone',)], [98, 99])
+        runtime.completion_fields()
+        self.assertEqual(len(self.events), 2)
+
+    def test_fault_during_batch_configuration_releases_admission_and_propagates(self):
+        runtime = self.runtime()
+        runtime.replay.admit_model_free_batch = Method(
+            lambda count: dict(ready=True, reservation_token='reserved'))
+        def fail(step):
+            raise RuntimeError('autotune failed')
+        with self.assertRaisesRegex(RuntimeError, 'autotune failed'):
+            runtime.before_update(1, prepare_update=fail)
+        self.assertEqual(self.cancelled, ['reserved'])
+
+    def test_finalization_drains_and_includes_last_real_receipt_with_validation_disabled(self):
+        runtime = self.runtime()
+        status = runtime.status()
+        status['budget']['active_real'] = 1
+        calls = []
+        def release_lease(seconds):
+            self.assertEqual(calls, ['pause'])
+            status['budget']['active_real'] = 0
+            calls.append('drained')
+        def stop_pipeline():
+            self.assertEqual(calls, ['pause', 'drained'])
+            calls.append('stopped')
+        runtime.sleep = release_lease
+        runtime.collector.set_paused = Method(lambda value: calls.append('pause') if value else self.fail())
+        runtime.collector.stop_pipeline = Method(stop_pipeline)
+        runtime.stats_actor.get_model_free_success = Method(
+            lambda: rollout_snapshot(99 if 'drained' in calls else 98))
+        fields = runtime.finish(2)
+        self.assertEqual(calls, ['pause', 'drained', 'stopped'])
+        self.assertEqual(fields['budget_status']['active_real'], 0)
+        self.assertEqual(fields['model_free_success']['crossings']['99']['total_episodes_processed'], 1010)
+
+    def test_simultaneous_budget_and_rollout_crossing_prefers_rollout(self):
+        runtime = self.runtime(exhausted=True)
+        runtime.stats_actor.get_model_free_success = Method(lambda: rollout_snapshot(99))
+        self.assertEqual(runtime.before_update(7), 'rollout_success_target_reached')
+        self.assertEqual(self.admissions, [])
+
+    def test_manual_stop_wins_when_99_has_already_crossed(self):
+        runtime = self.runtime(exhausted=True)
+        runtime.stats_actor.get_model_free_success = Method(lambda: rollout_snapshot(99))
+        runtime.requested_stop = lambda: True
+        self.assertEqual(runtime.before_update(7), 'requested_stop')
+        self.assertEqual(self.admissions, [])
 
     def test_exhaustion_never_admits_an_epoch(self):
         runtime = self.runtime(exhausted=True)
@@ -65,15 +147,16 @@ class RuntimeTests(unittest.TestCase):
 
     def test_validation_time_does_not_spend_replay_supply_timeout(self):
         runtime = self.runtime(ready=False)
+        runtime.control = ModelFreeControl()
         clock = [0.]
         runtime.sleep = lambda seconds: None
         runtime.validate = lambda step: clock.__setitem__(0, clock[0] + 4000.)
         runtime.requested_stop = lambda: bool(self.admissions)
         with patch('model_free_runtime.time.monotonic', side_effect=lambda: clock[0]):
-            self.assertEqual(runtime.before_update(7), 'requested_stop')
+            self.assertEqual(runtime.before_update(0), 'requested_stop')
+        self.assertEqual(clock[0], 4000.)
 
     def validation_fixture(self, directory, result=None):
-        from model_free_control import ModelFreeControl
         runtime = self.runtime()
         runtime.control = ModelFreeControl(ModelFreeControlConfig())
         runtime.environment = {'ACCERL_DATA_DIR': directory, 'ACCERL_RUN_ID': 'test',

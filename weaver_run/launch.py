@@ -353,10 +353,23 @@ def final_snapshot(directory, run_id, *, model_free=False):
             and policy_weights.stat().st_size==manifest["weights_bytes"]>0,
             "Final Policy snapshot identity or files failed validation")
     if model_free:
-        require(manifest['metadata'].get('model_free') is True
+        metadata = manifest['metadata']
+        require(metadata.get('model_free') is True
                 and set(manifest['steps'])=={'policy'}
-                and 'online_world' not in manifest['metadata'], 'Final model-free snapshot mode differs')
-        return dict(policy_step=manifest['steps']['policy'],model_free=True)
+                and 'online_world' not in metadata, 'Final model-free snapshot mode differs')
+        receipt = dict(policy_step=manifest['steps']['policy'], model_free=True)
+        # 旧权重清单没有真实回合判停记录。
+        if 'model_free_success' in metadata or 'stop_reason' in metadata:
+            from engine.model_free_success import validate_model_free_success
+            stats = validate_model_free_success(metadata.get('model_free_success'))
+            reason = metadata.get('stop_reason')
+            require(type(metadata.get('global_step')) is int and metadata['global_step'] == receipt['policy_step'],
+                    'Rollout statistics and final Policy step differ')
+            require(isinstance(reason, str) and reason
+                    and (reason != 'rollout_success_target_reached' or '99' in stats['crossings']),
+                    'Missing model-free completion evidence')
+            receipt.update(stop_reason=reason, model_free_success=stats)
+        return receipt
     world=manifest["metadata"]["online_world"]
     world_weights=Path(world["weights_file"]).resolve()
     require(world["reason"]==manifest["reason"] and world["run_id"]==run_id

@@ -10,7 +10,6 @@ from unittest.mock import patch
 import numpy as np
 
 from initial_state_env import initial_state_pool_metadata, set_real_training_action_horizon
-from model_free_completion import validate_automatic_completion
 from model_free_control import collection_budget
 from pipeline_budget import PipelineBudgetConfig
 from real_collection import RealCollectionCoordinator
@@ -86,30 +85,21 @@ class PoolInitializationTests(unittest.TestCase):
                 self.owner.acquire_real(0, dict(self.training_pool, **changes))
         self.assertEqual(self.owner._next_token, 0)
 
-    def test_real_p0_full_score_produces_accepted_completion_without_any_collection(self):
+    def test_real_p0_full_score_initializes_pool_and_allows_collection(self):
         with patch('environment_rendering.render_worker_options', return_value={}):
             runtime, result = self.real_runtime()
             self.assertFalse(collection_budget(self.owner.pipeline_status())['initialized'])
-            reason = runtime.before_update(0)
-            self.assertEqual(reason, 'fixed_validation_target_reached')
-            self.owner.stop_pipeline()
-            details = dict(runtime.finish(0), global_step=0, stop_reason=reason)
-        state = dict(model_free=True, pipeline_config=self.owner.pipeline_config.to_dict(),
-                     fixed_validation_config=runtime.control.config.to_dict())
-        try:
-            receipt = validate_automatic_completion(details, state)
-        except RuntimeError as exc:
-            self.fail(str(exc))
-        self.assertEqual(receipt, {'stop_reason': reason})
+            self.assertIsNone(runtime.before_update(0))
+            details = runtime.completion_fields()
         self.assertTrue(details['budget_status']['initialized'])
         self.assertEqual(details['budget_status']['consumed_env_steps'], 0)
         self.assertEqual(details['budget_status']['available_env_steps'], 1000000)
         self.assertEqual(details['budget_status']['reset_steps'], 10)
-        self.assertEqual(self.admissions, [])
+        self.assertEqual(self.admissions, [576])
         self.assertEqual(runtime.worker_refs, [])
         self.assertEqual(self.owner._next_token, 0)
         self.assertEqual(self.owner.pipeline_status()['budget']['real_admitted'], 0)
-        self.assertTrue(self.owner.pipeline_status()['budget']['paused'])
+        self.assertFalse(self.owner.pipeline_status()['budget']['paused'])
         self.assertEqual(result['initial_state_pool']['max_action_steps'], 220)
         self.assertNotIn('benchmark_action_horizon', result['initial_state_pool'])
         self.assertEqual(self.owner.initial_state_checkpoint()['pool'], self.training_pool)
