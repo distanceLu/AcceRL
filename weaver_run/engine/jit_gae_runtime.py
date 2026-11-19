@@ -98,14 +98,19 @@ def _inputs(owner, observations):
     return result
 
 
-def _forward_values(owner, nodes, segments, micro, counters):
+def _forward_values(owner, nodes, segments, micro, counters, *, timer=None, bundle=None):
     values = {}
     with torch.no_grad():
         for offset in range(0, len(nodes), micro):
             group = nodes[offset:offset+micro]
+            marker = timer.begin(bundle, len(group)) if timer is not None else None
             inputs = _inputs(owner, [segments[n.segment]['observations'][n.index] for n in group])
+            if timer is not None:
+                timer.model_begin(marker)
             start=time.monotonic()
             logits, value = owner.base_model(inputs)
+            if timer is not None:
+                timer.model_end(marker)
             owner._jit_times['no_grad_forward_host_call_wall_s']+=time.monotonic()-start
             value = value.float().reshape(-1)
             if len(value) != len(group):
@@ -116,6 +121,8 @@ def _forward_values(owner, nodes, segments, micro, counters):
                      else 'prepass_selected_and_context_states'] += len(group)
             counters['no_grad_forward_calls'] += 1
             del inputs, logits, value
+            if timer is not None:
+                timer.end(marker)
     return values
 
 
@@ -131,14 +138,17 @@ def _precompute(owner, segments, bundles, device, counters):
     return result
 
 
-def run_jit_policy_update(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim):
+def run_jit_policy_update(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim,
+                          original_denominators=None, context_timer=None):
     from cost_scheduler_runtime import scheduled_policy_update
     with scheduled_policy_update(owner):
         return _run(owner, observations, actions_np, old_logits_np,
-                    micro_begin=micro_begin, micro_end=micro_end, trim=trim)
+                    micro_begin=micro_begin, micro_end=micro_end, trim=trim,
+                    original_denominators=original_denominators, context_timer=context_timer)
 
 
-def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim):
+def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim,
+         original_denominators=None, context_timer=None):
     started = time.monotonic()
     config = owner.fresh_config
     device = next(owner.model.parameters()).device
@@ -173,9 +183,20 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                 or old_logits_np.shape[:-1] != actions_np.shape
                 or not masks.any(axis=(1,2)).all()):
             raise ValueError('JIT action masks/old logits must preserve the original cohort geometry')
-        weights = np.empty(len(masks), np.float32)
-        for start in range(0, len(masks), micro):
-            weights[start:start+micro] = 1. / masks[start:start+micro].sum()
+        if original_denominators is None:
+            weights = np.empty(len(masks), np.float32)
+            for start in range(0, len(masks), micro):
+                weights[start:start+micro] = 1. / masks[start:start+micro].sum()
+        else:
+            # Original autobatch averages the means of two eight-sample groups
+            # before GAS scales a 16-sample backward. Carry that denominator
+            # with each sample even when its rank and training group change.
+            denominators = np.asarray(original_denominators)
+            if (micro != 16 or denominators.shape != (len(masks),)
+                    or denominators.dtype.kind not in 'iu' or (denominators <= 0).any()
+                    or (denominators > 8 * masks.shape[1] * masks.shape[2]).any()):
+                raise ValueError('Invalid original eight-sample token denominator')
+            weights = np.float32(.5) / denominators.astype(np.float32)
         return segments, bundles, masks, weights
 
     segments,bundles,masks,weights = _checked(prepare, device)
@@ -221,7 +242,8 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         try:
             def forward():
                 values = {} if separate else _forward_values(owner,
-                    [n for n in bundle.nodes if n.selected is None],segments,config.jit_context_micro,counters)
+                    [n for n in bundle.nodes if n.selected is None],segments,config.jit_context_micro,counters,
+                    timer=context_timer, bundle=number)
                 inputs = _inputs(owner,[observations[i] for i in indices])
                 start=time.monotonic();logits,value = owner.model.forward(inputs)
                 owner._jit_times['selected_forward_host_call_wall_s']+=time.monotonic()-start

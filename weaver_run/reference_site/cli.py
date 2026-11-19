@@ -295,6 +295,18 @@ def stop(record,job):
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1] in ('bench-jit','bench-jit-status'):
+        parser=argparse.ArgumentParser(prog='./run.sh '+sys.argv[1])
+        parser.add_argument('--id',dest='label',required=True)
+        opts=parser.parse_args(sys.argv[2:])
+        require((os.getuid(),socket.gethostname())==(1004,'h20-xyff52ab-0001') and
+                (HOME/'.owner').read_text()=='WEAVER server catalog v1\n','Unexpected benchmark server')
+        sys.path.insert(0,str(CHECKOUT))
+        from weaver_run.reference_site.jit_bench_queue import submit
+        with (EXPERIMENTS/'.launch.lock').open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            print(json.dumps(submit(sys.modules[__name__],opts.label,status=sys.argv[1].endswith('-status')),indent=2))
+        return
     if len(sys.argv)>1 and sys.argv[1]=='legacy-baseline':
         sys.path.insert(0,str(CHECKOUT))
         from weaver_run.reference_site.legacy_baseline import main as legacy_main

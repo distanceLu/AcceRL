@@ -410,7 +410,7 @@ def main():
         legacy_main(sys.argv[2:])
         return
     parser=argparse.ArgumentParser(prog="./run.sh")
-    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","view"],default="original",nargs="?")
+    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","view"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
     parser.add_argument("--root",type=Path,help="Existing output directory (view only)")
     parser.add_argument("--port",type=int,default=8765,help="Loopback viewer port (view only)")
@@ -441,7 +441,7 @@ def main():
         op="original" if args.action in ("original","restore","start") else args.action
         cli=HERE/"reference_site/cli.py"
         os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else []),*fixed_validation_arguments(validation),*(['--batch-autotune'] if args.batch_autotune else [])])
-    require(not args.action.startswith('diagnose'),'This saved-checkpoint diagnostic uses the reference site queue and assets')
+    require(not args.action.startswith(('diagnose','bench-jit')),'This saved-checkpoint diagnostic uses the reference site queue and assets')
     if args.action=="check":
         with tempfile.TemporaryDirectory(prefix="weaver-check-") as d:
             ids,_=allocated(True)

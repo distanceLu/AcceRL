@@ -727,6 +727,18 @@ class ReplayBufferActor:
         self.fresh_refresh_prune = dependency_pruning_enabled()
         self.fresh_refresh_micro = 2
 
+    async def freeze_gpu_trial(self, batch_size, cohort_id):
+        from gpu_trial_replay import freeze_trial
+        return await freeze_trial(self, batch_size, cohort_id)
+
+    async def gpu_trial_batch(self, cohort_id, arm):
+        from gpu_trial_replay import trial_shards
+        return await trial_shards(self, cohort_id, arm)
+
+    def release_gpu_trial(self, cohort_id):
+        from gpu_trial_replay import release_trial
+        return release_trial(self, cohort_id)
+
     def configure_batch_autotune(self, policy_step, refresh_micro=None):
         if (not self.fresh_enabled or not self.fresh_config.real_only
                 or getattr(self, 'cost_scheduler_enabled', False)
@@ -2868,6 +2880,9 @@ class TrainerActor(TrainerActorCom):
             # ============ 1. 初始化 Actor Engine (bf16) ============
             print(f"Trainer {self.rank}: 正在加载 OpenVLA ActorCritic...")
             model = ActorCritic(self.cfg, torch_dtype=self.torch_dtype)
+            if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
+                from jit_bench_checkpoint import restore
+                restore(model,self.rank)
             self.base_model = model
 
             param_groups = self.base_model.get_parameter_groups()
@@ -3859,6 +3874,15 @@ class TrainerActor(TrainerActorCom):
         from batch_autotune_runtime import configure_training
         return configure_training(self, policy_step, micro)
 
+    def paired_gpu_weight_digest(self):
+        from paired_gpu_trainer import weight_digest
+        return weight_digest(self)
+
+    def run_paired_gpu_arm(self, arm, shard):
+        from paired_gpu_trainer import run_arm
+        return run_arm(self, arm, shard, micro_begin=micro_begin, micro_end=micro_end,
+                       trim=_trim_cuda_cache)
+
     def get_batch_autotune_stats(self, policy_step):
         from batch_autotune_runtime import training_report
         return training_report(self, policy_step)
@@ -4840,6 +4864,19 @@ def main(args):
                               "world_replicas": args.num_ctrl_inference_actors})
     experiment.flush()
     worker_run_refs = []
+    if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
+        if not model_free or not split_training or not fresh_replay or eval_workers:
+            raise RuntimeError('The paired GPU benchmark requires fresh model-free split training')
+        from paired_gpu_driver import run_benchmark
+        try:
+            run_benchmark(ray=ray, args=args, replay=replay_buffers[0], trainers=trainer_group,
+                inference=inference_pool, collector=producer_coordinators[0], workers=rollout_workers,
+                sync_policy=lambda: sync_model('policy', inference_pool), experiment=experiment,
+                stop_requested=stop_requested)
+        finally:
+            experiment.close()
+            writer.close()
+        return
     if model_free:
         from model_free_runtime import ModelFreeRuntime, ValidationInterrupted
         model_free_runtime = ModelFreeRuntime(ray=ray, collector=producer_coordinators[0],
