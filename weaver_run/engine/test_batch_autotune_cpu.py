@@ -159,5 +159,14 @@ class MemoryGuardTests(unittest.TestCase):
             self.assertFalse(result['allowed'])
 
 
+class FixedTrajectoryBatchTests(unittest.TestCase):
+    def test_fixed_training_micro_skips_calibration_from_first_update(self):
+        tuner = BatchAutotuner(BatchAutotuneConfig(enabled=True), fixed_train_micro=16)
+        for step in range(1, 20):
+            self.assertEqual(tuner.current, dict(train_micro=16, refresh_micro=2))
+            self.assertTrue(tuner.observe(dict(policy_step=step))['frozen'])
+        self.assertEqual(tuner.summary()['windows'], [])
+
+
 if __name__ == '__main__':
     unittest.main()

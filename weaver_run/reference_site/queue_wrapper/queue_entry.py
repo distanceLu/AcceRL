@@ -261,6 +261,7 @@ def main():
     parser.add_argument('--model-free',action='store_true')
     parser.add_argument('--num-eval-workers',type=int)
     parser.add_argument('--batch-autotune',action='store_true')
+    parser.add_argument('--trajectory-jit',action='store_true')
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
     from launch import add_fixed_validation_arguments
     add_fixed_validation_arguments(parser)

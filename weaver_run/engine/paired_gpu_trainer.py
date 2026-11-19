@@ -3,14 +3,13 @@ import hashlib
 import math
 import struct
 import time
-from types import SimpleNamespace
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
-from batch_autotune_runtime import begin_training_micro, configure_training, end_training_micro, finish_training
-from jit_gae_runtime import _checked, run_jit_policy_update
+from batch_autotune_runtime import configure_training
+from jit_gae_runtime import _checked, run_balanced_trajectory_update
 
 
 def weight_digest(owner):
@@ -105,7 +104,6 @@ def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
     before = int(owner.model.global_steps)
     before_skips = int(owner.model.skipped_steps)
     original_actor_start = owner.policy_train_start_step
-    original_config = owner.fresh_config
     owner.policy_train_start_step = 0
     timer = ContextTimer()
     initialization_prepass = arm == 'jit' and not getattr(getattr(owner, 'advantage_ema', None), 'updates', 0)
@@ -123,27 +121,11 @@ def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
             metrics = owner._train_policy(*prepared, center, scale, {})
             del prepared
         else:
-            owner.fresh_config = SimpleNamespace(jit_gae_mode='fused', advantage_norm='ema_zscore',
-                jit_context_micro=2, advantage_ema_beta=.9, advantage_scale_floor=.001, policy_sampling='chunks')
-
-            def begin(rank_owner, workload, engine, local_micro, start, end, *, sample_indices):
-                token = micro_begin(rank_owner, workload, engine, local_micro, start, end)
-                token['sample_ids'] = [shard['sample_ids'][i] for i in sample_indices]
-                begin_training_micro(rank_owner, torch)
-                return token
-
-            def end(rank_owner, token, engine, error=None):
-                micro_end(rank_owner, token, engine, error=error)
-                if error is None:
-                    end_training_micro(rank_owner)
-
-            metrics = run_jit_policy_update(owner, shard['observations'], actions, old_logits,
-                micro_begin=begin, micro_end=end, trim=trim,
-                original_denominators=shard['original_denominators'], context_timer=timer)
-            finish_training(owner, metrics['policy_train_time'])
+            metrics = run_balanced_trajectory_update(owner, shard['observations'], actions, old_logits,
+                shard['original_denominators'], micro_begin=micro_begin, micro_end=micro_end,
+                trim=trim, context_timer=timer)
     finally:
         owner.policy_train_start_step = original_actor_start
-        owner.fresh_config = original_config
     owner._policy_joint_batch_mode.complete(step)
     torch.cuda.synchronize(device)
     owner.telemetry.flush(force_gpu=True)

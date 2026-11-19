@@ -726,6 +726,8 @@ class ReplayBufferActor:
         from critic_refresh_plan import dependency_pruning_enabled
         self.fresh_refresh_prune = dependency_pruning_enabled()
         self.fresh_refresh_micro = 2
+        import os
+        self.trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
 
     async def freeze_gpu_trial(self, batch_size, cohort_id):
         from gpu_trial_replay import freeze_trial
@@ -738,6 +740,20 @@ class ReplayBufferActor:
     def release_gpu_trial(self, cohort_id):
         from gpu_trial_replay import release_trial
         return release_trial(self, cohort_id)
+
+    async def trajectory_jit_shards(self, global_size):
+        """Return separate Ray objects so the coordinator only transports their references."""
+        from training_topology import shard_batch
+        if not self.trajectory_jit or global_size != 576:
+            raise ValueError('Trajectory JIT requires four 144-sample rank shards')
+        batch = await self.sample(global_size)
+        try:
+            return [shard_batch(batch, 'policy', rank, 144, 4) for rank in range(4)]
+        except BaseException:
+            token = batch[-1]['fresh_reservation_token']
+            self.fresh_store.cancel(token)
+            self.fresh_records.pop(token, None)
+            raise
 
     def configure_batch_autotune(self, policy_step, refresh_micro=None):
         if (not self.fresh_enabled or not self.fresh_config.real_only
@@ -832,11 +848,22 @@ class ReplayBufferActor:
         if getattr(self,'cost_scheduler_enabled',False):
             self.cost_scheduler_broker.update_inventory.remote(self.scheduler_inventory())
 
-    def commit_fresh_use(self, token, sample_ids):
-        self.fresh_store.commit(token, sample_ids)
+    def commit_fresh_use(self, token, sample_ids, jit_receipts=None):
         records = self.fresh_records[token]
+        if self.trajectory_jit:
+            from jit_replay import validate_receipts
+            validated = validate_receipts(records, sample_ids, jit_receipts, self.fresh_store.versions[0])
+        elif jit_receipts is not None:
+            raise ValueError('Unexpected trainer targets for a shared critic reservation')
+        else:
+            validated = {}
+        self.fresh_store.commit(token, sample_ids)
         for sample_id in sample_ids:
             record = records.pop(sample_id)
+            if validated:
+                record.update(validated[sample_id])
+                if self.fresh_config.signal_telemetry:
+                    record_signal(self.telemetry, phase='refreshed', **record)
             if self.fresh_config.signal_telemetry:
                 record_signal(self.telemetry, phase='consumed', **record,
                     consumption_policy_version=self.fresh_store.versions[0],
@@ -909,7 +936,14 @@ class ReplayBufferActor:
                 if getattr(self,'cost_scheduler_enabled',False):
                     await self.cost_scheduler_broker.update_inventory.remote(self.scheduler_inventory())
                 refreshed = None
-                if self.fresh_config.refresh_gae:
+                jit_denominators = None
+                if self.trajectory_jit:
+                    from jit_replay import arrange_trajectory_draw, dependency_counts
+                    if (admission is None or not self.fresh_config.real_only or not self.fresh_config.refresh_gae
+                            or len(self.fresh_critics) != 4):
+                        raise ValueError('Trajectory JIT needs the admitted four-rank real-only cohort')
+                    sample_ids, jit_denominators, placement = arrange_trajectory_draw(self.fresh_store, sample_ids)
+                elif self.fresh_config.refresh_gae:
                     from critic_refresh_plan import (balanced_refresh_groups, refresh_plan_receipt,
                         dependency_refresh_groups, dependency_refresh_receipt)
                     unique = list(dict.fromkeys(self.fresh_store.samples[sid]['segment_id'] for sid in sample_ids))
@@ -982,13 +1016,18 @@ class ReplayBufferActor:
                             offset += count
                         if offset != len(answer['values']):
                             raise RuntimeError('FRESH critic response differs from ordered K+1 observations')
-                result, records = self.fresh_store.materialize(sample_ids, refreshed)
+                result, records = self.fresh_store.materialize(sample_ids, refreshed, jit_denominators=jit_denominators)
                 ledger = self.capture_ledger.reserve(sample_ids)
                 metadata = dict(ledger, fresh_reservation_token=token, fresh_versions=list(self.fresh_store.versions),
                     source_counts={source:sum(record['source']==source for record in records)
                                    for source in ('real','imagined')},
                     rewards_refreshed=False, critic_refreshed=bool(refreshed is not None))
-                if self.fresh_config.signal_telemetry:
+                if self.trajectory_jit:
+                    metadata.update(jit_pending=True, **dependency_counts(self.fresh_store, sample_ids))
+                    self.telemetry.event('trajectory_jit_placement', actual_batch=len(sample_ids),
+                        details=dict(**placement, reservation_id=ledger['reservation_id'],
+                                     policy_version=self.fresh_store.versions[0]))
+                elif self.fresh_config.signal_telemetry:
                     for record in records:
                         record_signal(self.telemetry, phase='refreshed', **record)
                 self.fresh_records[token] = {record['sample_id']:record for record in records}
@@ -2690,6 +2729,9 @@ class TrainerActor(TrainerActorCom):
         if self._batch_autotune_enabled and (training_role != 'policy' or self.world_config.backend != 'model_free'
                                             or not self.cpu_replay_prefetch):
             raise ValueError('Batch autotuning requires model-free Policy owners with CPU Replay preparation')
+        self._trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+        if self._trajectory_jit and (not self._batch_autotune_enabled or world_size != 4 or clip_mode != 'gipo'):
+            raise ValueError('Trajectory JIT requires four model-free GIPO ranks with batch controls')
         self._serial_phase = SerialPhase(training_role, rank, world_size) if self.cpu_replay_prefetch else None
         self._serial_prefetch = None
         setup_debugger("trainer", rank)
@@ -2882,6 +2924,9 @@ class TrainerActor(TrainerActorCom):
             model = ActorCritic(self.cfg, torch_dtype=self.torch_dtype)
             if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
                 from jit_bench_checkpoint import restore
+                restore(model,self.rank)
+            elif os.environ.get('ACCERL_TRAJECTORY_JIT_INITIAL_CHECKPOINT'):
+                from trajectory_jit_initial import restore
                 restore(model,self.rank)
             self.base_model = model
 
@@ -3112,6 +3157,11 @@ class TrainerActor(TrainerActorCom):
         return {'backend':'policy_zero2','boundary':'optimizer_update','rank':self.rank}
 
     def _train_policy(self, inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs):
+        if getattr(self, '_trajectory_jit', False):
+            from jit_gae_runtime import run_balanced_trajectory_update
+            return run_balanced_trajectory_update(self, inputs_batch, act_token_t, logits_old_t,
+                [obs['_jit_original_denominator'] for obs in inputs_batch],
+                micro_begin=micro_begin, micro_end=micro_end, trim=_trim_cuda_cache)
         from cost_scheduler_runtime import scheduled_policy_update
         with scheduled_policy_update(self):
             """Policy 训练（包含 Value 网络）— 与原版完全一致"""
@@ -3682,21 +3732,17 @@ class TrainerActor(TrainerActorCom):
         policy_sample_time = current_batch['sample_time']
         policy_prep_time = current_batch['prep_time']
 
-        # 修正std 归一化
-        local_sum = adv_t.sum()
-        local_sq_sum = (adv_t * adv_t).sum()
-        local_count = torch.tensor([adv_t.numel()], device=adv_t.device, dtype=torch.float32)
-
-        stats_tensor = torch.stack([local_sum, local_sq_sum, local_count.squeeze(0)])
-        distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
-
-        global_sum, global_sq_sum, global_count = stats_tensor[0], stats_tensor[1], stats_tensor[2]
-        global_mean = global_sum / torch.clamp(global_count, min=1.0)
-        global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
-        global_std = torch.sqrt(global_var)
-
+        global_mean = global_std = None
+        if not getattr(self, '_trajectory_jit', False):
+            local_sum = adv_t.sum()
+            local_sq_sum = (adv_t * adv_t).sum()
+            stats_tensor = torch.stack((local_sum, local_sq_sum, adv_t.new_tensor(adv_t.numel())))
+            distributed.all_reduce(stats_tensor, op=distributed.ReduceOp.SUM)
+            global_sum, global_sq_sum, global_count = stats_tensor.unbind()
+            global_mean = global_sum / torch.clamp(global_count, min=1.0)
+            global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
+            global_std = torch.sqrt(global_var)
         policy_result = self._train_policy(inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs)
-
 
         perf_metrics = {
             "policy_sample_time": policy_sample_time, "policy_prep_time": policy_prep_time,
@@ -3793,6 +3839,8 @@ class TrainerActor(TrainerActorCom):
                          else self.batch_coordinator.sample_wm.remote(self.rank, local_size, self.training_role))
         else:
             raw = await replay.sample.remote(local_size)
+        if isinstance(raw, dict) and 'trajectory_jit_shard_ref' in raw:
+            raw = await raw['trajectory_jit_shard_ref']
         elapsed = time.time() - started
         self.telemetry.event("data_fetch", start_ns=int(started * 1e9), end_ns=now_ns(),
                              duration_ns=int(elapsed * 1e9), replay="policy" if policy else "wm",
@@ -3825,10 +3873,15 @@ class TrainerActor(TrainerActorCom):
         loop = asyncio.get_running_loop()
         started = time.time()
         if policy:
-            future = loop.run_in_executor(self._prep_executor, self._prepare_policy_batch, *raw[:-1])
-            prepared = await finish_preparation(future)
-            future = None
-            inputs, actions, advantage, old_logits, target = prepared
+            if bool(raw[-1].get('jit_pending')) != getattr(self, '_trajectory_jit', False):
+                raise RuntimeError('Replay and trainer disagree on trajectory JIT mode')
+            if raw[-1].get('jit_pending'):
+                # Keep the observations on the CPU until their reverse-GAE microbatch runs.
+                inputs, actions, advantage, old_logits, target = raw[:-1]
+            else:
+                future = loop.run_in_executor(self._prep_executor, self._prepare_policy_batch, *raw[:-1])
+                inputs, actions, advantage, old_logits, target = await finish_preparation(future)
+                future = None
             self.next_ready_batch = {"inputs_batch": inputs, "act_token": actions,
                                      "advantage": advantage, "logits_old": old_logits,
                                      "value_target": target, "capture_meta": raw[-1],
@@ -3930,7 +3983,9 @@ class TrainerActor(TrainerActorCom):
                 self._serial_prefetch.release_in_use()
             if self.training_role == 'policy' and self.fresh_policy_replay:
                 metadata = self.capture_policy_metadata
-                await self.replay_buffer.commit_fresh_use.remote(metadata['fresh_reservation_token'], metadata['sample_ids'])
+                receipt_args = (self._jit_receipts,) if metadata.get('jit_pending') else ()
+                await self.replay_buffer.commit_fresh_use.remote(metadata['fresh_reservation_token'],
+                    metadata['sample_ids'], *receipt_args)
             trained = self.training_role == "policy" or result["metrics"]["trained_" + self.training_role]
             self.telemetry.event("split_serial_phase_end", details={
                 "policy_step": policy_step, "model": self.training_role, "rank": self.rank,
@@ -4262,6 +4317,12 @@ def main(args):
         raise ValueError('--batch-autotune requires --model-free with online Eval0')
     from model_free_control import ModelFreeControlConfig
     fixed_validation_config = ModelFreeControlConfig.from_args(args) if model_free else None
+    trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+    if trajectory_jit and (not model_free or not batch_autotune or args.num_trainer_gpus != 4
+            or args.num_inference_actors != 4 or args.num_eval_workers != 0
+            or fixed_validation_config.interval_env_steps != 0
+            or args.train_batch_size * args.accumulation_steps != 144):
+        raise ValueError('Trajectory JIT requires the four-card, Eval0, 576-sample model-free recipe')
     model_free_runtime = None
     from evaluation_threshold import resolve_online_evaluation
     if model_free and serial_enabled(args.gpu_layout, environment=os.environ):
@@ -5002,7 +5063,13 @@ def main(args):
         from batch_autotune_runtime import BatchAutotuneRuntime
         autotune_runtime = BatchAutotuneRuntime(ray=ray, trainers=training_groups['policy'],
             inference_pool=inference_pool,replay=replay_buffers[0],writer=writer,
-            experiment=experiment,directory=os.environ['ACCERL_DATA_DIR'])
+            experiment=experiment,directory=os.environ['ACCERL_DATA_DIR'],trajectory_jit=trajectory_jit)
+        if trajectory_jit:
+            experiment.event('trajectory_jit_training_started', details=dict(
+                train_micro=16, gradient_accumulation=9, global_batch=576, context_micro=2,
+                advantage_normalization='ema_zscore', advantage_ema_beta=.9,
+                real_rollout_workers=len(rollout_workers), eval_workers=len(eval_workers)))
+            experiment.flush()
     while run_policy.should_continue(global_step=global_step, train_iters=args.train_iters,
             target_reached=target_reached, requested_stop=stop_requested(),
             completed_epochs=completed_epochs, measure_stop_epochs=measure_stop_epochs):

@@ -7,12 +7,13 @@ still originate on CPU. This is not a claim of a fully GPU-resident Replay.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 import time
 import numpy as np
 import torch
 import torch.distributed as dist
 
-from advantage_ema import AdvantageEMA, raw_sums
+from advantage_ema import AdvantageEMA, moments, raw_sums
 from jit_gae import ReverseGAE, masked_policy_loss
 from jit_gae_plan import build_plan
 
@@ -126,31 +127,30 @@ def _forward_values(owner, nodes, segments, micro, counters, *, timer=None, bund
     return values
 
 
-def _precompute(owner, segments, bundles, device, counters):
+def _precompute(owner, segments, bundles, device, counters, context_micro):
     gae = ReverseGAE(segments, device)
     result = []
     with _prepass_state(owner.base_model, device):
         for bundle in bundles:
-            values = _forward_values(owner, bundle.nodes, segments,
-                                     owner.fresh_config.jit_context_micro, counters)
+            values = _forward_values(owner, bundle.nodes, segments, context_micro, counters)
             start=time.monotonic();result.append(gae.consume(bundle, values))
             owner._jit_times['gae_host_call_wall_s']+=time.monotonic()-start
     return result
 
 
 def run_jit_policy_update(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim,
-                          original_denominators=None, context_timer=None):
+                          original_denominators=None, context_timer=None, config=None):
     from cost_scheduler_runtime import scheduled_policy_update
     with scheduled_policy_update(owner):
         return _run(owner, observations, actions_np, old_logits_np,
                     micro_begin=micro_begin, micro_end=micro_end, trim=trim,
-                    original_denominators=original_denominators, context_timer=context_timer)
+                    original_denominators=original_denominators, context_timer=context_timer,
+                    config=owner.fresh_config if config is None else config)
 
 
 def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim,
-         original_denominators=None, context_timer=None):
+         original_denominators, context_timer, config):
     started = time.monotonic()
-    config = owner.fresh_config
     device = next(owner.model.parameters()).device
     version = int(owner.global_step)
     micro = owner.train_batch_size
@@ -224,7 +224,8 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                     no_grad_forward_calls=0, selected_grad_states=0, selected_grad_forward_calls=0)
     separate = config.jit_gae_mode == 'trainer_separate'
     need_prepass = separate or config.advantage_norm == 'optimizer_window' or not ema.updates
-    targets = _checked(lambda: _precompute(owner,segments,bundles,device,counters), device) if need_prepass else None
+    targets = _checked(lambda: _precompute(owner,segments,bundles,device,counters,config.jit_context_micro),
+                       device) if need_prepass else None
     initial_sums = (_sum(sum((raw_sums(a) for a,_ in targets), torch.zeros(3,device=device,dtype=torch.float64)))
                     if need_prepass else None)
     if initial_sums is not None and not bool(torch.isfinite(initial_sums).all()):
@@ -297,26 +298,29 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     if not bool(sums[0] == expected_count):
         raise RuntimeError('EMA statistics must cover selected chunks only, on every rank')
     ema.commit(sums,expected_updates=expected,optimizer_succeeded=True)
+    batch_mean, batch_variance = moments(sums)
     # One packed result readback after the successful optimizer boundary. Required
     # finite/error votes above remain explicit synchronization points.
     packed = torch.cat((torch.stack(metrics).reshape(-1),torch.cat(receipt_tensors).reshape(-1),
-                        totals[3:].float(),torch.stack((mean,scale,ema.mean,ema.variance)).float())).detach().cpu().numpy()
+                        totals[3:].float(),torch.stack((mean,scale,ema.mean,ema.variance,
+                                                       batch_mean,batch_variance.sqrt())).float())).detach().cpu().numpy()
     split = len(bundles)*7
     metric_rows = packed[:split].reshape(-1,7)
-    receipt_rows = packed[split:-7].reshape(-1,2)
+    receipt_rows = packed[split:-9].reshape(-1,2)
     owner._jit_receipts = [dict(sample_id=observations[i]['_jit_sample_id'],advantage=float(row[0]),
         value_target=float(row[1]),refresh_policy_version=version) for i,row in zip(receipt_indices,receipt_rows)]
     trim('idle')
     elapsed = time.monotonic()-started
     owner.telemetry.event('jit_gae_optimizer_window',details=dict(rank=owner.rank,policy_version=version,
         mode=config.jit_gae_mode,normalization=config.advantage_norm,ema_updates=ema.updates,
-        ema_beta=ema.beta,ema_scale_floor=ema.scale_floor,normalization_mean=float(packed[-4]),
-        normalization_scale=float(packed[-3]),ema_mean=float(packed[-2]),ema_variance=float(packed[-1]),
+        ema_beta=ema.beta,ema_scale_floor=ema.scale_floor,normalization_mean=float(packed[-6]),
+        normalization_scale=float(packed[-5]),ema_mean=float(packed[-4]),ema_variance=float(packed[-3]),
+        raw_advantage_mean=float(packed[-2]),raw_advantage_std=float(packed[-1]),
         selected_chunks=len(observations),unique_rank_segments=len(segments),
         sampling_protocol=config.policy_sampling,
         whole_imagined_segments=sum(s.get('source') == 'imagined' for s in segments.values()),
-        dependency_states=dependency_states,global_rank_dependency_states=int(packed[-7]),
-        global_no_grad_states=int(packed[-6]),global_selected_grad_states=int(packed[-5]),
+        dependency_states=dependency_states,global_rank_dependency_states=int(packed[-9]),
+        global_no_grad_states=int(packed[-8]),global_selected_grad_states=int(packed[-7]),
         global_unique_suffix_states=owner.capture_policy_metadata.get('jit_global_suffix_states'),
         original_shared_full_refresh_states=owner.capture_policy_metadata.get('jit_full_refresh_states'),
         initialization_prepass=bool(need_prepass),
@@ -327,3 +331,29 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         packed_report_d2h_payload_bytes=int(packed.nbytes),**owner._jit_times,**counters))
     keys=('epoch_losses','epoch_p_losses','epoch_v_losses','epoch_e_losses','epoch_kl_losses','epoch_ent','epoch_kl_divs')
     return dict(zip(keys,metric_rows.T.tolist()),policy_train_time=elapsed)
+
+
+def run_balanced_trajectory_update(owner, observations, actions, old_logits, denominators, *,
+                                   micro_begin, micro_end, trim, context_timer=None):
+    """The same trajectory-local optimizer window for formal training and paired timing."""
+    from batch_autotune_runtime import begin_training_micro, end_training_micro, finish_training
+
+    def begin(rank_owner, workload, engine, local_micro, start, end, *, sample_indices):
+        token = micro_begin(rank_owner, workload, engine, local_micro, start, end)
+        ids = rank_owner.capture_policy_metadata['sample_ids']
+        token['sample_ids'] = [ids[i] for i in sample_indices]
+        begin_training_micro(rank_owner, torch)
+        return token
+
+    def end(rank_owner, token, engine, error=None):
+        micro_end(rank_owner, token, engine, error=error)
+        if error is None:
+            end_training_micro(rank_owner)
+
+    recipe = SimpleNamespace(jit_gae_mode='fused', advantage_norm='ema_zscore', jit_context_micro=2,
+                             advantage_ema_beta=.9, advantage_scale_floor=.001, policy_sampling='chunks')
+    result = run_jit_policy_update(owner, observations, actions, old_logits, micro_begin=begin, micro_end=end,
+                                   trim=trim, original_denominators=denominators,
+                                   context_timer=context_timer, config=recipe)
+    finish_training(owner, result['policy_train_time'])
+    return result

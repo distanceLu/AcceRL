@@ -143,13 +143,18 @@ class BatchAutotuner:
     the state in which the supplied update ran. Receipts are detached JSON data.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, *, fixed_train_micro=None):
         if not isinstance(config, BatchAutotuneConfig):
             raise ValueError('BatchAutotuner requires BatchAutotuneConfig')
         self.config = config
         self.completed_updates = 0
         self.phase = 'refresh' if config.enabled else 'disabled'
         self._current = dict(train_micro=8, refresh_micro=2)
+        if fixed_train_micro is not None:
+            if type(fixed_train_micro) is not int or fixed_train_micro not in config.train_candidates or not config.enabled:
+                raise ValueError('Fixed training batch requires an enabled, supported microbatch')
+            self._current['train_micro'] = fixed_train_micro
+            self.phase = 'frozen'
         self._window = []
         self._stage_results = []
         self._history = []

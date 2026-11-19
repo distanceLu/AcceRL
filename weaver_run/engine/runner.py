@@ -128,6 +128,7 @@ def collect(data, state):
     result['fixed_validation_config']=state.get('fixed_validation_config')
     if 'model_free_success_target' in state:
         result['model_free_success_target'] = state['model_free_success_target']
+    result['trajectory_jit']=state.get('trajectory_jit',False)
     result['batch_autotune']=state.get('batch_autotune',False)
     activity=data/'training/fixed_validation_activity.json'
     if activity.exists():
@@ -254,6 +255,8 @@ def report(data, state):
                     '真实预算1000000步，训练150动作，评测220动作；双图像、无proprio、GIPO，cost scheduler关闭。']
         if state.get('batch_autotune'):
             lines[3]='Real4 / Imag0，Policy 四卡 ZeRO2 global576；前期按六更新窗口校准 refresh batch 与训练 micro/GAS，之后冻结。实际配置见 BatchAutotune 遥测。'
+        if state.get('trajectory_jit'):
+            lines[3]='Real4 / Imag0，Policy 四卡 ZeRO2，global 576；同轨迹集中，每卡144，训练微批16×9，上下文微批2，优势使用EMA归一化。'
         target = state.get('model_free_success_target')
         if target:
             lines += ['', f"最近 {target['window_size']} 个有效真实训练回合首次达到 {target['window_successes']} 次成功即停止更新并保存。固定评测用于诊断，实际预算耗尽也会停止。"]
@@ -324,6 +327,9 @@ def formal_environment(state, data, pre):
         env['ACCERL_EXPERIMENT_ROOT'] = state['experiment_root']
     env.update(cost_scheduler_environment_configuration(state, data))
     env['ACCERL_BATCH_AUTOTUNE']=str(int(state.get('batch_autotune',False)))
+    env['ACCERL_TRAJECTORY_JIT']=str(int(state.get('trajectory_jit',False)))
+    if state.get('trajectory_jit'):
+        env['ACCERL_TRAJECTORY_JIT_INITIAL_CHECKPOINT']=state['initial_policy']['checkpoint']
     if state.get('model_free'):
         env['ACCERL_MODEL_FREE']='1'
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
@@ -357,7 +363,7 @@ def enforce_stop_window(data, state, child, now=None):
         raise SaveGraceExpired('Manual-stop GPU save grace of900seconds expired')
 
 
-def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False):
+def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False):
     if mode != 'manual' or stop_on_target:
         raise RuntimeError('This source only permits a fresh manual-stop formal run')
     if data.resolve() != (safe.MASTER/'formal_v3').resolve():
@@ -376,9 +382,10 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
         online_world_identity(config)
     from pipeline_budget import PipelineBudgetConfig
     from model_free_mode import pipeline_configuration
-    from launch import mode_options, fixed_validation_options, fixed_validation_arguments, batch_autotune_options
+    from launch import mode_options, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
+    selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     validation=fixed_validation_options(model_free,num_eval_workers,fixed_validation)
     budget = pipeline_configuration(SimpleNamespace(model_free=model_free,pipeline_config=pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG')))
     if os.getuid()!=1004:
@@ -407,6 +414,11 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     if batch_autotune:
         state['policy_batch_schedule'].update(autotune=True,candidates_micro_GAS=[[8,18],[16,9],[24,6]],
             critic_refresh_candidates=[2,4,8],window_updates=6)
+    if trajectory_jit:
+        from trajectory_jit_initial import verify_reference_policy
+        state['initial_policy'] = verify_reference_policy(safe.MASTER)
+        state['policy_batch_schedule'].update(ordinary_micro_GAS=[16,9], candidates_micro_GAS=[[16,9]],
+            critic_refresh_candidates=[], context_micro=2, advantage_normalization='ema_zscore')
     state['warmup_steps']={'policy':100,'value':100,'ctrl':20,'reward':20}
     state['world_backend_config'] = config.to_dict()
     state['service_plan'] = plan.to_dict()
@@ -427,7 +439,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else [])
+            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else []) + (['--trajectory-jit'] if trajectory_jit else [])
             child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),*launch_args],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
@@ -708,6 +720,7 @@ if __name__ == '__main__':
     a.add_argument('--model-free',action='store_true')
     a.add_argument('--num-eval-workers',type=int)
     a.add_argument('--batch-autotune',action='store_true')
+    a.add_argument('--trajectory-jit',action='store_true')
     from launch import add_fixed_validation_arguments, fixed_validation_overrides
     add_fixed_validation_arguments(a)
     args = a.parse_args()
@@ -718,4 +731,4 @@ if __name__ == '__main__':
     elif args.mode == 'sample':
         safe.sample(args.data, args.run_id)
     else:
-        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune)
+        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit)

@@ -248,16 +248,26 @@ class SegmentReplay:
         if not pending:
             del self.reservations[token]
 
-    def materialize(self, sample_ids, refreshed_values=None):
+    def materialize(self, sample_ids, refreshed_values=None, *, jit_denominators=None):
         from critic_refresh_plan import RefreshedSuffix
         targets = {}
+        contexts = {}
+        jit = jit_denominators is not None
+        if jit and (refreshed_values is not None or self.versions is None):
+            raise ValueError('Trajectory JIT needs a published policy and trainer-side values')
         selected = {}
         for sid in sample_ids:
             sample = self.samples[sid]
             selected.setdefault(sample['segment_id'], []).append(sample['index'])
-        for sid in sample_ids:
-            segment = self.segments[self.samples[sid]['segment_id']]
-            if segment.segment_id not in targets:
+        for key, indices in selected.items():
+            segment = self.segments[key]
+            if jit:
+                start = min(indices)
+                contexts[key] = dict(segment_id=key, count=segment.count, source=segment.source,
+                    observations=(None,) * start + segment.observations[start:], rewards=segment.rewards,
+                    terminated=segment.terminated, truncated=segment.truncated, gamma=segment.gamma,
+                    lambda_=segment.lambda_)
+            else:
                 values = (refreshed_values[segment.segment_id] if refreshed_values is not None else segment.generation_values)
                 first = 0
                 if isinstance(values, RefreshedSuffix):
@@ -268,14 +278,20 @@ class SegmentReplay:
         observations, tokens, advantages, logits, returns, records = [], [], [], [], [], []
         for sid in sample_ids:
             sample = self.samples[sid];index = sample['index'];segment = self.segments[sample['segment_id']]
-            first, adv, target = targets[segment.segment_id]
-            offset = index - first
             observation = dict(segment.observations[index])
             observation['_fresh_action_mask'] = segment.action_mask[index].copy()
+            if jit:
+                observation.update(_jit_sample_id=sid, _jit_segment=contexts[segment.segment_id], _jit_index=index,
+                                   _jit_version=self.versions[0], _jit_original_denominator=jit_denominators[sid])
+                advantage = value_target = None
+            else:
+                first, adv, target = targets[segment.segment_id]
+                advantage, value_target = float(adv[index-first]), float(target[index-first])
             observations.append(observation);tokens.append(segment.action_tokens[index])
-            advantages.append(adv[offset]);logits.append(segment.behaviour_logits[index]);returns.append(target[offset])
+            advantages.append(0. if jit else advantage);logits.append(segment.behaviour_logits[index])
+            returns.append(0. if jit else value_target)
             records.append(dict(sample_id=sid, source=segment.source, segment_id=segment.segment_id,
-                reward=float(segment.rewards[index]), advantage=float(adv[offset]), value_target=float(target[offset]),
+                reward=float(segment.rewards[index]), advantage=advantage, value_target=value_target,
                 phi_before=segment.phi[index], phi_after=segment.phi[index+1],
                 generation_policy_version=segment.versions[index]['policy'],
                 generation_world_version=segment.versions[index].get('world_bundle_version'),

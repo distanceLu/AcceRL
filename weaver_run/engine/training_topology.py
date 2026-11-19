@@ -457,6 +457,9 @@ class GlobalBatchCoordinator:
                 or ("combined" in self.wm_consumers and len(self.wm_consumers) != 1)):
             raise ValueError("WM consumers must be combined or distinct split model roles")
         self.replays = {"policy": policy_replay, "wm": wm_replay}
+        self.trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+        if self.trajectory_jit and (self.wm_consumers or world_size != 4):
+            raise ValueError("Trajectory JIT requires a four-rank Policy-only coordinator")
         self.world_size = world_size
         self.conditions = {kind: asyncio.Condition() for kind in self.replays}
         self.pending = {kind: None for kind in self.replays}
@@ -536,6 +539,9 @@ class GlobalBatchCoordinator:
                         self.pending[kind] = ticket
                         if ticket.get("global_batch_size") != global_size:
                             raise ValueError("Reserved window ticket has an unexpected global size")
+                    elif self.trajectory_jit:
+                        self.pending[kind] = self.replays[kind].trajectory_jit_shards.options(
+                            num_returns=self.world_size).remote(global_size)
                     else:
                         self.pending[kind] = await self.replays[kind].sample.remote(global_size)
                         if self.pipeline_enabled and kind == "policy":
@@ -558,6 +564,8 @@ class GlobalBatchCoordinator:
                     result = await self.replays[kind].project_windows.remote(
                         self.pending[kind]["ticket_id"], rank, local_size, consumer)
                     self._validate_projection(result, rank, local_size, consumer)
+                elif self.trajectory_jit:
+                    result = {'trajectory_jit_shard_ref': self.pending[kind][rank]}
                 else:
                     result = shard_batch(self.pending[kind], kind, rank, local_size, self.world_size)
                 self.claimed[kind].add(identity)

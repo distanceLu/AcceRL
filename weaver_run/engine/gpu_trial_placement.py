@@ -49,7 +49,8 @@ def place_segments(ids, segments):
                             reached[n,c]=(block,prev)
                     if (144,target) in reached: break
                 key=(144,target)
-                assert key in reached, 'No exact two-dimensional assignment found'
+                if key not in reached:
+                    return None
                 chosen=[]
                 while key!=(0,0):
                     block,key=reached[key]; chosen.append(block)
@@ -179,18 +180,60 @@ def cross_card_cost(loads):
     return sum(max(column) for column in zip(*micro_calls))
 
 
+def _capacity_shards(ids):
+    """Prioritize whole trajectories when the ideal context split cannot be packed."""
+    groups = sorted(select_by_segment(ids).values(), key=len, reverse=True)
+    bins = [[] for _ in range(4)]
+    failed = set()
+
+    def pack(index, space):
+        if index == len(groups):
+            return True
+        state = (index, tuple(sorted(space)))
+        if state in failed or len(failed) >= 20000:
+            return False
+        tried = set()
+        block = groups[index]
+        for rank in sorted(range(4), key=space.__getitem__):
+            capacity = space[rank]
+            if capacity < len(block) or capacity in tried:
+                continue
+            tried.add(capacity)
+            space[rank] -= len(block)
+            bins[rank].append(block)
+            if pack(index+1, space):
+                return True
+            bins[rank].pop()
+            space[rank] += len(block)
+        failed.add(state)
+        return False
+
+    if pack(0, [144] * 4):
+        return [[pos for block in rank for pos,_ in block] for rank in bins]
+    # Preserve the draw even for a single group larger than a rank. Each of
+    # the three boundaries can divide at most one trajectory.
+    positions = [pos for block in groups for pos,_ in sorted(block, key=lambda row: row[1])]
+    return [positions[start:start+144] for start in range(0,576,144)]
+
+
 def ordered_positions(ids, segments):
     if len(set(ids)) != 576 or len(ids) != 576:
         raise ValueError('Paired GPU trial requires 576 distinct real actions')
-    selected, costs = geometry(ids, segments)
     base = place_segments(ids, segments)
-    greedy = [prefix_order(rank, costs, 16) for rank in base]
-    polished = [balance_with_swaps(rank, costs, 16) for rank in greedy]
+    if base is None:
+        by_rank = [geometry([ids[pos] for pos in row], segments) for row in _capacity_shards(ids)]
+        base = [list(selected) for selected,_ in by_rank]
+    else:
+        by_rank = [geometry(ids, segments)] * 4
+    greedy = [prefix_order(rank, costs, 16) for rank,(_,costs) in zip(base, by_rank)]
+    polished = [balance_with_swaps(rank, costs, 16) for rank,(_,costs) in zip(greedy, by_rank)]
+    def loads(ranks):
+        return [buckets(rank, costs, 16) for rank,(_,costs) in zip(ranks, by_rank)]
     order = min((base, greedy, polished),
-                key=lambda ranks: cross_card_cost([buckets(rank, costs, 16) for rank in ranks]))
+                key=lambda ranks: cross_card_cost(loads(ranks)))
     original = {sid: ordinal for ordinal, sid in enumerate(ids)}
     positions = [[original[f'{sid}:chunk{index}'] for sid in rank for index in selected[sid]]
-                 for rank in order]
+                 for rank,(selected,_) in zip(order, by_rank)]
     if list(map(len, positions)) != [144]*4 or sorted(sum(positions, [])) != list(range(576)):
         raise ValueError('Trajectory placement changed the sampled batch')
-    return positions, [buckets(rank, costs, 16) for rank in order]
+    return positions, loads(order)

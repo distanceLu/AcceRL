@@ -96,14 +96,15 @@ def handoff_verified():
                 "前序训练或 P0 回放队列记录不匹配")
 
 
-def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False):
+def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False):
     require(profile=="restore", "This branch manages the original training profile")
     commit=revision(checkout)
     source=checkout/"weaver_run/engine"
     wrapper=checkout/"weaver_run/reference_site/queue_wrapper/queue_entry.py"
-    from launch import expand, settings, mode_options, effective_pipeline, fixed_validation_options, fixed_validation_arguments, batch_autotune_options
+    from launch import expand, settings, mode_options, effective_pipeline, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
+    selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     validation=fixed_validation_options(model_free,num_eval_workers,fixed_validation)
     if not model_free:
         template=json.loads((checkout/"weaver_run/recipe/world_backend_config.json").read_bytes())
@@ -118,7 +119,7 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False
           "--source",str(source),"--root",str(root),"--git-commit",commit,
           *(["--model-free"] if model_free else ["--native-gpu-preflight"]),
           *(["--num-eval-workers",str(selected["num_eval_workers"])] if model_free or num_eval_workers is not None else []),
-          *fixed_validation_arguments(validation),*(['--batch-autotune'] if batch_autotune else [])]
+          *fixed_validation_arguments(validation),*(['--batch-autotune'] if batch_autotune else []),*(['--trajectory-jit'] if trajectory_jit else [])]
     job=dict(name="WEAVER "+profile+" "+label,submission_id="weaver-run-"+label,
              cwd=str(source),argv=argv,manual=True,timeout_seconds=0)
     record=dict(schema=2,profile=profile,label=label,root=str(root),source=str(source),
@@ -136,6 +137,9 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False
         from engine.model_free_success import TARGET_SUCCESSES, WINDOW_SIZE
         record.update(stop_policy="real_rollout_success_or_budget_or_explicit_stop_or_fault",
                       model_free_success_target=dict(window_size=WINDOW_SIZE, window_successes=TARGET_SUCCESSES))
+    if trajectory_jit:
+        from engine.trajectory_jit_initial import reference_policy
+        record['initial_policy'] = reference_policy(EXPERIMENTS)
     json_write(stage/"experiment.json",record)
     return record
 
@@ -177,7 +181,7 @@ def summary(record, job):
                 job=job["id"] if job else None,state=job["state"] if job else "prepared")
     if record.get("git_commit"):
         result["git_commit"]=record["git_commit"]
-    result.update(batch_autotune=record.get("batch_autotune",False),model_free=record.get("model_free",False),num_eval_workers=record.get("num_eval_workers",3))
+    result.update(trajectory_jit=record.get('trajectory_jit',False),batch_autotune=record.get("batch_autotune",False),model_free=record.get("model_free",False),num_eval_workers=record.get("num_eval_workers",3))
     p=Path(record["root"])/"formal_v3/runnerstatus.json"
     if p.is_file():
         state=json.loads(p.read_bytes())
@@ -195,23 +199,24 @@ def save_submission(root, item):
         json_write(path,receipt)
 
 
-def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False):
-    from launch import mode_options, fixed_validation_options, batch_autotune_options
+def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False):
+    from launch import mode_options, fixed_validation_options, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
+    selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     selected['fixed_validation_config']=fixed_validation_options(model_free,num_eval_workers,fixed_validation)
     latest_label=latest()
     if not label and latest_label:
         last=recorded(latest_label)
         prior=lookup(last["job"]["submission_id"])
-        if last["profile"]==profile and all(last.get(k,False if k in ("model_free","batch_autotune") else 3 if k=='num_eval_workers' else None)==v for k,v in selected.items()) and (prior is None or prior["state"] in ("queued","running")):
+        if last["profile"]==profile and all(last.get(k,False if k in ("model_free","batch_autotune","trajectory_jit") else 3 if k=='num_eval_workers' else None)==v for k,v in selected.items()) and (prior is None or prior["state"] in ("queued","running")):
             label=latest_label
     label=label or profile+"-"+dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")+"-"+uuid4().hex[:6]
     require(LABEL.fullmatch(label),"无效的实验名")
     root=EXPERIMENTS/label
     if os.path.lexists(root):
         r=recorded(label)
-        require(r["profile"]==profile and all(r.get(k,False if k in ("model_free","batch_autotune") else 3 if k=='num_eval_workers' else None)==v for k,v in selected.items()),"实验名已绑定另一配置")
+        require(r["profile"]==profile and all(r.get(k,False if k in ("model_free","batch_autotune","trajectory_jit") else 3 if k=='num_eval_workers' else None)==v for k,v in selected.items()),"实验名已绑定另一配置")
         prior=lookup(r["job"]["submission_id"])
         if prior:
             require(json.loads(prior["argv_json"])==r["job"]["argv"] and all(prior[k]==r["job"][k]
@@ -227,7 +232,7 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
         with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".staging-") as staging:
             staged=Path(staging)/"output"
             staged.mkdir(mode=0o700)
-            r=make_spec(profile,label,root,staged,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune)
+            r=make_spec(profile,label,root,staged,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit)
             staged.rename(root)
     if not r.get("git_commit"):
         raise ValueError("Use a new label for a Git-backed experiment")
@@ -235,7 +240,7 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     require(revision(CHECKOUT)==revision(RUNTIME,r["git_commit"]),
             "Prepared experiment belongs to another commit; use a fresh label")
     with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".verify-") as temp:
-        expected=make_spec(profile,label,root,Path(temp),model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune)
+        expected=make_spec(profile,label,root,Path(temp),model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit)
         require(r==expected and (model_free or (root/"git-world.json").read_bytes()==(Path(temp)/"git-world.json").read_bytes())
                 and (root/"git-pipeline.json").read_bytes()==(Path(temp)/"git-pipeline.json").read_bytes()
                 and digest((root/"mps.json").read_bytes())==PROFILES[profile]["mps_receipt"],
@@ -254,12 +259,12 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     return summary(r,item)
 
 
-def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False):
+def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False):
     with tempfile.TemporaryDirectory(prefix=".cpu-check-",dir=EXPERIMENTS) as d:
         temp=Path(d)
         root=temp/"output"
         root.mkdir()
-        r=make_spec(profile,"validation-"+profile,root,root,checkout=CHECKOUT,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune)
+        r=make_spec(profile,"validation-"+profile,root,root,checkout=CHECKOUT,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit)
         check_record(r)
         # Production agent.py is pinned to its live root. Exercise the same
         # QueueStore.create used by the create API in a private workerless DB.
@@ -345,10 +350,12 @@ def main():
     p.add_argument("--model-free",action="store_true")
     p.add_argument("--num-eval-workers",type=int)
     p.add_argument("--batch-autotune",action="store_true")
-    from launch import add_fixed_validation_arguments, fixed_validation_options, fixed_validation_overrides, batch_autotune_options
+    p.add_argument("--trajectory-jit",action="store_true")
+    from launch import add_fixed_validation_arguments, fixed_validation_options, fixed_validation_overrides, batch_autotune_options, trajectory_jit_options
     add_fixed_validation_arguments(p)
     opts=p.parse_args()
     batch_autotune_options(opts.model_free,opts.num_eval_workers,opts.batch_autotune)
+    trajectory_jit_options(opts.model_free,opts.num_eval_workers,opts.batch_autotune,opts.trajectory_jit)
     validation=fixed_validation_options(opts.model_free,opts.num_eval_workers,fixed_validation_overrides(opts))
     args=opts.args.copy()
     action=args.pop(0) if args and args[0] in ("list","check","start","status","stop") else "start"
@@ -373,12 +380,12 @@ def main():
     require(EXPERIMENTS.resolve()==EXPERIMENTS and EXPERIMENTS.stat().st_uid==1004,"实验目录身份不符")
     if action=="check":
         for name in (PROFILES if profile=="all" else [profile]):
-            print(json.dumps(offline_check(name,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune),ensure_ascii=False),flush=True)
+            print(json.dumps(offline_check(name,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit),ensure_ascii=False),flush=True)
         return
     if action=="start":
         with (EXPERIMENTS/".launch.lock").open("a") as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
-            result=start(profile,opts.label,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune)
+            result=start(profile,opts.label,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit)
     else:
         label=opts.label or latest()
         if not label and action=="status":

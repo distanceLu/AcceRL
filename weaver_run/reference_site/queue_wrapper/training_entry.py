@@ -257,15 +257,19 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
         raise ValueError('Source/root paths must be canonical and not symlinks')
     evidence = verify_git(source, git_commit)
     sys.path.insert(0,str(source.parent))
-    from launch import batch_autotune_options
+    from launch import batch_autotune_options, trajectory_jit_options
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
+    trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
+    if trajectory_jit:
+        from engine.trajectory_jit_initial import verify_reference_policy
+        verify_reference_policy(root)
     scheduler = None if model_free else validate_cost_scheduler_admission(source)
     # This module is CPU-only, and its bytes have just been verified.
     paths = runpy.run_path(str(source / 'candidate_paths.py'))
@@ -287,7 +291,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
         with tempfile.TemporaryDirectory(dir=root,prefix='.policy-admission-') as temp:
             work=Path(temp)
             command,environment,resources=prepare(work,['4','5','6','7'],'weaverintegrated_cpu_check',
-                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune)
+                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit)
             check(work,command,environment,resources)
     else:
         backend = read_json(root / BACKEND_CONFIG)
@@ -306,10 +310,10 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     return {**evidence, 'source': str(source), 'experiment_root': str(root),
             'backend': backend, 'mps_receipt_sha256': hashlib.sha256(mps_path.read_bytes()).hexdigest(),
             'world_admission': admission, 'cost_scheduler': scheduler, 'mps_boot_id': authorization['boot_id'],
-            'gpu_access_performed': False,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
+            'gpu_access_performed': False,'trajectory_jit':trajectory_jit,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -326,6 +330,7 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
                PYTHONUNBUFFERED='1', PYTHONDONTWRITEBYTECODE='1',
                OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
     env['ACCERL_BATCH_AUTOTUNE']=str(int(batch_autotune))
+    env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit))
     env['ACCERL_MODEL_FREE']=str(int(model_free))
     if model_free or num_eval_workers is not None:
         env['ACCERL_NUM_EVAL_WORKERS']=str((0 if model_free else 3) if num_eval_workers is None else num_eval_workers)
@@ -335,8 +340,10 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False):
     if model_free is not None:
+        if state.get('trajectory_jit',False) != trajectory_jit:
+            raise ValueError('Runner trajectory JIT mode differs from queued arguments')
         if state.get('batch_autotune',False) != batch_autotune:
             raise ValueError('Runner batch autotune mode differs from queued arguments')
         expected_count=(0 if model_free else 3) if num_eval_workers is None else num_eval_workers
@@ -896,6 +903,8 @@ def runner_command(args):
     command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args)))
     if batch_autotune_options(model_free,count,getattr(args,'batch_autotune',False)):
         command += ['--batch-autotune']
+    if getattr(args,'trajectory_jit',False):
+        command += ['--trajectory-jit']
     return command
 
 
@@ -905,6 +914,8 @@ def mode_kwargs(args):
     selected=dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
     selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args))
     selected['batch_autotune']=batch_autotune_options(selected['model_free'],selected['num_eval_workers'],getattr(args,'batch_autotune',False))
+    if getattr(args,'trajectory_jit',False):
+        selected['trajectory_jit']=True
     return selected
 
 
@@ -1131,6 +1142,7 @@ def main():
     parser.add_argument('--model-free',action='store_true')
     parser.add_argument('--num-eval-workers',type=int)
     parser.add_argument('--batch-autotune',action='store_true')
+    parser.add_argument('--trajectory-jit',action='store_true')
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
     from launch import add_fixed_validation_arguments
     add_fixed_validation_arguments(parser)

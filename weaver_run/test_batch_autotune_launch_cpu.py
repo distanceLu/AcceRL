@@ -17,6 +17,48 @@ from test_model_free_launch_cpu import launch, training, site, HERE
 
 
 class BatchAutotuneLaunchTests(unittest.TestCase):
+    def test_trajectory_jit_reaches_driver_without_a_benchmark_plan(self):
+        for mf, evaluation, tuned in ((False,0,True),(True,2,True),(True,0,False)):
+            with self.assertRaises(ValueError):
+                launch.trajectory_jit_options(mf,evaluation,tuned,True)
+        args = types.SimpleNamespace(source=HERE/'engine', root=Path('/output'), model_free=True,
+                                     num_eval_workers=0, batch_autotune=True, trajectory_jit=True)
+        self.assertTrue(training.mode_kwargs(args)['trajectory_jit'])
+        self.assertIn('--trajectory-jit', training.runner_command(args))
+        capture = {}
+        with patch.dict(os.environ, {'ACCERL_PIPELINE_CONFIG':'/pipeline', 'ACCERL_FINAL_CHECKPOINT':'/out'}, clear=True), \
+                patch.object(os,'chdir'), patch.object(os,'execve',side_effect=lambda p,a,e:capture.update(argv=a,env=e)):
+            launch.exec_managed_driver(['--model-free','--num-eval-workers','0','--batch-autotune','--trajectory-jit',
+                                        '--fixed-validation-interval-env-steps','0'])
+        self.assertEqual(capture['env']['ACCERL_TRAJECTORY_JIT'], '1')
+        self.assertNotIn('ACCERL_JIT_BENCH_PLAN',capture['env'])
+        self.assertNotIn('--trajectory-jit', capture['argv'])
+        self.assertIn('--batch-autotune', capture['argv'])
+
+    def test_reference_policy_rejects_tampering_and_wrong_checkpoint_step(self):
+        import hashlib
+        import json
+        from engine import trajectory_jit_initial as initial
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            policy=initial.reference_policy(root)
+            weights=Path(policy['checkpoint'])
+            weights.parent.mkdir(parents=True)
+            weights.write_bytes(b'original')
+            policy.update(bytes=weights.stat().st_size,sha256=hashlib.sha256(weights.read_bytes()).hexdigest())
+            manifest=dict(steps={'policy':0},metadata={'run_id':policy['run_id']},tensor_counts={'policy':891})
+            (weights.parent/'manifest.json').write_text(json.dumps(manifest))
+            (root/'experiment.json').write_text(json.dumps({'initial_policy':policy}))
+            with patch.object(initial,'reference_policy',return_value=policy):
+                self.assertEqual(initial.verify_reference_policy(root),policy)
+                weights.write_bytes(b'modified')
+                with self.assertRaisesRegex(ValueError,'checksum'):
+                    initial.verify_reference_policy(root)
+                manifest['steps']['policy']=189
+                (weights.parent/'manifest.json').write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError,'at P0'):
+                    initial.verify_reference_policy(root)
+
     def test_training_flag_is_explicit_and_defaults_preserve_argv(self):
         plain = launch.training_arguments({}, model_free=True, template=[])
         tuned = launch.training_arguments({}, model_free=True, template=[], batch_autotune=True)

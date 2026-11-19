@@ -2,6 +2,28 @@
 import math
 
 
+def arrange_trajectory_draw(store, sample_ids):
+    from gpu_trial_placement import ordered_positions
+    geometry, denominators = {}, {}
+    for start in range(0, len(sample_ids), 8):
+        group = sample_ids[start:start+8]
+        tokens = 0
+        for sid in group:
+            sample = store.samples[sid]
+            segment = store.segments[sample['segment_id']]
+            if segment.source != 'real':
+                raise ValueError('Model-free trajectory JIT requires real trajectories')
+            geometry[segment.segment_id] = (segment.count, bool(segment.terminated[-1]))
+            tokens += int(segment.action_mask[sample['index']].sum())
+        denominators.update(dict.fromkeys(group, tokens))
+    positions, context_counts = ordered_positions(sample_ids, geometry)
+    by_rank = [[sample_ids[p] for p in row] for row in positions]
+    rank_visits = sum(len({store.samples[sid]['segment_id'] for sid in rank}) for rank in by_rank)
+    return sum(by_rank, []), denominators, dict(raw_sample_ids=sample_ids,
+        trajectories=len(geometry), extra_trajectory_rank_visits=rank_visits-len(geometry),
+        context_by_rank_bundle=context_counts)
+
+
 def dependency_counts(store, sample_ids):
     first = {}
     for sid in sample_ids:

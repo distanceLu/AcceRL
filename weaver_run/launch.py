@@ -213,6 +213,14 @@ def training_arguments(values, *, model_free=False, num_eval_workers=None, templ
     return result
 
 
+def trajectory_jit_options(model_free, num_eval_workers, batch_autotune, trajectory_jit):
+    require(type(trajectory_jit) is bool, 'trajectory JIT must be bool')
+    if trajectory_jit:
+        require(batch_autotune and model_free and mode_options(model_free,num_eval_workers)['num_eval_workers']==0,
+                'Trajectory JIT requires --model-free --batch-autotune and zero online evaluation workers')
+    return trajectory_jit
+
+
 def effective_pipeline(model_free=False):
     if not model_free:
         return read(RECIPE/'pipeline_config.json')
@@ -228,6 +236,7 @@ def exec_managed_driver(overrides=()):
     options.add_argument('--model-free',action='store_true')
     options.add_argument('--num-eval-workers',type=int)
     options.add_argument('--batch-autotune',action='store_true')
+    options.add_argument('--trajectory-jit',action='store_true')
     add_fixed_validation_arguments(options)
     selected,other=options.parse_known_args(overrides)
     values=dict(settings(), ids="4,5,6,7", world=os.environ.get("ACCERL_WORLD_BACKEND_CONFIG",''),
@@ -239,6 +248,7 @@ def exec_managed_driver(overrides=()):
     env.update(read(RECIPE/"env.json"))
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(selected.batch_autotune)),ACCERL_MODEL_FREE=str(int(selected.model_free)),
                ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
+    env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(selected.model_free, selected.num_eval_workers, selected.batch_autotune, selected.trajectory_jit)))
     if selected.model_free:
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
@@ -247,7 +257,7 @@ def exec_managed_driver(overrides=()):
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 
-def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False):
+def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False):
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
@@ -292,6 +302,7 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
                ACCERL_PIPELINE_CONFIG=values["pipeline"],ACCERL_WORLD_BACKEND_CONFIG=values["world"],
                ACCERL_COST_SCHEDULER_CONFIG=str(RECIPE/"cost_scheduler_config.json"),
                ACCERL_RAY_TMP=f"/dev/shm/wr_{os.getuid()}_{uuid.uuid4().hex[:10]}",ACCERL_RAY_SPILL=str(work/"ray_spill"))
+    env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)))
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(batch_autotune)),ACCERL_MODEL_FREE=str(int(model_free)),ACCERL_NUM_EVAL_WORKERS=str(mode_options(model_free,num_eval_workers)['num_eval_workers']))
     if model_free:
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
@@ -417,10 +428,12 @@ def main():
     parser.add_argument("--model-free",action="store_true")
     parser.add_argument("--num-eval-workers",type=int)
     parser.add_argument("--batch-autotune",action="store_true")
+    parser.add_argument("--trajectory-jit",action="store_true")
     add_fixed_validation_arguments(parser)
     args=parser.parse_args()
     selected=mode_options(args.model_free,args.num_eval_workers)
     selected['batch_autotune']=batch_autotune_options(args.model_free,args.num_eval_workers,args.batch_autotune)
+    selected['trajectory_jit']=trajectory_jit_options(args.model_free,args.num_eval_workers,args.batch_autotune,args.trajectory_jit)
     validation=fixed_validation_options(args.model_free,args.num_eval_workers,fixed_validation_overrides(args))
     require(args.action in ("original","restore","start","check") or (not args.model_free and args.num_eval_workers is None and not args.batch_autotune),"Training mode options are only for start/check")
     host=socket.gethostname()==REFERENCE_SERVER
@@ -440,12 +453,12 @@ def main():
     if host and args.action!="check":
         op="original" if args.action in ("original","restore","start") else args.action
         cli=HERE/"reference_site/cli.py"
-        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else []),*fixed_validation_arguments(validation),*(['--batch-autotune'] if args.batch_autotune else [])])
+        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else []),*fixed_validation_arguments(validation),*(['--batch-autotune'] if args.batch_autotune else []),*(['--trajectory-jit'] if args.trajectory_jit else [])])
     require(not args.action.startswith(('diagnose','bench-jit')),'This saved-checkpoint diagnostic uses the reference site queue and assets')
     if args.action=="check":
         with tempfile.TemporaryDirectory(prefix="weaver-check-") as d:
             ids,_=allocated(True)
-            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check",model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune)
+            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check",model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit)
             check(Path(d),cmd,env,paths)
         print("CHECK PASSED: Policy assets, actual parsed training arguments and CPU environment."
               if args.model_free else "CHECK PASSED: clone imports, actual parsed training arguments, native bundle and CPU environment.")
@@ -470,7 +483,7 @@ def main():
     run_id="weaverintegrated_"+label
     put(work/"status.json",dict(state="checking",run_id=run_id))
     try:
-        cmd,env,paths=prepare(work,ids,run_id,model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune)
+        cmd,env,paths=prepare(work,ids,run_id,model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit)
         check(work,cmd,env,paths)
         mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
         # Advisory locks only for this user's explicitly allocated GPUs. Keep through exit.

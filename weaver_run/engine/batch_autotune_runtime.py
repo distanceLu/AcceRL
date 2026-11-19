@@ -202,9 +202,12 @@ def aggregate_sample(policy_step, update_seconds, trainers, inference):
 
 
 class BatchAutotuneRuntime:
-    def __init__(self, *, ray, trainers, inference_pool, replay, writer, experiment, directory):
+    def __init__(self, *, ray, trainers, inference_pool, replay, writer, experiment, directory,
+                 trajectory_jit=False):
         from batch_autotune import BatchAutotuneConfig, BatchAutotuner
-        self.controller = BatchAutotuner(BatchAutotuneConfig(enabled=True))
+        self.trajectory_jit = trajectory_jit
+        self.controller = BatchAutotuner(BatchAutotuneConfig(enabled=True),
+                                         fixed_train_micro=16 if trajectory_jit else None)
         self.ray,self.trainers,self.inference,self.replay = ray,trainers,inference_pool,replay
         self.writer,self.experiment,self.directory = writer,experiment,Path(directory)
         self.started = None
@@ -231,6 +234,11 @@ class BatchAutotuneRuntime:
         training = self.ray.get([x.get_batch_autotune_stats.remote(policy_step) for x in self.trainers],timeout=30)
         inference = self.ray.get([x.get_batch_autotune_stats.remote(policy_step) for x in self.inference],timeout=30)
         sample = aggregate_sample(policy_step,seconds,training,inference)
+        if self.trajectory_jit:
+            if sample['refresh_observations'] or any(t['micro'] != 16 for t in training):
+                raise RuntimeError('Trajectory JIT requires local GAE and a training microbatch of 16')
+            sample['rollout_action_requests_by_rank'] = {
+                str(x['rank']): len(x['action_latencies']) for x in inference}
         chosen = dict(self.controller.current)
         decision = self.controller.observe(sample)
         receipt = dict(policy_step=policy_step,sample=sample,decision=decision,
@@ -244,6 +252,8 @@ class BatchAutotuneRuntime:
             Refresh_Observations=sample['refresh_observations'],Action_P95_Seconds=sample['action_p95_seconds'],
             Sampled_Peak_Memory_GiB=max((x['peak_used_bytes'] for x in sample['cards']),default=0)/2**30,
             Frozen=int(decision['frozen']))
+        if self.trajectory_jit:
+            values['Sampled_Peak_Memory_GiB'] = max(t['memory']['peak_used_bytes'] for t in training)/2**30
         for name,value in values.items():
             if value is not None:self.writer.add_scalar('BatchAutotune/'+name,value,policy_step)
         self.writer.flush();self.experiment.flush()
