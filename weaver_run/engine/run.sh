@@ -111,7 +111,7 @@ for output in "$ACCERL_TELEMETRY_DB" "$ACCERL_FINAL_CHECKPOINT" "$ACCERL_STOP_FI
     esac
 done
 if [[ "$MODEL_FREE" == 1 ]]; then
-    echo "Model-free Policy ZeRO2 Real4/Imag0 + existing MPS: run=$ACCERL_RUN_ID data=$ACCERL_DATA_DIR pipe=$CUDA_MPS_PIPE_DIRECTORY"
+    echo "Model-free Policy ZeRO2 + real rollouts + existing MPS: run=$ACCERL_RUN_ID data=$ACCERL_DATA_DIR pipe=$CUDA_MPS_PIPE_DIRECTORY"
 else
     echo "Online WEAVER initialized3200 + Policy ZeRO2 + existing MPS: run=$ACCERL_RUN_ID serial=$ACCERL_SPLIT_TRAIN_SERIAL data=$ACCERL_DATA_DIR pipe=$CUDA_MPS_PIPE_DIRECTORY"
 fi

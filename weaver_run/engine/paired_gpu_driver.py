@@ -61,9 +61,14 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
 
     plan = json.loads(Path(os.environ['ACCERL_JIT_BENCH_PLAN']).read_text(encoding='utf8'))
     output = Path(os.environ['ACCERL_JIT_BENCH_OUTPUT'])
-    if (len(workers) != 4 or len(trainers) != 4 or len(inference) != 4 or
+    normal_only = plan.get('normal_only', False)
+    expected_workers = plan.get('real_workers', 4)
+    if (normal_only != (os.environ.get('WEAVER_BENCH_NORMAL_ONLY') == '1') or
+            normal_only and plan.get('comparison') != 'admission_pulse' or
+            expected_workers not in ((4, 8) if normal_only else (4,)) or
+            len(workers) != expected_workers or len(trainers) != 4 or len(inference) != 4 or
             args.num_eval_workers != 0 or not args.batch_autotune):
-        raise ValueError('GPU pairing requires four real collectors, four trainers and four inference replicas')
+        raise ValueError('P189 benchmark topology or normal-only mode differs from the recorded plan')
     if plan.get('comparison') == 'admission_pulse':
         from admission_pulse_bench import run_pulse_benchmark
         return run_pulse_benchmark(ray=ray, plan=plan, output=output, replay=replay, trainers=trainers,

@@ -182,7 +182,7 @@ def fixed_validation_arguments(config):
             for part in ('--fixed-validation-'+key.replace('_','-'),str(value))]
 
 
-def training_arguments(values, *, model_free=False, num_eval_workers=None, template=None, fixed_validation=None, batch_autotune=False, real_sampling='chunks'):
+def training_arguments(values, *, model_free=False, num_eval_workers=None, template=None, fixed_validation=None, batch_autotune=False, real_sampling='chunks', real_workers=4):
     options = mode_options(model_free, num_eval_workers)
     batch_autotune_options(model_free, num_eval_workers, batch_autotune)
     validation = fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling)
@@ -193,9 +193,9 @@ def training_arguments(values, *, model_free=False, num_eval_workers=None, templ
         replicas='1,2,3' if not model_free and count==3 else ','.join(map(str,range(count)))
         changes.update({'--num-eval-workers':str(count), '--eval-inference-replicas':replicas})
     if model_free:
-        changes.update({'--num-rollout-workers':'4', '--num-ctrl-inference-actors':'0',
+        changes.update({'--num-rollout-workers':str(real_workers), '--num-ctrl-inference-actors':'0',
                         '--num-reward-inference-actors':'0', '--ctrl-eval-interval':'0',
-                        '--exp-name':f'OpenVLA_ModelFree_Real4_Imag0_Eval{options["num_eval_workers"]}_Budget1M_Manual_gpu47_fresh'})
+                        '--exp-name':f'OpenVLA_ModelFree_Real{real_workers}_Imag0_Eval{options["num_eval_workers"]}_Budget1M_Manual_gpu47_fresh'})
     remove = set(changes) | ({'--world-backend-config'} if model_free else set())
     result=[]
     index=0
@@ -261,11 +261,15 @@ def exec_managed_driver(overrides=()):
     add_real_sampling_argument(options)
     add_fixed_validation_arguments(options)
     selected,other=options.parse_known_args(overrides)
+    workers = 4
+    if selected.model_free and os.environ.get('ACCERL_JIT_BENCH_PLAN'):
+        from model_free_mode import real_worker_count
+        workers = real_worker_count()
     values=dict(settings(), ids="4,5,6,7", world=os.environ.get("ACCERL_WORLD_BACKEND_CONFIG",''),
                 pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
     argv=training_arguments(values,model_free=selected.model_free,num_eval_workers=selected.num_eval_workers,
-                            fixed_validation=fixed_validation_overrides(selected),batch_autotune=selected.batch_autotune,real_sampling=selected.real_sampling) + other
+                            fixed_validation=fixed_validation_overrides(selected),batch_autotune=selected.batch_autotune,real_sampling=selected.real_sampling,real_workers=workers) + other
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(selected.batch_autotune)),ACCERL_MODEL_FREE=str(int(selected.model_free)),
@@ -444,6 +448,10 @@ def main():
         from weaver_run.reference_site.legacy_baseline import main as legacy_main
         legacy_main(sys.argv[2:])
         return
+    if sys.argv[1:2] == ['bench-admission-pulse'] and socket.gethostname() == REFERENCE_SERVER:
+        # 短测的参数在原站队列入口统一解析。
+        cli = HERE/'reference_site/cli.py'
+        os.execv(sys.executable, [sys.executable, '-I', '-B', str(cli), *sys.argv[1:]])
     parser=argparse.ArgumentParser(prog="./run.sh")
     parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","bench-episode-sampling","bench-episode-sampling-status","bench-admission-pulse","bench-admission-pulse-status","view"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")

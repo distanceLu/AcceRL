@@ -1,8 +1,19 @@
 """Explicit Policy-only mode; no model imports or World asset inspection."""
 import json
+import os
 from pathlib import Path
 
 from pipeline_budget import PipelineBudgetConfig
+
+
+def real_worker_count():
+    # 仅 P189 对照短测覆盖采集并发；正式配方仍按每卡一个环境启动。
+    if not os.environ.get('ACCERL_JIT_BENCH_PLAN') or os.environ.get('WEAVER_BENCH_NORMAL_ONLY') != '1':
+        return 4
+    workers = int(os.environ['WEAVER_BENCH_REAL_WORKERS'])
+    if workers not in (4, 8):
+        raise ValueError('P189 rollout count must be 4 or 8')
+    return workers
 
 
 def configure_training_mode(args):
@@ -15,7 +26,7 @@ def configure_training_mode(args):
         raise ValueError('Model-free mode requires four Policy trainer ranks and four inference replicas')
     if args.gpu_layout != 'four_rank_split_train':
         raise ValueError('Model-free mode requires the concurrent four-card split layout')
-    args.num_rollout_workers = 4
+    args.num_rollout_workers = real_worker_count()
     args.num_ctrl_inference_actors = args.num_reward_inference_actors = 0
     args.ctrl_eval_interval = 0
     if args.num_eval_workers == 0:
@@ -37,7 +48,8 @@ def pipeline_configuration(args):
         values = json.loads(Path(source).read_text(encoding='utf8'))
     else:
         values = {}
-    values.update(model_free=True, real_workers=4, max_real_in_flight=4,
+    workers = real_worker_count()
+    values.update(model_free=True, real_workers=workers, max_real_in_flight=workers,
                   imagination_workers=0, max_imagine_in_flight=0,
                   inventory_refill_enabled=False, seed_reserve_per_bucket=0)
     return PipelineBudgetConfig.from_json(values)

@@ -2,6 +2,7 @@
 from collections import Counter
 import ast
 import copy
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
@@ -53,6 +54,15 @@ class ModelFreeStartupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'concurrent Policy'):
             startup.execute_definition(startup.startup_ast(), namespace)(args)
         self.assertEqual(context.actors, [])
+
+    def test_worker_count_benchmark_expands_both_workers_and_episode_leases(self):
+        args = startup.arguments(overrides=('--model-free',))
+        with patch.dict(os.environ, ACCERL_JIT_BENCH_PLAN='plan.json',
+                        WEAVER_BENCH_NORMAL_ONLY='1', WEAVER_BENCH_REAL_WORKERS='8'):
+            configure_training_mode(args)
+            config = pipeline_configuration(args)
+        self.assertEqual((args.num_rollout_workers, config.real_workers, config.max_real_in_flight), (8,8,8))
+        self.assertEqual((args.num_inference_actors, args.num_trainer_gpus), (4,4))
 
     def test_unaccounted_model_free_collection_is_rejected_before_loading_models(self):
         args = startup.arguments(overrides=('--model-free', '--num-eval-workers', '0'))

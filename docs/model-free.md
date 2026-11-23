@@ -142,6 +142,17 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 原站 GPU 4–7 空闲时可运行 `./run.sh bench-admission-pulse --id p189-admission-pulse`，用 `bench-admission-pulse-status` 和同一 ID 查状态。三组使用相同的 P189 权重、零学习率和等概率连续采样。正常组照常采集和更新，另外两组在首次更新边界分别暂缓新动作请求或新训练更新 5 秒。每组连续观察三次更新，计时包含这 5 秒。三个条件轮换顺序，各测三次。实验目录中的 `plan.json` 记录提交号与配置，`result.json` 记录各次观测。
 
+### 比较每卡一个或两个真实 rollout
+
+在原站 GPU 4–7 上依次提交下面两个作业。等前一个退出，再提交下一个。两个作业都用 P189、零学习率、等概率连续抽样和 Eval0。每卡常驻一个训练 rank、一个推理副本，第二个环境共享同卡推理。每次作业预热一次，再连续测三组，每组三次更新，全程照常放行训练和采集。
+
+```bash
+./run.sh bench-admission-pulse --id p189-normal-real8 --real-workers 8 --normal-only
+./run.sh bench-admission-pulse --id p189-normal-real4 --real-workers 4 --normal-only
+```
+
+用 `bench-admission-pulse-status --id <作业ID>` 查询状态。比较每秒完成的真实动作、实际推理 batch 大小、动作请求 p95 和三次权重发布总耗时。测量窗口从首个更新的提交意图开始，截止到第三次发布完成。
+
 ## 验证范围
 
 CPU 测试覆盖开关与旧模式回归、真实采集/150步失败、真实数据独立成批、当前Value GAE、四rank分片、四卡映射、Eval0/4、TensorBoard筛选、预算并发、Policy-only保存/读取/最终审计，以及受管/可移植启动参数传递。实际 GPU 模型加载、EGL上下文、首个 NCCL/ZeRO 更新和长训吞吐仍需新实验验收；本次不占用现有训练资源。

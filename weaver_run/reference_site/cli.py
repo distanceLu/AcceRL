@@ -313,6 +313,12 @@ def main():
                                            'bench-admission-pulse','bench-admission-pulse-status'):
         parser=argparse.ArgumentParser(prog='./run.sh '+sys.argv[1])
         parser.add_argument('--id',dest='label',required=True)
+        parser.set_defaults(real_workers=4, normal_only=False)
+        if sys.argv[1]=='bench-admission-pulse':
+            parser.add_argument('--real-workers', type=int, choices=(4,8), default=4,
+                                help='真实环境总数，8 个时每个推理副本接两个环境')
+            parser.add_argument('--normal-only', action='store_true',
+                                help='只测正常共置，连续三组各三次更新')
         opts=parser.parse_args(sys.argv[2:])
         require((os.getuid(),socket.gethostname())==(1004,'h20-xyff52ab-0001') and
                 (HOME/'.owner').read_text()=='WEAVER server catalog v1\n','Unexpected benchmark server')
@@ -322,7 +328,8 @@ def main():
             fcntl.flock(lock,fcntl.LOCK_EX)
             print(json.dumps(submit(sys.modules[__name__],opts.label,status=sys.argv[1].endswith('-status'),
                                     sampling=sys.argv[1].startswith('bench-episode-sampling'),
-                                    pulse=sys.argv[1].startswith('bench-admission-pulse')),indent=2))
+                                    pulse=sys.argv[1].startswith('bench-admission-pulse'),
+                                    real_workers=opts.real_workers, normal_only=opts.normal_only),indent=2))
         return
     if len(sys.argv)>1 and sys.argv[1]=='legacy-baseline':
         sys.path.insert(0,str(CHECKOUT))

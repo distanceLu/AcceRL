@@ -22,15 +22,22 @@ WEIGHTS_SHA256 = '9025fd14bd1e7e6bce8b284824a1a4eeb167d6c07b6074acdb00db4653f3e0
 MAX_SECONDS = 3*3600
 
 
-def submit(cli,label,*,status=False,sampling=False,pulse=False):
+def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,normal_only=False):
     cli.require(cli.LABEL.fullmatch(label),'Invalid benchmark label')
     root = cli.EXPERIMENTS/label
     if sampling and pulse:
         raise ValueError('Select one benchmark comparison')
+    if (real_workers not in (4, 8) or (normal_only and not pulse)
+            or (real_workers == 8 and not normal_only)):
+        raise ValueError('Eight real workers require the normal-only admission benchmark')
     prefix = 'weaver-bench-sampling-' if sampling else 'weaver-bench-'
     sid = ('weaver-bench-pulse-' if pulse else prefix) + label
     found = cli.lookup(sid)
     if status or found:
+        if found and pulse and not status:
+            prior = json.loads((root/'plan.json').read_bytes())
+            if (prior['real_workers'], prior.get('normal_only', False)) != (real_workers, normal_only):
+                raise ValueError('Benchmark label already has different rollout settings')
         info = dict(label=label,job_id=found['id'] if found else None,
                     state=found['state'] if found else 'not_submitted',root=str(root))
         for file in ('benchmark_queue.json','submission.json'):
@@ -52,13 +59,15 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False):
     plan = dict(git_commit=commit,git_branch=BRANCH,label=label,output=str(root),
                 checkpoint=str(weights),checkpoint_sha256=WEIGHTS_SHA256,
                 checkpoint_policy_step=189,checkpoint_run_id=SOURCE_RUN,
-                real_workers=4,online_eval_workers=0,fixed_validation=False,
+                real_workers=real_workers,online_eval_workers=0,fixed_validation=False,
                 global_batch=576,rank_size=144,train_micro=16,context_micro=2,
                 source='fresh_real_rollouts_at_P189',gpu_ids=[4,5,6,7])
     if pulse:
         plan.update(comparison='admission_pulse', real_sampling='uniform_blocks',
                     warmup_updates=1, measured_blocks=3, updates_per_arm=3,
                     pulse_seconds=5.0, minimum_replay_chunks=2048)
+        if normal_only:
+            plan['normal_only'] = True
     else:
         plan.update(warmup_pairs=1, measured_pairs=6, minimum_replay_chunks=4096)
     if sampling:
@@ -66,7 +75,8 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False):
         plan['sampling_modes'] = ['chunks','whole_episodes','uniform_blocks']
     comparison = 'three-sampler learner JIT' if sampling else 'same-cohort learner JIT'
     if pulse:
-        comparison = 'rollout and trainer admission pulses'
+        comparison = (f'normal colocation with {real_workers} real workers' if normal_only
+                      else 'rollout and trainer admission pulses')
     job = dict(name='WEAVER '+comparison+' '+label,submission_id=sid,cwd=str(runtime),
                argv=[cli.PYTHON,'-B',str(runtime/'weaver_run/reference_site/jit_bench_queue.py'),
                      str(root/'plan.json')],manual=False,timeout_seconds=MAX_SECONDS+180)
@@ -79,7 +89,9 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False):
         root.mkdir(mode=0o700)
         put(root/'plan.json',plan)
     put(root/'experiment.json',dict(profile='model_free_jit_bench',git_commit=commit,job=job))
-    put(root/'git-pipeline.json',effective_pipeline(True))
+    pipeline = effective_pipeline(True)
+    pipeline.update(real_workers=real_workers, max_real_in_flight=real_workers)
+    put(root/'git-pipeline.json',pipeline)
     mps=(cli.PARENT/'mps.json').read_bytes()
     if hashlib.sha256(mps).hexdigest()!=cli.PROFILES['restore']['mps_receipt']:
         raise ValueError('Frozen GPU4-7 MPS receipt differs')
@@ -100,6 +112,14 @@ def benchmark_argv(plan):
         # 最终驱动按命令行重建环境，JIT 和采样方式必须随同传入。
         argv.extend(['--trajectory-jit', '--real-sampling', plan['real_sampling']])
     return argv
+
+
+def pulse_environment(plan):
+    if plan.get('comparison') != 'admission_pulse':
+        return {}
+    return {'WEAVER_BENCH_REAL_WORKERS':str(plan.get('real_workers', 4)),
+            'WEAVER_BENCH_NORMAL_ONLY':'1' if plan.get('normal_only') else '0',
+            'ACCERL_TENSORBOARD':'0'}
 
 
 def run(plan_file):
@@ -129,8 +149,7 @@ def run(plan_file):
         state.update(trajectory_jit=True, real_sampling=plan['real_sampling'],
                      initial_policy={'checkpoint': str(path)})
     env=formal_environment(state,data,pre)
-    if pulse:
-        env['ACCERL_TENSORBOARD'] = '0'
+    env.update(pulse_environment(plan))
     env.update(ACCERL_RAY_TMP='/dev/shm/weaverintegrated_jb_'+str(os.getpid()),
                ACCERL_JIT_BENCH_PLAN=str(plan_file),ACCERL_JIT_BENCH_OUTPUT=str(root),
                ACCERL_JIT_BENCH_CHECKPOINT=str(path))

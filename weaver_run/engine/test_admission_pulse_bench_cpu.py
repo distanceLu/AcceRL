@@ -9,8 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from admission_pulse_bench import (CONDITIONS, block_order, fixed_weight_epoch, replay_snapshot,
-                                  recent_demand, run_pulse_benchmark)
+from admission_pulse_bench import CONDITIONS, block_order, fixed_weight_epoch, replay_snapshot, recent_demand
 
 
 class PulseBenchTest(unittest.TestCase):
@@ -56,6 +55,26 @@ class PulseBenchTest(unittest.TestCase):
         self.assertEqual(out['version'],4)
 
     def test_crossover_counts_the_scheduled_delay_and_all_28_publications(self):
+        report = self.run_trial(normal_only=False, real_workers=4)
+        self.assertEqual(report['completed_updates'],28)
+        for block in report['blocks']:
+            for arm in block['arms']:
+                first=arm['updates'][0]
+                self.assertGreater(first['dispatch_ns'],arm['intent_wall_ns'])
+                if arm['condition']=='trainer_yields':
+                    self.assertGreaterEqual(first['dispatch_ns']-arm['intent_wall_ns'],5_000_000_000)
+
+    def test_normal_only_runs_three_windows_of_three_updates(self):
+        for collectors in (4,8):
+            with self.subTest(collectors=collectors):
+                report = self.run_trial(normal_only=True, real_workers=collectors)
+                self.assertEqual(report['completed_updates'], 10)
+                self.assertEqual([[(a['condition'], a['pulse'], len(a['updates'])) for a in b['arms']]
+                                  for b in report['blocks']], [[('normal', None, 3)]] * 3)
+                self.assertEqual(report['actual_real_workers'], collectors)
+
+    def run_trial(self, *, normal_only, real_workers):
+        from paired_gpu_driver import run_benchmark
         def actor(**methods):
             return SimpleNamespace(**{key:SimpleNamespace(remote=fn) for key,fn in methods.items()})
         version = 0
@@ -90,22 +109,21 @@ class PulseBenchTest(unittest.TestCase):
         def sleep(seconds):
             nonlocal ns
             ns += round(seconds*1e9)
+        if normal_only:
+            plan.update(normal_only=True, real_workers=real_workers)
         with (tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ,
-                ACCERL_TRAJECTORY_JIT='1',ACCERL_REAL_SAMPLING='uniform_blocks',ACCERL_RUN_ID='trial'),
+                ACCERL_TRAJECTORY_JIT='1',ACCERL_REAL_SAMPLING='uniform_blocks',ACCERL_RUN_ID='trial',
+                ACCERL_JIT_BENCH_OUTPUT=tmp, ACCERL_JIT_BENCH_PLAN=str(Path(tmp)/'plan.json'),
+                WEAVER_BENCH_NORMAL_ONLY='1' if normal_only else '0', WEAVER_BENCH_REAL_WORKERS=str(real_workers)),
                 patch('time.time_ns',now),patch('time.sleep',sleep),patch('builtins.print')):
-            run_pulse_benchmark(ray=SimpleNamespace(get=lambda v,timeout:v,wait=lambda *a,**kw:([],None)),
-                plan=plan,output=Path(tmp),replay=replay,trainers=[rank_worker(i) for i in range(4)],
+            (Path(tmp)/'plan.json').write_text(json.dumps(plan))
+            run_benchmark(ray=SimpleNamespace(get=lambda v,timeout:v,wait=lambda *a,**kw:([],None)),
+                args=SimpleNamespace(num_eval_workers=0,batch_autotune=True),
+                replay=replay,trainers=[rank_worker(i) for i in range(4)],
                 inference=[infer(i) for i in range(4)],collector=actor(stop_pipeline=lambda:None),
-                workers=[actor(run=lambda:None) for _ in range(4)],sync_policy=publish,
+                workers=[actor(run=lambda:None) for _ in range(real_workers)],sync_policy=publish,
                 experiment=SimpleNamespace(event=lambda *a,**kw:None,flush=lambda:None),stop_requested=lambda:False)
-            report=json.loads((Path(tmp)/'result.json').read_text())
-        self.assertEqual(report['completed_updates'],28)
-        for block in report['blocks']:
-            for arm in block['arms']:
-                first=arm['updates'][0]
-                self.assertGreater(first['dispatch_ns'],arm['intent_wall_ns'])
-                if arm['condition']=='trainer_yields':
-                    self.assertGreaterEqual(first['dispatch_ns']-arm['intent_wall_ns'],5_000_000_000)
+            return json.loads((Path(tmp)/'result.json').read_text())
 
 
 if __name__ == '__main__':

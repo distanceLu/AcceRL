@@ -79,11 +79,14 @@ def run_pulse_benchmark(*, ray, plan, output, replay, trainers, inference, colle
             or os.environ.get('ACCERL_TRAJECTORY_JIT') != '1'
             or os.environ.get('ACCERL_REAL_SAMPLING') != 'uniform_blocks'):
         raise ValueError('Invalid P189 continuous-update crossover plan')
+    normal_only = plan.get('normal_only', False)
+    protocol = ('One warmup then three normal-colocation windows.' if normal_only else
+                'One warmup then three blocks of three crossover arms.')
     report = dict(status='running', run_id=os.environ['ACCERL_RUN_ID'], plan=plan,
         git_commit=plan['git_commit'], checkpoint=plan['checkpoint'], learning_rate=0,
+        actual_real_workers=len(workers),
         order_seed=ORDER_SEED, demand_window_ns=DEMAND_WINDOW_NS, blocks=[],
-        protocol='One live replay and optimizer/EMA history. One warmup then three blocks of three arms. '
-                 'Real successful uses and IPC publications advance logical versions at fixed numerical P189 weights. '
+        protocol=protocol + ' Real successful uses and IPC publications advance logical versions at fixed numerical P189 weights. '
                  'Intent is after common readiness, before any pulse, reservation, training or publication.')
 
     def progress(phase):
@@ -165,7 +168,7 @@ def run_pulse_benchmark(*, ray, plan, output, replay, trainers, inference, colle
         for index in range(plan['measured_blocks']):
             block = dict(block=index+1, arms=[])
             report['blocks'].append(block)
-            for condition in block_order(index):
+            for condition in (('normal',) if normal_only else block_order(index)):
                 arm_id = f"block-{index+1}-{condition}"
                 progress('preparing '+arm_id)
                 ready = wait_for_arm_ready(GLOBAL_BATCH)
