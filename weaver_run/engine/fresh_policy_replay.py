@@ -148,6 +148,7 @@ class SegmentReplay:
         self.on_add, self.on_evict = on_add, on_evict
         self.segments = OrderedDict()
         self.samples, self.reservations = {}, {}
+        self.reservation_sampling = {}
         self.versions = None
 
     def set_versions(self, policy, world):
@@ -202,9 +203,24 @@ class SegmentReplay:
                 return False
         return sample['uses'] + sample['reserved'] < self.config.max_sample_uses
 
-    def reserve(self, count):
+    def reserve(self, count, *, real_sampling='chunks'):
         if type(count) is not int or count < 1:
             raise ValueError('FRESH cohort size must be positive')
+        details = None
+        if real_sampling == 'chunks':
+            selected = self._choose_chunks(count)
+        else:
+            from real_episode_sampling import choose
+            selected, details = choose(self, count, real_sampling)
+        token = 'fresh-reservation:' + uuid.uuid4().hex
+        for sid in selected:
+            self.samples[sid]['reserved'] += 1
+        self.reservations[token] = set(selected)
+        if details is not None:
+            self.reservation_sampling[token] = details
+        return token, selected
+
+    def _choose_chunks(self, count):
         eligible = [(sid, value) for sid, value in self.samples.items() if self._eligible(value)]
         if self.config.real_policy_replay and not self.config.real_only:
             real_count = max(1, min(count - 1, int(round(count * self.config.real_fraction))))
@@ -220,14 +236,11 @@ class SegmentReplay:
             if len(eligible) < count:
                 raise FreshReplayNotReady('Fresh cohort unavailable; no stale Replay fallback')
             selected = self.rng.sample([sid for sid, _ in eligible], count)
-        token = 'fresh-reservation:' + uuid.uuid4().hex
-        for sid in selected:
-            self.samples[sid]['reserved'] += 1
-        self.reservations[token] = set(selected)
-        return token, selected
+        return selected
 
     def cancel(self, token):
         selected = self.reservations.pop(token)
+        self.reservation_sampling.pop(token, None)
         for sid in selected:
             self.samples[sid]['reserved'] -= 1
 
@@ -247,6 +260,7 @@ class SegmentReplay:
             pending.remove(sid)
         if not pending:
             del self.reservations[token]
+            self.reservation_sampling.pop(token, None)
 
     def materialize(self, sample_ids, refreshed_values=None, *, jit_denominators=None):
         from critic_refresh_plan import RefreshedSuffix

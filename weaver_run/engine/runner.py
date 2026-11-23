@@ -129,6 +129,7 @@ def collect(data, state):
     if 'model_free_success_target' in state:
         result['model_free_success_target'] = state['model_free_success_target']
     result['trajectory_jit']=state.get('trajectory_jit',False)
+    result['real_sampling'] = state.get('real_sampling', 'chunks')
     result['batch_autotune']=state.get('batch_autotune',False)
     activity=data/'training/fixed_validation_activity.json'
     if activity.exists():
@@ -328,6 +329,7 @@ def formal_environment(state, data, pre):
     env.update(cost_scheduler_environment_configuration(state, data))
     env['ACCERL_BATCH_AUTOTUNE']=str(int(state.get('batch_autotune',False)))
     env['ACCERL_TRAJECTORY_JIT']=str(int(state.get('trajectory_jit',False)))
+    env['ACCERL_REAL_SAMPLING'] = state.get('real_sampling', 'chunks')
     if state.get('trajectory_jit'):
         env['ACCERL_TRAJECTORY_JIT_INITIAL_CHECKPOINT']=state['initial_policy']['checkpoint']
     if state.get('model_free'):
@@ -363,7 +365,7 @@ def enforce_stop_window(data, state, child, now=None):
         raise SaveGraceExpired('Manual-stop GPU save grace of900seconds expired')
 
 
-def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False):
+def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks'):
     if mode != 'manual' or stop_on_target:
         raise RuntimeError('This source only permits a fresh manual-stop formal run')
     if data.resolve() != (safe.MASTER/'formal_v3').resolve():
@@ -383,10 +385,12 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     from pipeline_budget import PipelineBudgetConfig
     from model_free_mode import pipeline_configuration
     from launch import mode_options, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
+    from launch import real_sampling_options, real_sampling_arguments
     selected=mode_options(model_free,num_eval_workers)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
-    validation=fixed_validation_options(model_free,num_eval_workers,fixed_validation)
+    selected['real_sampling'] = real_sampling_options(trajectory_jit, real_sampling)
+    validation=fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling)
     budget = pipeline_configuration(SimpleNamespace(model_free=model_free,pipeline_config=pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG')))
     if os.getuid()!=1004:
         raise RuntimeError('Wrong UID')
@@ -439,7 +443,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else []) + (['--trajectory-jit'] if trajectory_jit else [])
+            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else []) + (['--trajectory-jit'] if trajectory_jit else []) + real_sampling_arguments(real_sampling)
             child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),*launch_args],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
@@ -721,7 +725,8 @@ if __name__ == '__main__':
     a.add_argument('--num-eval-workers',type=int)
     a.add_argument('--batch-autotune',action='store_true')
     a.add_argument('--trajectory-jit',action='store_true')
-    from launch import add_fixed_validation_arguments, fixed_validation_overrides
+    from launch import add_fixed_validation_arguments, add_real_sampling_argument, fixed_validation_overrides
+    add_real_sampling_argument(a)
     add_fixed_validation_arguments(a)
     args = a.parse_args()
     if args.mode == 'guard':
@@ -731,4 +736,4 @@ if __name__ == '__main__':
     elif args.mode == 'sample':
         safe.sample(args.data, args.run_id)
     else:
-        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit)
+        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling)

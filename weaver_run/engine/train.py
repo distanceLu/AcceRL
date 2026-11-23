@@ -728,10 +728,11 @@ class ReplayBufferActor:
         self.fresh_refresh_micro = 2
         import os
         self.trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+        self.real_sampling = os.environ.get('ACCERL_REAL_SAMPLING', 'chunks')
 
-    async def freeze_gpu_trial(self, batch_size, cohort_id):
+    async def freeze_gpu_trial(self, batch_size, cohort_id, sampling=False):
         from gpu_trial_replay import freeze_trial
-        return await freeze_trial(self, batch_size, cohort_id)
+        return await freeze_trial(self, batch_size, cohort_id, sampling=sampling)
 
     async def gpu_trial_batch(self, cohort_id, arm):
         from gpu_trial_replay import trial_shards
@@ -902,7 +903,7 @@ class ReplayBufferActor:
             return {key: value for key, value in previous.items() if key != 'sample_ids'}
         snapshot = shortage(self.fresh_store, batch_size)
         try:
-            token, sample_ids = self.fresh_store.reserve(batch_size)
+            token, sample_ids = self.fresh_store.reserve(batch_size, real_sampling=self.real_sampling)
         except FreshReplayNotReady:
             return dict(snapshot, ready=False, batch_size=batch_size)
         self._model_free_admission = dict(snapshot, ready=True, batch_size=batch_size,
@@ -942,7 +943,10 @@ class ReplayBufferActor:
                     if (admission is None or not self.fresh_config.real_only or not self.fresh_config.refresh_gae
                             or len(self.fresh_critics) != 4):
                         raise ValueError('Trajectory JIT needs the admitted four-rank real-only cohort')
-                    sample_ids, jit_denominators, placement = arrange_trajectory_draw(self.fresh_store, sample_ids)
+                    sample_ids, jit_denominators, placement = arrange_trajectory_draw(
+                        self.fresh_store, sample_ids, preserve_rank_shards=self.real_sampling != 'chunks')
+                    placement['real_sampling'] = (self.fresh_store.reservation_sampling[token]
+                        if self.real_sampling != 'chunks' else dict(requested='chunks', actual='chunks'))
                 elif self.fresh_config.refresh_gae:
                     from critic_refresh_plan import (balanced_refresh_groups, refresh_plan_receipt,
                         dependency_refresh_groups, dependency_refresh_receipt)
@@ -1023,7 +1027,8 @@ class ReplayBufferActor:
                                    for source in ('real','imagined')},
                     rewards_refreshed=False, critic_refreshed=bool(refreshed is not None))
                 if self.trajectory_jit:
-                    metadata.update(jit_pending=True, **dependency_counts(self.fresh_store, sample_ids))
+                    metadata.update(jit_pending=True, real_sampling=placement['real_sampling']['actual'],
+                                    **dependency_counts(self.fresh_store, sample_ids))
                     self.telemetry.event('trajectory_jit_placement', actual_batch=len(sample_ids),
                         details=dict(**placement, reservation_id=ledger['reservation_id'],
                                      policy_version=self.fresh_store.versions[0]))
@@ -4318,6 +4323,9 @@ def main(args):
     from model_free_control import ModelFreeControlConfig
     fixed_validation_config = ModelFreeControlConfig.from_args(args) if model_free else None
     trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+    real_sampling = os.environ.get('ACCERL_REAL_SAMPLING', 'chunks')
+    if real_sampling not in ('chunks', 'whole_episodes', 'uniform_blocks') or (real_sampling != 'chunks' and not trajectory_jit):
+        raise ValueError('Real episode sampling requires the model-free trajectory JIT trainer')
     if trajectory_jit and (not model_free or not batch_autotune or args.num_trainer_gpus != 4
             or args.num_inference_actors != 4 or args.num_eval_workers != 0
             or fixed_validation_config.interval_env_steps != 0
@@ -5067,7 +5075,7 @@ def main(args):
         if trajectory_jit:
             experiment.event('trajectory_jit_training_started', details=dict(
                 train_micro=16, gradient_accumulation=9, global_batch=576, context_micro=2,
-                advantage_normalization='ema_zscore', advantage_ema_beta=.9,
+                advantage_normalization='ema_zscore', advantage_ema_beta=.9, real_sampling=real_sampling,
                 real_rollout_workers=len(rollout_workers), eval_workers=len(eval_workers)))
             experiment.flush()
     while run_policy.should_continue(global_step=global_step, train_iters=args.train_iters,

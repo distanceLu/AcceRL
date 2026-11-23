@@ -216,12 +216,15 @@ def _capacity_shards(ids):
     return [positions[start:start+144] for start in range(0,576,144)]
 
 
-def ordered_positions(ids, segments):
+def ordered_positions(ids, segments, *, preserve_rank_shards=False):
     if len(set(ids)) != 576 or len(ids) != 576:
         raise ValueError('Paired GPU trial requires 576 distinct real actions')
-    base = place_segments(ids, segments)
+    # 新采样器已给每卡分好 144 个，跨卡的同一轨迹分别按完整后缀计费。
+    base = None if preserve_rank_shards else place_segments(ids, segments)
     if base is None:
-        by_rank = [geometry([ids[pos] for pos in row], segments) for row in _capacity_shards(ids)]
+        shards = ([ids[start:start+144] for start in range(0, 576, 144)] if preserve_rank_shards
+                  else [[ids[pos] for pos in row] for row in _capacity_shards(ids)])
+        by_rank = [geometry(shard, segments) for shard in shards]
         base = [list(selected) for selected,_ in by_rank]
     else:
         by_rank = [geometry(ids, segments)] * 4

@@ -257,16 +257,17 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
         raise ValueError('Source/root paths must be canonical and not symlinks')
     evidence = verify_git(source, git_commit)
     sys.path.insert(0,str(source.parent))
-    from launch import batch_autotune_options, trajectory_jit_options
+    from launch import batch_autotune_options, trajectory_jit_options, real_sampling_options
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
+    real_sampling_options(trajectory_jit, real_sampling)
     if trajectory_jit:
         from engine.trajectory_jit_initial import verify_reference_policy
         verify_reference_policy(root)
@@ -291,7 +292,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
         with tempfile.TemporaryDirectory(dir=root,prefix='.policy-admission-') as temp:
             work=Path(temp)
             command,environment,resources=prepare(work,['4','5','6','7'],'weaverintegrated_cpu_check',
-                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit)
+                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling)
             check(work,command,environment,resources)
     else:
         backend = read_json(root / BACKEND_CONFIG)
@@ -310,10 +311,10 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     return {**evidence, 'source': str(source), 'experiment_root': str(root),
             'backend': backend, 'mps_receipt_sha256': hashlib.sha256(mps_path.read_bytes()).hexdigest(),
             'world_admission': admission, 'cost_scheduler': scheduler, 'mps_boot_id': authorization['boot_id'],
-            'gpu_access_performed': False,'trajectory_jit':trajectory_jit,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
+            'gpu_access_performed': False,'real_sampling':real_sampling,'trajectory_jit':trajectory_jit,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -331,6 +332,7 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
                OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
     env['ACCERL_BATCH_AUTOTUNE']=str(int(batch_autotune))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit))
+    env['ACCERL_REAL_SAMPLING'] = real_sampling
     env['ACCERL_MODEL_FREE']=str(int(model_free))
     if model_free or num_eval_workers is not None:
         env['ACCERL_NUM_EVAL_WORKERS']=str((0 if model_free else 3) if num_eval_workers is None else num_eval_workers)
@@ -340,8 +342,10 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
     if model_free is not None:
+        if state.get('real_sampling', 'chunks') != real_sampling:
+            raise ValueError('Runner real sampling differs from queue request')
         if state.get('trajectory_jit',False) != trajectory_jit:
             raise ValueError('Runner trajectory JIT mode differs from queued arguments')
         if state.get('batch_autotune',False) != batch_autotune:
@@ -356,7 +360,7 @@ def check_state(state, source, root, run_id=None, supervisor=None, *, model_free
             from model_free_completion import rollout_target_config
             if state.get('model_free_success_target') != rollout_target_config():
                 raise ValueError('Runner rollout success target differs from queued training')
-            if state.get('fixed_validation_config') != fixed_validation_options(model_free,num_eval_workers,fixed_validation):
+            if state.get('fixed_validation_config') != fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling):
                 raise ValueError('Runner fixed validation configuration differs from queued arguments')
     rid = state.get('run_id', '')
     if (not re.fullmatch(r'weaverintegrated_[A-Za-z0-9_-]+', rid)
@@ -899,23 +903,28 @@ def runner_command(args):
     if count is not None:
         command += ['--num-eval-workers',str(count)]
     sys.path.insert(0,str(args.source.parent))
-    from launch import fixed_validation_options, fixed_validation_overrides, fixed_validation_arguments, batch_autotune_options
-    command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args)))
+    from launch import (fixed_validation_options, fixed_validation_overrides, fixed_validation_arguments,
+                        batch_autotune_options, real_sampling_arguments)
+    command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args),real_sampling=getattr(args,'real_sampling','chunks')))
     if batch_autotune_options(model_free,count,getattr(args,'batch_autotune',False)):
         command += ['--batch-autotune']
     if getattr(args,'trajectory_jit',False):
         command += ['--trajectory-jit']
+    command += real_sampling_arguments(getattr(args, 'real_sampling', 'chunks'))
     return command
 
 
 def mode_kwargs(args):
     sys.path.insert(0,str(args.source.parent))
-    from launch import fixed_validation_options, fixed_validation_overrides, batch_autotune_options
+    from launch import fixed_validation_options, fixed_validation_overrides, batch_autotune_options, real_sampling_options
     selected=dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
-    selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args))
+    real_sampling = real_sampling_options(getattr(args, 'trajectory_jit', False), getattr(args, 'real_sampling', 'chunks'))
+    selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args), real_sampling=real_sampling)
     selected['batch_autotune']=batch_autotune_options(selected['model_free'],selected['num_eval_workers'],getattr(args,'batch_autotune',False))
     if getattr(args,'trajectory_jit',False):
         selected['trajectory_jit']=True
+    if real_sampling != 'chunks':
+        selected['real_sampling'] = real_sampling
     return selected
 
 
@@ -1144,7 +1153,8 @@ def main():
     parser.add_argument('--batch-autotune',action='store_true')
     parser.add_argument('--trajectory-jit',action='store_true')
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-    from launch import add_fixed_validation_arguments
+    from launch import add_fixed_validation_arguments, add_real_sampling_argument
+    add_real_sampling_argument(parser)
     add_fixed_validation_arguments(parser)
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()

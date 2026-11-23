@@ -17,6 +17,36 @@ from test_model_free_launch_cpu import launch, training, site, HERE
 
 
 class BatchAutotuneLaunchTests(unittest.TestCase):
+    def test_real_sampling_reaches_queue_runner_and_driver(self):
+        for mode in ('whole_episodes', 'uniform_blocks'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                stage = Path(temp)
+                (stage / 'mps.json').write_bytes(b'{}')
+                with patch.object(site, 'PARENT', stage), patch.object(site, 'revision', return_value='a'*40), \
+                        patch.object(site, 'PROFILES', {'restore': {'mps_receipt': site.digest(b'{}')}}):
+                    record = site.make_spec('restore', 'test-run', stage, stage, checkout=HERE.parent,
+                        model_free=True, batch_autotune=True, trajectory_jit=True, real_sampling=mode)
+                self.assertEqual(record['real_sampling'], mode)
+                queue_args = record['job']['argv']
+                self.assertEqual(queue_args[queue_args.index('--real-sampling')+1], mode)
+                self.assertEqual(record['fixed_validation_config']['interval_env_steps'], 0)
+                args = types.SimpleNamespace(source=HERE/'engine', root=stage, model_free=True,
+                    num_eval_workers=0, batch_autotune=True, trajectory_jit=True, real_sampling=mode)
+                runner = training.runner_command(args)
+                self.assertEqual(runner[runner.index('--real-sampling')+1], mode)
+                self.assertEqual(runner[runner.index('--fixed-validation-interval-env-steps')+1], '0')
+                self.assertEqual(training.mode_kwargs(args)['real_sampling'], mode)
+                captured = {}
+                with patch.dict(os.environ, {'ACCERL_PIPELINE_CONFIG':'/pipeline','ACCERL_FINAL_CHECKPOINT':'/out'}), \
+                        patch.object(os,'chdir'), patch.object(os,'execve',side_effect=lambda p,a,e:captured.update(e)):
+                    launch.exec_managed_driver(['--model-free','--batch-autotune','--trajectory-jit',
+                                                '--real-sampling', mode])
+                self.assertEqual(captured['ACCERL_REAL_SAMPLING'], mode)
+        with self.assertRaisesRegex(ValueError, 'trajectory-jit'):
+            launch.real_sampling_options(False, 'whole_episodes')
+        with self.assertRaisesRegex(ValueError, 'interval'):
+            launch.fixed_validation_options(True, 0, {'interval_env_steps':100000}, real_sampling='whole_episodes')
+
     def test_trajectory_jit_reaches_driver_without_a_benchmark_plan(self):
         for mf, evaluation, tuned in ((False,0,True),(True,2,True),(True,0,False)):
             with self.assertRaises(ValueError):

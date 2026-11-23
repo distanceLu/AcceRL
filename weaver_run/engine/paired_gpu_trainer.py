@@ -142,6 +142,7 @@ def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
         if counts != list(expected):
             raise RuntimeError('GPU context observations differ from the planned per-bundle suffixes')
     return dict(arm=arm, rank=owner.rank, version=version, version_after=owner.global_step,
+                sampled_device_memory=owner._autobatch_train_report['memory'] if arm=='jit' else None,
                 cohort_id=shard['cohort_id'], sample_ids_sha256=shard['sample_ids_sha256'],
                 optimizer_delta=int(owner.model.global_steps)-before,
                 skipped_delta=int(owner.model.skipped_steps)-before_skips,

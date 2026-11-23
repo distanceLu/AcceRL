@@ -1,9 +1,37 @@
 """Bounded, frozen-weight A/B with four live real collectors and real IPC publications."""
 import json
+from itertools import permutations
 import math
 import os
 from pathlib import Path
 import time
+
+
+def sampling_order(round_index):
+    from gpu_trial_replay import SAMPLING_MODES
+    orders = tuple(permutations(SAMPLING_MODES))
+    return orders[max(0, round_index-1) % len(orders)]
+
+
+def summarize_sampling(rounds):
+    from gpu_trial_replay import SAMPLING_MODES
+    measured = [p for p in rounds if not p['warmup']]
+    if len(measured) != 6:
+        raise ValueError('Sampling comparison requires six measured rounds')
+    summary = {}
+    for mode in SAMPLING_MODES:
+        arms = [next(a for a in p['arms'] if a['name']==mode) for p in measured]
+        mean = lambda values: sum(values)/len(measured)
+        summary[mode] = dict(
+            mean_update_and_ipc_s=mean(a['seconds'] for a in arms),
+            mean_reserve_s=mean(a['sampling_seconds'] for a in arms),
+            mean_reserve_plus_update_s=mean(a['seconds']+a['sampling_seconds'] for a in arms),
+            mean_distinct_episodes=mean(p['frozen']['draws'][mode]['trajectories'] for p in measured),
+            mean_context_observations=mean(sum(r['context']['observations'] for r in a['trainers']) for a in arms),
+            fallback_rounds=sum(a['actual_sampling']!=mode for a in arms),
+            sampled_peak_device_used_bytes=max(r['sampled_device_memory']['peak_used_bytes']
+                                               for a in arms for r in a['trainers']))
+    return summary
 
 
 def summarize(pairs):
@@ -39,6 +67,7 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
     warmup = plan['warmup_pairs']
     measured = plan['measured_pairs']
     minimum = plan['minimum_replay_chunks']
+    sampling = plan.get('comparison') == 'episode_sampling'
     if (warmup != 1 or measured != 6 or not 576 <= minimum <= args.replay_capacity):
         raise ValueError('Unsupported paired benchmark plan or Replay capacity')
     pairs = []
@@ -47,6 +76,11 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
                   checkpoint=str(os.environ['ACCERL_JIT_BENCH_CHECKPOINT']),
                   source='new real cohorts at frozen P189 weights', learning_rate=0,
                   timing='Replay arm dispatch through full optimizer update and four IPC acknowledgements; common cohort capture, configuration and reporting outside timing')
+    if sampling:
+        report.update(source='Three different 576-ID cohorts drawn from one immutable eligible pool per round. '
+                      'No uses charged. Four live collectors continue with frozen numerical Policy weights.',
+                      timing='Per-mode reserve CPU time and dispatch-to-IPC wall time recorded separately. '
+                      'Common inventory fill, cohort retention and reporting excluded. Shared optimizer/EMA history, zero LR.')
 
     def progress(phase):
         report['phase'] = phase
@@ -80,7 +114,8 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
         wall_start_ns = time.time_ns()
         start = time.perf_counter()
         shards = replay.gpu_trial_batch.options(num_returns=4).remote(cohort,arm)
-        ranks = [t.run_paired_gpu_arm.remote(arm,shard) for t,shard in zip(trainers,shards)]
+        compute = 'jit' if sampling else arm
+        ranks = [t.run_paired_gpu_arm.remote(compute,shard) for t,shard in zip(trainers,shards)]
         results = ray.get(ranks, timeout=1200)
         before_publish = time.perf_counter()
         sync_policy()
@@ -129,20 +164,24 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
             check()
             cid=f'pair-{pair_id:02d}'
             progress('freezing '+cid)
-            frozen=ray.get(replay.freeze_gpu_trial.remote(576,cid), timeout=600)
+            frozen=ray.get(replay.freeze_gpu_trial.remote(576,cid,sampling), timeout=600)
             if not frozen['ready']:
                 raise RuntimeError(f'Replay could not freeze {cid}: {frozen}')
             pair=dict(cohort=cid, warmup=pair_id<warmup, frozen=frozen, arms=[])
             pairs.append(pair)
             try:
-                names=('pruned','jit') if pair_id%2==0 else ('jit','pruned')
+                names=sampling_order(pair_id) if sampling else (('pruned','jit') if pair_id%2==0 else ('jit','pruned'))
                 for name in names:
                     progress(f'{cid} {name} starting')
                     arm=measure(name,version,cid)
-                    if any(rank['sample_ids_sha256'] != frozen['sample_ids_sha256']
+                    draw = frozen['draws'][name] if sampling else frozen
+                    if any(rank['sample_ids_sha256'] != draw['sample_ids_sha256']
                            or (not pair['warmup'] and rank['initialization_prepass'])
                            for rank in arm['trainers']):
                         raise RuntimeError('Measured ranks did not consume the frozen steady-state cohort')
+                    if sampling:
+                        arm['sampling_seconds'] = draw['sampling_seconds']
+                        arm['actual_sampling'] = draw['sampling']['actual']
                     version+=1
                     pair['arms'].append(arm)
                     progress(f'{cid} {name} complete ({arm["seconds"]:.2f}s)')
@@ -151,7 +190,7 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
         report['final_weights']=digests()
         if report['initial_weights'][0]['sha256']!=report['final_weights'][0]['sha256']:
             raise RuntimeError('Policy weights changed between paired trials')
-        report['summary']=summarize(pairs)
+        report['summary']=summarize_sampling(pairs) if sampling else summarize(pairs)
         report['phase']='completed'
         report['status']='completed'
         atomic_json(output/'result.json',report)

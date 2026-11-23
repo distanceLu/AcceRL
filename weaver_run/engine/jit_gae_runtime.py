@@ -317,7 +317,7 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         normalization_scale=float(packed[-5]),ema_mean=float(packed[-4]),ema_variance=float(packed[-3]),
         raw_advantage_mean=float(packed[-2]),raw_advantage_std=float(packed[-1]),
         selected_chunks=len(observations),unique_rank_segments=len(segments),
-        sampling_protocol=config.policy_sampling,
+        sampling_protocol=owner.capture_policy_metadata.get('real_sampling', config.policy_sampling),
         whole_imagined_segments=sum(s.get('source') == 'imagined' for s in segments.values()),
         dependency_states=dependency_states,global_rank_dependency_states=int(packed[-9]),
         global_no_grad_states=int(packed[-8]),global_selected_grad_states=int(packed[-7]),

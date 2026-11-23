@@ -120,6 +120,26 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 配置选择、显存保护与跳过原因通过 `BatchAutotune` 遥测、TensorBoard以及实验内JSON记录。CPU测试能够验证边界、权重计算和参数传递；真实GPU上的显存峰值、四卡ZeRO行为和提速幅度仍需要首次开启后的实验测量。
 
+## 真实回合采样（四卡 trajectory JIT）
+
+原站可用同一初始策略和训练配方分别提交两组实验，标签请按实际实验命名。
+
+```bash
+cd /mnt/data/lcx1/dong/WEAVER
+./run.sh start restore --model-free --batch-autotune --trajectory-jit --num-eval-workers 0 --fixed-validation-interval-env-steps 0 --real-sampling whole_episodes --id mf-whole-episodes
+./run.sh start restore --model-free --batch-autotune --trajectory-jit --num-eval-workers 0 --fixed-validation-interval-env-steps 0 --real-sampling uniform_blocks --id mf-uniform-blocks
+```
+
+| `--real-sampling` | 一次 576 个 chunk 如何选择 |
+|---|---|
+| `chunks`（默认） | 从当前合格的 chunk 无放回均匀抽样，再把同轨迹的计算尽量放到同卡。 |
+| `whole_episodes` | 只从每个 chunk 都合格的完整回合中，随机化装出四份各 144 个 chunk。有限次搜索未装满时，该次改用 `uniform_blocks` 并记录原因。该模式适合测量整回合计算的速度。 |
+| `uniform_blocks` | 随机排列回合，组内按时间排列合格 chunk，从均匀随机起点沿环取 576 个不同 ID，再每卡分 144 个。对一次固定的合格池，每个 chunk 的入选概率均为 576 除以合格数，相邻 chunk 常会一起入选。 |
+
+两种新模式都保留原轨迹终点。中间有超龄或用满的 chunk、环回起点、或轨迹跨卡时，Trainer 仍按原后缀计算 GAE。仅选中的 ID 产生训练损失、进入 EMA 并记一次 Replay 使用。每卡仍运行 9 个 16 样本微批，动作 token 分母沿用预留时每 8 个样本的有效 token 数。首个 EMA 窗口包含初始化前向，统计稳态前向和速度时应单列。
+
+原站固定 P189 权重的短测通过 `./run.sh bench-episode-sampling --id p189-sampling-compare` 提交，使用 `./run.sh bench-episode-sampling-status --id p189-sampling-compare` 查询。同一时点的 Replay 库存分别产生三种采样的 cohort，三臂均运行 JIT。短测比较采样及更新时间；达到同一成功率的墙钟与动作数需要用正式训练测量。
+
 ## 验证范围
 
 CPU 测试覆盖开关与旧模式回归、真实采集/150步失败、真实数据独立成批、当前Value GAE、四rank分片、四卡映射、Eval0/4、TensorBoard筛选、预算并发、Policy-only保存/读取/最终审计，以及受管/可移植启动参数传递。实际 GPU 模型加载、EGL上下文、首个 NCCL/ZeRO 更新和长训吞吐仍需新实验验收；本次不占用现有训练资源。

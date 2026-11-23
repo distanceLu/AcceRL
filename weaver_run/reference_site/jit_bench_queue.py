@@ -22,10 +22,10 @@ WEIGHTS_SHA256 = '9025fd14bd1e7e6bce8b284824a1a4eeb167d6c07b6074acdb00db4653f3e0
 MAX_SECONDS = 3*3600
 
 
-def submit(cli,label,*,status=False):
+def submit(cli,label,*,status=False,sampling=False):
     cli.require(cli.LABEL.fullmatch(label),'Invalid benchmark label')
     root = cli.EXPERIMENTS/label
-    sid = 'weaver-bench-'+label
+    sid = ('weaver-bench-sampling-' if sampling else 'weaver-bench-')+label
     found = cli.lookup(sid)
     if status or found:
         info = dict(label=label,job_id=found['id'] if found else None,
@@ -49,7 +49,11 @@ def submit(cli,label,*,status=False):
                 warmup_pairs=1,measured_pairs=6,minimum_replay_chunks=4096,
                 global_batch=576,rank_size=144,train_micro=16,context_micro=2,
                 source='fresh_real_rollouts_at_P189',gpu_ids=[4,5,6,7])
-    job = dict(name='WEAVER same-cohort learner JIT '+label,submission_id=sid,cwd=str(runtime),
+    if sampling:
+        plan['comparison'] = 'episode_sampling'
+        plan['sampling_modes'] = ['chunks','whole_episodes','uniform_blocks']
+    comparison = 'three-sampler learner JIT' if sampling else 'same-cohort learner JIT'
+    job = dict(name='WEAVER '+comparison+' '+label,submission_id=sid,cwd=str(runtime),
                argv=[cli.PYTHON,'-B',str(runtime/'weaver_run/reference_site/jit_bench_queue.py'),
                      str(root/'plan.json')],manual=False,timeout_seconds=MAX_SECONDS+180)
     if root.exists():

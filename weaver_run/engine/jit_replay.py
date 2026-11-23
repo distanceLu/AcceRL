@@ -2,7 +2,7 @@
 import math
 
 
-def arrange_trajectory_draw(store, sample_ids):
+def arrange_trajectory_draw(store, sample_ids, *, preserve_rank_shards=False):
     from gpu_trial_placement import ordered_positions
     geometry, denominators = {}, {}
     for start in range(0, len(sample_ids), 8):
@@ -16,12 +16,13 @@ def arrange_trajectory_draw(store, sample_ids):
             geometry[segment.segment_id] = (segment.count, bool(segment.terminated[-1]))
             tokens += int(segment.action_mask[sample['index']].sum())
         denominators.update(dict.fromkeys(group, tokens))
-    positions, context_counts = ordered_positions(sample_ids, geometry)
+    positions, context_counts = ordered_positions(sample_ids, geometry, preserve_rank_shards=preserve_rank_shards)
     by_rank = [[sample_ids[p] for p in row] for row in positions]
     rank_visits = sum(len({store.samples[sid]['segment_id'] for sid in rank}) for rank in by_rank)
     return sum(by_rank, []), denominators, dict(raw_sample_ids=sample_ids,
         trajectories=len(geometry), extra_trajectory_rank_visits=rank_visits-len(geometry),
-        context_by_rank_bundle=context_counts)
+        context_by_rank_bundle=context_counts, rank_shards_preserved=preserve_rank_shards,
+        token_denominator='valid_tokens_in_original_eight_at_reservation')
 
 
 def dependency_counts(store, sample_ids):

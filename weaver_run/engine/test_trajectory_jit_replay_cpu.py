@@ -13,6 +13,35 @@ from training_topology import GlobalBatchCoordinator
 
 
 class TrajectoryReplayTests(unittest.TestCase):
+    def test_episode_protocol_preserves_admitted_rank_members_and_full_suffix_geometry(self):
+        for requested in ('whole_episodes', 'uniform_blocks'):
+            with self.subTest(requested=requested), patch.dict(os.environ,
+                    ACCERL_TRAJECTORY_JIT='1', ACCERL_REAL_SAMPLING=requested):
+                replay = runtime_replay_class()(2400, dict(real_only=True, real_fraction=1.,
+                    real_policy_replay=True, refresh_gae=True, signal_telemetry=True))
+                replay.capture_ledger, replay.telemetry = Ledger(), Writer()
+                replay.configure_fresh([object()]*4)
+                replay.set_fresh_versions(5, 0)
+                for episode in range(83):
+                    replay.add_segment(real_segment(episode, 9))
+                replay.fresh_store.rng = random.Random(17)
+                admission = replay.admit_model_free_batch(576)
+                draw = replay._model_free_admission['sample_ids']
+                shards = asyncio.run(replay.trajectory_jit_shards(576))
+                placement = next(row['details'] for kind, row in replay.telemetry.events
+                                 if kind == 'trajectory_jit_placement')
+                self.assertEqual(placement['real_sampling']['actual'], requested)
+                for rank, shard in enumerate(shards):
+                    observations, _, _, _, _, meta = shard
+                    self.assertEqual(meta['real_sampling'], requested)
+                    self.assertEqual(set(meta['sample_ids']), set(draw[144*rank:144*(rank+1)]))
+                    segments, bundles = build_plan(observations, 16, 5)
+                    contexts = [sum(n.selected is None for n in b.nodes) for b in bundles]
+                    self.assertEqual(placement['context_by_rank_bundle'][rank], contexts)
+                    if requested == 'whole_episodes':
+                        self.assertEqual(sum(contexts), sum(not s['terminated'][-1] for s in segments.values()))
+                self.assertEqual(admission['reservation_token'], shards[0][-1]['fresh_reservation_token'])
+
     def test_admission_placement_receipts_and_exact_uses(self):
         with patch.dict(os.environ, ACCERL_TRAJECTORY_JIT='1'):
             replay = runtime_replay_class()(2400, dict(real_only=True, real_fraction=1., real_policy_replay=True,

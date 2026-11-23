@@ -7,12 +7,16 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 
 import numpy as np
 
 from critic_refresh_plan import dependency_refresh_groups, dependency_refresh_receipt
 from fresh_policy_replay import FreshReplayNotReady, SegmentReplay
 from gpu_trial_placement import ordered_positions
+
+
+SAMPLING_MODES = ('chunks', 'whole_episodes', 'uniform_blocks')
 
 
 def _digest(ids):
@@ -64,7 +68,42 @@ def _persist(directory, frozen, cohort_id):
                 segment_bytes=sum(row['bytes'] for row in paths.values()))
 
 
-async def freeze_trial(owner, count, cohort_id):
+def freeze_sampling_round(owner, count, cohort_id):
+    """三次抽样在同一 actor 调用内完成，中间不让出执行权、不消耗样本。"""
+    real = owner.fresh_store
+    draws, receipts = {}, {}
+    for mode in SAMPLING_MODES:
+        started = time.perf_counter()
+        try:
+            token, ids = real.reserve(count, real_sampling=mode)
+        except FreshReplayNotReady:
+            return dict(ready=False, replay_resident=len(real.samples))
+        try:
+            sampling_s = time.perf_counter() - started
+            sampling = dict(real.reservation_sampling.get(token, {'requested':mode,'actual':mode}))
+            sampled = SegmentReplay(real.capacity, owner.fresh_config)
+            sampled.set_versions(*real.versions)
+            for sid in ids:
+                sample = real.samples[sid]
+                key = sample['segment_id']
+                sampled.samples[sid] = dict(sample)
+                sampled.segments[key] = real.segments[key]
+        finally:
+            real.cancel(token)
+        receipt = dict(sample_ids=list(ids), sample_ids_sha256=_digest(ids), trajectories=len(sampled.segments),
+                       sampling_seconds=sampling_s, sampling=sampling)
+        draws[mode] = dict(key=cohort_id+'-'+mode, ids=ids, store=sampled, receipt=receipt,
+                           preserve_rank_shards=mode!='chunks')
+        receipts[mode] = receipt
+    receipt = dict(ready=True, cohort_id=cohort_id, version=real.versions[0], n=count,
+                   replay_resident_at_draw=len(real.samples), real_admitted_at_draw=owner.fresh_admitted_chunks['real'],
+                   draws=receipts)
+    # 保留三组样本的轨迹引用，采集端在测速期间可以继续逐出旧数据。
+    owner._gpu_trial = dict(key=cohort_id, busy=False, receipt=receipt, draws=draws)
+    return receipt
+
+
+async def freeze_trial(owner, count, cohort_id, *, sampling=False):
     output = os.environ.get('ACCERL_JIT_BENCH_OUTPUT')
     key = str(cohort_id)
     if (not output or not Path(output).is_absolute() or
@@ -79,6 +118,8 @@ async def freeze_trial(owner, count, cohort_id):
         if previous['key'] == key and previous.get('receipt'):
             return previous['receipt']
         raise RuntimeError('A frozen trial already exists or is being written')
+    if sampling:
+        return freeze_sampling_round(owner, count, key)
     real = owner.fresh_store
     try:
         token, ids = real.reserve(count)
@@ -127,10 +168,12 @@ def release_trial(owner, cohort_id):
 async def trial_shards(owner, cohort_id, arm):
     frozen = getattr(owner,'_gpu_trial',None)
     if (frozen is None or frozen['key'] != str(cohort_id) or not frozen.get('receipt')
-            or frozen['busy'] or arm not in ('jit','pruned')):
+            or frozen['busy'] or arm not in frozen.get('draws', ('jit','pruned'))):
         raise RuntimeError('Invalid frozen GPU trial arm or concurrent replay of its inputs')
     frozen['busy'] = True
     try:
+        if 'draws' in frozen:
+            return await _shards(owner, frozen['draws'][arm], 'jit')
         return await _shards(owner, frozen, arm)
     finally:
         frozen['busy'] = False
@@ -172,7 +215,7 @@ async def _shards(owner, frozen, arm):
                                original_denominators=[original_denominators[p//8] for p in range(sl.start,sl.stop)]))
     else:
         geometry = {key:(s.count,bool(s.terminated[-1])) for key,s in store.segments.items()}
-        positions, counts = ordered_positions(ids,geometry)
+        positions, counts = ordered_positions(ids,geometry,preserve_rank_shards=frozen.get('preserve_rank_shards',False))
         descriptors = {}
         for key, indices in selected.items():
             s = store.segments[key]
