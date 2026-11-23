@@ -44,6 +44,7 @@ def replay_snapshot(owner):
 
 
 async def fixed_weight_epoch(owner, step):
+    from torch.cuda import memory_stats
     if (not os.environ.get('ACCERL_JIT_BENCH_PLAN') or not owner._trajectory_jit or
             not owner.cpu_replay_prefetch or os.environ.get('ACCERL_REAL_SAMPLING') != 'uniform_blocks'):
         raise ValueError('Frozen pulse epoch requires the isolated trajectory-JIT benchmark')
@@ -64,7 +65,12 @@ async def fixed_weight_epoch(owner, step):
             or meta['real_sampling'] != 'uniform_blocks' or len(ids) != 144
             or {row['sample_id'] for row in owner._jit_receipts} != set(ids)):
         raise RuntimeError('Optimizer, versions or charged trajectory JIT cohort failed verification')
+    # 从执行更新的进程读取配置和分配器计数，避免只记录启动器的意图。
+    stats = memory_stats()
     return dict(rank=owner.rank, version=step, started_ns=start, finished_ns=end,
+                cache_trim=dict(micro=os.environ['ACCERL_TRIM_MICRO_CACHE'], idle=os.environ['ACCERL_TRIM_IDLE_CACHE']),
+                allocator={key: stats[key] for key in ('num_alloc_retries','num_ooms',
+                                                       'reserved_bytes.all.current','reserved_bytes.all.peak')},
                 sample_ids=ids, reservation=meta['fresh_reservation_token'])
 
 
@@ -141,6 +147,9 @@ def run_pulse_benchmark(*, ray, plan, output, replay, trainers, inference, colle
         dispatch_ns = time.time_ns()
         ranks = ray.get([t.run_admission_pulse_epoch.remote(step) for t in trainers], timeout=600)
         ranks.sort(key=lambda row:row['rank'])
+        expected_trim = dict(micro='0' if plan.get('no_micro_cache_trim') else '1', idle='1')
+        if any(r['cache_trim'] != expected_trim for r in ranks):
+            raise RuntimeError(f"Trainer cache trim differs from plan: {[r['cache_trim'] for r in ranks]}")
         ids = [sid for row in ranks for sid in row['sample_ids']]
         if (len(set(ids)) != GLOBAL_BATCH or [row['rank'] for row in ranks] != list(range(4))
                 or any(row['version'] != step or row['reservation'] != admission['reservation_token']
@@ -153,6 +162,8 @@ def run_pulse_benchmark(*, ray, plan, output, replay, trainers, inference, colle
                     eligible_at_admission=admission['eligible']['real'], dispatch_ns=dispatch_ns,
                     rank_started_ns=[r['started_ns'] for r in ranks],
                     rank_finished_ns=[r['finished_ns'] for r in ranks],
+                    rank_cache_trim=[dict(rank=r['rank'], **r['cache_trim']) for r in ranks],
+                    rank_allocator=[dict(rank=r['rank'], **r['allocator']) for r in ranks],
                     publish_started_ns=publish_started_ns, published_ns=published_ns,
                     sample_ids_sha256=hashlib.sha256(json.dumps(ids, separators=(',',':')).encode()).hexdigest())
 

@@ -153,6 +153,12 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 用 `bench-admission-pulse-status --id <作业ID>` 查询状态。比较每秒完成的真实动作、实际推理 batch 大小、动作请求 p95 和三次权重发布总耗时。测量窗口从首个更新的提交意图开始，截止到第三次发布完成。
 
+测试 Trainer 在连续微批间复用显存缓存时，使用同一份四环境配方，额外传入 `--no-micro-cache-trim`。训练器仍在更新结束时回收缓存，推理服务也按原配方回收。各训练 rank 的实际开关随更新记录在作业结果中。
+
+```bash
+./run.sh bench-admission-pulse --id p189-real4-no-micro-trim --normal-only --real-workers 4 --no-micro-cache-trim
+```
+
 ## 验证范围
 
 CPU 测试覆盖开关与旧模式回归、真实采集/150步失败、真实数据独立成批、当前Value GAE、四rank分片、四卡映射、Eval0/4、TensorBoard筛选、预算并发、Policy-only保存/读取/最终审计，以及受管/可移植启动参数传递。实际 GPU 模型加载、EGL上下文、首个 NCCL/ZeRO 更新和长训吞吐仍需新实验验收；本次不占用现有训练资源。

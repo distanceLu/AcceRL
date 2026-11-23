@@ -12,6 +12,21 @@ from weaver_run.reference_site import jit_bench_queue
 
 
 class PulseSubmissionTest(unittest.TestCase):
+    def test_cache_comparison_overrides_only_micro_trim_after_recipe_load(self):
+        import launch
+        plan = dict(comparison='admission_pulse', real_sampling='uniform_blocks',
+                    normal_only=True, real_workers=4)
+        for disabled in (True, False):
+            with self.subTest(disabled=disabled):
+                plan['no_micro_cache_trim'] = disabled
+                env = dict(jit_bench_queue.pulse_environment(plan), ACCERL_JIT_BENCH_PLAN='plan.json',
+                           ACCERL_PIPELINE_CONFIG='pipeline.json', ACCERL_FINAL_CHECKPOINT='weights')
+                with patch.dict(os.environ, env, clear=True), patch.object(os, 'chdir'), patch.object(os, 'execve') as run:
+                    launch.exec_managed_driver(jit_bench_queue.benchmark_argv(plan)[2:])
+                effective = run.call_args.args[2]
+                self.assertEqual(effective['ACCERL_TRIM_MICRO_CACHE'], '0' if disabled else '1')
+                self.assertEqual(effective['ACCERL_TRIM_IDLE_CACHE'], '1')
+
     def test_eight_worker_managed_argv_matches_actual_job(self):
         import launch
         plan = {'comparison':'admission_pulse', 'real_sampling':'uniform_blocks',
@@ -74,13 +89,18 @@ class PulseSubmissionTest(unittest.TestCase):
             self.assertEqual(plan['real_workers'], 8)
             self.assertEqual((pipeline['real_workers'], pipeline['max_real_in_flight']), (8, 8))
             self.assertEqual(jit_bench_queue.pulse_environment(plan), {
-                'WEAVER_BENCH_REAL_WORKERS':'8', 'WEAVER_BENCH_NORMAL_ONLY':'1',
+                'WEAVER_BENCH_REAL_WORKERS':'8', 'WEAVER_BENCH_NORMAL_ONLY':'1','WEAVER_BENCH_NO_MICRO_CACHE_TRIM':'0',
                 'ACCERL_TENSORBOARD':'0'})
             self.assertEqual(jit_bench_queue.pulse_environment({'comparison':'episode_sampling'}), {})
             old = jit_bench_queue.pulse_environment({'comparison':'admission_pulse'})
             self.assertEqual((old['WEAVER_BENCH_REAL_WORKERS'], old['WEAVER_BENCH_NORMAL_ONLY']), ('4', '0'))
             with self.assertRaises(ValueError):
                 jit_bench_queue.submit(cli, 'invalid-count', pulse=True, real_workers=6)
+            jit_bench_queue.submit(cli, 'cache-test', pulse=True, normal_only=True, no_micro_cache_trim=True)
+            plan = json.loads((cli.EXPERIMENTS/'cache-test'/'plan.json').read_bytes())
+            self.assertTrue(plan['no_micro_cache_trim'])
+            with self.assertRaises(ValueError):
+                jit_bench_queue.submit(cli, 'invalid-cache', pulse=True, no_micro_cache_trim=True)
 
 
 if __name__ == '__main__':

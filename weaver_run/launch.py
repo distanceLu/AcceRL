@@ -272,6 +272,11 @@ def exec_managed_driver(overrides=()):
                             fixed_validation=fixed_validation_overrides(selected),batch_autotune=selected.batch_autotune,real_sampling=selected.real_sampling,real_workers=workers) + other
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
+    if (selected.model_free and env.get('ACCERL_JIT_BENCH_PLAN') and
+            env.get('WEAVER_BENCH_NORMAL_ONLY') == '1' and workers == 4 and
+            env.get('WEAVER_BENCH_NO_MICRO_CACHE_TRIM') == '1'):
+        # 配方载入后只覆盖微批回收，更新结束和推理端的 idle 回收沿用原值。
+        env['ACCERL_TRIM_MICRO_CACHE'] = '0'
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(selected.batch_autotune)),ACCERL_MODEL_FREE=str(int(selected.model_free)),
                ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(selected.model_free, selected.num_eval_workers, selected.batch_autotune, selected.trajectory_jit)))

@@ -22,7 +22,8 @@ WEIGHTS_SHA256 = '9025fd14bd1e7e6bce8b284824a1a4eeb167d6c07b6074acdb00db4653f3e0
 MAX_SECONDS = 3*3600
 
 
-def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,normal_only=False):
+def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,normal_only=False,
+           no_micro_cache_trim=False):
     cli.require(cli.LABEL.fullmatch(label),'Invalid benchmark label')
     root = cli.EXPERIMENTS/label
     if sampling and pulse:
@@ -30,13 +31,16 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,no
     if (real_workers not in (4, 8) or (normal_only and not pulse)
             or (real_workers == 8 and not normal_only)):
         raise ValueError('Eight real workers require the normal-only admission benchmark')
+    if no_micro_cache_trim and not (pulse and normal_only and real_workers == 4):
+        raise ValueError('Micro cache trim comparison requires four workers and --normal-only')
     prefix = 'weaver-bench-sampling-' if sampling else 'weaver-bench-'
     sid = ('weaver-bench-pulse-' if pulse else prefix) + label
     found = cli.lookup(sid)
     if status or found:
         if found and pulse and not status:
             prior = json.loads((root/'plan.json').read_bytes())
-            if (prior['real_workers'], prior.get('normal_only', False)) != (real_workers, normal_only):
+            if (prior['real_workers'], prior.get('normal_only', False), prior.get('no_micro_cache_trim', False)
+                    ) != (real_workers, normal_only, no_micro_cache_trim):
                 raise ValueError('Benchmark label already has different rollout settings')
         info = dict(label=label,job_id=found['id'] if found else None,
                     state=found['state'] if found else 'not_submitted',root=str(root))
@@ -68,6 +72,7 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,no
                     pulse_seconds=5.0, minimum_replay_chunks=2048)
         if normal_only:
             plan['normal_only'] = True
+            plan['no_micro_cache_trim'] = no_micro_cache_trim
     else:
         plan.update(warmup_pairs=1, measured_pairs=6, minimum_replay_chunks=4096)
     if sampling:
@@ -119,6 +124,7 @@ def pulse_environment(plan):
         return {}
     return {'WEAVER_BENCH_REAL_WORKERS':str(plan.get('real_workers', 4)),
             'WEAVER_BENCH_NORMAL_ONLY':'1' if plan.get('normal_only') else '0',
+            'WEAVER_BENCH_NO_MICRO_CACHE_TRIM':'1' if plan.get('no_micro_cache_trim') else '0',
             'ACCERL_TENSORBOARD':'0'}
 
 

@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import time
@@ -49,8 +50,13 @@ class PulseBenchTest(unittest.TestCase):
             owner._jit_receipts = [dict(sample_id=s) for s in ids]
             return (1.,0.,0.,0.,0.,dict(policy=0.,value=0.),step)
         owner.run_training_epoch=train
-        with patch.dict(os.environ, ACCERL_JIT_BENCH_PLAN='p', ACCERL_REAL_SAMPLING='uniform_blocks'):
+        stats = dict.fromkeys(('num_alloc_retries','num_ooms','reserved_bytes.all.current','reserved_bytes.all.peak'), 0)
+        with (patch.dict(os.environ, ACCERL_JIT_BENCH_PLAN='p', ACCERL_REAL_SAMPLING='uniform_blocks',
+                         ACCERL_TRIM_MICRO_CACHE='0', ACCERL_TRIM_IDLE_CACHE='1'),
+              patch.dict(sys.modules, {'torch.cuda': SimpleNamespace(memory_stats=lambda: stats)})):
             out=asyncio.run(fixed_weight_epoch(owner,4))
+        self.assertEqual(out['cache_trim'], {'micro':'0','idle':'1'})
+        self.assertEqual(out['allocator'], stats)
         self.assertEqual(out['sample_ids'],ids)
         self.assertEqual(out['version'],4)
 
@@ -73,7 +79,13 @@ class PulseBenchTest(unittest.TestCase):
                                   for b in report['blocks']], [[('normal', None, 3)]] * 3)
                 self.assertEqual(report['actual_real_workers'], collectors)
 
-    def run_trial(self, *, normal_only, real_workers):
+    def test_cache_trial_checks_each_rank(self):
+        report = self.run_trial(normal_only=True, real_workers=4, disable_trim=True)
+        self.assertEqual([r['micro'] for r in report['warmup']['rank_cache_trim']], ['0'] * 4)
+        with self.assertRaisesRegex(RuntimeError, 'cache trim'):
+            self.run_trial(normal_only=True, real_workers=4, disable_trim=True, bad_rank=True)
+
+    def run_trial(self, *, normal_only, real_workers, disable_trim=False, bad_rank=False):
         from paired_gpu_driver import run_benchmark
         def actor(**methods):
             return SimpleNamespace(**{key:SimpleNamespace(remote=fn) for key,fn in methods.items()})
@@ -86,6 +98,8 @@ class PulseBenchTest(unittest.TestCase):
                 self.assertEqual(step,version+1)
                 return dict(rank=rank,version=step,reservation='r'+str(version),
                     sample_ids=[f'{rank}-{i}' for i in range(144)],
+                    cache_trim=dict(micro='0' if disable_trim and not (bad_rank and rank==2) else '1',idle='1'),
+                    allocator={},
                     started_ns=time.time_ns(),finished_ns=time.time_ns())
             return actor(run_admission_pulse_epoch=epoch, configure_batch_autotune=lambda *_:None,
                 paired_gpu_weight_digest=lambda:dict(rank=rank,sha256='same_weights'))
@@ -111,6 +125,8 @@ class PulseBenchTest(unittest.TestCase):
             ns += round(seconds*1e9)
         if normal_only:
             plan.update(normal_only=True, real_workers=real_workers)
+        if disable_trim:
+            plan['no_micro_cache_trim'] = True
         with (tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ,
                 ACCERL_TRAJECTORY_JIT='1',ACCERL_REAL_SAMPLING='uniform_blocks',ACCERL_RUN_ID='trial',
                 ACCERL_JIT_BENCH_OUTPUT=tmp, ACCERL_JIT_BENCH_PLAN=str(Path(tmp)/'plan.json'),
