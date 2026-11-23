@@ -55,6 +55,29 @@ class OrangeAdmissionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             training.check_cost_scheduler_state(state,self.source,self.root)
 
+    def test_formal_model_free_request_binds_eight_rollouts_and_trainer_cache(self):
+        from weaver_run.reference_site import cli
+        args = SimpleNamespace(source=cli.CHECKOUT/'weaver_run/engine', root=self.root,
+                               model_free=True, num_eval_workers=0, batch_autotune=True,
+                               trajectory_jit=True, real_sampling='uniform_blocks',
+                               real_workers=8, no_micro_cache_trim=True)
+        receipt = b'{}'
+        (self.root/'mps.json').write_bytes(receipt)
+        with patch.object(cli, 'PARENT', self.root), patch.object(cli, 'revision', return_value='a'*40), \
+             patch.object(cli, 'PROFILES', {'restore': {'mps_receipt': cli.digest(receipt)}}):
+            record = cli.make_spec('restore', 'training', self.root, self.root, checkout=cli.CHECKOUT,
+                model_free=True, real_workers=8, no_micro_cache_trim=True)
+        self.assertEqual((record['real_workers'], record['pipeline']['real_workers'],
+                          record['pipeline']['max_real_in_flight']), (8, 8, 8))
+        self.assertTrue(record['no_micro_cache_trim'])
+        for argv in (record['job']['argv'], training.runner_command(args)):
+            self.assertEqual(argv[argv.index('--real-workers')+1], '8')
+            self.assertIn('--no-micro-cache-trim', argv)
+        selected = training.mode_kwargs(args)
+        self.assertEqual((selected['real_workers'], selected['no_micro_cache_trim']), (8, True))
+        env = training.launch_environment(self.root, args.source, {}, **selected)
+        self.assertEqual((env['ACCERL_MODEL_FREE_REAL_WORKERS'], env['ACCERL_TRIM_MICRO_CACHE']), ('8', '0'))
+
     def test_parallel_training_or_extra_card_lane_is_rejected(self):
         for key, value in [('training_gangs', 2), ('training_gangs', True), ('card_inflight', 3)]:
             with self.subTest(key=key, value=value):

@@ -214,12 +214,11 @@ def validate_cost_scheduler_admission(source):
 
 def check_cost_scheduler_state(state, source, root):
     if state.get('model_free'):
-        from model_free_mode import pipeline_configuration
-        from types import SimpleNamespace
-        expected = pipeline_configuration(SimpleNamespace(model_free=True,pipeline_config=source / PIPELINE_CONFIG)).to_dict()
+        from launch import effective_pipeline
+        expected = effective_pipeline(True,real_workers=state.get('real_workers',4))
         if (state.get('cost_scheduler') is not None or state.get('pipeline_config') != expected
                 or state.get('pipeline_config_path') != str(root / 'formal_v3/pipeline_config.json')):
-            raise ValueError('Model-free runner must activate Real4/Imag0 and disable cost scheduling')
+            raise ValueError('Model-free runner real rollout pipeline or cost scheduler differs from the request')
         return True
     expected = validate_cost_scheduler_admission(source)
     observed = state.get('cost_scheduler', {})
@@ -257,14 +256,15 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
         raise ValueError('Source/root paths must be canonical and not symlinks')
     evidence = verify_git(source, git_commit)
     sys.path.insert(0,str(source.parent))
-    from launch import batch_autotune_options, trajectory_jit_options, real_sampling_options
+    from launch import batch_autotune_options, trajectory_jit_options, real_sampling_options, rollout_options
+    rollout_options(model_free,real_workers,no_micro_cache_trim)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     real_sampling_options(trajectory_jit, real_sampling)
@@ -283,7 +283,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
         sys.path.insert(0,str(source.parent))
         from launch import effective_pipeline, mode_options
         mode_options(True,num_eval_workers)
-        if read_json(root / 'git-pipeline.json') != effective_pipeline(True):
+        if read_json(root / 'git-pipeline.json') != effective_pipeline(True,real_workers=real_workers):
             raise ValueError('Frozen model-free pipeline differs from source')
         backend = {'backend':'model_free','world_trainable':False,'reward_provider':'environment'}
         admission = {'skipped':True,'reason':'model_free_has_no_world_assets'}
@@ -292,7 +292,8 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
         with tempfile.TemporaryDirectory(dir=root,prefix='.policy-admission-') as temp:
             work=Path(temp)
             command,environment,resources=prepare(work,['4','5','6','7'],'weaverintegrated_cpu_check',
-                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling)
+                model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,
+                real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim)
             check(work,command,environment,resources)
     else:
         backend = read_json(root / BACKEND_CONFIG)
@@ -311,10 +312,11 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     return {**evidence, 'source': str(source), 'experiment_root': str(root),
             'backend': backend, 'mps_receipt_sha256': hashlib.sha256(mps_path.read_bytes()).hexdigest(),
             'world_admission': admission, 'cost_scheduler': scheduler, 'mps_boot_id': authorization['boot_id'],
+            **(dict(real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim) if model_free else {}),
             'gpu_access_performed': False,'real_sampling':real_sampling,'trajectory_jit':trajectory_jit,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -337,13 +339,17 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     if model_free or num_eval_workers is not None:
         env['ACCERL_NUM_EVAL_WORKERS']=str((0 if model_free else 3) if num_eval_workers is None else num_eval_workers)
     if model_free:
+        env['ACCERL_MODEL_FREE_REAL_WORKERS']=str(real_workers)
+        env['ACCERL_TRIM_MICRO_CACHE']='0' if no_micro_cache_trim else '1'
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env['ACCERL_PIPELINE_CONFIG']=str(root / 'git-pipeline.json')
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False):
     if model_free is not None:
+        if (state.get('real_workers',4),state.get('no_micro_cache_trim',False)) != (real_workers,no_micro_cache_trim):
+            raise ValueError('Runner rollout count or trainer cache policy differs from queue request')
         if state.get('real_sampling', 'chunks') != real_sampling:
             raise ValueError('Runner real sampling differs from queue request')
         if state.get('trajectory_jit',False) != trajectory_jit:
@@ -904,19 +910,20 @@ def runner_command(args):
         command += ['--num-eval-workers',str(count)]
     sys.path.insert(0,str(args.source.parent))
     from launch import (fixed_validation_options, fixed_validation_overrides, fixed_validation_arguments,
-                        batch_autotune_options, real_sampling_arguments)
+                        batch_autotune_options, real_sampling_arguments, rollout_arguments)
     command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args),real_sampling=getattr(args,'real_sampling','chunks')))
     if batch_autotune_options(model_free,count,getattr(args,'batch_autotune',False)):
         command += ['--batch-autotune']
     if getattr(args,'trajectory_jit',False):
         command += ['--trajectory-jit']
     command += real_sampling_arguments(getattr(args, 'real_sampling', 'chunks'))
+    command += rollout_arguments(getattr(args,'real_workers',4),getattr(args,'no_micro_cache_trim',False))
     return command
 
 
 def mode_kwargs(args):
     sys.path.insert(0,str(args.source.parent))
-    from launch import fixed_validation_options, fixed_validation_overrides, batch_autotune_options, real_sampling_options
+    from launch import fixed_validation_options, fixed_validation_overrides, batch_autotune_options, real_sampling_options, rollout_options
     selected=dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
     real_sampling = real_sampling_options(getattr(args, 'trajectory_jit', False), getattr(args, 'real_sampling', 'chunks'))
     selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args), real_sampling=real_sampling)
@@ -925,6 +932,9 @@ def mode_kwargs(args):
         selected['trajectory_jit']=True
     if real_sampling != 'chunks':
         selected['real_sampling'] = real_sampling
+    rollout = rollout_options(selected['model_free'],getattr(args,'real_workers',4),getattr(args,'no_micro_cache_trim',False))
+    if selected['model_free']:
+        selected.update(rollout)
     return selected
 
 
@@ -1153,7 +1163,8 @@ def main():
     parser.add_argument('--batch-autotune',action='store_true')
     parser.add_argument('--trajectory-jit',action='store_true')
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-    from launch import add_fixed_validation_arguments, add_real_sampling_argument
+    from launch import add_fixed_validation_arguments, add_rollout_arguments, add_real_sampling_argument
+    add_rollout_arguments(parser)
     add_real_sampling_argument(parser)
     add_fixed_validation_arguments(parser)
     parser.add_argument('--validate-only', action='store_true')

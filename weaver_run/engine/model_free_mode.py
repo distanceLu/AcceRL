@@ -7,12 +7,13 @@ from pipeline_budget import PipelineBudgetConfig
 
 
 def real_worker_count():
-    # 仅 P189 对照短测覆盖采集并发；正式配方仍按每卡一个环境启动。
-    if not os.environ.get('ACCERL_JIT_BENCH_PLAN') or os.environ.get('WEAVER_BENCH_NORMAL_ONLY') != '1':
-        return 4
-    workers = int(os.environ['WEAVER_BENCH_REAL_WORKERS'])
+    # 已归档的 P189 计划仍通过自己的参数传递并发数。
+    if os.environ.get('ACCERL_JIT_BENCH_PLAN') and os.environ.get('WEAVER_BENCH_NORMAL_ONLY') == '1':
+        workers = int(os.environ['WEAVER_BENCH_REAL_WORKERS'])
+    else:
+        workers = int(os.environ.get('ACCERL_MODEL_FREE_REAL_WORKERS', 4))
     if workers not in (4, 8):
-        raise ValueError('P189 rollout count must be 4 or 8')
+        raise ValueError('Model-free rollout count must be 4 or 8')
     return workers
 
 
@@ -36,7 +37,7 @@ def configure_training_mode(args):
     return True
 
 
-def pipeline_configuration(args):
+def pipeline_configuration(args, *, real_workers=None):
     source = getattr(args, 'pipeline_config', None)
     if not getattr(args, 'model_free', False):
         return PipelineBudgetConfig.from_json(source)
@@ -48,7 +49,7 @@ def pipeline_configuration(args):
         values = json.loads(Path(source).read_text(encoding='utf8'))
     else:
         values = {}
-    workers = real_worker_count()
+    workers = real_worker_count() if real_workers is None else real_workers
     values.update(model_free=True, real_workers=workers, max_real_in_flight=workers,
                   imagination_workers=0, max_imagine_in_flight=0,
                   inventory_refill_enabled=False, seed_reserve_per_bucket=0)

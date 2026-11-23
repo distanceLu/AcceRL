@@ -477,6 +477,22 @@ class ModelFreeLaunchTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--eval-inference-replicas')+1], '0,1,2,3')
         self.assertIn('ModelFree', argv[argv.index('--exp-name')+1])
 
+    def test_formal_eight_workers_propagate_to_driver_and_replay_leases(self):
+        selected = launch.rollout_options(True, real_workers=8, no_micro_cache_trim=True)
+        effective = launch.effective_pipeline(True, real_workers=8)
+        self.assertEqual((effective['real_workers'], effective['max_real_in_flight']), (8, 8))
+        variables = {'ACCERL_PIPELINE_CONFIG':'/pipeline.json', 'ACCERL_FINAL_CHECKPOINT':'/weights'}
+        with patch.dict(os.environ, variables, clear=True), patch.object(os, 'chdir'), patch.object(os, 'execve') as execute:
+            launch.exec_managed_driver(['--model-free', *launch.rollout_arguments(**selected)])
+        _, argv, env = execute.call_args.args
+        self.assertEqual(argv[argv.index('--num-rollout-workers') + 1], '8')
+        self.assertNotIn('--no-micro-cache-trim', argv)
+        self.assertEqual((env['ACCERL_MODEL_FREE_REAL_WORKERS'], env['ACCERL_TRIM_MICRO_CACHE'],
+                          env['ACCERL_TRIM_IDLE_CACHE']), ('8','0','1'))
+        self.assertNotIn('ACCERL_JIT_BENCH_PLAN', env)
+        with self.assertRaises(ValueError):
+            launch.rollout_options(False, real_workers=8)
+
     def test_managed_spec_persists_effective_mode_and_never_reads_world_template(self):
         with tempfile.TemporaryDirectory() as temp:
             stage=Path(temp)

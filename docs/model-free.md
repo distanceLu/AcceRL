@@ -28,7 +28,7 @@ model-free 不创建 World/Reward 模型、想象 worker、WM Replay、WM 训练
 | 训练任务/初态 | spatial task0、50初态 | 保留 |
 | 训练动作上限 | 150；到限失败 | 保留 |
 | 固定评测动作上限 | 220 | 保留 |
-| 真实仿真预算 | 100万步，含 reset settling | 保留，4个worker共享一个全局预算 |
+| 真实仿真预算 | 100万步，含 reset settling | 全部真实 worker 共享 100 万步预算 |
 
 四个 Real worker 是 CPU 仿真进程，各自的 EGL 渲染和 Policy 请求绑定到对应 GPU。GPU4–7 每卡常驻一份 Policy trainer 和一份 Policy inference；不是四个独立策略分别训练，trainer 是同一策略的四个分布式 rank。
 
@@ -73,7 +73,7 @@ Eval0 不写伪造的0%在线 Eval曲线；固定验证只有完整跑完50例�
 
 ## 自动停止与固定验证
 
-**正式达标条件为最近 1,000 个有效真实训练回合中至少 990 次成功。** 四个 Real worker 共享一个窗口，按统计端收到完整回合的顺序，每完成一个有效回合就更新一次。首次达到 980 次成功时记录 98% 里程碑，首次达到 990 次成功时锁定 99% 里程碑。窗口未满时继续采集，即使前 999 个回合全部成功也继续训练。150 动作到限仍未完成任务算一次失败。因剩余预算不足而提前截断的回合、在线 Eval 和固定验证均不进入窗口。
+**正式达标条件为最近 1,000 个有效真实训练回合中至少 990 次成功。** 全部 Real worker 共享一个窗口，按统计端收到完整回合的顺序，每完成一个有效回合就更新一次。首次达到 980 次成功时记录 98% 里程碑，首次达到 990 次成功时锁定 99% 里程碑。窗口未满时继续采集，即使前 999 个回合全部成功也继续训练。150 动作到限仍未完成任务算一次失败。因剩余预算不足而提前截断的回合、在线 Eval 和固定验证均不进入窗口。
 
 达到 99% 后，在安全更新边界结束训练，记录 `rollout_success_target_reached`，覆盖保存 `latest_weights.pt`，再进入原站的收尾评测。已发出的更新可以完成，后续回合导致成功率回落也保留首次达标记录。比较到达 98% 或 99% 的速度时，可查看事件 `model_free_rollout_success_milestone`，或读取最终权重清单 `metadata.model_free_success.crossings` 中对应的 `elapsed_seconds`（从作业启动到统计端收到达标回合）。最终保存的 Policy 版本对应更新边界，窗口中的回合可能由多个 Policy 版本采集。
 
@@ -128,6 +128,14 @@ cd /mnt/data/lcx1/dong/WEAVER
 cd /mnt/data/lcx1/dong/WEAVER
 ./run.sh start restore --model-free --batch-autotune --trajectory-jit --num-eval-workers 0 --fixed-validation-interval-env-steps 0 --real-sampling whole_episodes --id mf-whole-episodes
 ./run.sh start restore --model-free --batch-autotune --trajectory-jit --num-eval-workers 0 --fixed-validation-interval-env-steps 0 --real-sampling uniform_blocks --id mf-uniform-blocks
+```
+
+8 环境正式训练从同一份 P0 初始策略开始。GPU 4–7 各运行两个真实环境、一个推理副本和一个训练 rank。Trainer 跨微批复用显存缓存，更新结束时仍回收缓存。
+
+```bash
+./run.sh start restore --model-free --batch-autotune --trajectory-jit \
+  --real-sampling uniform_blocks --num-eval-workers 0 --fixed-validation-interval-env-steps 0 \
+  --real-workers 8 --no-micro-cache-trim --id mf-jit-uniform8-notrim-20261123-a
 ```
 
 | `--real-sampling` | 一次 576 个 chunk 如何选择 |

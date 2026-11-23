@@ -96,13 +96,16 @@ def handoff_verified():
                 "前序训练或 P0 回放队列记录不匹配")
 
 
-def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
+def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False):
     require(profile=="restore", "This branch manages the original training profile")
     commit=revision(checkout)
     source=checkout/"weaver_run/engine"
     wrapper=checkout/"weaver_run/reference_site/queue_wrapper/queue_entry.py"
-    from launch import real_sampling_options, real_sampling_arguments, expand, settings, mode_options, effective_pipeline, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
+    from launch import rollout_options, rollout_arguments, real_sampling_options, real_sampling_arguments, expand, settings, mode_options, effective_pipeline, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
+    rollout = rollout_options(model_free,real_workers,no_micro_cache_trim)
+    if model_free:
+        selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     selected['real_sampling'] = real_sampling_options(trajectory_jit, real_sampling)
@@ -111,7 +114,8 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False
         template=json.loads((checkout/"weaver_run/recipe/world_backend_config.json").read_bytes())
         config=expand(template,dict(settings(),weaver=str(checkout/"weaver_run/vendor/weaver")))
         json_write(stage/"git-world.json",config)
-    json_write(stage/'git-pipeline.json',effective_pipeline(model_free))
+    pipeline=effective_pipeline(model_free,real_workers=real_workers)
+    json_write(stage/'git-pipeline.json',pipeline)
     json_write(stage/'visualization_config.json',json.loads((checkout/'weaver_run/recipe/visualization.json').read_bytes()))
     mps=(PARENT/"mps.json").read_bytes()
     require(digest(mps)==PROFILES[profile]["mps_receipt"], "MPS receipt differs")
@@ -120,11 +124,12 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False
           "--source",str(source),"--root",str(root),"--git-commit",commit,
           *(["--model-free"] if model_free else ["--native-gpu-preflight"]),
           *(["--num-eval-workers",str(selected["num_eval_workers"])] if model_free or num_eval_workers is not None else []),
-          *fixed_validation_arguments(validation),*(['--batch-autotune'] if batch_autotune else []),*(['--trajectory-jit'] if trajectory_jit else []),*real_sampling_arguments(real_sampling)]
+          *fixed_validation_arguments(validation),*(['--batch-autotune'] if batch_autotune else []),*(['--trajectory-jit'] if trajectory_jit else []),*real_sampling_arguments(real_sampling),
+          *rollout_arguments(real_workers,no_micro_cache_trim)]
     job=dict(name="WEAVER "+profile+" "+label,submission_id="weaver-run-"+label,
              cwd=str(source),argv=argv,manual=True,timeout_seconds=0)
     record=dict(schema=2,profile=profile,label=label,root=str(root),source=str(source),
-                recipe_baseline="1793355532",**selected,pipeline=effective_pipeline(model_free),fixed_validation_config=validation,
+                recipe_baseline="1793355532",**selected,pipeline=pipeline,fixed_validation_config=validation,
                 cost_scheduler_enabled=not model_free, real_collection_action_limit=None,
                 real_training_action_horizon=150,task_action_horizon=150,
                 base_task_action_horizon=220,final_evaluation_action_horizon=220,
@@ -151,6 +156,10 @@ def check_record(record):
     validation=result["validation"]
     require(result.get("valid") and validation["gpu_access_performed"] is False
             and validation["git_commit"]==record["git_commit"], "Queue CPU admission failed")
+    if record.get("model_free"):
+        require((validation["real_workers"],validation["no_micro_cache_trim"]) ==
+                (record.get("real_workers",4),record.get("no_micro_cache_trim",False)),
+                "Validated rollout count or cache policy differs from the job")
 
 
 def create(job, queue):
@@ -184,6 +193,8 @@ def summary(record, job):
         result["git_commit"]=record["git_commit"]
     result['real_sampling'] = record.get('real_sampling', 'chunks')
     result.update(trajectory_jit=record.get('trajectory_jit',False),batch_autotune=record.get("batch_autotune",False),model_free=record.get("model_free",False),num_eval_workers=record.get("num_eval_workers",3))
+    if record.get('model_free'):
+        result.update(real_workers=record.get('real_workers',4),no_micro_cache_trim=record.get('no_micro_cache_trim',False))
     p=Path(record["root"])/"formal_v3/runnerstatus.json"
     if p.is_file():
         state=json.loads(p.read_bytes())
@@ -201,16 +212,19 @@ def save_submission(root, item):
         json_write(path,receipt)
 
 
-def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
-    from launch import real_sampling_options, mode_options, fixed_validation_options, batch_autotune_options, trajectory_jit_options
+def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False):
+    from launch import rollout_options, real_sampling_options, mode_options, fixed_validation_options, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
+    rollout = rollout_options(model_free,real_workers,no_micro_cache_trim)
+    if model_free:
+        selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     selected['real_sampling'] = real_sampling_options(trajectory_jit, real_sampling)
     selected['fixed_validation_config']=fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling)
     # 旧实验记录没有采样开关，沿用原来的 chunk 抽样。
     defaults = dict(model_free=False, batch_autotune=False, trajectory_jit=False,
-                    num_eval_workers=3, real_sampling='chunks')
+                    num_eval_workers=3, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False)
     def same_mode(record):
         return record["profile"] == profile and all(record.get(k, defaults.get(k)) == v
                                                      for k, v in selected.items())
@@ -241,7 +255,8 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
         with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".staging-") as staging:
             staged=Path(staging)/"output"
             staged.mkdir(mode=0o700)
-            r=make_spec(profile,label,root,staged,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling)
+            r=make_spec(profile,label,root,staged,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,
+                        real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim)
             staged.rename(root)
     if not r.get("git_commit"):
         raise ValueError("Use a new label for a Git-backed experiment")
@@ -249,7 +264,8 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     require(revision(CHECKOUT)==revision(RUNTIME,r["git_commit"]),
             "Prepared experiment belongs to another commit; use a fresh label")
     with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".verify-") as temp:
-        expected=make_spec(profile,label,root,Path(temp),model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling)
+        expected=make_spec(profile,label,root,Path(temp),model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,
+                        real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim)
         require(r==expected and (model_free or (root/"git-world.json").read_bytes()==(Path(temp)/"git-world.json").read_bytes())
                 and (root/"git-pipeline.json").read_bytes()==(Path(temp)/"git-pipeline.json").read_bytes()
                 and digest((root/"mps.json").read_bytes())==PROFILES[profile]["mps_receipt"],
@@ -268,12 +284,13 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     return summary(r,item)
 
 
-def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks'):
+def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False):
     with tempfile.TemporaryDirectory(prefix=".cpu-check-",dir=EXPERIMENTS) as d:
         temp=Path(d)
         root=temp/"output"
         root.mkdir()
-        r=make_spec(profile,"validation-"+profile,root,root,checkout=CHECKOUT,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling)
+        r=make_spec(profile,"validation-"+profile,root,root,checkout=CHECKOUT,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,
+                        real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim)
         check_record(r)
         # Production agent.py is pinned to its live root. Exercise the same
         # QueueStore.create used by the create API in a private workerless DB.
@@ -373,10 +390,12 @@ def main():
     p.add_argument("--num-eval-workers",type=int)
     p.add_argument("--batch-autotune",action="store_true")
     p.add_argument("--trajectory-jit",action="store_true")
-    from launch import add_real_sampling_argument, real_sampling_options, add_fixed_validation_arguments, fixed_validation_options, fixed_validation_overrides, batch_autotune_options, trajectory_jit_options
+    from launch import add_rollout_arguments, rollout_options, add_real_sampling_argument, real_sampling_options, add_fixed_validation_arguments, fixed_validation_options, fixed_validation_overrides, batch_autotune_options, trajectory_jit_options
+    add_rollout_arguments(p)
     add_real_sampling_argument(p)
     add_fixed_validation_arguments(p)
     opts=p.parse_args()
+    rollout_options(opts.model_free,opts.real_workers,opts.no_micro_cache_trim)
     batch_autotune_options(opts.model_free,opts.num_eval_workers,opts.batch_autotune)
     trajectory_jit_options(opts.model_free,opts.num_eval_workers,opts.batch_autotune,opts.trajectory_jit)
     real_sampling_options(opts.trajectory_jit, opts.real_sampling)
@@ -404,12 +423,14 @@ def main():
     require(EXPERIMENTS.resolve()==EXPERIMENTS and EXPERIMENTS.stat().st_uid==1004,"实验目录身份不符")
     if action=="check":
         for name in (PROFILES if profile=="all" else [profile]):
-            print(json.dumps(offline_check(name,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit,real_sampling=opts.real_sampling),ensure_ascii=False),flush=True)
+            print(json.dumps(offline_check(name,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit,real_sampling=opts.real_sampling,
+                real_workers=opts.real_workers,no_micro_cache_trim=opts.no_micro_cache_trim),ensure_ascii=False),flush=True)
         return
     if action=="start":
         with (EXPERIMENTS/".launch.lock").open("a") as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
-            result=start(profile,opts.label,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit,real_sampling=opts.real_sampling)
+            result=start(profile,opts.label,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit,real_sampling=opts.real_sampling,
+                real_workers=opts.real_workers,no_micro_cache_trim=opts.no_micro_cache_trim)
     else:
         label=opts.label or latest()
         if not label and action=="status":

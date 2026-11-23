@@ -37,7 +37,8 @@ def main():
                          agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml")))
     expected['model_free']=args.model_free
     if args.model_free:
-        expected.update(num_rollout_workers=4,num_ctrl_inference_actors=0,num_reward_inference_actors=0,
+        workers=int(os.environ.get('ACCERL_MODEL_FREE_REAL_WORKERS', 4))
+        expected.update(num_rollout_workers=workers,num_ctrl_inference_actors=0,num_reward_inference_actors=0,
                         ctrl_eval_interval=0,world_backend_config=None)
     count=int(os.environ.get('ACCERL_NUM_EVAL_WORKERS',0 if args.model_free else 3))
     tuning=os.environ.get('ACCERL_BATCH_AUTOTUNE','0')
@@ -47,8 +48,9 @@ def main():
     if args.model_free or count!=3:
         expected.update(num_eval_workers=count,eval_inference_replicas=','.join(map(str,range(count))))
     if args.model_free:
-        expected['exp_name']=f'OpenVLA_ModelFree_Real4_Imag0_Eval{count}_Budget1M_Manual_gpu47_fresh'
-        validation = fixed_validation_options(True, count, fixed_validation_overrides(args))
+        expected['exp_name']=f'OpenVLA_ModelFree_Real{workers}_Imag0_Eval{count}_Budget1M_Manual_gpu47_fresh'
+        validation = fixed_validation_options(True, count, fixed_validation_overrides(args),
+                                              real_sampling=os.environ.get('ACCERL_REAL_SAMPLING','chunks'))
         expected.update({'fixed_validation_' + key: value for key, value in validation.items()})
     diff={k:[expected.get(k),vars(args).get(k)] for k in expected.keys()|vars(args).keys() if expected.get(k)!=vars(args).get(k)}
     if diff:

@@ -130,6 +130,9 @@ def collect(data, state):
         result['model_free_success_target'] = state['model_free_success_target']
     result['trajectory_jit']=state.get('trajectory_jit',False)
     result['real_sampling'] = state.get('real_sampling', 'chunks')
+    if state.get('model_free'):
+        result['real_workers'] = state.get('real_workers', 4)
+        result['no_micro_cache_trim'] = state.get('no_micro_cache_trim', False)
     result['batch_autotune']=state.get('batch_autotune',False)
     activity=data/'training/fixed_validation_activity.json'
     if activity.exists():
@@ -249,15 +252,16 @@ def report(data, state):
             'WEAVER从已评估World微调3200步native权重初始化（该阶段RM冻结）；原生DDP4、micro4/GAS64/global1024，独立环境。')
         lines[6] = 'Policy100、Value100、World20预热。原生RM以真实LIBERO成功标签训练sigmoid/Brier分数，未经校准；想象仅按horizon终止。真实worker1、想象worker4；真实预算1000000步含reset settling。'
     if state.get('model_free'):
+        real_workers = state.get('real_workers', 4)
         lines[0]='# GPU4–7 Model-free Policy 训练记录'
-        lines[3:7]=['Real4 / Imag0，Policy 四卡 ZeRO2 micro8/GAS18/global576；没有 World/Reward 模型。',
+        lines[3:7]=[f'Real{real_workers} / Imag0，Policy 四卡 ZeRO2 micro8/GAS18/global576；没有 World/Reward 模型。',
                     '每25次Policy更新保存weights；Policy100、Value100预热，使用真实环境奖励和当前Value GAE。',
                     '在线Eval workers='+str(state.get('num_eval_workers',0))+'；固定验证配置='+str(state.get('fixed_validation_config'))+'。',
                     '真实预算1000000步，训练150动作，评测220动作；双图像、无proprio、GIPO，cost scheduler关闭。']
         if state.get('batch_autotune'):
-            lines[3]='Real4 / Imag0，Policy 四卡 ZeRO2 global576；前期按六更新窗口校准 refresh batch 与训练 micro/GAS，之后冻结。实际配置见 BatchAutotune 遥测。'
+            lines[3]=f'Real{real_workers} / Imag0，Policy 四卡 ZeRO2 global576；前期按六更新窗口校准 refresh batch 与训练 micro/GAS，之后冻结。实际配置见 BatchAutotune 遥测。'
         if state.get('trajectory_jit'):
-            lines[3]='Real4 / Imag0，Policy 四卡 ZeRO2，global 576；同轨迹集中，每卡144，训练微批16×9，上下文微批2，优势使用EMA归一化。'
+            lines[3]=f'Real{real_workers} / Imag0，Policy 四卡 ZeRO2，global 576；同轨迹集中，每卡144，训练微批16×9，上下文微批2，优势使用EMA归一化。'
         target = state.get('model_free_success_target')
         if target:
             lines += ['', f"最近 {target['window_size']} 个有效真实训练回合首次达到 {target['window_successes']} 次成功即停止更新并保存。固定评测用于诊断，实际预算耗尽也会停止。"]
@@ -334,6 +338,8 @@ def formal_environment(state, data, pre):
         env['ACCERL_TRAJECTORY_JIT_INITIAL_CHECKPOINT']=state['initial_policy']['checkpoint']
     if state.get('model_free'):
         env['ACCERL_MODEL_FREE']='1'
+        env['ACCERL_MODEL_FREE_REAL_WORKERS'] = str(state.get('real_workers', 4))
+        env['ACCERL_TRIM_MICRO_CACHE'] = '0' if state.get('no_micro_cache_trim') else '1'
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
     if state.get('num_eval_workers') is not None:
@@ -365,7 +371,7 @@ def enforce_stop_window(data, state, child, now=None):
         raise SaveGraceExpired('Manual-stop GPU save grace of900seconds expired')
 
 
-def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks'):
+def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False):
     if mode != 'manual' or stop_on_target:
         raise RuntimeError('This source only permits a fresh manual-stop formal run')
     if data.resolve() != (safe.MASTER/'formal_v3').resolve():
@@ -385,13 +391,14 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     from pipeline_budget import PipelineBudgetConfig
     from model_free_mode import pipeline_configuration
     from launch import mode_options, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
-    from launch import real_sampling_options, real_sampling_arguments
+    from launch import real_sampling_options, real_sampling_arguments, rollout_options, rollout_arguments
     selected=mode_options(model_free,num_eval_workers)
+    selected.update(rollout_options(model_free, real_workers, no_micro_cache_trim))
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     selected['real_sampling'] = real_sampling_options(trajectory_jit, real_sampling)
     validation=fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling)
-    budget = pipeline_configuration(SimpleNamespace(model_free=model_free,pipeline_config=pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG')))
+    budget = pipeline_configuration(SimpleNamespace(model_free=model_free,pipeline_config=pipeline_config or os.environ.get('ACCERL_PIPELINE_CONFIG')), real_workers=real_workers)
     if os.getuid()!=1004:
         raise RuntimeError('Wrong UID')
     cost_configuration = None if model_free else cost_scheduler_launch_configuration(cost_scheduler_config)
@@ -443,7 +450,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else []) + (['--trajectory-jit'] if trajectory_jit else []) + real_sampling_arguments(real_sampling)
+            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else []) + (['--trajectory-jit'] if trajectory_jit else []) + real_sampling_arguments(real_sampling) + rollout_arguments(real_workers, no_micro_cache_trim)
             child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),*launch_args],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
@@ -725,7 +732,8 @@ if __name__ == '__main__':
     a.add_argument('--num-eval-workers',type=int)
     a.add_argument('--batch-autotune',action='store_true')
     a.add_argument('--trajectory-jit',action='store_true')
-    from launch import add_fixed_validation_arguments, add_real_sampling_argument, fixed_validation_overrides
+    from launch import add_fixed_validation_arguments, add_real_sampling_argument, add_rollout_arguments, fixed_validation_overrides
+    add_rollout_arguments(a)
     add_real_sampling_argument(a)
     add_fixed_validation_arguments(a)
     args = a.parse_args()
@@ -736,4 +744,4 @@ if __name__ == '__main__':
     elif args.mode == 'sample':
         safe.sample(args.data, args.run_id)
     else:
-        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling)
+        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling,real_workers=args.real_workers,no_micro_cache_trim=args.no_micro_cache_trim)

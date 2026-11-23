@@ -242,13 +242,34 @@ def real_sampling_arguments(real_sampling):
     return [] if real_sampling == 'chunks' else ['--real-sampling', real_sampling]
 
 
-def effective_pipeline(model_free=False):
+def add_rollout_arguments(parser):
+    parser.add_argument('--real-workers', type=int, choices=(4, 8), default=4)
+    parser.add_argument('--no-micro-cache-trim', action='store_true')
+
+
+def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False):
+    require(type(real_workers) is int and real_workers in (4, 8), 'Model-free rollout count must be 4 or 8')
+    require(type(no_micro_cache_trim) is bool, 'no_micro_cache_trim must be bool')
+    require(model_free or (real_workers == 4 and not no_micro_cache_trim),
+            'Rollout concurrency and micro cache overrides require --model-free')
+    return dict(real_workers=real_workers, no_micro_cache_trim=no_micro_cache_trim)
+
+
+def rollout_arguments(real_workers=4, no_micro_cache_trim=False):
+    args = [] if real_workers == 4 else ['--real-workers', str(real_workers)]
+    if no_micro_cache_trim:
+        args.append('--no-micro-cache-trim')
+    return args
+
+
+def effective_pipeline(model_free=False, real_workers=4):
     if not model_free:
         return read(RECIPE/'pipeline_config.json')
     sys.path.insert(0,str(ENGINE))
     from types import SimpleNamespace
     from model_free_mode import pipeline_configuration
-    return pipeline_configuration(SimpleNamespace(model_free=True,pipeline_config=RECIPE/'pipeline_config.json')).to_dict()
+    return pipeline_configuration(SimpleNamespace(model_free=True,pipeline_config=RECIPE/'pipeline_config.json'),
+                                  real_workers=real_workers).to_dict()
 
 
 def exec_managed_driver(overrides=()):
@@ -258,13 +279,18 @@ def exec_managed_driver(overrides=()):
     options.add_argument('--num-eval-workers',type=int)
     options.add_argument('--batch-autotune',action='store_true')
     options.add_argument('--trajectory-jit',action='store_true')
+    add_rollout_arguments(options)
     add_real_sampling_argument(options)
     add_fixed_validation_arguments(options)
     selected,other=options.parse_known_args(overrides)
-    workers = 4
+    rollout_options(selected.model_free,selected.real_workers,selected.no_micro_cache_trim)
+    workers = selected.real_workers
+    no_micro_cache_trim = selected.no_micro_cache_trim
     if selected.model_free and os.environ.get('ACCERL_JIT_BENCH_PLAN'):
         from model_free_mode import real_worker_count
         workers = real_worker_count()
+        no_micro_cache_trim = (os.environ.get('WEAVER_BENCH_NORMAL_ONLY') == '1'
+                              and os.environ.get('WEAVER_BENCH_NO_MICRO_CACHE_TRIM') == '1')
     values=dict(settings(), ids="4,5,6,7", world=os.environ.get("ACCERL_WORLD_BACKEND_CONFIG",''),
                 pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
@@ -272,16 +298,14 @@ def exec_managed_driver(overrides=()):
                             fixed_validation=fixed_validation_overrides(selected),batch_autotune=selected.batch_autotune,real_sampling=selected.real_sampling,real_workers=workers) + other
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
-    if (selected.model_free and env.get('ACCERL_JIT_BENCH_PLAN') and
-            env.get('WEAVER_BENCH_NORMAL_ONLY') == '1' and
-            env.get('WEAVER_BENCH_NO_MICRO_CACHE_TRIM') == '1'):
-        # 配方载入后只覆盖微批回收，更新结束和推理端的 idle 回收沿用原值。
-        env['ACCERL_TRIM_MICRO_CACHE'] = '0'
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(selected.batch_autotune)),ACCERL_MODEL_FREE=str(int(selected.model_free)),
                ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(selected.model_free, selected.num_eval_workers, selected.batch_autotune, selected.trajectory_jit)))
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(selected.trajectory_jit, selected.real_sampling)
     if selected.model_free:
+        env['ACCERL_MODEL_FREE_REAL_WORKERS'] = str(workers)
+        # 让训练器复用微批缓存，更新结束时仍交还显存给同卡推理。
+        env['ACCERL_TRIM_MICRO_CACHE'] = '0' if no_micro_cache_trim else '1'
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
     # TensorBoard consumers on this host already watch the original runs directory.
@@ -289,7 +313,8 @@ def exec_managed_driver(overrides=()):
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 
-def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks'):
+def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False):
+    rollout_options(model_free,real_workers,no_micro_cache_trim)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
@@ -303,10 +328,10 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
     if model_free:
         values['pipeline']=str(work/'pipeline_config.json')
-        put(Path(values['pipeline']),effective_pipeline(True))
+        put(Path(values['pipeline']),effective_pipeline(True, real_workers=real_workers))
     else:
         put(work/"world.json", expand(read(RECIPE/"world_backend_config.json"),values))
-    argv=training_arguments(values,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,real_sampling=real_sampling)
+    argv=training_arguments(values,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,real_sampling=real_sampling,real_workers=real_workers)
     env={k:v for k,v in os.environ.items() if not k.startswith(("ACCERL_","ACCE_CAPTURE_","NSYS_","CUDA_INJECTION","NVTX_INJECTION","EXPERIMENT_QUEUE_"))}
     for key in ("RAY_ADDRESS","SOFT_STOP_AT","MEASURE_STOP_AFTER_EPOCHS","SHORT_TEST_DEADLINE",
                 "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE","CUDA_MPS_PINNED_DEVICE_MEM_LIMIT","CUDA_MPS_CLIENT_PRIORITY"):
@@ -338,6 +363,8 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(trajectory_jit, real_sampling)
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(batch_autotune)),ACCERL_MODEL_FREE=str(int(model_free)),ACCERL_NUM_EVAL_WORKERS=str(mode_options(model_free,num_eval_workers)['num_eval_workers']))
     if model_free:
+        env['ACCERL_MODEL_FREE_REAL_WORKERS'] = str(real_workers)
+        env['ACCERL_TRIM_MICRO_CACHE'] = '0' if no_micro_cache_trim else '1'
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
     return [sys.executable,str(ENGINE/"train.py"),*argv],env,host
@@ -466,10 +493,13 @@ def main():
     parser.add_argument("--num-eval-workers",type=int)
     parser.add_argument("--batch-autotune",action="store_true")
     parser.add_argument("--trajectory-jit",action="store_true")
+    add_rollout_arguments(parser)
     add_real_sampling_argument(parser)
     add_fixed_validation_arguments(parser)
     args=parser.parse_args()
     selected=mode_options(args.model_free,args.num_eval_workers)
+    rollout = rollout_options(args.model_free,args.real_workers,args.no_micro_cache_trim)
+    selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(args.model_free,args.num_eval_workers,args.batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(args.model_free,args.num_eval_workers,args.batch_autotune,args.trajectory_jit)
     selected['real_sampling'] = real_sampling_options(args.trajectory_jit, args.real_sampling)
@@ -492,12 +522,12 @@ def main():
     if host and args.action!="check":
         op="original" if args.action in ("original","restore","start") else args.action
         cli=HERE/"reference_site/cli.py"
-        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else []),*fixed_validation_arguments(validation),*(['--batch-autotune'] if args.batch_autotune else []),*(['--trajectory-jit'] if args.trajectory_jit else []),*real_sampling_arguments(args.real_sampling)])
+        os.execv(sys.executable,[sys.executable,"-I","-B",str(cli),op,*(["--id",args.id] if args.id else []),*(["--model-free"] if args.model_free else []),*(["--num-eval-workers",str(args.num_eval_workers)] if args.num_eval_workers is not None else []),*fixed_validation_arguments(validation),*(['--batch-autotune'] if args.batch_autotune else []),*(['--trajectory-jit'] if args.trajectory_jit else []),*real_sampling_arguments(args.real_sampling),*rollout_arguments(**rollout)])
     require(not args.action.startswith(('diagnose','bench-')),'This saved-checkpoint diagnostic uses the reference site queue and assets')
     if args.action=="check":
         with tempfile.TemporaryDirectory(prefix="weaver-check-") as d:
             ids,_=allocated(True)
-            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check",model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling)
+            cmd,env,paths=prepare(Path(d),ids,"weaverintegrated_cpu_check",model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling,**rollout)
             check(Path(d),cmd,env,paths)
         print("CHECK PASSED: Policy assets, actual parsed training arguments and CPU environment."
               if args.model_free else "CHECK PASSED: clone imports, actual parsed training arguments, native bundle and CPU environment.")
@@ -522,7 +552,7 @@ def main():
     run_id="weaverintegrated_"+label
     put(work/"status.json",dict(state="checking",run_id=run_id))
     try:
-        cmd,env,paths=prepare(work,ids,run_id,model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling)
+        cmd,env,paths=prepare(work,ids,run_id,model_free=args.model_free,num_eval_workers=args.num_eval_workers,fixed_validation=validation,batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling,**rollout)
         check(work,cmd,env,paths)
         mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
         # Advisory locks only for this user's explicitly allocated GPUs. Keep through exit.
@@ -534,7 +564,7 @@ def main():
             mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
             env["CUDA_VISIBLE_DEVICES"]=",".join(cards)
             require(published(ROOT)==git_commit,"Revision changed during admission")
-            put(work/"command.json",dict(git_branch=BRANCH,git_commit=git_commit,argv=cmd,gpus=cards,run_id=run_id,recipe="model_free" if args.model_free else "original95",weights_only=True,**selected, pipeline=effective_pipeline(args.model_free),fixed_validation_config=validation))
+            put(work/"command.json",dict(git_branch=BRANCH,git_commit=git_commit,argv=cmd,gpus=cards,run_id=run_id,recipe="model_free" if args.model_free else "original95",weights_only=True,**selected, pipeline=effective_pipeline(args.model_free, real_workers=args.real_workers),fixed_validation_config=validation))
             put(outputs/"last.json",label)
             print(f"Starting {run_id}; log: {work/'train.log'}",flush=True)
             with (work/"train.log").open("xb") as log:
