@@ -22,10 +22,13 @@ WEIGHTS_SHA256 = '9025fd14bd1e7e6bce8b284824a1a4eeb167d6c07b6074acdb00db4653f3e0
 MAX_SECONDS = 3*3600
 
 
-def submit(cli,label,*,status=False,sampling=False):
+def submit(cli,label,*,status=False,sampling=False,pulse=False):
     cli.require(cli.LABEL.fullmatch(label),'Invalid benchmark label')
     root = cli.EXPERIMENTS/label
-    sid = ('weaver-bench-sampling-' if sampling else 'weaver-bench-')+label
+    if sampling and pulse:
+        raise ValueError('Select one benchmark comparison')
+    prefix = 'weaver-bench-sampling-' if sampling else 'weaver-bench-'
+    sid = ('weaver-bench-pulse-' if pulse else prefix) + label
     found = cli.lookup(sid)
     if status or found:
         info = dict(label=label,job_id=found['id'] if found else None,
@@ -35,10 +38,14 @@ def submit(cli,label,*,status=False,sampling=False):
                 info[file] = json.loads((root/file).read_bytes())
         return info
     commit = cli.published(cli.CHECKOUT)
-    # Another queued training can repin .git-runtime. This job holds a separate
-    # content-addressed checkout so both leases remain bound to their own commit.
-    runtime = cli.HOME/'library'/'jit-bench-code'/commit
-    runtime.parent.mkdir(parents=True,exist_ok=True)
+    if pulse:
+        # 空闲队列复用现有运行目录；这个短测只新建实验数据。
+        cli.ready()
+        runtime = cli.RUNTIME
+    else:
+        # These two older benchmarks may also be queued behind an active training.
+        runtime = cli.HOME/'library'/'jit-bench-code'/commit
+        runtime.parent.mkdir(parents=True,exist_ok=True)
     cli.pin_worktree(cli.CHECKOUT,runtime,commit)
     original = cli.EXPERIMENTS/SOURCE_LABEL
     weights = original/'formal_v3/training/checkpoints/latest_weights.pt'
@@ -46,13 +53,20 @@ def submit(cli,label,*,status=False,sampling=False):
                 checkpoint=str(weights),checkpoint_sha256=WEIGHTS_SHA256,
                 checkpoint_policy_step=189,checkpoint_run_id=SOURCE_RUN,
                 real_workers=4,online_eval_workers=0,fixed_validation=False,
-                warmup_pairs=1,measured_pairs=6,minimum_replay_chunks=4096,
                 global_batch=576,rank_size=144,train_micro=16,context_micro=2,
                 source='fresh_real_rollouts_at_P189',gpu_ids=[4,5,6,7])
+    if pulse:
+        plan.update(comparison='admission_pulse', real_sampling='uniform_blocks',
+                    warmup_updates=1, measured_blocks=3, updates_per_arm=3,
+                    pulse_seconds=5.0, minimum_replay_chunks=2048)
+    else:
+        plan.update(warmup_pairs=1, measured_pairs=6, minimum_replay_chunks=4096)
     if sampling:
         plan['comparison'] = 'episode_sampling'
         plan['sampling_modes'] = ['chunks','whole_episodes','uniform_blocks']
     comparison = 'three-sampler learner JIT' if sampling else 'same-cohort learner JIT'
+    if pulse:
+        comparison = 'rollout and trainer admission pulses'
     job = dict(name='WEAVER '+comparison+' '+label,submission_id=sid,cwd=str(runtime),
                argv=[cli.PYTHON,'-B',str(runtime/'weaver_run/reference_site/jit_bench_queue.py'),
                      str(root/'plan.json')],manual=False,timeout_seconds=MAX_SECONDS+180)
@@ -101,7 +115,13 @@ def run(plan_file):
                experiment_root=str(root),source_path=str(ENGINE),candidate='weaver_integrated_v1',
                pipeline_config_path=str(root/'git-pipeline.json'),model_free=True,batch_autotune=True,
                num_eval_workers=0,owned=[],supervisor=safe.proc_identity(os.getpid()))
+    pulse = plan.get('comparison') == 'admission_pulse'
+    if pulse:
+        state.update(trajectory_jit=True, real_sampling=plan['real_sampling'],
+                     initial_policy={'checkpoint': str(path)})
     env=formal_environment(state,data,pre)
+    if pulse:
+        env['ACCERL_TENSORBOARD'] = '0'
     env.update(ACCERL_RAY_TMP='/dev/shm/weaverintegrated_jb_'+str(os.getpid()),
                ACCERL_JIT_BENCH_PLAN=str(plan_file),ACCERL_JIT_BENCH_OUTPUT=str(root),
                ACCERL_JIT_BENCH_CHECKPOINT=str(path))

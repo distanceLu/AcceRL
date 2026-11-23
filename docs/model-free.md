@@ -140,6 +140,8 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 原站固定 P189 权重的短测通过 `./run.sh bench-episode-sampling --id p189-sampling-compare` 提交，使用 `./run.sh bench-episode-sampling-status --id p189-sampling-compare` 查询。同一时点的 Replay 库存分别产生三种采样的 cohort，三臂均运行 JIT。短测比较采样及更新时间；达到同一成功率的墙钟与动作数需要用正式训练测量。
 
+原站 GPU 4–7 空闲时可运行 `./run.sh bench-admission-pulse --id p189-admission-pulse`，用 `bench-admission-pulse-status` 和同一 ID 查状态。三组使用相同的 P189 权重、零学习率和等概率连续采样。正常组照常采集和更新，另外两组在首次更新边界分别暂缓新动作请求或新训练更新 5 秒。每组连续观察三次更新，计时包含这 5 秒。三个条件轮换顺序，各测三次。实验目录中的 `plan.json` 记录提交号与配置，`result.json` 记录各次观测。
+
 ## 验证范围
 
 CPU 测试覆盖开关与旧模式回归、真实采集/150步失败、真实数据独立成批、当前Value GAE、四rank分片、四卡映射、Eval0/4、TensorBoard筛选、预算并发、Policy-only保存/读取/最终审计，以及受管/可移植启动参数传递。实际 GPU 模型加载、EGL上下文、首个 NCCL/ZeRO 更新和长训吞吐仍需新实验验收；本次不占用现有训练资源。

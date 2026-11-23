@@ -445,7 +445,7 @@ def main():
         legacy_main(sys.argv[2:])
         return
     parser=argparse.ArgumentParser(prog="./run.sh")
-    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","bench-episode-sampling","bench-episode-sampling-status","view"],default="original",nargs="?")
+    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","bench-episode-sampling","bench-episode-sampling-status","bench-admission-pulse","bench-admission-pulse-status","view"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
     parser.add_argument("--root",type=Path,help="Existing output directory (view only)")
     parser.add_argument("--port",type=int,default=8765,help="Loopback viewer port (view only)")

@@ -293,18 +293,36 @@ def profile_rpc(owner, workload, actor, method, *args, **kwargs):
     context = kwargs.pop("_capture_context", None) or {}
     submitted = now_ns()
     perf = time.perf_counter_ns()
+    gate = (getattr(owner, 'bench_action_gate', None)
+            if workload == 'policy_infer' and method == 'request' and context.get('workflow') == 'real_rollout'
+            else None)
     request_id = new_id("request")
+    writer = _writer(owner)
+    if gate is not None:
+        ready = submitted
+        writer.event('bench_action_ready', workload=workload, request_id=request_id, ts_ns=ready)
+        pulse_id, wait_ns = gate.wait()
+        submitted = now_ns()
+        perf = time.perf_counter_ns()
     metadata = {"request_id": request_id, "submitted_ns": submitted,
                 "caller_role": _role(owner), "caller_id": str(getattr(owner, "wid", getattr(owner, "rank", 0))),
                 "episode_id": getattr(owner, "capture_episode_id", getattr(owner, "current_episode_id", None)),
                 "method": method, **context}
-    writer = _writer(owner)
     writer.event("request_submit", workload=workload, request_id=request_id,
                  submitted_ns=submitted, details=metadata)
     if method == "request":
         kwargs["telemetry_meta"] = metadata
     try:
+        if gate is not None:
+            dispatch = now_ns()
         result = ray.get(getattr(actor, method).remote(*args, **kwargs))
+        if gate is not None:
+            response = now_ns()
+            writer.event('bench_action_request', workload=workload, request_id=request_id,
+                         ts_ns=response, start_ns=ready, submitted_ns=dispatch, end_ns=response,
+                         duration_ns=response-ready, status='ok',
+                         details=dict(worker_id=owner.wid, arm_id=pulse_id, gate_wait_ns=wait_ns,
+                                      ready_ns=ready, dispatch_ns=dispatch, response_ns=response))
         versions = {}
         if isinstance(result, dict) and "_capture_payload" in result:
             versions = dict(result.get("versions", {}))

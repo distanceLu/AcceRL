@@ -309,7 +309,8 @@ def stop(record,job):
 
 
 def main():
-    if len(sys.argv)>1 and sys.argv[1] in ('bench-jit','bench-jit-status','bench-episode-sampling','bench-episode-sampling-status'):
+    if len(sys.argv)>1 and sys.argv[1] in ('bench-jit','bench-jit-status','bench-episode-sampling','bench-episode-sampling-status',
+                                           'bench-admission-pulse','bench-admission-pulse-status'):
         parser=argparse.ArgumentParser(prog='./run.sh '+sys.argv[1])
         parser.add_argument('--id',dest='label',required=True)
         opts=parser.parse_args(sys.argv[2:])
@@ -320,7 +321,8 @@ def main():
         with (EXPERIMENTS/'.launch.lock').open('a') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
             print(json.dumps(submit(sys.modules[__name__],opts.label,status=sys.argv[1].endswith('-status'),
-                                    sampling=sys.argv[1].startswith('bench-episode-sampling')),indent=2))
+                                    sampling=sys.argv[1].startswith('bench-episode-sampling'),
+                                    pulse=sys.argv[1].startswith('bench-admission-pulse')),indent=2))
         return
     if len(sys.argv)>1 and sys.argv[1]=='legacy-baseline':
         sys.path.insert(0,str(CHECKOUT))

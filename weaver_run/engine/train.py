@@ -742,6 +742,10 @@ class ReplayBufferActor:
         from gpu_trial_replay import release_trial
         return release_trial(self, cohort_id)
 
+    def pulse_inventory(self):
+        from admission_pulse_bench import replay_snapshot
+        return replay_snapshot(self)
+
     async def trajectory_jit_shards(self, global_size):
         """Return separate Ray objects so the coordinator only transports their references."""
         from training_topology import shard_batch
@@ -1218,6 +1222,9 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.pipeline_max_episode_frames = pipeline.max_episode_frames
         if worker_mode == "real":
             super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
+            if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
+                from bench_action_gate import RolloutPulseGate
+                self.bench_action_gate = RolloutPulseGate.from_environment(os.environ)
             if pipeline.real_training_action_horizon is not None:
                 from initial_state_env import set_real_training_action_horizon
                 for env in self.envs:
@@ -1805,6 +1812,8 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 raise
         self.requests.append((inputs_t, deterministic))
         self.promises.append(fut)
+        if hasattr(self, '_pulse_last_request_ns'):
+            self._pulse_last_request_ns = time.time_ns()
         from batch_autotune_runtime import action_timer, finish_action
         token = action_timer(self, current_request_metadata())
         answer = await fut
@@ -1822,6 +1831,13 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
     def get_batch_autotune_stats(self, policy_step):
         from batch_autotune_runtime import inference_report
         return inference_report(self, policy_step)
+
+    def pulse_action_demand(self):
+        # 仅短测首次查询时启用；四个真实采集器是该作业仅有的动作请求来源。
+        if not hasattr(self, '_pulse_last_request_ns'):
+            self._pulse_last_request_ns = 0
+        return dict(rank=int(self.actor_id), last_request_ns=self._pulse_last_request_ns,
+                    observed_ns=time.time_ns())
 
     def evaluate_values(self, inputs, expected_version=None, *, batch_sizes=None):
         """Bounded critic-only forward; never sample actions or advance RNG."""
@@ -3940,6 +3956,10 @@ class TrainerActor(TrainerActorCom):
         from paired_gpu_trainer import run_arm
         return run_arm(self, arm, shard, micro_begin=micro_begin, micro_end=micro_end,
                        trim=_trim_cuda_cache)
+
+    async def run_admission_pulse_epoch(self, policy_step):
+        from admission_pulse_bench import fixed_weight_epoch
+        return await fixed_weight_epoch(self, policy_step)
 
     def get_batch_autotune_stats(self, policy_step):
         from batch_autotune_runtime import training_report

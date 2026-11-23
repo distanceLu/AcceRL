@@ -64,6 +64,11 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
     if (len(workers) != 4 or len(trainers) != 4 or len(inference) != 4 or
             args.num_eval_workers != 0 or not args.batch_autotune):
         raise ValueError('GPU pairing requires four real collectors, four trainers and four inference replicas')
+    if plan.get('comparison') == 'admission_pulse':
+        from admission_pulse_bench import run_pulse_benchmark
+        return run_pulse_benchmark(ray=ray, plan=plan, output=output, replay=replay, trainers=trainers,
+            inference=inference, collector=collector, workers=workers, sync_policy=sync_policy,
+            experiment=experiment, stop_requested=stop_requested)
     warmup = plan['warmup_pairs']
     measured = plan['measured_pairs']
     minimum = plan['minimum_replay_chunks']
