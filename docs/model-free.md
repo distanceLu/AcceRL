@@ -153,10 +153,11 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 用 `bench-admission-pulse-status --id <作业ID>` 查询状态。比较每秒完成的真实动作、实际推理 batch 大小、动作请求 p95 和三次权重发布总耗时。测量窗口从首个更新的提交意图开始，截止到第三次发布完成。
 
-测试 Trainer 在连续微批间复用显存缓存时，使用同一份四环境配方，额外传入 `--no-micro-cache-trim`。训练器仍在更新结束时回收缓存，推理服务也按原配方回收。各训练 rank 的实际开关随更新记录在作业结果中。
+比较四个与八个环境在 Trainer 连续微批间复用显存缓存时的表现，两次提交都加上 `--no-micro-cache-trim`。训练器仍在更新结束时回收缓存，推理服务也按原配方回收。各训练 rank 的实际开关随更新记录在作业结果中。
 
 ```bash
 ./run.sh bench-admission-pulse --id p189-real4-no-micro-trim --normal-only --real-workers 4 --no-micro-cache-trim
+./run.sh bench-admission-pulse --id p189-real8-no-micro-trim --normal-only --real-workers 8 --no-micro-cache-trim
 ```
 
 ## 验证范围

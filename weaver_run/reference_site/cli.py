@@ -320,7 +320,7 @@ def main():
             parser.add_argument('--normal-only', action='store_true',
                                 help='只测正常共置，连续三组各三次更新')
             parser.add_argument('--no-micro-cache-trim', action='store_true',
-                                help='四环境正常共置时，保留相邻训练微批之间的显存缓存')
+                                help='正常共置时，保留相邻训练微批之间的显存缓存')
         opts=parser.parse_args(sys.argv[2:])
         require((os.getuid(),socket.gethostname())==(1004,'h20-xyff52ab-0001') and
                 (HOME/'.owner').read_text()=='WEAVER server catalog v1\n','Unexpected benchmark server')

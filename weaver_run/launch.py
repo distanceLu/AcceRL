@@ -273,7 +273,7 @@ def exec_managed_driver(overrides=()):
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
     if (selected.model_free and env.get('ACCERL_JIT_BENCH_PLAN') and
-            env.get('WEAVER_BENCH_NORMAL_ONLY') == '1' and workers == 4 and
+            env.get('WEAVER_BENCH_NORMAL_ONLY') == '1' and
             env.get('WEAVER_BENCH_NO_MICRO_CACHE_TRIM') == '1'):
         # 配方载入后只覆盖微批回收，更新结束和推理端的 idle 回收沿用原值。
         env['ACCERL_TRIM_MICRO_CACHE'] = '0'

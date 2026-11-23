@@ -31,8 +31,8 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,no
     if (real_workers not in (4, 8) or (normal_only and not pulse)
             or (real_workers == 8 and not normal_only)):
         raise ValueError('Eight real workers require the normal-only admission benchmark')
-    if no_micro_cache_trim and not (pulse and normal_only and real_workers == 4):
-        raise ValueError('Micro cache trim comparison requires four workers and --normal-only')
+    if no_micro_cache_trim and not (pulse and normal_only):
+        raise ValueError('Micro cache trim comparison requires --normal-only')
     prefix = 'weaver-bench-sampling-' if sampling else 'weaver-bench-'
     sid = ('weaver-bench-pulse-' if pulse else prefix) + label
     found = cli.lookup(sid)

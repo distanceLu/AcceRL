@@ -16,8 +16,9 @@ class PulseSubmissionTest(unittest.TestCase):
         import launch
         plan = dict(comparison='admission_pulse', real_sampling='uniform_blocks',
                     normal_only=True, real_workers=4)
-        for disabled in (True, False):
-            with self.subTest(disabled=disabled):
+        for workers, disabled in ((4, True), (4, False), (8, True), (8, False)):
+            with self.subTest(workers=workers, disabled=disabled):
+                plan['real_workers'] = workers
                 plan['no_micro_cache_trim'] = disabled
                 env = dict(jit_bench_queue.pulse_environment(plan), ACCERL_JIT_BENCH_PLAN='plan.json',
                            ACCERL_PIPELINE_CONFIG='pipeline.json', ACCERL_FINAL_CHECKPOINT='weights')
@@ -99,6 +100,13 @@ class PulseSubmissionTest(unittest.TestCase):
             jit_bench_queue.submit(cli, 'cache-test', pulse=True, normal_only=True, no_micro_cache_trim=True)
             plan = json.loads((cli.EXPERIMENTS/'cache-test'/'plan.json').read_bytes())
             self.assertTrue(plan['no_micro_cache_trim'])
+            jit_bench_queue.submit(cli, 'cache-eight', pulse=True, normal_only=True,
+                                   real_workers=8, no_micro_cache_trim=True)
+            eight_plan = json.loads((cli.EXPERIMENTS/'cache-eight'/'plan.json').read_bytes())
+            for key in ('comparison', 'normal_only', 'no_micro_cache_trim', 'checkpoint_sha256',
+                        'real_sampling', 'global_batch', 'rank_size', 'updates_per_arm'):
+                self.assertEqual(eight_plan[key], plan[key])
+            self.assertEqual(eight_plan['real_workers'], 8)
             with self.assertRaises(ValueError):
                 jit_bench_queue.submit(cli, 'invalid-cache', pulse=True, no_micro_cache_trim=True)
 
