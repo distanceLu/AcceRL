@@ -93,6 +93,15 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False):
     return submission
 
 
+def benchmark_argv(plan):
+    argv = ['bash',str(ENGINE/'run.sh'),'--model-free','--num-eval-workers','0',
+            '--fixed-validation-interval-env-steps','0','--batch-autotune']
+    if plan.get('comparison') == 'admission_pulse':
+        # 最终驱动按命令行重建环境，JIT 和采样方式必须随同传入。
+        argv.extend(['--trajectory-jit', '--real-sampling', plan['real_sampling']])
+    return argv
+
+
 def run(plan_file):
     plan = json.loads(plan_file.read_bytes())
     root = plan_file.parent
@@ -127,8 +136,7 @@ def run(plan_file):
                ACCERL_JIT_BENCH_CHECKPOINT=str(path))
     put(root/'checkpoint_verified.json',dict(sha256=WEIGHTS_SHA256,policy_step=189,run_id=SOURCE_RUN,
             bytes=path.stat().st_size,tensors=manifest['tensor_counts']['policy']))
-    argv=['bash',str(ENGINE/'run.sh'),'--model-free','--num-eval-workers','0',
-          '--fixed-validation-interval-env-steps','0','--batch-autotune']
+    argv=benchmark_argv(plan)
     def interrupted(signum, frame):
         raise InterruptedError('Queue supervisor received signal '+str(signum))
     for sig in (signal.SIGTERM,signal.SIGINT):

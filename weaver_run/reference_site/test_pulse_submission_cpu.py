@@ -10,6 +10,13 @@ from weaver_run.reference_site import jit_bench_queue
 
 
 class PulseSubmissionTest(unittest.TestCase):
+    def test_pulse_driver_receives_jit_and_sampling_flags(self):
+        pulse = jit_bench_queue.benchmark_argv({'comparison':'admission_pulse',
+                                               'real_sampling':'uniform_blocks'})
+        self.assertIn('--trajectory-jit', pulse)
+        self.assertEqual(pulse[pulse.index('--real-sampling')+1], 'uniform_blocks')
+        self.assertNotIn('--trajectory-jit', jit_bench_queue.benchmark_argv({'comparison':'episode_sampling'}))
+
     def test_pulse_uses_existing_runtime_and_three_live_arms(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
