@@ -4450,6 +4450,10 @@ def main(args):
     validate_online_runtime_arguments(world_config, args)
     pipeline_config = pipeline_configuration(args)
     rollout_inventory_gate = os.environ.get('ACCERL_ROLLOUT_INVENTORY_GATE') == '1'
+    from real_collection import configured_episode_rate
+    real_episode_rate = configured_episode_rate(os.environ.get('ACCERL_REAL_EPISODES_PER_MINUTE', '0'),
+        model_free=model_free, real_workers=pipeline_config.real_workers, trajectory_jit=trajectory_jit,
+        real_sampling=real_sampling, inventory_gate=rollout_inventory_gate)
     if rollout_inventory_gate and (not model_free or pipeline_config.real_workers != 8
             or not trajectory_jit or real_sampling != 'uniform_blocks'):
         raise ValueError('Rollout inventory gate requires the eight-worker model-free uniform_blocks JIT recipe')
@@ -4629,7 +4633,8 @@ def main(args):
     ]
     if model_free:
         from real_collection import RealCollectionCoordinator
-        producer_coordinators = [ray.remote(RealCollectionCoordinator).remote(pipeline_config.to_dict())]
+        producer_coordinators = [ray.remote(RealCollectionCoordinator).remote(
+            pipeline_config.to_dict(), real_episodes_per_minute=real_episode_rate)]
     else:
         producer_coordinators = wm_replay_buffers
     batch_coordinator = (ray.remote(GlobalBatchCoordinator).remote(

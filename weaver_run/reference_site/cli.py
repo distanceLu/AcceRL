@@ -96,7 +96,7 @@ def handoff_verified():
                 "前序训练或 P0 回放队列记录不匹配")
 
 
-def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False):
+def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0):
     require(profile=="restore", "This branch manages the original training profile")
     commit=revision(checkout)
     source=checkout/"weaver_run/engine"
@@ -104,7 +104,7 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False
     from launch import rollout_options, rollout_arguments, real_sampling_options, real_sampling_arguments, expand, settings, mode_options, effective_pipeline, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
     rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                              compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
+                              real_episodes_per_minute=real_episodes_per_minute, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     if model_free:
         selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
@@ -158,6 +158,8 @@ def check_record(record):
     require(result.get("valid") and validation["gpu_access_performed"] is False
             and validation["git_commit"]==record["git_commit"], "Queue CPU admission failed")
     if record.get("model_free"):
+        require(validation.get('real_episodes_per_minute', 0.0) == record.get('real_episodes_per_minute', 0.0),
+                'Validated fixed episode rate differs from the job')
         require(validation.get('compile_action_inference', False) == record.get('compile_action_inference', False),
                 'Validated action inference compile mode differs from the job')
         require(validation.get("rollout_inventory_gate", False) == record.get("rollout_inventory_gate", False),
@@ -201,6 +203,7 @@ def summary(record, job):
     if record.get('model_free'):
         result.update(real_workers=record.get('real_workers',4), no_micro_cache_trim=record.get('no_micro_cache_trim',False),
                       rollout_inventory_gate=record.get('rollout_inventory_gate',False),
+                      real_episodes_per_minute=record.get('real_episodes_per_minute', 0.0),
                       compile_action_inference=record.get('compile_action_inference', False))
     p=Path(record["root"])/"formal_v3/runnerstatus.json"
     if p.is_file():
@@ -219,11 +222,11 @@ def save_submission(root, item):
         json_write(path,receipt)
 
 
-def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False):
+def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0):
     from launch import rollout_options, real_sampling_options, mode_options, fixed_validation_options, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
     rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                              compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
+                              real_episodes_per_minute=real_episodes_per_minute, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     if model_free:
         selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
@@ -232,7 +235,7 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     selected['fixed_validation_config']=fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling)
     # 旧实验记录没有采样开关，沿用原来的 chunk 抽样。
     defaults = dict(model_free=False, batch_autotune=False, trajectory_jit=False,
-                    num_eval_workers=3, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False)
+                    num_eval_workers=3, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0)
     def same_mode(record):
         return record["profile"] == profile and all(record.get(k, defaults.get(k)) == v
                                                      for k, v in selected.items())
@@ -276,6 +279,7 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
             # 旧的已准备实验未记录此开关，默认关闭。
             r.setdefault('rollout_inventory_gate', False)
             r.setdefault('compile_action_inference', False)
+            r.setdefault('real_episodes_per_minute', 0.0)
         require(r==expected and (model_free or (root/"git-world.json").read_bytes()==(Path(temp)/"git-world.json").read_bytes())
                 and (root/"git-pipeline.json").read_bytes()==(Path(temp)/"git-pipeline.json").read_bytes()
                 and digest((root/"mps.json").read_bytes())==PROFILES[profile]["mps_receipt"],
@@ -294,13 +298,13 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     return summary(r,item)
 
 
-def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False):
+def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0):
     with tempfile.TemporaryDirectory(prefix=".cpu-check-",dir=EXPERIMENTS) as d:
         temp=Path(d)
         root=temp/"output"
         root.mkdir()
         r=make_spec(profile,"validation-"+profile,root,root,checkout=CHECKOUT,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,
-                    real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim,rollout_inventory_gate=rollout_inventory_gate, compile_action_inference=compile_action_inference)
+                    real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim,rollout_inventory_gate=rollout_inventory_gate, real_episodes_per_minute=real_episodes_per_minute, compile_action_inference=compile_action_inference)
         check_record(r)
         # Production agent.py is pinned to its live root. Exercise the same
         # QueueStore.create used by the create API in a private workerless DB.
@@ -408,7 +412,7 @@ def main():
     add_fixed_validation_arguments(p)
     opts=p.parse_args()
     rollout = rollout_options(opts.model_free, opts.real_workers, opts.no_micro_cache_trim,
-                              opts.rollout_inventory_gate, compile_action_inference=opts.compile_action_inference,
+                              opts.rollout_inventory_gate, real_episodes_per_minute=opts.real_episodes_per_minute, compile_action_inference=opts.compile_action_inference,
                               trajectory_jit=opts.trajectory_jit,
                               real_sampling=opts.real_sampling)
     batch_autotune_options(opts.model_free,opts.num_eval_workers,opts.batch_autotune)

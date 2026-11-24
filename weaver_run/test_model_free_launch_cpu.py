@@ -34,6 +34,33 @@ site = module('model_free_site_cli', HERE / 'reference_site/cli.py')
 
 
 class ModelFreeLaunchTests(unittest.TestCase):
+    def test_fixed_episode_rate_reaches_driver_and_frozen_experiment(self):
+        options = dict(model_free=True, trajectory_jit=True, batch_autotune=True, num_eval_workers=0,
+                       real_sampling='uniform_blocks', real_workers=8, real_episodes_per_minute=22.2)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'mps.json').write_bytes(b'{}')
+            with patch.object(site, 'PARENT', root), patch.object(site, 'revision', return_value='a'*40), \
+                 patch.object(site, 'PROFILES', {'restore': {'mps_receipt': site.digest(b'{}')}}):
+                record = site.make_spec('restore', 'fixedrate', root, root, checkout=site.CHECKOUT, **options)
+            self.assertEqual(record['real_episodes_per_minute'], 22.2)
+            argv = record['job']['argv']
+            self.assertEqual(argv[argv.index('--real-episodes-per-minute')+1], '22.2')
+            args = types.SimpleNamespace(source=HERE/'engine', root=root, **options)
+            mode = training.mode_kwargs(args)
+            self.assertEqual(mode['real_episodes_per_minute'], 22.2)
+            self.assertEqual(training.launch_environment(root, args.source, {}, **mode)
+                             ['ACCERL_REAL_EPISODES_PER_MINUTE'], '22.2')
+            command = training.runner_command(args)
+            with patch.dict(os.environ, dict(ACCERL_PIPELINE_CONFIG='p', ACCERL_FINAL_CHECKPOINT='w'), clear=True), \
+                 patch.object(os, 'chdir'), patch.object(os, 'execve') as execute:
+                launch.exec_managed_driver(command[command.index('--model-free'):])
+                self.assertEqual(execute.call_args.args[2]['ACCERL_REAL_EPISODES_PER_MINUTE'], '22.2')
+        for rate, gate in ((-1, False), (float('nan'), False), (float('inf'), False), (22.2, True)):
+            with self.subTest(rate=rate, gate=gate), self.assertRaises(ValueError):
+                launch.rollout_options(True, 8, rollout_inventory_gate=gate, trajectory_jit=True,
+                                      real_sampling='uniform_blocks', real_episodes_per_minute=rate)
+
     def test_compiled_action_request_is_frozen_and_forwarded_to_training_workers(self):
         from test_manual_controller_cpu import env as formal_env
         flag = '--compile-action-inference'

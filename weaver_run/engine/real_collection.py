@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -16,8 +17,24 @@ from initial_state_scheduler import InitialStateScheduler
 from pipeline_budget import PipelineBudgetConfig, PipelineBudgetError, LeaseExpiredError
 
 
+def _episode_rate(value):
+    rate = float(value)
+    if not math.isfinite(rate) or rate < 0 or (rate and not math.isfinite(60. / rate)):
+        raise ValueError('Real episode rate must be finite, nonnegative and have a finite interval')
+    return rate
+
+
+def configured_episode_rate(value, *, model_free, real_workers, trajectory_jit, real_sampling, inventory_gate):
+    rate = _episode_rate(value)
+    if rate and (not model_free or real_workers != 8 or not trajectory_jit
+                 or real_sampling != 'uniform_blocks' or inventory_gate):
+        raise ValueError('Fixed episode rate requires the eight-worker model-free uniform_blocks JIT '
+                         'recipe with inventory gating disabled')
+    return rate
+
+
 class RealCollectionCoordinator:
-    def __init__(self, pipeline_config):
+    def __init__(self, pipeline_config, *, real_episodes_per_minute=0.):
         self.pipeline_config = PipelineBudgetConfig.from_json(pipeline_config)
         if not self.pipeline_config.model_free:
             raise ValueError('RealCollectionCoordinator requires model_free collection')
@@ -30,6 +47,11 @@ class RealCollectionCoordinator:
         self._gate_closed_seconds = 0.
         self._gate_deferred_polls = 0
         self._gate_transitions = 0
+        self._episode_rate = _episode_rate(real_episodes_per_minute)
+        self._episode_interval = 60. / self._episode_rate if self._episode_rate else 0.
+        self._next_episode_at = float('-inf')
+        self._rate_deferred_polls = 0
+        self._rate_idle_budget = None
         self._leases = {}
         self._next_token = 0
         self._completed_ids = set()
@@ -104,11 +126,20 @@ class RealCollectionCoordinator:
                 return deepcopy(row)
         if self._paused:
             return None
+        if self._episode_interval and time.monotonic() < self._next_episode_at:
+            # 等待期间不占用初态或预算。最后一个回合结束后仍须向采集端报告预算耗尽。
+            if not self._leases and owner is not None and self._rate_idle_budget is None:
+                status = owner.status()
+                self._rate_idle_budget = status if self._budget_exhausted(status) else {}
+            if self._rate_idle_budget:
+                return {'budget_exhausted': True, 'status': self._rate_idle_budget}
+            self._rate_deferred_polls += 1
+            return None
         if owner is not None:
             status = owner.status()
             if self._budget_exhausted(status):
                 return {'budget_exhausted': True, 'status': status}
-        active_count = owner.status()['episodes_inflight'] if owner is not None else len(self._leases)
+        active_count = status['episodes_inflight'] if owner is not None else len(self._leases)
         if active_count >= self.pipeline_config.max_real_in_flight:
             return None
         # 只挡新回合。已分配的初态、在途动作和预算收尾照常处理。
@@ -131,6 +162,9 @@ class RealCollectionCoordinator:
             lease['initial_state'] = initial_state
         self._leases[lease['token']] = lease
         self._counts['real_admitted'] += 1
+        if self._episode_interval:
+            self._next_episode_at = lease['acquired_at'] + self._episode_interval
+            self._rate_idle_budget = None
         return deepcopy(lease)
 
     def finish_real_episode(self, token, payload):
@@ -202,6 +236,9 @@ class RealCollectionCoordinator:
                         time.monotonic() - self._gate_closed_since if self._gate_closed_since is not None else 0.),
                     rollout_gate_transitions=self._gate_transitions,
                     rollout_gate_deferred_polls=self._gate_deferred_polls,
+                    real_episodes_per_minute=self._episode_rate,
+                    real_rate_deferred_polls=self._rate_deferred_polls,
+                    real_rate_wait_seconds=max(0., self._next_episode_at - time.monotonic()),
                     **self._counts), initial_states=states,
                     frames={'resident_frame_bytes': 0}, train_windows=0, eval_windows=0, pending_draws=0)
 
@@ -215,6 +252,8 @@ class RealCollectionCoordinator:
 
     def set_rollout_gate(self, revision, closed):
         # Replay 是唯一发布方。迟到的旧通知不能覆盖较新的准入状态。
+        if self._episode_rate:
+            raise ValueError('The fixed real episode rate and Replay inventory gate are mutually exclusive')
         if revision <= self._gate_revision:
             return
         self._gate_revision = revision

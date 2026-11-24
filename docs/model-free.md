@@ -179,6 +179,10 @@ cd /mnt/data/lcx1/dong/WEAVER
 ./run.sh bench-admission-pulse --id p189-real8-no-micro-trim --normal-only --real-workers 8 --no-micro-cache-trim
 ```
 
+### 固定真实回合的发放速率
+
+8 个真实 worker 的 `uniform_blocks` 轨迹 JIT 作业可加 `--real-episodes-per-minute 22.2`。8 个环境合计每隔至少 2.70 秒开放一个新回合，已有回合继续执行；环境忙时实际发放率可以更低。默认值 0 关闭限速。固定限速与 `--rollout-inventory-gate` 分别用于静态和自适应对照，两者均可搭配 `--compile-action-inference`。实际发放率由初态队列的租约时间戳计算。
+
 ## 验证范围
 
 CPU 测试覆盖开关与旧模式回归、真实采集/150步失败、真实数据独立成批、当前Value GAE、四rank分片、四卡映射、Eval0/4、TensorBoard筛选、预算并发、Policy-only保存/读取/最终审计，以及受管/可移植启动参数传递。实际 GPU 模型加载、EGL上下文、首个 NCCL/ZeRO 更新和长训吞吐仍需新实验验收；本次不占用现有训练资源。
