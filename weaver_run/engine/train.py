@@ -730,9 +730,10 @@ class ReplayBufferActor:
         self.trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
         self.real_sampling = os.environ.get('ACCERL_REAL_SAMPLING', 'chunks')
 
-    async def freeze_gpu_trial(self, batch_size, cohort_id, sampling=False):
+    async def freeze_gpu_trial(self, batch_size, cohort_id, sampling=False, *, layout_pool_size=None, layout_seed=None):
         from gpu_trial_replay import freeze_trial
-        return await freeze_trial(self, batch_size, cohort_id, sampling=sampling)
+        return await freeze_trial(self, batch_size, cohort_id, sampling=sampling,
+                                  layout_pool_size=layout_pool_size,layout_seed=layout_seed)
 
     async def gpu_trial_batch(self, cohort_id, arm):
         from gpu_trial_replay import trial_shards
@@ -3951,6 +3952,14 @@ class TrainerActor(TrainerActorCom):
     def paired_gpu_weight_digest(self):
         from paired_gpu_trainer import weight_digest
         return weight_digest(self)
+
+    def prepare_layout_ema(self, cohort, version, first):
+        from paired_gpu_trainer import prepare_layout_ema
+        return prepare_layout_ema(self,cohort,version,first)
+
+    def read_layout_normalization(self, version):
+        from paired_gpu_trainer import read_layout_normalization
+        return read_layout_normalization(self,version)
 
     def run_paired_gpu_arm(self, arm, shard):
         from paired_gpu_trainer import run_arm

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
 import tempfile
 import time
@@ -17,6 +18,7 @@ from gpu_trial_placement import ordered_positions
 
 
 SAMPLING_MODES = ('chunks', 'whole_episodes', 'uniform_blocks')
+LAYOUT_ARMS = ('preserve', 'repack')
 
 
 def _digest(ids):
@@ -103,7 +105,44 @@ def freeze_sampling_round(owner, count, cohort_id):
     return receipt
 
 
-async def freeze_trial(owner, count, cohort_id, *, sampling=False):
+def freeze_layout_round(owner, count, key, pool_size, seed):
+    from real_episode_sampling import _uniform_block
+
+    real = owner.fresh_store
+    eligible = [sid for sid, sample in real.samples.items() if real._eligible(sample)]
+    if len(eligible) < pool_size:
+        return dict(ready=False, eligible_before_limit=len(eligible), pool_size=pool_size)
+    # 入库时整条轨迹按时间顺序写入，截取末尾即得到最新合格片段。
+    pool = eligible[-pool_size:]
+    groups = defaultdict(list)
+    for sid in pool:
+        segment = real.samples[sid]['segment_id']
+        if real.segments[segment].source != 'real':
+            raise ValueError('Non-real chunk in trajectory layout pool')
+        groups[segment].append(sid)
+    ids = _uniform_block(random.Random(seed), groups)
+    sampled = SegmentReplay(real.capacity,owner.fresh_config)
+    sampled.set_versions(*real.versions)
+    for sid in ids:
+        sample = real.samples[sid]
+        segment = sample['segment_id']
+        sampled.samples[sid] = dict(sample)
+        sampled.segments[segment] = real.segments[segment]
+    tokens = [int(sampled.segments[s['segment_id']].action_mask[s['index']].sum())
+              for s in (sampled.samples[sid] for sid in ids)]
+    receipt = dict(ready=True, cohort_id=key, n=count, pool_size=pool_size, seed=seed,
+        pool_ids_sha256=_digest(pool), eligible_before_limit=len(eligible),
+        sample_ids=ids, sample_ids_sha256=_digest(ids), version=real.versions[0],
+        original_group_denominators=[sum(tokens[i:i+8]) for i in range(0,len(tokens),8)],
+        trajectories=len(sampled.segments), replay_resident_at_draw=len(real.samples),
+        real_admitted_at_draw=owner.fresh_admitted_chunks['real'])
+    draws = {name:dict(key=key+'-'+name, ids=ids, store=sampled, receipt=receipt, layout_arm=name,
+                       preserve_rank_shards=name=='preserve') for name in LAYOUT_ARMS}
+    owner._gpu_trial = dict(key=key, busy=False, receipt=receipt, draws=draws)
+    return receipt
+
+
+async def freeze_trial(owner, count, cohort_id, *, sampling=False, layout_pool_size=None, layout_seed=None):
     output = os.environ.get('ACCERL_JIT_BENCH_OUTPUT')
     key = str(cohort_id)
     if (not output or not Path(output).is_absolute() or
@@ -113,13 +152,20 @@ async def freeze_trial(owner, count, cohort_id, *, sampling=False):
             or len(owner.fresh_critics) != 4 or not owner.fresh_refresh_prune
             or getattr(owner,'_model_free_admission',None) is not None):
         raise RuntimeError('Trial requires independent real-only FRESH Replay with four current critics')
+    if layout_pool_size is not None or layout_seed is not None:
+        if sampling or layout_pool_size not in (581,2753) or type(layout_seed) is not int:
+            raise ValueError('Invalid trajectory layout pool or seed')
     previous = getattr(owner,'_gpu_trial',None)
     if previous is not None:
         if previous['key'] == key and previous.get('receipt'):
+            if (previous['receipt'].get('pool_size'),previous['receipt'].get('seed')) != (layout_pool_size,layout_seed):
+                raise RuntimeError('Frozen cohort already has a different layout pool or seed')
             return previous['receipt']
         raise RuntimeError('A frozen trial already exists or is being written')
     if sampling:
         return freeze_sampling_round(owner, count, key)
+    if layout_pool_size is not None:
+        return freeze_layout_round(owner, count, key, layout_pool_size, layout_seed)
     real = owner.fresh_store
     try:
         token, ids = real.reserve(count)
@@ -193,6 +239,8 @@ async def _shards(owner, frozen, arm):
     original_denominators = [sum(token_counts[start:start+8]) for start in range(0,len(ids),8)]
     receipt = dict(cohort_id=frozen['key'], version=version, freeze_version=store.versions[0],
                    sample_ids_sha256=frozen['receipt']['sample_ids_sha256'])
+    if 'layout_arm' in frozen:
+        receipt['layout_arm'] = frozen['layout_arm']
     if arm == 'pruned':
         groups = dependency_refresh_groups([store.segments[s] for s in selected], selected, 4, micro=2)
         live_groups = [(critic,group) for critic,group in zip(owner.fresh_critics,groups) if group.inputs]
@@ -215,7 +263,10 @@ async def _shards(owner, frozen, arm):
                                original_denominators=[original_denominators[p//8] for p in range(sl.start,sl.stop)]))
     else:
         geometry = {key:(s.count,bool(s.terminated[-1])) for key,s in store.segments.items()}
+        layout_start = time.perf_counter() if 'layout_arm' in frozen else None
         positions, counts = ordered_positions(ids,geometry,preserve_rank_shards=frozen.get('preserve_rank_shards',False))
+        if layout_start is not None:
+            receipt['layout_planning_s'] = time.perf_counter()-layout_start
         descriptors = {}
         for key, indices in selected.items():
             s = store.segments[key]

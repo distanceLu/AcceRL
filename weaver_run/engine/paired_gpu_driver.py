@@ -7,6 +7,63 @@ from pathlib import Path
 import time
 
 
+def layout_round(index):
+    from gpu_trial_replay import LAYOUT_ARMS
+    if not 0 <= index <= 8:
+        raise ValueError('Trajectory layout expects one warmup and eight measured pairs')
+    if index == 0:
+        return 2753, LAYOUT_ARMS
+    block, offset = divmod(index-1,2)
+    return (581,2753)[offset], (LAYOUT_ARMS[::-1] if (block+offset)%2 else LAYOUT_ARMS)
+
+
+def verify_layout_exposures(arm, ids, ranks, original_group_denominators):
+    from gpu_trial_replay import _digest
+    if len(original_group_denominators)!=72 or any(d<=0 for d in original_group_denominators):
+        raise ValueError('Missing the 72 frozen eight-sample token denominators')
+    denominators = {sid:original_group_denominators[i//8] for i,sid in enumerate(ids)}
+    consumed = []
+    for result in ranks:
+        rank = result['rank']
+        seen = result['consumed_sample_ids']
+        if len(seen)!=144 or _digest(seen)!=result['consumed_sample_ids_sha256']:
+            raise ValueError('Invalid trajectory layout rank receipt')
+        if arm=='preserve' and set(seen)!=set(ids[144*rank:144*(rank+1)]):
+            raise ValueError('Preserved layout changed a rank membership')
+        if result['consumed_token_denominators']!=[denominators.get(sid) for sid in seen]:
+            raise ValueError('Layout changed a frozen token denominator')
+        consumed.extend(seen)
+    if len(consumed)!=576 or len(set(ids))!=576 or set(consumed)!=set(ids):
+        raise ValueError('JIT layout arms must consume the same frozen 576 IDs')
+
+
+def common_layout_scalars(rows, version, fields):
+    if sorted(r['rank'] for r in rows)!=list(range(4)) or any(r['version']!=version for r in rows):
+        raise ValueError('Incomplete four-rank layout normalization receipt')
+    values = {k:rows[0][k] for k in fields}
+    if not all(map(math.isfinite,values.values())) or any(r[k]!=v for r in rows for k,v in values.items()):
+        raise ValueError('Four ranks used inconsistent layout normalization')
+    return values
+
+
+def summarize_layout(pairs):
+    summary = {}
+    for size in (581,2753):
+        measured = [p for p in pairs if not p['warmup'] and p['frozen']['pool_size']==size]
+        if len(measured)!=4:
+            raise ValueError('Expected four measured placement pairs at each pool size')
+        durations = {name:[] for name in ('preserve','repack')}
+        for pair in measured:
+            for arm in pair['arms']:
+                durations[arm['name']].append(arm['seconds'])
+        baseline, candidate = (durations[name] for name in ('preserve','repack'))
+        summary[str(size)] = dict(measured_pairs=len(measured), preserve_mean_s=sum(baseline)/len(measured),
+            repack_mean_s=sum(candidate)/len(measured), mean_repack_saving_s=(sum(baseline)-sum(candidate))/len(measured),
+            repack_saving_fraction=1-sum(candidate)/sum(baseline),
+            paired_repack_saving_s=[a-b for a,b in zip(baseline,candidate)])
+    return summary
+
+
 def sampling_order(round_index):
     from gpu_trial_replay import SAMPLING_MODES
     orders = tuple(permutations(SAMPLING_MODES))
@@ -78,7 +135,11 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
     measured = plan['measured_pairs']
     minimum = plan['minimum_replay_chunks']
     sampling = plan.get('comparison') == 'episode_sampling'
-    if (warmup != 1 or measured != 6 or not 576 <= minimum <= args.replay_capacity):
+    layout = plan.get('comparison') == 'trajectory_layout'
+    if layout and (plan.get('layout_pool_sizes') != [581,2753] or minimum != 2753
+            or plan.get('real_sampling')!='uniform_blocks' or plan.get('no_micro_cache_trim') is not True):
+        raise ValueError('Unexpected trajectory layout pool, sampler or cache policy')
+    if (warmup != 1 or measured != (8 if layout else 6) or not 576 <= minimum <= args.replay_capacity):
         raise ValueError('Unsupported paired benchmark plan or Replay capacity')
     pairs = []
     report = dict(status='running', run_id=os.environ['ACCERL_RUN_ID'],
@@ -91,6 +152,12 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
                       'No uses charged. Four live collectors continue with frozen numerical Policy weights.',
                       timing='Per-mode reserve CPU time and dispatch-to-IPC wall time recorded separately. '
                       'Common inventory fill, cohort retention and reporting excluded. Shared optimizer/EMA history, zero LR.')
+    if layout:
+        report.update(source='One uniform-block draw from the most recently admitted eligible real chunks per pair. '
+            'Both placements retain the same IDs and full trajectories without consuming Replay uses.',
+            timing='Replay layout and shard dispatch through one four-rank optimizer update and IPC acknowledgements. '
+            'Draw and EMA preparation excluded. Both measured arms start with the same FP64 advantage moments; '
+            'zero-LR Adam state, EMA update counts and logical publications advance. Both warmup arms run normally.')
 
     def progress(phase):
         report['phase'] = phase
@@ -124,7 +191,7 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
         wall_start_ns = time.time_ns()
         start = time.perf_counter()
         shards = replay.gpu_trial_batch.options(num_returns=4).remote(cohort,arm)
-        compute = 'jit' if sampling else arm
+        compute = 'jit' if sampling or layout else arm
         ranks = [t.run_paired_gpu_arm.remote(compute,shard) for t,shard in zip(trainers,shards)]
         results = ray.get(ranks, timeout=1200)
         before_publish = time.perf_counter()
@@ -137,6 +204,9 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
                     r['train_micro'] != 16 or r['gas'] != 9 or not r['actor_loss_enabled']
                     for r in results)):
             raise RuntimeError('An arm did not execute a complete four-rank optimizer update')
+        if layout and any(r['layout_arm']!=arm or r['cache_trim']!=dict(micro='0',idle='1') or
+                          bool(r['initialization_prepass'])!=(version==0) for r in results):
+            raise RuntimeError('Trajectory layout rank has unexpected allocator or EMA initialization settings')
         stats = ray.get([i.get_batch_autotune_stats.remote(version+1) for i in inference], timeout=45)
         collectors = []
         for entry in stats:
@@ -174,15 +244,33 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
             check()
             cid=f'pair-{pair_id:02d}'
             progress('freezing '+cid)
-            frozen=ray.get(replay.freeze_gpu_trial.remote(576,cid,sampling), timeout=600)
+            if layout:
+                size,names = layout_round(pair_id)
+                deadline = time.monotonic()+900
+                while True:
+                    frozen=ray.get(replay.freeze_gpu_trial.remote(576,cid,layout_pool_size=size,
+                                   layout_seed=1124+pair_id),timeout=600)
+                    if frozen['ready']:
+                        break
+                    check()
+                    if time.monotonic()>=deadline:
+                        raise TimeoutError(f'Only {frozen["eligible_before_limit"]} eligible chunks for pool {size}')
+                    time.sleep(3)
+            else:
+                frozen=ray.get(replay.freeze_gpu_trial.remote(576,cid,sampling), timeout=600)
+                names=sampling_order(pair_id) if sampling else (('pruned','jit') if pair_id%2==0 else ('jit','pruned'))
             if not frozen['ready']:
                 raise RuntimeError(f'Replay could not freeze {cid}: {frozen}')
             pair=dict(cohort=cid, warmup=pair_id<warmup, frozen=frozen, arms=[])
             pairs.append(pair)
             try:
-                names=sampling_order(pair_id) if sampling else (('pruned','jit') if pair_id%2==0 else ('jit','pruned'))
                 for name in names:
                     progress(f'{cid} {name} starting')
+                    if layout and not pair['warmup']:
+                        start_ema=ray.get([t.prepare_layout_ema.remote(cid,version,not pair['arms']) for t in trainers],timeout=60)
+                        initial=common_layout_scalars(start_ema,version,('mean','variance','scale_floor'))
+                        if any(r['updates']!=version for r in start_ema) or initial!=pair.setdefault('input_ema',initial):
+                            raise ValueError('Measured layout arms must start from the same numeric EMA state')
                     arm=measure(name,version,cid)
                     draw = frozen['draws'][name] if sampling else frozen
                     if any(rank['sample_ids_sha256'] != draw['sample_ids_sha256']
@@ -192,6 +280,19 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
                     if sampling:
                         arm['sampling_seconds'] = draw['sampling_seconds']
                         arm['actual_sampling'] = draw['sampling']['actual']
+                    if layout:
+                        verify_layout_exposures(name,frozen['sample_ids'],arm['trainers'],frozen['original_group_denominators'])
+                        actual=ray.get([t.read_layout_normalization.remote(version) for t in trainers],timeout=60)
+                        arm['normalization']=common_layout_scalars(actual,version,('mean','scale'))
+                        if not pair['warmup']:
+                            scale=max(math.sqrt(initial['variance']),initial['scale_floor'])
+                            if (arm['normalization']['mean']!=initial['mean'] or
+                                not math.isclose(arm['normalization']['scale'],scale,abs_tol=0,rel_tol=1e-15) or
+                                (pair['arms'] and arm['normalization']!=pair['arms'][0]['normalization'])):
+                                raise ValueError('Measured layout objective used different normalization scalars')
+                            arm['input_ema']=dict(initial,updates=version)
+                        # 四卡分片由同一个 Replay 进程规划，CPU 耗时只计一次。
+                        arm['layout_planning_s'] = arm['trainers'][0]['layout_planning_s']
                     version+=1
                     pair['arms'].append(arm)
                     progress(f'{cid} {name} complete ({arm["seconds"]:.2f}s)')
@@ -200,7 +301,10 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
         report['final_weights']=digests()
         if report['initial_weights'][0]['sha256']!=report['final_weights'][0]['sha256']:
             raise RuntimeError('Policy weights changed between paired trials')
-        report['summary']=summarize_sampling(pairs) if sampling else summarize(pairs)
+        if layout:
+            report['summary']=summarize_layout(pairs)
+        else:
+            report['summary']=summarize_sampling(pairs) if sampling else summarize(pairs)
         report['phase']='completed'
         report['status']='completed'
         atomic_json(output/'result.json',report)

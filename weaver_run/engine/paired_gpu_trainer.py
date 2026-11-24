@@ -1,6 +1,7 @@
 """Explicit four-rank short-test endpoints. Called only by the paired diagnostic."""
 import hashlib
 import math
+import os
 import struct
 import time
 
@@ -10,6 +11,49 @@ import torch.distributed as dist
 
 from batch_autotune_runtime import configure_training
 from jit_gae_runtime import _checked, run_balanced_trajectory_update
+
+
+def prepare_layout_ema(owner, cohort, version, first):
+    ema = owner.advantage_ema
+    if version != owner.global_step or ema.updates != version or version < 2:
+        raise ValueError('Layout EMA preparation requires the completed warmup and current optimizer step')
+    # 两臂都在计时前读写并同步这两个标量。
+    current = torch.stack((ema.mean,ema.variance)).tolist()
+    if first:
+        owner._layout_ema_snapshot = (cohort,version,current)
+    prior = getattr(owner,'_layout_ema_snapshot',None)
+    if not prior or prior[:2] != (cohort,version if first else version-1):
+        raise ValueError('Missing the initial EMA moments for this layout pair')
+    ema.mean.fill_(prior[2][0])
+    ema.variance.fill_(prior[2][1])
+    mean,variance = torch.stack((ema.mean,ema.variance)).tolist()
+    if [mean,variance]!=prior[2] or not all(map(math.isfinite,(mean,variance))) or variance<0:
+        raise ValueError('Invalid or unrecovered layout EMA moments')
+    return dict(rank=owner.rank, version=version, updates=ema.updates, mean=mean,
+                variance=variance, scale_floor=ema.scale_floor)
+
+
+def read_layout_normalization(owner, version):
+    computed_version,mean,scale = owner._layout_normalization
+    if computed_version!=version or owner.global_step!=version+1:
+        raise ValueError('Layout normalization receipt belongs to a different optimizer update')
+    values = torch.stack((mean,scale)).tolist()
+    owner._layout_normalization = None
+    return dict(rank=owner.rank, version=version, mean=values[0], scale=values[1])
+
+
+def layout_receipt(owner, ids, version):
+    from gpu_trial_replay import _digest
+
+    receipts = owner._jit_receipts
+    consumed = [row['sample_id'] for row in receipts]
+    if len(consumed)!=144 or set(consumed)!=set(ids) or any(row['refresh_policy_version']!=version for row in receipts):
+        raise ValueError('JIT exposure receipts do not cover the layout rank at its current version')
+    # 启动脚本提供默认值，训练器仅在开关为 1 时清理。
+    cache_trim = {phase: '1' if os.environ.get('ACCERL_TRIM_'+phase.upper()+'_CACHE')=='1' else '0'
+                  for phase in ('micro','idle')}
+    return dict(consumed_sample_ids=consumed, consumed_sample_ids_sha256=_digest(consumed),cache_trim=cache_trim,
+                advantage_value_targets=[[row['advantage'],row['value_target']] for row in receipts])
 
 
 def weight_digest(owner):
@@ -106,6 +150,7 @@ def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
     original_actor_start = owner.policy_train_start_step
     owner.policy_train_start_step = 0
     timer = ContextTimer()
+    timer.capture_layout_normalization = 'layout_arm' in shard
     initialization_prepass = arm == 'jit' and not getattr(getattr(owner, 'advantage_ema', None), 'updates', 0)
     started = time.perf_counter()
     try:
@@ -141,6 +186,14 @@ def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
                   for j in range(9)]
         if counts != list(expected):
             raise RuntimeError('GPU context observations differ from the planned per-bundle suffixes')
+    layout = {}
+    if 'layout_arm' in shard:
+        layout = layout_receipt(owner, shard['sample_ids'], version)
+        owner._layout_normalization = (version,*timer.layout_normalization)
+        denominators = dict(zip(shard['sample_ids'],shard['original_denominators']))
+        layout.update(layout_arm=shard['layout_arm'],layout_planning_s=shard['layout_planning_s'],
+            consumed_token_denominators=[denominators[sid] for sid in layout['consumed_sample_ids']],
+            planned_bundle_context_counts=list(shard['bundle_context_counts']))
     return dict(arm=arm, rank=owner.rank, version=version, version_after=owner.global_step,
                 sampled_device_memory=owner._autobatch_train_report['memory'] if arm=='jit' else None,
                 cohort_id=shard['cohort_id'], sample_ids_sha256=shard['sample_ids_sha256'],
@@ -148,4 +201,4 @@ def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
                 skipped_delta=int(owner.model.skipped_steps)-before_skips,
                 actor_loss_enabled=True, learning_rate=0., train_micro=16, gas=9,
                 initialization_prepass=initialization_prepass, context=context,
-                trainer_wall_s=seconds, mean_loss=sum(losses)/len(losses))
+                trainer_wall_s=seconds, mean_loss=sum(losses)/len(losses), **layout)

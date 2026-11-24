@@ -327,6 +327,7 @@ def stop(record,job):
 
 def main():
     if len(sys.argv)>1 and sys.argv[1] in ('bench-jit','bench-jit-status','bench-episode-sampling','bench-episode-sampling-status',
+                                           'bench-trajectory-layout','bench-trajectory-layout-status',
                                            'bench-admission-pulse','bench-admission-pulse-status'):
         parser=argparse.ArgumentParser(prog='./run.sh '+sys.argv[1])
         parser.add_argument('--id',dest='label',required=True)
@@ -347,6 +348,7 @@ def main():
             fcntl.flock(lock,fcntl.LOCK_EX)
             print(json.dumps(submit(sys.modules[__name__],opts.label,status=sys.argv[1].endswith('-status'),
                                     sampling=sys.argv[1].startswith('bench-episode-sampling'),
+                                    layout=sys.argv[1].startswith('bench-trajectory-layout'),
                                     pulse=sys.argv[1].startswith('bench-admission-pulse'),
                                     real_workers=opts.real_workers, normal_only=opts.normal_only,
                                     no_micro_cache_trim=opts.no_micro_cache_trim),indent=2))

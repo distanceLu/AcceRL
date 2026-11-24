@@ -22,19 +22,25 @@ WEIGHTS_SHA256 = '9025fd14bd1e7e6bce8b284824a1a4eeb167d6c07b6074acdb00db4653f3e0
 MAX_SECONDS = 3*3600
 
 
-def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,normal_only=False,
+def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,real_workers=4,normal_only=False,
            no_micro_cache_trim=False):
     cli.require(cli.LABEL.fullmatch(label),'Invalid benchmark label')
     root = cli.EXPERIMENTS/label
-    if sampling and pulse:
+    if sum((sampling,pulse,layout)) > 1:
         raise ValueError('Select one benchmark comparison')
     if (real_workers not in (4, 8) or (normal_only and not pulse)
             or (real_workers == 8 and not normal_only)):
         raise ValueError('Eight real workers require the normal-only admission benchmark')
     if no_micro_cache_trim and not (pulse and normal_only):
         raise ValueError('Micro cache trim comparison requires --normal-only')
-    prefix = 'weaver-bench-sampling-' if sampling else 'weaver-bench-'
-    sid = ('weaver-bench-pulse-' if pulse else prefix) + label
+    prefix = 'weaver-bench-'
+    if layout:
+        prefix += 'layout-'
+    elif sampling:
+        prefix += 'sampling-'
+    elif pulse:
+        prefix += 'pulse-'
+    sid = prefix + label
     found = cli.lookup(sid)
     if status or found:
         if found and pulse and not status:
@@ -49,7 +55,7 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,no
                 info[file] = json.loads((root/file).read_bytes())
         return info
     commit = cli.published(cli.CHECKOUT)
-    if pulse:
+    if pulse or layout:
         # 空闲队列复用现有运行目录；这个短测只新建实验数据。
         cli.ready()
         runtime = cli.RUNTIME
@@ -73,6 +79,10 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,no
         if normal_only:
             plan['normal_only'] = True
             plan['no_micro_cache_trim'] = no_micro_cache_trim
+    elif layout:
+        plan.update(comparison='trajectory_layout', real_sampling='uniform_blocks',
+                    warmup_pairs=1, measured_pairs=8, minimum_replay_chunks=2753,
+                    layout_pool_sizes=[581,2753], no_micro_cache_trim=True)
     else:
         plan.update(warmup_pairs=1, measured_pairs=6, minimum_replay_chunks=4096)
     if sampling:
@@ -82,6 +92,8 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,real_workers=4,no
     if pulse:
         comparison = (f'normal colocation with {real_workers} real workers' if normal_only
                       else 'rollout and trainer admission pulses')
+    elif layout:
+        comparison = 'same-cohort trajectory layout'
     job = dict(name='WEAVER '+comparison+' '+label,submission_id=sid,cwd=str(runtime),
                argv=[cli.PYTHON,'-B',str(runtime/'weaver_run/reference_site/jit_bench_queue.py'),
                      str(root/'plan.json')],manual=False,timeout_seconds=MAX_SECONDS+180)
@@ -116,6 +128,8 @@ def benchmark_argv(plan):
     if plan.get('comparison') == 'admission_pulse':
         # 最终驱动按命令行重建环境，JIT 和采样方式必须随同传入。
         argv.extend(['--trajectory-jit', '--real-sampling', plan['real_sampling']])
+    elif plan.get('comparison') == 'trajectory_layout':
+        argv.append('--no-micro-cache-trim')
     return argv
 
 
@@ -154,6 +168,8 @@ def run(plan_file):
     if pulse:
         state.update(trajectory_jit=True, real_sampling=plan['real_sampling'],
                      initial_policy={'checkpoint': str(path)})
+    elif plan.get('comparison') == 'trajectory_layout':
+        state['no_micro_cache_trim'] = True
     env=formal_environment(state,data,pre)
     env.update(pulse_environment(plan))
     env.update(ACCERL_RAY_TMP='/dev/shm/weaverintegrated_jb_'+str(os.getpid()),

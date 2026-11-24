@@ -231,6 +231,9 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     if initial_sums is not None and not bool(torch.isfinite(initial_sums).all()):
         raise ValueError('Nonfinite initial global advantage moments')
     mean, scale = ema.frozen(config.advantage_norm, initial_sums)
+    if getattr(context_timer,'capture_layout_normalization',False):
+        # 保留 loss 实际使用的 FP64 均值和尺度，发布后再回读。
+        context_timer.layout_normalization = (mean,scale)
     # Freeze once for the entire GAS window; do not mutate EMA inside the loop.
     gae = ReverseGAE(segments, device)
     sums = torch.zeros(3, device=device, dtype=torch.float64)

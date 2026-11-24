@@ -289,8 +289,8 @@ def exec_managed_driver(overrides=()):
     if selected.model_free and os.environ.get('ACCERL_JIT_BENCH_PLAN'):
         from model_free_mode import real_worker_count
         workers = real_worker_count()
-        no_micro_cache_trim = (os.environ.get('WEAVER_BENCH_NORMAL_ONLY') == '1'
-                              and os.environ.get('WEAVER_BENCH_NO_MICRO_CACHE_TRIM') == '1')
+        if os.environ.get('WEAVER_BENCH_NORMAL_ONLY') == '1':
+            no_micro_cache_trim = os.environ.get('WEAVER_BENCH_NO_MICRO_CACHE_TRIM') == '1'
     values=dict(settings(), ids="4,5,6,7", world=os.environ.get("ACCERL_WORLD_BACKEND_CONFIG",''),
                 pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
@@ -485,7 +485,7 @@ def main():
         cli = HERE/'reference_site/cli.py'
         os.execv(sys.executable, [sys.executable, '-I', '-B', str(cli), *sys.argv[1:]])
     parser=argparse.ArgumentParser(prog="./run.sh")
-    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","bench-episode-sampling","bench-episode-sampling-status","bench-admission-pulse","bench-admission-pulse-status","view"],default="original",nargs="?")
+    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","bench-episode-sampling","bench-episode-sampling-status","bench-trajectory-layout","bench-trajectory-layout-status","bench-admission-pulse","bench-admission-pulse-status","view"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
     parser.add_argument("--root",type=Path,help="Existing output directory (view only)")
     parser.add_argument("--port",type=int,default=8765,help="Loopback viewer port (view only)")
