@@ -3,6 +3,7 @@ from prismatic.vla.constants import NUM_ACTIONS_CHUNK, IGNORE_INDEX, ACTION_DIM
 import torch
 import numpy as np
 from typing import Any, Dict, List, Tuple
+from collections import OrderedDict, namedtuple
 from prismatic.vla.constants import (
     ACTION_PROPRIO_NORMALIZATION_TYPE,
     STOP_INDEX,
@@ -79,12 +80,53 @@ def normalize_proprio_batch(proprio: np.ndarray, norm_stats: Dict[str, Any]) -> 
     return normalized
 
 
+class PromptTokenCache:
+    """Worker-local LRU of processed Prismatic tokenizer outputs, keyed by prompt and dtype."""
+
+    CacheInfo = namedtuple("CacheInfo", "hits misses maxsize currsize")
+
+    def __init__(self, processor, maxsize=32):
+        if maxsize < 1:
+            raise ValueError("Prompt token cache size must be positive")
+        self.processor = processor
+        self.maxsize = maxsize
+        self.entries = OrderedDict()
+        self.hits = self.misses = 0
+
+    def cache_info(self):
+        return self.CacheInfo(self.hits, self.misses, self.maxsize, len(self.entries))
+
+    def prepare_primary(self, prompt, image, dtype):
+        key = (prompt, dtype)
+        if key in self.entries:
+            self.hits += 1
+            self.entries.move_to_end(key)
+            inputs = self.processor.image_processor(image, return_tensors="pt").to(dtype=dtype)
+            inputs.update({name: tensor.clone() for name, tensor in self.entries[key].items()})
+            return inputs
+
+        # PrismaticProcessor returns the tokenizer fields together with pixel_values.
+        # The original combined call preserves its tokenizer options and BatchFeature casting.
+        inputs = self.processor(prompt, image).to(dtype=dtype)
+        inputs["input_ids"], inputs["attention_mask"], inputs["labels"] = process_one_obs(
+            inputs["input_ids"], inputs["attention_mask"]
+        )
+        self.entries[key] = {name: tensor.clone() for name, tensor in inputs.items()
+                             if name != "pixel_values"}
+        if len(self.entries) > self.maxsize:
+            self.entries.popitem(last=False)
+        self.misses += 1
+        return inputs
+
+
 def prepare_one_obs(
     cfg: Any,
     processor: Any,
     obs: Dict[str, Any],
     task_label: str,
     torch_dtype: torch.dtype,
+    *,
+    prompt_cache=None,
 ) -> Dict:
     """
     Generate action predictions with the VLA policy.
@@ -110,13 +152,22 @@ def prepare_one_obs(
     prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
     
     # Process primary image
-    inputs = processor(prompt, primary_image).to(dtype=torch_dtype)
+    if prompt_cache is None:
+        inputs = processor(prompt, primary_image).to(dtype=torch_dtype)
+    else:
+        if prompt_cache.processor is not processor:
+            raise ValueError("Prompt token cache belongs to a different processor")
+        inputs = prompt_cache.prepare_primary(prompt, primary_image, torch_dtype)
 
     # Process additional wrist images if any
     if all_images:
-        all_wrist_inputs = [
-            processor(prompt, image_wrist).to(dtype=torch_dtype) for image_wrist in all_images
-        ]
+        if prompt_cache is None:
+            all_wrist_inputs = [processor(prompt, image).to(dtype=torch_dtype) for image in all_images]
+        else:
+            all_wrist_inputs = [
+                processor.image_processor(image, return_tensors="pt").to(dtype=torch_dtype)
+                for image in all_images
+            ]
         # Concatenate all images
         primary_pixel_values = inputs["pixel_values"]
         all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
@@ -134,12 +185,10 @@ def prepare_one_obs(
 
     proprio example: (8,), numpy.ndarray
     """
-    input_ids, attention_mask, labels = process_one_obs(
-        inputs["input_ids"], inputs["attention_mask"]
-    )
-    inputs["input_ids"] = input_ids
-    inputs["attention_mask"] = attention_mask
-    inputs["labels"] = labels
+    if prompt_cache is None:
+        inputs["input_ids"], inputs["attention_mask"], inputs["labels"] = process_one_obs(
+            inputs["input_ids"], inputs["attention_mask"]
+        )
     inputs["proprio"] = proprio
     return inputs
 

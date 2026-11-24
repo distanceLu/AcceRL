@@ -65,6 +65,17 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 开关、Eval数量、有效 pipeline 和 `git_commit` 保存到实验记录。不可复用绑定了另一配置的实验名。模式开启时不做 World 权重或独立 native 环境的 admission，但仍校验 Policy 资源和当前控制环境、两路观察及初态。
 
+在 model-free trajectory JIT 训练中，`--compile-action-inference` 同时启用真实动作推理的编译路径和 rollout 任务文本缓存。原站的八 worker 配置示例为
+
+```bash
+./run.sh original --model-free --trajectory-jit --batch-autotune \
+    --num-eval-workers 0 --fixed-validation-interval-env-steps 0 \
+    --real-sampling uniform_blocks --real-workers 8 --no-micro-cache-trim \
+    --compile-action-inference --id mf8-compiled-action
+```
+
+该命令持续采集真实回合。实验记录与运行状态中的 `compile_action_inference` 标识本次选择。推理副本优先捕获产生动作 logits 与 value 的完整前向（`full_logits_value`），也支持只捕获视觉编码与投影（`vision_projector`）。`compiled_policy_validation` 记录与同版本普通前向的比对结果，`compiled_policy_stats` 记录各范围实际回放次数、回退原因和捕获失败次数。
+
 TensorBoard 原站仍写到 `AcceRL-scheduler/runs/Libero/` 的监控目录，实验名明确包含 `ModelFree_Real4_Imag0_Eval0` 或 `Eval4`。保留 Policy/Value loss、真实平均回报与幕长、Policy熵/KL，新增显式真实成功率、Policy/Value学习率、累计真实动作数、完成回合的动作吞吐及更新速度。完成回合动作吞吐按两次日志间已完成回合累计动作数计算，可能随回合完成出现波动，不是逐动作即时计时。
 
 Eval0 不写伪造的0%在线 Eval曲线；固定验证只有完整跑完50例才记录成功率。不存在的 World/RM/Imagine 服务也不写伪零曲线。终端明确显示在线 Eval 关闭。低频抽样双相机预览沿用现有设置，不额外调用世界模型。

@@ -34,6 +34,50 @@ site = module('model_free_site_cli', HERE / 'reference_site/cli.py')
 
 
 class ModelFreeLaunchTests(unittest.TestCase):
+    def test_compiled_action_request_is_frozen_and_forwarded_to_training_workers(self):
+        from test_manual_controller_cpu import env as formal_env
+        flag = '--compile-action-inference'
+        key = 'ACCERL_COMPILE_ACTION_INFERENCE'
+        options = dict(model_free=True, trajectory_jit=True, batch_autotune=True,
+                       real_sampling='uniform_blocks', real_workers=8, no_micro_cache_trim=True,
+                       num_eval_workers=0, compile_action_inference=True)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'mps.json').write_bytes(b'{}')
+            with patch.object(site, 'PARENT', root), patch.object(site, 'revision', return_value='a'*40), \
+                 patch.object(site, 'PROFILES', {'restore': {'mps_receipt': site.digest(b'{}')}}):
+                record = site.make_spec('restore', 'compiled', root, root, checkout=site.CHECKOUT, **options)
+            self.assertIs(json.loads((root/'experiment.json').read_bytes())['compile_action_inference'], True)
+            self.assertIn(flag, record['job']['argv'])
+            self.assertFalse(record['rollout_inventory_gate'])
+            args = types.SimpleNamespace(source=HERE/'engine', root=root, **options)
+            selected = training.mode_kwargs(args)
+            self.assertIs(selected['compile_action_inference'], True)
+            self.assertEqual(training.launch_environment(root, args.source, {}, **selected)[key], '1')
+            state = dict(options, run_id='weaverintegrated_test', started_ns=1,
+                         initial_policy={'checkpoint': 'p0'}, experiment_root=str(root))
+            self.assertEqual(formal_env(state=state)[key], '1')
+            del state['compile_action_inference']
+            self.assertEqual(formal_env({key: '1'}, state=state)[key], '0')
+            command = training.runner_command(args)
+            overrides = command[command.index('--model-free'):]
+            self.assertIn(flag, overrides)
+            env = dict(ACCERL_PIPELINE_CONFIG='pipeline.json', ACCERL_FINAL_CHECKPOINT='weights',
+                       ACCERL_EXPERIMENT_ROOT=str(root), ACCERL_COMPILE_ACTION_INFERENCE='1')
+            for enabled in (True, False):
+                with self.subTest(enabled=enabled), patch.dict(os.environ, env, clear=True), \
+                     patch.object(os, 'chdir'), patch.object(os, 'execve') as execute:
+                    launch.exec_managed_driver([arg for arg in overrides if enabled or arg != flag])
+                    _, argv, child_env = execute.call_args.args
+                    self.assertEqual(child_env[key], str(int(enabled)))
+                    self.assertNotIn(flag, argv)
+
+    def test_compiled_action_requires_model_free_trajectory_jit(self):
+        for model_free, trajectory_jit in [(False, False), (False, True), (True, False)]:
+            with self.subTest(model_free=model_free, trajectory_jit=trajectory_jit), \
+                 self.assertRaisesRegex(ValueError, 'compile-action-inference'):
+                launch.rollout_options(model_free, trajectory_jit=trajectory_jit, compile_action_inference=True)
+
     def automatic_case(self, reason='real_budget_exhausted', steps=5):
         from test_manual_controller_cpu import result, RUN
         from world_backends import build_service_plan

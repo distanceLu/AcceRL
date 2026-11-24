@@ -45,6 +45,12 @@ def main():
     if tuning not in ('0','1'):
         raise ValueError('ACCERL_BATCH_AUTOTUNE must be 0 or 1')
     expected['batch_autotune']=batch_autotune_options(args.model_free,count,tuning=='1')
+    compile_actions = os.environ.get('ACCERL_COMPILE_ACTION_INFERENCE', '0')
+    if compile_actions not in ('0', '1'):
+        raise ValueError('ACCERL_COMPILE_ACTION_INFERENCE must be 0 or 1')
+    if compile_actions == '1' and not (args.model_free and os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+                                       and callable(getattr(torch.cuda, 'CUDAGraph', None))):
+        raise ValueError('Compiled action inference requires model-free trajectory JIT and torch.cuda.CUDAGraph')
     if args.model_free or count!=3:
         expected.update(num_eval_workers=count,eval_inference_replicas=','.join(map(str,range(count))))
     if args.model_free:

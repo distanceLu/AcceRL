@@ -1277,6 +1277,11 @@ class RolloutWorkerActor(BaseWorkerActor):
             self.stats_actor, self.cfg = stats_actor, cfg
             self.processor = get_processor(cfg)
             self.num_tasks, self.envs = 1, []
+        if self.model_free and os.environ.get('ACCERL_COMPILE_ACTION_INFERENCE') == '1':
+            from functools import partial
+            from rl.utils import PromptTokenCache
+            self.prompt_cache = PromptTokenCache(self.processor)
+            self.prepare_real_observation = partial(prepare_one_obs, prompt_cache=self.prompt_cache)
         setup_debugger("rollout_worker", wid)
         self.env_outcome = [deque(maxlen=100) for _ in range(self.num_tasks)]
         self.local_buffer = []
@@ -1370,11 +1375,12 @@ class RolloutWorkerActor(BaseWorkerActor):
         step_count = 0
         reward_sum, time_start, step_count_total = 0.0, time.time(), 0
         fresh_real_segment = []
+        prepare = getattr(self, 'prepare_real_observation', prepare_one_obs)
         while True:
             frame_before = step_count_total
             lineage_begin(self, "real_action_chunk", real_prefix,
                           episode_id=self.capture_episode_id, start_frame=frame_before)
-            inputs_t = prepare_one_obs(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
+            inputs_t = prepare(self.cfg, self.processor, obs, self.task_description, self.torch_dtype)
             act_norm, action_env, action_token, logits, value = profile_rpc(self, 'policy_infer', self.infer, 'request', inputs_t, deterministic=False, _capture_context={'workflow': 'real_rollout'})
             version = getattr(self, 'capture_last_versions', {}).get('policy')
             if version is not None:
@@ -1443,7 +1449,7 @@ class RolloutWorkerActor(BaseWorkerActor):
                         # 先确认回合已计数，再释放采集配额，避免排空时漏判达标。
                         ray.get(stats_ref)
                 if self.fresh_config.real_policy_replay:
-                    final_inputs = prepare_one_obs(self.cfg, self.processor, nxt, self.task_description, self.torch_dtype)
+                    final_inputs = prepare(self.cfg, self.processor, nxt, self.task_description, self.torch_dtype)
                     # LIBERO's complete finite task horizon is an observed
                     # failed task, even though the simulator reports truncated.
                     # Only an earlier collection-budget censoring has unknown
@@ -1464,6 +1470,11 @@ class RolloutWorkerActor(BaseWorkerActor):
                 if self.model_free:
                     metadata = dict(self.collection_metadata, action_steps=step_count_total,
                                     success=bool(success))
+                    if hasattr(self, 'prompt_cache'):
+                        counts = self.prompt_cache.cache_info()
+                        self.telemetry.event('rollout_prompt_cache', details={
+                            'episode_id': self.capture_episode_id, 'hits': counts.hits,
+                            'misses': counts.misses, 'scope': 'worker_lifetime'})
                     ray.get(self.wm_replay_buffer.finish_real_episode.remote(self.pipeline_lease,
                         {'episode_id': self.capture_episode_id, 'metadata': metadata}))
                 else:
@@ -1802,6 +1813,10 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         self.model = ActorCritic(cfg, torch_dtype=torch_dtype)
         self.model.cuda()
         self.model.eval()
+        self.compiled_actions = None
+        if os.environ.get('ACCERL_COMPILE_ACTION_INFERENCE') == '1':
+            from compiled_policy_inference import CompiledPolicyInference
+            self.compiled_actions = CompiledPolicyInference(self.model, self._record_compiled_event)
         self.processor = self.model.processor
         self.cfg = cfg
         self.stats_actor = stats_actor
@@ -1837,20 +1852,21 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         self._check_inference_health()
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
+        metadata = current_request_metadata()
         if self._policy_dispatch is not None:
-            metadata = current_request_metadata()
             request_id = self._policy_dispatch.enqueue_action(inputs_t, deterministic, metadata, fut)
             try:
                 return await fut
             except asyncio.CancelledError:
                 self._policy_dispatch.cancel_queued_action(request_id)
                 raise
-        self.requests.append((inputs_t, deterministic))
+        rollout_action = (metadata or {}).get('workflow') == 'real_rollout'
+        self.requests.append((inputs_t, deterministic, rollout_action))
         self.promises.append(fut)
         if hasattr(self, '_pulse_last_request_ns'):
             self._pulse_last_request_ns = time.time_ns()
         from batch_autotune_runtime import action_timer, finish_action
-        token = action_timer(self, current_request_metadata())
+        token = action_timer(self, metadata)
         answer = await fut
         finish_action(token)
         return answer
@@ -1859,12 +1875,18 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         from batch_autotune_runtime import configure_inference
         return configure_inference(self, policy_step, refresh_micro)
 
+    def _record_compiled_event(self, kind, details):
+        self.telemetry.event(kind, model_version=self.capture_model_version, details=details)
+
     async def autotuned_evaluate_values(self, inputs, expected_version, *, batch_sizes=None):
         from batch_autotune_runtime import refresh_values
         return await refresh_values(self, inputs, expected_version, batch_sizes=batch_sizes)
 
     def get_batch_autotune_stats(self, policy_step):
         from batch_autotune_runtime import inference_report
+        if self.compiled_actions is not None:
+            summary = self.compiled_actions.summary()
+            self._record_compiled_event('compiled_policy_stats', dict(summary, policy_step=int(policy_step)))
         return inference_report(self, policy_step)
 
     def pulse_action_demand(self):
@@ -2105,7 +2127,12 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 stage_end(self, capture_stage)
                 capture_core = stage_begin(self, "gpu_forward_and_copy", actual_batch=len(inputs_list), cuda=True)
                 with torch.inference_mode():
-                    action_logits, value = self.model(inputs_batch)
+                    if self.compiled_actions is None or not all(r[2] for r in requests_to_process):
+                        action_logits, value = self.model(inputs_batch)
+                    else:
+                        action_logits, value = self.compiled_actions(
+                            inputs_batch, self.capture_model_version,
+                            original=inputs_list[0] if len(inputs_list) == 1 else None)
                     _, action_tokens_all, normalized_actions_all = self.model.post_process(
                         action_logits, deterministic=deterministic_flags)
                     action_tokens = action_tokens_all.view(

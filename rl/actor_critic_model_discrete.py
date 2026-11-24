@@ -29,6 +29,9 @@ from prismatic.vla.constants import (
     NUM_ACTIONS_CHUNK,
     ACTION_DIM,
     PROPRIO_DIM,
+    ACTION_TOKEN_BEGIN_IDX,
+    IGNORE_INDEX,
+    STOP_INDEX,
 )
 from typing import Any
 
@@ -216,6 +219,35 @@ class ActorCritic(nn.Module):
 
     def _forward_vla(self, batch: Dict[str, torch.Tensor]):
         return forward_vla(self, batch)
+
+    real_action_count = NUM_ACTIONS_CHUNK * ACTION_DIM
+    real_action_token_begin = ACTION_TOKEN_BEGIN_IDX
+    real_ignore_index = IGNORE_INDEX
+    real_stop_index = STOP_INDEX
+
+    def real_action_vision(self, pixels):
+        """GPU-only image path of the two-view, FiLM-disabled rollout policy."""
+        with torch.autocast('cuda', dtype=self.model_dtype, cache_enabled=False):
+            return self.vla._process_vision_features(pixels.to(self.model_dtype), use_film=False)
+
+    def real_action_from_patches(self, input_ids, patches, attention_mask):
+        """No sampled actions, dynamic boolean indexing, or updates to policy weights."""
+        from compiled_policy_inference import static_action_outputs
+
+        with torch.autocast('cuda', dtype=self.model_dtype, cache_enabled=False):
+            embedded = self.vla.get_input_embeddings()(input_ids)
+            # CPU admission checked the exact (prompt, 56 actions, STOP) layout.
+            # Zero just these 56 embeddings as in the model's non-diffusion branch.
+            before_actions = embedded.shape[1] - self.real_action_count - 1
+            embedded = torch.cat((embedded[:, :before_actions],
+                                  torch.zeros_like(embedded[:, before_actions:-1]), embedded[:, -1:]), dim=1)
+            sequence, attention = self.vla._build_multimodal_attention(embedded, patches, attention_mask)
+            result = self.vla.language_model(inputs_embeds=sequence, attention_mask=attention,
+                                            position_ids=None, past_key_values=None, use_cache=None,
+                                            output_attentions=self.vla.config.output_attentions,
+                                            output_hidden_states=True, return_dict=True)
+        return static_action_outputs(result.logits, result.hidden_states[-1], self.real_action_count,
+                                     lambda h: self._compute_value_from_hidden(h.to(self.model_dtype)))
 
     def _compute_value_from_hidden(self, actions_hidden_states: torch.Tensor) -> torch.Tensor:
         """
