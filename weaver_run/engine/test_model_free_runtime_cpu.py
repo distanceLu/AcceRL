@@ -137,6 +137,27 @@ class RuntimeTests(unittest.TestCase):
         runtime = self.runtime()
         self.assertIsNone(runtime.before_update(7))
         self.assertEqual(self.admissions, [576])
+        receipt = self.events[-1][1]['details']
+        self.assertEqual((receipt['not_ready_polls'], receipt['shortage_wait_seconds']), (0, 0.))
+
+    def test_shortage_wait_starts_at_first_negative_reply_and_excludes_validation_and_preparation(self):
+        runtime = self.runtime()
+        clock = [100.]
+        def advance(seconds):
+            clock[0] += seconds
+        def admit(count):
+            self.admissions.append(count)
+            advance(7 if len(self.admissions) == 1 else 1)
+            return dict(ready=len(self.admissions) == 3, reservation_token='three')
+        runtime.replay.admit_model_free_batch = Method(admit)
+        runtime.control.should_validate = lambda steps, policy: len(self.admissions) == 1
+        runtime.validate = lambda policy: advance(75.)
+        runtime.sleep = advance
+        with patch('model_free_runtime.time.monotonic', side_effect=lambda: clock[0]):
+            self.assertIsNone(runtime.before_update(4, prepare_update=lambda policy: advance(50.)))
+        receipt = self.events[-1][1]['details']
+        self.assertEqual(receipt['not_ready_polls'], 2)
+        self.assertEqual(receipt['shortage_wait_seconds'], 2.5)
 
     def test_stop_is_polled_while_replay_has_no_cohort(self):
         runtime = self.runtime(ready=False)

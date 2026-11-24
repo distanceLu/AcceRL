@@ -25,6 +25,11 @@ class RealCollectionCoordinator:
         self.initial_state_pool = None
         self.pipeline_stopped = False
         self._paused = False
+        self._gate_revision = 0
+        self._gate_closed_since = None
+        self._gate_closed_seconds = 0.
+        self._gate_deferred_polls = 0
+        self._gate_transitions = 0
         self._leases = {}
         self._next_token = 0
         self._completed_ids = set()
@@ -105,6 +110,10 @@ class RealCollectionCoordinator:
                 return {'budget_exhausted': True, 'status': status}
         active_count = owner.status()['episodes_inflight'] if owner is not None else len(self._leases)
         if active_count >= self.pipeline_config.max_real_in_flight:
+            return None
+        # 只挡新回合。已分配的初态、在途动作和预算收尾照常处理。
+        if self._gate_closed_since is not None:
+            self._gate_deferred_polls += 1
             return None
         initial_state = None
         if owner is not None:
@@ -188,6 +197,11 @@ class RealCollectionCoordinator:
                     stopped=self.pipeline_stopped, failure=self._failure, paused=self._paused,
                     budget_exhausted=self._budget_exhausted(states),
                     reset_steps=self.initial_state_pool['reset_steps'] if self.initial_state_pool else None,
+                    rollout_gate_closed=self._gate_closed_since is not None,
+                    rollout_gate_closed_seconds=self._gate_closed_seconds + (
+                        time.monotonic() - self._gate_closed_since if self._gate_closed_since is not None else 0.),
+                    rollout_gate_transitions=self._gate_transitions,
+                    rollout_gate_deferred_polls=self._gate_deferred_polls,
                     **self._counts), initial_states=states,
                     frames={'resident_frame_bytes': 0}, train_windows=0, eval_windows=0, pending_draws=0)
 
@@ -198,6 +212,21 @@ class RealCollectionCoordinator:
             and not states['conservative_unknown_env_steps']
             and not states['recovery_required_tokens']
             and states['available_env_steps'] <= self.initial_state_pool['reset_steps'])
+
+    def set_rollout_gate(self, revision, closed):
+        # Replay 是唯一发布方。迟到的旧通知不能覆盖较新的准入状态。
+        if revision <= self._gate_revision:
+            return
+        self._gate_revision = revision
+        if closed == (self._gate_closed_since is not None):
+            return
+        self._gate_transitions += 1
+        now = time.monotonic()
+        if closed:
+            self._gate_closed_since = now
+        else:
+            self._gate_closed_seconds += now - self._gate_closed_since
+            self._gate_closed_since = None
 
     def set_paused(self, paused):
         """Pause new admissions; existing leases retain identity and can finish."""

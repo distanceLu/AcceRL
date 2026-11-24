@@ -133,6 +133,7 @@ def collect(data, state):
     if state.get('model_free'):
         result['real_workers'] = state.get('real_workers', 4)
         result['no_micro_cache_trim'] = state.get('no_micro_cache_trim', False)
+        result['rollout_inventory_gate'] = state.get('rollout_inventory_gate', False)
     result['batch_autotune']=state.get('batch_autotune',False)
     activity=data/'training/fixed_validation_activity.json'
     if activity.exists():
@@ -334,6 +335,7 @@ def formal_environment(state, data, pre):
     env['ACCERL_BATCH_AUTOTUNE']=str(int(state.get('batch_autotune',False)))
     env['ACCERL_TRAJECTORY_JIT']=str(int(state.get('trajectory_jit',False)))
     env['ACCERL_REAL_SAMPLING'] = state.get('real_sampling', 'chunks')
+    env['ACCERL_ROLLOUT_INVENTORY_GATE'] = str(int(state.get('rollout_inventory_gate',False)))
     if state.get('trajectory_jit'):
         env['ACCERL_TRAJECTORY_JIT_INITIAL_CHECKPOINT']=state['initial_policy']['checkpoint']
     if state.get('model_free'):
@@ -371,7 +373,7 @@ def enforce_stop_window(data, state, child, now=None):
         raise SaveGraceExpired('Manual-stop GPU save grace of900seconds expired')
 
 
-def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False):
+def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=None, cost_scheduler_config=None, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False):
     if mode != 'manual' or stop_on_target:
         raise RuntimeError('This source only permits a fresh manual-stop formal run')
     if data.resolve() != (safe.MASTER/'formal_v3').resolve():
@@ -393,7 +395,9 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     from launch import mode_options, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
     from launch import real_sampling_options, real_sampling_arguments, rollout_options, rollout_arguments
     selected=mode_options(model_free,num_eval_workers)
-    selected.update(rollout_options(model_free, real_workers, no_micro_cache_trim))
+    rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
+                              trajectory_jit=trajectory_jit, real_sampling=real_sampling)
+    selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     selected['real_sampling'] = real_sampling_options(trajectory_jit, real_sampling)
@@ -450,7 +454,7 @@ def run(data, mode, stop_on_target, world_backend_config=None, pipeline_config=N
     child=None
     with (data/'runner.log').open('a',buffering=1) as log:
         try:
-            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else []) + (['--trajectory-jit'] if trajectory_jit else []) + real_sampling_arguments(real_sampling) + rollout_arguments(real_workers, no_micro_cache_trim)
+            launch_args=(['--model-free'] if model_free else []) + (['--num-eval-workers',str(num_eval_workers)] if num_eval_workers is not None else []) + fixed_validation_arguments(validation) + (['--batch-autotune'] if batch_autotune else []) + (['--trajectory-jit'] if trajectory_jit else []) + real_sampling_arguments(real_sampling) + rollout_arguments(**rollout)
             child=subprocess.Popen(['bash',str(SOURCE/'run.sh'),*launch_args],
                 cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             state['child']=safe.proc_identity(child.pid)
@@ -744,4 +748,4 @@ if __name__ == '__main__':
     elif args.mode == 'sample':
         safe.sample(args.data, args.run_id)
     else:
-        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling,real_workers=args.real_workers,no_micro_cache_trim=args.no_micro_cache_trim)
+        run(args.data, args.mode, args.stop_on_target, args.world_backend_config, args.pipeline_config, args.cost_scheduler_config,args.model_free,args.num_eval_workers,fixed_validation_overrides(args),batch_autotune=args.batch_autotune,trajectory_jit=args.trajectory_jit,real_sampling=args.real_sampling,real_workers=args.real_workers,no_micro_cache_trim=args.no_micro_cache_trim,rollout_inventory_gate=args.rollout_inventory_gate)

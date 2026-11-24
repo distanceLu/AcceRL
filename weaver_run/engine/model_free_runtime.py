@@ -69,6 +69,8 @@ class ModelFreeRuntime:
     def before_update(self, policy_step, prepare_update=None):
         """Only return None after one full cohort is reserved and safe to dispatch."""
         started = time.monotonic()
+        shortage_started = None
+        not_ready_polls = 0
         while True:
             reason = self.boundary_reason()
             if reason is not None:
@@ -80,13 +82,18 @@ class ModelFreeRuntime:
                 except ValidationInterrupted:
                     return 'requested_stop'
                 # The validation pause has independent simulator and drain deadlines.
-                started += time.monotonic() - validation_started
+                validation_seconds = time.monotonic() - validation_started
+                started += validation_seconds
+                if shortage_started is not None:
+                    shortage_started += validation_seconds
                 reason = self.boundary_reason()
                 if reason is not None:
                     return reason
             admission = self.ray.get(
                 self.replay.admit_model_free_batch.remote(self.global_batch_size), timeout=30)
+            observed = time.monotonic()
             if admission['ready']:
+                shortage_wait = 0. if shortage_started is None else observed - shortage_started
                 dispatch = False
                 try:
                     if prepare_update is not None:
@@ -95,14 +102,18 @@ class ModelFreeRuntime:
                     reason = self.boundary_reason()
                     if reason is None:
                         self.experiment.event('model_free_update_admitted', details={
-                            'policy_step': policy_step + 1, **admission})
+                            'policy_step': policy_step + 1, **admission,
+                            'not_ready_polls': not_ready_polls, 'shortage_wait_seconds': shortage_wait})
                         dispatch = True
                     return reason
                 finally:
                     if not dispatch:
                         self.ray.get(self.replay.cancel_model_free_admission.remote(
                             admission['reservation_token']), timeout=30)
-            if time.monotonic() - started > 3600:
+            not_ready_polls += 1
+            if shortage_started is None:
+                shortage_started = observed
+            if observed - started > 3600:
                 raise TimeoutError('Model-free Replay did not supply a complete eligible cohort in 3600 seconds')
             self.sleep(.25)
 

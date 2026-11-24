@@ -729,6 +729,34 @@ class ReplayBufferActor:
         import os
         self.trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
         self.real_sampling = os.environ.get('ACCERL_REAL_SAMPLING', 'chunks')
+        self.rollout_gate_collector = None
+
+    def configure_rollout_inventory_gate(self, collector, batch_size):
+        self.rollout_gate_collector = collector
+        self.rollout_gate_batch = batch_size
+        self.rollout_gate_closed = False
+        self.rollout_gate_revision = 0
+        self._update_rollout_gate('configured')
+
+    def _update_rollout_gate(self, reason):
+        if self.rollout_gate_collector is None:
+            return
+        batch = self.rollout_gate_batch
+        stock = self.fresh_store.model_free_inventory(batch)
+        closed = self.rollout_gate_closed
+        if stock['eligible_now'] < batch or not stock['next_two_versions_ready'] or 4 * stock['eligible_next'] <= 5 * batch:
+            closed = False
+        elif stock['eligible_next'] >= 2 * batch:
+            closed = True
+        changed = closed != self.rollout_gate_closed
+        if changed or reason in ('published', 'configured'):
+            self.rollout_gate_closed = closed
+            self.rollout_gate_revision += 1
+            # 工作者只查本地租约状态，库存变化异步通知，不在动作路径上做 RPC。
+            self.rollout_gate_collector.set_rollout_gate.remote(self.rollout_gate_revision, closed)
+            self.telemetry.event('rollout_inventory_gate_decision', details=dict(stock,
+                closed=closed, changed=changed, revision=self.rollout_gate_revision,
+                reason=reason, batch_size=batch, close_at=2*batch, open_at=5*batch//4))
 
     async def freeze_gpu_trial(self, batch_size, cohort_id, sampling=False, *, layout_pool_size=None, layout_seed=None):
         from gpu_trial_replay import freeze_trial
@@ -758,6 +786,7 @@ class ReplayBufferActor:
         except BaseException:
             token = batch[-1]['fresh_reservation_token']
             self.fresh_store.cancel(token)
+            self._update_rollout_gate('cancelled')
             self.fresh_records.pop(token, None)
             raise
 
@@ -815,6 +844,7 @@ class ReplayBufferActor:
             if admission is not None and list((policy, world)) != admission['versions']:
                 raise RuntimeError('Cannot change Policy version with an admitted model-free cohort')
             self.fresh_store.set_versions(policy, world)
+            self._update_rollout_gate('published')
             pump = getattr(self, 'inventory_refill', None)
             if pump is not None and world == policy//5:
                 import time
@@ -826,6 +856,7 @@ class ReplayBufferActor:
         if not self.fresh_enabled or not self.fresh_critics:
             raise RuntimeError('FRESH ordered segment Replay is not configured')
         self.fresh_store.add(segment)
+        self._update_rollout_gate('added')
         self.fresh_admitted_chunks[segment.source] += segment.count
         if hasattr(self,'cost_admitted_chunks'):
             self.cost_admitted_chunks[segment.source] += segment.count
@@ -913,6 +944,7 @@ class ReplayBufferActor:
             return dict(snapshot, ready=False, batch_size=batch_size)
         self._model_free_admission = dict(snapshot, ready=True, batch_size=batch_size,
                                          reservation_token=token, sample_ids=sample_ids)
+        self._update_rollout_gate('reserved')
         return {key: value for key, value in self._model_free_admission.items() if key != 'sample_ids'}
 
     def cancel_model_free_admission(self, token):
@@ -922,6 +954,7 @@ class ReplayBufferActor:
             raise ValueError('Cannot cancel a different or already consumed admission')
         self.fresh_store.cancel(token)
         self._model_free_admission = None
+        self._update_rollout_gate('cancelled')
 
     async def sample(self, batch_size):
         if self.fresh_enabled:
@@ -1044,6 +1077,7 @@ class ReplayBufferActor:
                 return (*result, metadata)
             except BaseException:
                 self.fresh_store.cancel(token)
+                self._update_rollout_gate('cancelled')
                 if getattr(self, 'inventory_refill', None) is not None:
                     self.inventory_refill.timing.active = None
                     self.inventory_refill.notify()
@@ -4388,6 +4422,10 @@ def main(args):
     online_weaver = isolated_online_weaver(world_config)
     validate_online_runtime_arguments(world_config, args)
     pipeline_config = pipeline_configuration(args)
+    rollout_inventory_gate = os.environ.get('ACCERL_ROLLOUT_INVENTORY_GATE') == '1'
+    if rollout_inventory_gate and (not model_free or pipeline_config.real_workers != 8
+            or not trajectory_jit or real_sampling != 'uniform_blocks'):
+        raise ValueError('Rollout inventory gate requires the eight-worker model-free uniform_blocks JIT recipe')
     if model_free and not pipeline_config.initial_state_enabled:
         raise ValueError('Model-free stopping requires explicit initial-state allocation and budget accounting')
     if pipeline_config.inventory_refill_enabled and (not fresh_replay
@@ -4821,6 +4859,9 @@ def main(args):
         ray.get([replay.configure_fresh.remote(inference_pool, wm_replay_buffers[index] if wm_replay_buffers else None,
                      inventory_refill=pipeline_config.inventory_refill_enabled)
                  for index, replay in enumerate(replay_buffers)])
+        if rollout_inventory_gate:
+            batch = args.train_batch_size * args.accumulation_steps * args.num_trainer_gpus
+            ray.get(replay_buffers[0].configure_rollout_inventory_gate.remote(producer_coordinators[0], batch))
 
     def sync_model(kind, pool):
         publication_started_ns = time.time_ns()

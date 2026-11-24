@@ -150,12 +150,15 @@ class SegmentReplay:
         self.samples, self.reservations = {}, {}
         self.reservation_sampling = {}
         self.versions = None
+        self._model_free_counts = None
 
     def set_versions(self, policy, world):
         if any(type(v) is not int or v < 0 for v in (policy, world)):
             raise ValueError('FRESH versions must be successful published update counts')
         if self.versions and (policy < self.versions[0] or world < self.versions[1]):
             raise ValueError('FRESH publication versions cannot move backwards')
+        if self.versions != (policy, world):
+            self._model_free_counts = None
         self.versions = policy, world
 
     def _evict(self, segment_id, reason):
@@ -177,6 +180,7 @@ class SegmentReplay:
             raise ValueError('Real-only Policy replay rejects imagined segments')
         if segment.segment_id in self.segments or any(segment.sample_id(i) in self.samples for i in range(segment.count)):
             raise ValueError('Duplicate FRESH segment/sample identity')
+        self._model_free_counts = None
         while len(self.samples) + segment.count > self.capacity:
             if not any(self._evict(key, 'fresh_capacity') for key in list(self.segments)):
                 raise FreshReplayNotReady('FRESH Replay capacity is pinned by in-flight training')
@@ -203,6 +207,48 @@ class SegmentReplay:
                 return False
         return sample['uses'] + sample['reserved'] < self.config.max_sample_uses
 
+    def model_free_inventory(self, batch_size):
+        """Count distinct currently eligible real chunks surviving future publications.
+
+        Two-version readiness is a feasible allocation. Each draw still samples
+        from the eligible ring and can spend capacity differently.
+        """
+        if not self.config.real_only or not self.config.replay_age_limits:
+            raise ValueError('Model-free inventory requires age- and use-limited real Replay')
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError('FRESH cohort size must be positive')
+        if self._model_free_counts is None:
+            now = after_one = after_two = reusable_one = reusable_two = 0
+            if self.versions is not None:
+                policy = self.versions[0]
+                for sample in self.samples.values():
+                    remaining = self.config.max_sample_uses - sample['uses'] - sample['reserved']
+                    if remaining <= 0:
+                        continue
+                    segment = self.segments[sample['segment_id']]
+                    age = policy - segment.versions[sample['index']]['policy']
+                    if not 0 <= age <= self.config.max_policy_age:
+                        continue
+                    now += 1
+                    if age + 1 <= self.config.max_policy_age:
+                        after_one += 1
+                        reusable_one += remaining >= 2
+                    if age + 2 <= self.config.max_policy_age:
+                        after_two += 1
+                        reusable_two += remaining >= 2
+            # All v+2 survivors also survive v+1. A chunk contributes one
+            # position at v+1 and a second only if still legal and reusable.
+            self._model_free_counts = dict(
+                eligible_now=now, eligible_next=after_one, eligible_second=after_two,
+                next_two_batch_slots=after_one + reusable_one,
+                two_version_slots=after_one + reusable_two)
+        counts = self._model_free_counts
+        return dict(counts, policy_version=self.versions[0] if self.versions else None,
+                    next_batch_ready=counts['eligible_next'] >= batch_size,
+                    next_two_batches_ready=counts['next_two_batch_slots'] >= 2 * batch_size,
+                    next_two_versions_ready=(counts['eligible_second'] >= batch_size
+                                             and counts['two_version_slots'] >= 2 * batch_size))
+
     def reserve(self, count, *, real_sampling='chunks'):
         if type(count) is not int or count < 1:
             raise ValueError('FRESH cohort size must be positive')
@@ -213,6 +259,7 @@ class SegmentReplay:
             from real_episode_sampling import choose
             selected, details = choose(self, count, real_sampling)
         token = 'fresh-reservation:' + uuid.uuid4().hex
+        self._model_free_counts = None
         for sid in selected:
             self.samples[sid]['reserved'] += 1
         self.reservations[token] = set(selected)
@@ -240,6 +287,7 @@ class SegmentReplay:
 
     def cancel(self, token):
         selected = self.reservations.pop(token)
+        self._model_free_counts = None
         self.reservation_sampling.pop(token, None)
         for sid in selected:
             self.samples[sid]['reserved'] -= 1
@@ -254,6 +302,8 @@ class SegmentReplay:
             sample = self.samples[sid]
             if not self._eligible({**sample, 'reserved':sample['reserved']-1}):
                 raise ValueError('FRESH sample exceeded its age/use contract before actual consumption')
+        # Commit transfers a reserved use to a consumed use. Remaining
+        # inventory is identical, including while other ranks are pending.
         for sid in sample_ids:
             self.samples[sid]['reserved'] -= 1
             self.samples[sid]['uses'] += 1

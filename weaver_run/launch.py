@@ -245,20 +245,30 @@ def real_sampling_arguments(real_sampling):
 def add_rollout_arguments(parser):
     parser.add_argument('--real-workers', type=int, choices=(4, 8), default=4)
     parser.add_argument('--no-micro-cache-trim', action='store_true')
+    parser.add_argument('--rollout-inventory-gate', action='store_true',
+                        help='Limit new real rollouts by eligible replay inventory during eight-worker trajectory JIT.')
 
 
-def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False):
+def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False,
+                    *, trajectory_jit=False, real_sampling='chunks'):
+    require(type(rollout_inventory_gate) is bool, 'rollout inventory gate must be bool')
+    require(not rollout_inventory_gate or (model_free and real_workers == 8 and trajectory_jit and
+                                          real_sampling == 'uniform_blocks'),
+            'Rollout inventory gate requires --model-free --real-workers 8 --trajectory-jit --real-sampling uniform_blocks')
     require(type(real_workers) is int and real_workers in (4, 8), 'Model-free rollout count must be 4 or 8')
     require(type(no_micro_cache_trim) is bool, 'no_micro_cache_trim must be bool')
     require(model_free or (real_workers == 4 and not no_micro_cache_trim),
             'Rollout concurrency and micro cache overrides require --model-free')
-    return dict(real_workers=real_workers, no_micro_cache_trim=no_micro_cache_trim)
+    return dict(real_workers=real_workers, no_micro_cache_trim=no_micro_cache_trim,
+                rollout_inventory_gate=rollout_inventory_gate)
 
 
-def rollout_arguments(real_workers=4, no_micro_cache_trim=False):
+def rollout_arguments(real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False):
     args = [] if real_workers == 4 else ['--real-workers', str(real_workers)]
     if no_micro_cache_trim:
         args.append('--no-micro-cache-trim')
+    if rollout_inventory_gate:
+        args.append('--rollout-inventory-gate')
     return args
 
 
@@ -283,7 +293,9 @@ def exec_managed_driver(overrides=()):
     add_real_sampling_argument(options)
     add_fixed_validation_arguments(options)
     selected,other=options.parse_known_args(overrides)
-    rollout_options(selected.model_free,selected.real_workers,selected.no_micro_cache_trim)
+    rollout_options(selected.model_free, selected.real_workers, selected.no_micro_cache_trim,
+                    selected.rollout_inventory_gate, trajectory_jit=selected.trajectory_jit,
+                    real_sampling=selected.real_sampling)
     workers = selected.real_workers
     no_micro_cache_trim = selected.no_micro_cache_trim
     if selected.model_free and os.environ.get('ACCERL_JIT_BENCH_PLAN'):
@@ -302,6 +314,7 @@ def exec_managed_driver(overrides=()):
                ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(selected.model_free, selected.num_eval_workers, selected.batch_autotune, selected.trajectory_jit)))
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(selected.trajectory_jit, selected.real_sampling)
+    env['ACCERL_ROLLOUT_INVENTORY_GATE'] = str(int(selected.rollout_inventory_gate))
     if selected.model_free:
         env['ACCERL_MODEL_FREE_REAL_WORKERS'] = str(workers)
         # 让训练器复用微批缓存，更新结束时仍交还显存给同卡推理。
@@ -313,8 +326,9 @@ def exec_managed_driver(overrides=()):
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 
-def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False):
-    rollout_options(model_free,real_workers,no_micro_cache_trim)
+def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False):
+    rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
+                    trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
@@ -361,6 +375,7 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
                ACCERL_RAY_TMP=f"/dev/shm/wr_{os.getuid()}_{uuid.uuid4().hex[:10]}",ACCERL_RAY_SPILL=str(work/"ray_spill"))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)))
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(trajectory_jit, real_sampling)
+    env['ACCERL_ROLLOUT_INVENTORY_GATE'] = str(int(rollout_inventory_gate))
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(batch_autotune)),ACCERL_MODEL_FREE=str(int(model_free)),ACCERL_NUM_EVAL_WORKERS=str(mode_options(model_free,num_eval_workers)['num_eval_workers']))
     if model_free:
         env['ACCERL_MODEL_FREE_REAL_WORKERS'] = str(real_workers)
@@ -498,7 +513,9 @@ def main():
     add_fixed_validation_arguments(parser)
     args=parser.parse_args()
     selected=mode_options(args.model_free,args.num_eval_workers)
-    rollout = rollout_options(args.model_free,args.real_workers,args.no_micro_cache_trim)
+    rollout = rollout_options(args.model_free, args.real_workers, args.no_micro_cache_trim,
+                              args.rollout_inventory_gate, trajectory_jit=args.trajectory_jit,
+                              real_sampling=args.real_sampling)
     selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(args.model_free,args.num_eval_workers,args.batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(args.model_free,args.num_eval_workers,args.batch_autotune,args.trajectory_jit)

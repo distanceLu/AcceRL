@@ -256,7 +256,7 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
@@ -264,7 +264,8 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     evidence = verify_git(source, git_commit)
     sys.path.insert(0,str(source.parent))
     from launch import batch_autotune_options, trajectory_jit_options, real_sampling_options, rollout_options
-    rollout_options(model_free,real_workers,no_micro_cache_trim)
+    rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
+                              trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     real_sampling_options(trajectory_jit, real_sampling)
@@ -293,7 +294,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
             work=Path(temp)
             command,environment,resources=prepare(work,['4','5','6','7'],'weaverintegrated_cpu_check',
                 model_free=True,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,
-                real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim)
+                **rollout)
             check(work,command,environment,resources)
     else:
         backend = read_json(root / BACKEND_CONFIG)
@@ -312,11 +313,11 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     return {**evidence, 'source': str(source), 'experiment_root': str(root),
             'backend': backend, 'mps_receipt_sha256': hashlib.sha256(mps_path.read_bytes()).hexdigest(),
             'world_admission': admission, 'cost_scheduler': scheduler, 'mps_boot_id': authorization['boot_id'],
-            **(dict(real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim) if model_free else {}),
+            **(rollout if model_free else {}),
             'gpu_access_performed': False,'real_sampling':real_sampling,'trajectory_jit':trajectory_jit,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -335,6 +336,7 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     env['ACCERL_BATCH_AUTOTUNE']=str(int(batch_autotune))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit))
     env['ACCERL_REAL_SAMPLING'] = real_sampling
+    env['ACCERL_ROLLOUT_INVENTORY_GATE'] = str(int(rollout_inventory_gate))
     env['ACCERL_MODEL_FREE']=str(int(model_free))
     if model_free or num_eval_workers is not None:
         env['ACCERL_NUM_EVAL_WORKERS']=str((0 if model_free else 3) if num_eval_workers is None else num_eval_workers)
@@ -346,10 +348,12 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False):
     if model_free is not None:
         if (state.get('real_workers',4),state.get('no_micro_cache_trim',False)) != (real_workers,no_micro_cache_trim):
             raise ValueError('Runner rollout count or trainer cache policy differs from queue request')
+        if state.get('rollout_inventory_gate', False) != rollout_inventory_gate:
+            raise ValueError('Runner rollout inventory gate differs from queue request')
         if state.get('real_sampling', 'chunks') != real_sampling:
             raise ValueError('Runner real sampling differs from queue request')
         if state.get('trajectory_jit',False) != trajectory_jit:
@@ -917,7 +921,8 @@ def runner_command(args):
     if getattr(args,'trajectory_jit',False):
         command += ['--trajectory-jit']
     command += real_sampling_arguments(getattr(args, 'real_sampling', 'chunks'))
-    command += rollout_arguments(getattr(args,'real_workers',4),getattr(args,'no_micro_cache_trim',False))
+    command += rollout_arguments(getattr(args,'real_workers',4), getattr(args,'no_micro_cache_trim',False),
+                                getattr(args,'rollout_inventory_gate',False))
     return command
 
 
@@ -932,7 +937,9 @@ def mode_kwargs(args):
         selected['trajectory_jit']=True
     if real_sampling != 'chunks':
         selected['real_sampling'] = real_sampling
-    rollout = rollout_options(selected['model_free'],getattr(args,'real_workers',4),getattr(args,'no_micro_cache_trim',False))
+    rollout = rollout_options(selected['model_free'], getattr(args,'real_workers',4),
+                             getattr(args,'no_micro_cache_trim',False), getattr(args,'rollout_inventory_gate',False),
+                             trajectory_jit=getattr(args,'trajectory_jit',False), real_sampling=real_sampling)
     if selected['model_free']:
         selected.update(rollout)
     return selected

@@ -477,6 +477,64 @@ class ModelFreeLaunchTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--eval-inference-replicas')+1], '0,1,2,3')
         self.assertIn('ModelFree', argv[argv.index('--exp-name')+1])
 
+    def test_inventory_gate_is_bound_to_the_formal_job_and_managed_driver(self):
+        options = dict(model_free=True, num_eval_workers=0, batch_autotune=True,
+                       trajectory_jit=True, real_sampling='uniform_blocks',
+                       real_workers=8, no_micro_cache_trim=True, rollout_inventory_gate=True)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'mps.json').write_bytes(b'{}')
+            profiles = {'restore': {'mps_receipt': site.digest(b'{}')}}
+            with patch.object(site, 'PARENT', root), patch.object(site, 'PROFILES', profiles), \
+                 patch.object(site, 'revision', return_value='a'*40):
+                record = site.make_spec('restore', 'inventory', root, root, checkout=HERE.parent, **options)
+            self.assertTrue(record['rollout_inventory_gate'])
+            self.assertIn('--rollout-inventory-gate', record['job']['argv'])
+            args = types.SimpleNamespace(source=HERE/'engine', root=root, **options)
+            mode = training.mode_kwargs(args)
+            self.assertTrue(mode['rollout_inventory_gate'])
+            self.assertEqual(training.launch_environment(root, args.source, {}, **mode)
+                             ['ACCERL_ROLLOUT_INVENTORY_GATE'], '1')
+            command = training.runner_command(args)
+            self.assertIn('--rollout-inventory-gate', command)
+            overrides = command[command.index('--model-free'):]
+            env = dict(ACCERL_PIPELINE_CONFIG='pipeline.json', ACCERL_FINAL_CHECKPOINT='weights',
+                       ACCERL_ROLLOUT_INVENTORY_GATE='1')
+            for enabled in (True, False):
+                with self.subTest(enabled=enabled), patch.dict(os.environ, env, clear=True), \
+                     patch.object(os, 'chdir'), patch.object(os, 'execve') as execute:
+                    selected = [arg for arg in overrides if enabled or arg != '--rollout-inventory-gate']
+                    launch.exec_managed_driver(selected)
+                    _, argv, child_env = execute.call_args.args
+                    self.assertEqual(child_env['ACCERL_ROLLOUT_INVENTORY_GATE'], str(int(enabled)))
+                    self.assertNotIn('--rollout-inventory-gate', argv)
+
+    def test_reference_start_forwards_inventory_gate_and_runner_freezes_it(self):
+        from test_manual_controller_cpu import env as formal_env
+        argv = ['run.sh', 'original', '--id', 'gate-test', '--model-free', '--batch-autotune',
+                '--trajectory-jit', '--real-sampling', 'uniform_blocks', '--real-workers', '8',
+                '--rollout-inventory-gate']
+        with patch.object(sys, 'argv', argv), patch.object(launch.socket, 'gethostname',
+                return_value=launch.REFERENCE_SERVER), patch.object(os, 'execv', side_effect=InterruptedError) as start:
+            with self.assertRaises(InterruptedError):
+                launch.main()
+        self.assertIn('--rollout-inventory-gate', start.call_args.args[1])
+        state = dict(run_id='weaverintegrated_test', started_ns=1, model_free=True, real_workers=8,
+                     trajectory_jit=True, real_sampling='uniform_blocks', initial_policy={'checkpoint': 'p0'},
+                     rollout_inventory_gate=True)
+        self.assertEqual(formal_env(state=state)['ACCERL_ROLLOUT_INVENTORY_GATE'], '1')
+        del state['rollout_inventory_gate']
+        self.assertEqual(formal_env({'ACCERL_ROLLOUT_INVENTORY_GATE':'1'}, state=state)
+                         ['ACCERL_ROLLOUT_INVENTORY_GATE'], '0')
+
+    def test_inventory_gate_rejects_incompatible_formal_configuration(self):
+        options = dict(model_free=True, real_workers=8, trajectory_jit=True,
+                       real_sampling='uniform_blocks', rollout_inventory_gate=True)
+        for change in (dict(model_free=False), dict(real_workers=4), dict(trajectory_jit=False),
+                       dict(real_sampling='whole_episodes'), dict(real_sampling='chunks')):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'inventory gate'):
+                launch.rollout_options(**dict(options, **change))
+
     def test_formal_eight_workers_propagate_to_driver_and_replay_leases(self):
         selected = launch.rollout_options(True, real_workers=8, no_micro_cache_trim=True)
         effective = launch.effective_pipeline(True, real_workers=8)
