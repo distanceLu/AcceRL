@@ -341,8 +341,12 @@ def exec_managed_driver(overrides=()):
         env['ACCERL_TRIM_MICRO_CACHE'] = '0' if no_micro_cache_trim else '1'
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
-    # TensorBoard consumers on this host already watch the original runs directory.
-    os.chdir(SITE_ENTRY.parent.parent/"AcceRL-scheduler")
+    from engine.policy_source import training_pythonpath
+    env['PYTHONPATH'] = training_pythonpath(env.get('PYTHONPATH', ''))
+    env['ACCERL_REPO_ROOT'] = str(ROOT)
+    # Ray also propagates the driver's working directory to its workers.
+    env['ACCERL_TENSORBOARD_RUNS'] = str(SITE_ENTRY.parent.parent/'AcceRL-scheduler/runs')
+    os.chdir(ROOT)
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 

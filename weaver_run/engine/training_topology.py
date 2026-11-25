@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-from pathlib import Path
 import subprocess
 from collections.abc import Mapping
 
@@ -80,8 +79,8 @@ def ray_init_options(bindings, layout=DUAL_LAYOUT, active_kinds=None, inference_
     capacity = float(len(kinds) + len(infer)) if layout in (FOUR_LAYOUT, SPLIT_LAYOUT) else 1.0
     import_path = {}
     if layout == SPLIT_LAYOUT:
-        import_path["PYTHONPATH"] = os.pathsep.join(filter(None, (
-            str(Path(__file__).resolve().parent), os.environ.get("PYTHONPATH", ""))))
+        from policy_source import training_pythonpath
+        import_path["PYTHONPATH"] = training_pythonpath(os.environ.get("PYTHONPATH", ""))
     return {
         "num_gpus": 0,
         "resources": {binding["resource"]: capacity for binding in bindings},

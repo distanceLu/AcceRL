@@ -60,7 +60,7 @@ import torch.distributed as distributed
 from torch.utils.tensorboard import SummaryWriter
 
 # ---- AcceRL sys.path 设置 ----
-ACCE_RL_ROOT = Path(os.environ.get("ACCERL_REPO_ROOT", Path(__file__).resolve().parents[2]))
+ACCE_RL_ROOT = Path(__file__).resolve().parents[2]
 if str(ACCE_RL_ROOT) not in sys.path:
     sys.path.insert(0, str(ACCE_RL_ROOT))
 
@@ -70,6 +70,10 @@ from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
 from experiments.robot.libero.libero_utils import GenerateConfig, TaskSuite
 from rl.actor_critic_model_discrete import ActorCritic
 from rl.utils import prepare_one_obs
+from rl import actor_critic_model_discrete, utils as policy_utils
+from policy_source import verify_policy_imports
+verify_policy_imports(policy_utils, actor_critic_model_discrete,
+                      compile_actions=os.environ.get('ACCERL_COMPILE_ACTION_INFERENCE') == '1')
 # 训练/推理通信
 from rl.ds_com import TrainerActorCom, InferenceActorCom
 from rl.com_utils import find_free_port
@@ -4581,7 +4585,8 @@ def main(args):
 
 
     print(f"Ray 初始化完成，对象存储分配 {object_store_size_gb} GB 内存。")
-    log_dir = f"runs/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
+    runs_dir = os.environ.get("ACCERL_TENSORBOARD_RUNS", "runs")
+    log_dir = f"{runs_dir}/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
     writer = CaptureSummaryWriter(log_dir, tensorboard=(
         os.environ.get("ACCERL_CAPTURE_ONLY") != "1" or os.environ.get("ACCERL_TENSORBOARD") == "1"))
     writer.model_free = model_free
@@ -5681,7 +5686,7 @@ class CaptureSummaryWriter:
         self.native_world_losses = self.native_reward_losses = False
         self.tensorboard = SummaryWriter(path, flush_secs=5) if tensorboard else None
         self.telemetry = Telemetry("driver", "metrics")
-        self.telemetry.config({"args": vars(args), "source": __file__, "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "cwd": os.getcwd(), "python": sys.executable, "torch": torch.__version__, "ray": ray.__version__, "module_paths": {key: getattr(sys.modules.get(key),"__file__",None) for key in ("rl","prismatic","ctrl_world","libero")}})
+        self.telemetry.config({"args": vars(args), "source": __file__, "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "cwd": os.getcwd(), "python": sys.executable, "torch": torch.__version__, "ray": ray.__version__, "module_paths": {key: getattr(sys.modules.get(key),"__file__",None) for key in ("rl","rl.utils","rl.actor_critic_model_discrete","prismatic","ctrl_world","libero")}})
     def add_scalar(self, tag, value, step, walltime=None, double_precision=False):
         from model_free_mode import metric_enabled
         if not metric_enabled(tag, model_free=getattr(self, 'model_free', False),

@@ -10,9 +10,9 @@ export TMPDIR=/dev/shm
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 export RAY_DEDUP_LOGS=0
 set -euo pipefail
-FSDP_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export ACCERL_REPO_ROOT="${ACCERL_REPO_ROOT:-/mnt/data/lcx1/dong/AcceRL-scheduler}"
-export PYTHONPATH="$FSDP_SOURCE:$ACCERL_REPO_ROOT:$ACCERL_REPO_ROOT/rl/ctrl_world:${PYTHONPATH:-}"
+FSDP_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+export ACCERL_REPO_ROOT="$(cd "$FSDP_SOURCE/../.." && pwd -P)"
+export PYTHONPATH="$FSDP_SOURCE:$ACCERL_REPO_ROOT:$ACCERL_REPO_ROOT/rl/ctrl_world${PYTHONPATH:+:$PYTHONPATH}"
 export ACCERL_PIPELINE_CONFIG="${ACCERL_PIPELINE_CONFIG:-$FSDP_SOURCE/pipeline_default.json}"
 MODEL_FREE="${ACCERL_MODEL_FREE:-0}"
 for argument in "$@"; do

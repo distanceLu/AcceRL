@@ -650,7 +650,7 @@ class ModelFreeLaunchTests(unittest.TestCase):
             self.assertIn('--model-free',record['job']['argv'])
             self.assertFalse((stage/'git-world.json').exists())
 
-    def test_managed_driver_executes_model_free_recipe_in_tensorboard_watch_directory(self):
+    def test_managed_driver_uses_frozen_checkout_and_preserves_tensorboard_watch_directory(self):
         captured={}
         def execute(python,argv,env):
             captured.update(argv=argv,env=env)
@@ -662,7 +662,10 @@ class ModelFreeLaunchTests(unittest.TestCase):
         self.assertEqual(captured['env']['ACCERL_TENSORBOARD'],'1')
         self.assertNotIn('ACCERL_COST_SCHEDULER_CONFIG',captured['env'])
         self.assertNotIn('ACCERL_WORLD_BACKEND_CONFIG',captured['env'])
-        self.assertEqual(chdir.call_args.args[0],launch.SITE_ENTRY.parent.parent/'AcceRL-scheduler')
+        self.assertEqual(chdir.call_args.args[0],launch.ROOT)
+        self.assertEqual(Path(captured['env']['ACCERL_TENSORBOARD_RUNS']),launch.SITE_ENTRY.parent.parent/'AcceRL-scheduler/runs')
+        self.assertEqual(captured['env']['PYTHONPATH'].split(os.pathsep)[:2],
+                         [str(launch.ENGINE),str(launch.ROOT)])
 
     def test_mode_mismatch_cannot_pass_managed_state_checks(self):
         state=dict(run_id='weaverintegrated_test',candidate='weaver_integrated_v1',source_path='/source',
