@@ -23,10 +23,15 @@ class RolloutPulseGate:
         self.path = Path(output) / 'rollout_pulse.json'
 
     @classmethod
-    def from_environment(cls, env):
+    def from_environment(cls, env, worker_id=None):
         plan_path = env.get('ACCERL_JIT_BENCH_PLAN')
-        if plan_path and json.loads(Path(plan_path).read_bytes()).get('comparison') == 'admission_pulse':
-            return cls(env['ACCERL_JIT_BENCH_OUTPUT'])
+        if plan_path:
+            comparison = json.loads(Path(plan_path).read_bytes()).get('comparison')
+            if comparison == 'admission_pulse':
+                return cls(env['ACCERL_JIT_BENCH_OUTPUT'])
+            if comparison == 'critical_jit':
+                from critical_probe import TargetActionGate
+                return TargetActionGate(env['ACCERL_JIT_BENCH_OUTPUT'], worker_id)
         return None
 
     def wait(self):

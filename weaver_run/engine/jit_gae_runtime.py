@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from types import SimpleNamespace
+import os
 import time
 import numpy as np
 import torch
@@ -28,7 +29,7 @@ def _sum(tensor):
     return tensor
 
 
-def _checked(fn, device, valid=None):
+def _checked(fn, device, valid=None, probe=None):
     """All ranks reach the same failure vote before a backward collective.
 
 This does not promise recovery from a broken CUDA context/NCCL process. Such a
@@ -42,8 +43,15 @@ failure remains a failed job; no further optimizer window is admitted.
     failed = torch.tensor(int(error is not None), device=device)
     if error is None and valid is not None:
         failed = (~valid(result)).to(failed.dtype)
+    if probe is not None:
+        probe.mark('forward_ready')
     _sum(failed)
-    if bool(failed):
+    if probe is not None:
+        voted = probe.mark('vote_done')
+    failure = bool(failed)
+    if probe is not None:
+        probe.vote_complete(voted)
+    if failure:
         raise RuntimeError('JIT rank preparation/forward failed or nonfinite; stop the rank group') from error
     return result
 
@@ -238,12 +246,18 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     gae = ReverseGAE(segments, device)
     sums = torch.zeros(3, device=device, dtype=torch.float64)
     metrics, receipt_tensors, receipt_indices = [], [], []
+    probe = None
+    if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
+        from critical_probe import TrainerProbe
+        probe = TrainerProbe.for_update(owner, version + 1)
     prepass_s = time.monotonic()-started
     for number,bundle in enumerate(bundles):
         indices = list(bundle.selected)
         capture = micro_begin(owner, 'policy_train', owner.model, micro, number*micro,
                               (number+1)*micro, sample_indices=indices)
         try:
+            if probe is not None:
+                probe.begin(number)
             def forward():
                 values = {} if separate else _forward_values(owner,
                     [n for n in bundle.nodes if n.selected is None],segments,config.jit_context_micro,counters,
@@ -271,14 +285,18 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                     actor_enabled=version >= owner.policy_train_start_step)
                 return loss,metric,advantage,target
             loss,metric,advantage,target = _checked(forward, device,
-                valid=lambda rows:torch.stack([torch.isfinite(t).all() for t in rows]).all())
+                valid=lambda rows:torch.stack([torch.isfinite(t).all() for t in rows]).all(), probe=probe)
             sums += raw_sums(advantage)
             metrics.append(metric)
             receipt_tensors.append(torch.stack((advantage,target),dim=1))
             receipt_indices.extend(indices)
             backward_start=time.monotonic();owner.model.backward(loss)
+            if probe is not None:
+                probe.mark('backward_only_done')
             old_steps,old_skips = int(owner.model.global_steps),int(owner.model.skipped_steps)
             owner.model.step()
+            if probe is not None:
+                probe.mark('backward_done')
             owner._jit_times['backward_step_host_call_wall_s']+=time.monotonic()-backward_start
             successful = max(0,int(owner.model.global_steps)-old_steps-int(owner.model.skipped_steps)+old_skips)
             counters['selected_grad_states'] += micro
@@ -304,9 +322,15 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     batch_mean, batch_variance = moments(sums)
     # One packed result readback after the successful optimizer boundary. Required
     # finite/error votes above remain explicit synchronization points.
-    packed = torch.cat((torch.stack(metrics).reshape(-1),torch.cat(receipt_tensors).reshape(-1),
+    packed_device = torch.cat((torch.stack(metrics).reshape(-1),torch.cat(receipt_tensors).reshape(-1),
                         totals[3:].float(),torch.stack((mean,scale,ema.mean,ema.variance,
-                                                       batch_mean,batch_variance.sqrt())).float())).detach().cpu().numpy()
+                                                       batch_mean,batch_variance.sqrt())).float())).detach()
+    if probe is not None:
+        anchor = probe.mark('packed')
+    packed = packed_device.cpu().numpy()
+    if probe is not None:
+        probe.finish(anchor, time.time_ns())
+    del packed_device
     split = len(bundles)*7
     metric_rows = packed[:split].reshape(-1,7)
     receipt_rows = packed[split:-9].reshape(-1,2)

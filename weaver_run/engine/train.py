@@ -775,6 +775,22 @@ class ReplayBufferActor:
         from gpu_trial_replay import release_trial
         return release_trial(self, cohort_id)
 
+    def freeze_critical_jit(self, cohort_id, pool_size, seed, exposures):
+        from gpu_trial_replay import freeze_critical
+        return freeze_critical(self, cohort_id, pool_size, seed, exposures)
+
+    def critical_jit_decision(self, cohort_id, version, high_next):
+        from gpu_trial_replay import critical_decision
+        return critical_decision(self, cohort_id, version, high_next)
+
+    def critical_jit_inventory(self):
+        return dict(self.fresh_store.model_free_inventory(576), observed_ns=time.time_ns(),
+                    admitted_real_chunks=self.fresh_admitted_chunks['real'], resident=len(self.fresh_store.samples))
+
+    def commit_critical_jit(self, cohort_id, version, ids):
+        from gpu_trial_replay import commit_critical
+        return commit_critical(self, cohort_id, version, ids)
+
     def pulse_inventory(self):
         from admission_pulse_bench import replay_snapshot
         return replay_snapshot(self)
@@ -1263,7 +1279,8 @@ class RolloutWorkerActor(BaseWorkerActor):
             super().__init__(infer, replay, wid, stats_actor, cfg, benchmark_name)
             if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
                 from bench_action_gate import RolloutPulseGate
-                self.bench_action_gate = RolloutPulseGate.from_environment(os.environ)
+                self.bench_action_gate = RolloutPulseGate.from_environment(os.environ, worker_id=wid)
+                self.critical_actions = getattr(self.bench_action_gate, 'actions', None)
             if pipeline.real_training_action_horizon is not None:
                 from initial_state_env import set_real_training_action_horizon
                 for env in self.envs:
@@ -4018,9 +4035,9 @@ class TrainerActor(TrainerActorCom):
         from paired_gpu_trainer import weight_digest
         return weight_digest(self)
 
-    def prepare_layout_ema(self, cohort, version, first):
+    def prepare_layout_ema(self, cohort, version, first, *, repeated=False):
         from paired_gpu_trainer import prepare_layout_ema
-        return prepare_layout_ema(self,cohort,version,first)
+        return prepare_layout_ema(self,cohort,version,first,repeated=repeated)
 
     def read_layout_normalization(self, version):
         from paired_gpu_trainer import read_layout_normalization
@@ -4945,9 +4962,10 @@ def main(args):
                 if received != inventories:
                     raise RuntimeError(f"Inference weights differ after {kind} sync")
                 publication_timing["all_ACK_observed_ns"] = time.time_ns()
+            ack_completed_ns = time.time_ns()
             experiment.event("weight_publication_committed", model_version=inventories[0]["version"],
                 details={"kind": kind, "transport": "cuda_ipc" if kind in ("policy", "ctrl") else "cpu_ray",
-                         "started_ns": publication_started_ns, "ack_completed_ns": time.time_ns(),
+                         "started_ns": publication_started_ns, "ack_completed_ns": ack_completed_ns,
                          "inventories": inventories, "receiver_ranks": list(range(len(pool))),
                          "driver_timing": publication_timing,
                          "meaning": "all_rank_receivers_ACKed; per_receiver_model_version_event_is_its_visibility_point"})
@@ -4958,6 +4976,9 @@ def main(args):
                     published_fresh_versions['ctrl']) for producer in producer_coordinators])
                 ray.get([replay.set_fresh_versions.remote(published_fresh_versions['policy'],
                     published_fresh_versions['ctrl']) for replay in replay_buffers])
+            if kind in ("policy", "ctrl"):
+                return dict(version=inventories[0]["version"], receiver_ranks=list(range(len(pool))),
+                            inventories=inventories, ack_completed_ns=ack_completed_ns, **publication_timing)
         else:
             group = {"policy": "broadcast_actor", "reward": "broadcast_reward", "ctrl": "broadcast_ctrl"}[kind]
             send = trainer_group[0].broadcast_weights.remote(group)

@@ -197,6 +197,8 @@ def request_begin(owner, metadata=None):
     metadata.setdefault("request_id", new_id("request"))
     metadata.setdefault("submitted_ns", now_ns())
     metadata["arrival_ns"] = now_ns()
+    if getattr(owner, "critical_actions", None) is not None:
+        owner.critical_actions.enqueue(metadata)
     if not hasattr(owner, "capture_pending_meta"):
         owner.capture_pending_meta = collections.deque()
     if not hasattr(owner, "capture_served_versions"):
@@ -245,6 +247,8 @@ def batch_begin(owner, requests, promises=None, selected_metadata=None):
     starts = [item["arrival_ns"] for item in metadata]
     submitted = [item["submitted_ns"] for item in metadata]
     wall = now_ns()
+    if getattr(owner, "critical_actions", None) is not None:
+        owner.critical_actions.begin(metadata, wall)
     delays = sorted(max(0, wall - timestamp) for timestamp in starts)
     workflow_counts = dict(collections.Counter(str(item.get("workflow") or "unknown") for item in metadata))
     _writer(owner).event("batch_dispatch", workload=_role(owner), actual_batch=count,
@@ -265,6 +269,8 @@ def batch_begin(owner, requests, promises=None, selected_metadata=None):
                                gpu_interval_includes_cpu_enqueue_gaps=True,
                                queue_scope="client_submission_to_service_start")
     span.__enter__()
+    if getattr(owner, "critical_actions", None) is not None:
+        span.critical_end = 'service_end'
     return span
 
 
@@ -272,6 +278,8 @@ def batch_end(owner, span, error=None):
     if span is None or getattr(span, "capture_closed", False):
         return
     span.capture_closed = True
+    if getattr(span, 'critical_end', None) is not None:
+        owner.critical_actions.phase(span.critical_end, now_ns())
     span.__exit__(type(error) if error is not None else None, error,
                   error.__traceback__ if error is not None else None)
 
@@ -280,6 +288,9 @@ def stage_begin(owner, stage, actual_batch=1, cuda=False):
     span = _writer(owner).span(_role(owner) + "_" + stage, actual_batch=actual_batch,
                                model_version=_version(owner), cuda=cuda, stage=stage)
     span.__enter__()
+    if stage == 'gpu_forward_and_copy' and getattr(owner, "critical_actions", None) is not None:
+        owner.critical_actions.phase('gpu_start', now_ns())
+        span.critical_end = 'gpu_end'
     return span
 
 
@@ -299,9 +310,15 @@ def profile_rpc(owner, workload, actor, method, *args, **kwargs):
     request_id = new_id("request")
     writer = _writer(owner)
     if gate is not None:
-        ready = submitted
-        writer.event('bench_action_ready', workload=workload, request_id=request_id, ts_ns=ready)
-        pulse_id, wait_ns = gate.wait()
+        trace = getattr(owner, 'critical_actions', None)
+        if trace is None:
+            ready = submitted
+            writer.event('bench_action_ready', workload=workload, request_id=request_id, ts_ns=ready)
+            pulse_id, wait_ns = gate.wait()
+        else:
+            ready = now_ns()
+            pulse_id, wait_ns = gate.wait(ready)
+            writer.event('bench_action_ready', workload=workload, request_id=request_id, ts_ns=ready)
         submitted = now_ns()
         perf = time.perf_counter_ns()
     metadata = {"request_id": request_id, "submitted_ns": submitted,
@@ -315,9 +332,14 @@ def profile_rpc(owner, workload, actor, method, *args, **kwargs):
     try:
         if gate is not None:
             dispatch = now_ns()
-        result = ray.get(getattr(actor, method).remote(*args, **kwargs))
+        pending = getattr(actor, method).remote(*args, **kwargs)
+        if gate is not None and trace is not None:
+            trace.submitted(request_id, ready, dispatch, now_ns(), wait_ns, pulse_id)
+        result = ray.get(pending)
         if gate is not None:
             response = now_ns()
+            if trace is not None:
+                trace.worker('response', request_id, response, held_ns=wait_ns, gate_arm_id=pulse_id)
             writer.event('bench_action_request', workload=workload, request_id=request_id,
                          ts_ns=response, start_ns=ready, submitted_ns=dispatch, end_ns=response,
                          duration_ns=response-ready, status='ok',
@@ -496,6 +518,12 @@ def _init_wrapper(original, role):
                              duration_ns=time.perf_counter_ns() - perf,
                              details=details)
         _placement(self)
+        if role == "policy_infer" and os.environ.get("ACCERL_JIT_BENCH_PLAN"):
+            from critical_probe import ActionTrace, benchmark_output
+            output = benchmark_output(os.environ)
+            if output is not None:
+                self.critical_actions = ActionTrace(output, self.actor_id,
+                    gpu_uuid=self.gpu_binding['uuid'], physical_gpu=self.gpu_binding['physical_gpu'])
         if role in ("rollout", "evaluation"):
             _patch_envs(self)
     return init

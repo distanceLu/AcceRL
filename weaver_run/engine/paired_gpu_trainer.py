@@ -13,9 +13,9 @@ from batch_autotune_runtime import configure_training
 from jit_gae_runtime import _checked, run_balanced_trajectory_update
 
 
-def prepare_layout_ema(owner, cohort, version, first):
+def prepare_layout_ema(owner, cohort, version, first, *, repeated=False):
     ema = owner.advantage_ema
-    if version != owner.global_step or ema.updates != version or version < 2:
+    if version != owner.global_step or ema.updates != version or version < (1 if repeated else 2):
         raise ValueError('Layout EMA preparation requires the completed warmup and current optimizer step')
     # 两臂都在计时前读写并同步这两个标量。
     current = torch.stack((ema.mean,ema.variance)).tolist()
@@ -24,6 +24,8 @@ def prepare_layout_ema(owner, cohort, version, first):
     prior = getattr(owner,'_layout_ema_snapshot',None)
     if not prior or prior[:2] != (cohort,version if first else version-1):
         raise ValueError('Missing the initial EMA moments for this layout pair')
+    if repeated:
+        owner._layout_ema_snapshot = (cohort,version,prior[2])
     ema.mean.fill_(prior[2][0])
     ema.variance.fill_(prior[2][1])
     mean,variance = torch.stack((ema.mean,ema.variance)).tolist()

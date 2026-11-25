@@ -22,19 +22,25 @@ WEIGHTS_SHA256 = '9025fd14bd1e7e6bce8b284824a1a4eeb167d6c07b6074acdb00db4653f3e0
 MAX_SECONDS = 3*3600
 
 
-def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,real_workers=4,normal_only=False,
+def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,critical=False,real_workers=None,normal_only=False,
            no_micro_cache_trim=False):
     cli.require(cli.LABEL.fullmatch(label),'Invalid benchmark label')
     root = cli.EXPERIMENTS/label
-    if sum((sampling,pulse,layout)) > 1:
+    if sum((sampling,pulse,layout,critical)) > 1:
         raise ValueError('Select one benchmark comparison')
+    if real_workers is None:
+        real_workers = 8 if critical else 4
+    if critical and real_workers != 8:
+        raise ValueError('Critical JIT comparison requires eight real workers')
     if (real_workers not in (4, 8) or (normal_only and not pulse)
-            or (real_workers == 8 and not normal_only)):
-        raise ValueError('Eight real workers require the normal-only admission benchmark')
-    if no_micro_cache_trim and not (pulse and normal_only):
+            or (real_workers == 8 and not (normal_only or critical))):
+        raise ValueError('Eight real workers require a normal-only admission or critical JIT comparison')
+    if no_micro_cache_trim and not (critical or (pulse and normal_only)):
         raise ValueError('Micro cache trim comparison requires --normal-only')
     prefix = 'weaver-bench-'
-    if layout:
+    if critical:
+        prefix += 'critical-'
+    elif layout:
         prefix += 'layout-'
     elif sampling:
         prefix += 'sampling-'
@@ -51,19 +57,22 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,real
         info = dict(label=label,job_id=found['id'] if found else None,
                     state=found['state'] if found else 'not_submitted',root=str(root))
         for file in ('benchmark_queue.json','submission.json'):
-            if (root/file).is_file():
+            if found and (root/file).is_file():
                 info[file] = json.loads((root/file).read_bytes())
         return info
-    commit = cli.published(cli.CHECKOUT)
+    commit = cli.published(cli.CHECKOUT, push=critical)
     if pulse or layout:
         # 空闲队列复用现有运行目录；这个短测只新建实验数据。
         cli.ready()
         runtime = cli.RUNTIME
     else:
-        # These two older benchmarks may also be queued behind an active training.
+        # Jobs queued behind a live training must never repin its .git-runtime.
         runtime = cli.HOME/'library'/'jit-bench-code'/commit
         runtime.parent.mkdir(parents=True,exist_ok=True)
-    cli.pin_worktree(cli.CHECKOUT,runtime,commit)
+    if critical and runtime.exists():
+        cli.revision(runtime,commit)
+    else:
+        cli.pin_worktree(cli.CHECKOUT,runtime,commit)
     original = cli.EXPERIMENTS/SOURCE_LABEL
     weights = original/'formal_v3/training/checkpoints/latest_weights.pt'
     plan = dict(git_commit=commit,git_branch=BRANCH,label=label,output=str(root),
@@ -72,7 +81,13 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,real
                 real_workers=real_workers,online_eval_workers=0,fixed_validation=False,
                 global_batch=576,rank_size=144,train_micro=16,context_micro=2,
                 source='fresh_real_rollouts_at_P189',gpu_ids=[4,5,6,7])
-    if pulse:
+    if critical:
+        plan.update(comparison='critical_jit', real_sampling='uniform_blocks',
+                    no_micro_cache_trim=True, compile_action_inference=False, learning_rate=0.,
+                    warmup_updates=1, measured_blocks=6, noise_blocks=2, updates_per_arm=1,
+                    minimum_replay_chunks=2753, high_next_chunks=1152, gate_ttl_s=5.,
+                    protocol_seed=20261125)
+    elif pulse:
         plan.update(comparison='admission_pulse', real_sampling='uniform_blocks',
                     warmup_updates=1, measured_blocks=3, updates_per_arm=3,
                     pulse_seconds=5.0, minimum_replay_chunks=2048)
@@ -89,13 +104,15 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,real
         plan['comparison'] = 'episode_sampling'
         plan['sampling_modes'] = ['chunks','whole_episodes','uniform_blocks']
     comparison = 'three-sampler learner JIT' if sampling else 'same-cohort learner JIT'
-    if pulse:
+    if critical:
+        comparison = 'eight-rollout critical JIT admission'
+    elif pulse:
         comparison = (f'normal colocation with {real_workers} real workers' if normal_only
                       else 'rollout and trainer admission pulses')
     elif layout:
         comparison = 'same-cohort trajectory layout'
     job = dict(name='WEAVER '+comparison+' '+label,submission_id=sid,cwd=str(runtime),
-               argv=[cli.PYTHON,'-B',str(runtime/'weaver_run/reference_site/jit_bench_queue.py'),
+               argv=[cli.PYTHON,*(['-I'] if critical else []),'-B',str(runtime/'weaver_run/reference_site/jit_bench_queue.py'),
                      str(root/'plan.json')],manual=False,timeout_seconds=MAX_SECONDS+180)
     if root.exists():
         if not (root/'plan.json').is_file() or json.loads((root/'plan.json').read_bytes())!=plan:
@@ -106,8 +123,7 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,real
         root.mkdir(mode=0o700)
         put(root/'plan.json',plan)
     put(root/'experiment.json',dict(profile='model_free_jit_bench',git_commit=commit,job=job))
-    pipeline = effective_pipeline(True)
-    pipeline.update(real_workers=real_workers, max_real_in_flight=real_workers)
+    pipeline = effective_pipeline(True, real_workers=real_workers)
     put(root/'git-pipeline.json',pipeline)
     mps=(cli.PARENT/'mps.json').read_bytes()
     if hashlib.sha256(mps).hexdigest()!=cli.PROFILES['restore']['mps_receipt']:
@@ -125,9 +141,12 @@ def submit(cli,label,*,status=False,sampling=False,pulse=False,layout=False,real
 def benchmark_argv(plan):
     argv = ['bash',str(ENGINE/'run.sh'),'--model-free','--num-eval-workers','0',
             '--fixed-validation-interval-env-steps','0','--batch-autotune']
-    if plan.get('comparison') == 'admission_pulse':
+    if plan.get('comparison') in ('admission_pulse','critical_jit'):
         # 最终驱动按命令行重建环境，JIT 和采样方式必须随同传入。
         argv.extend(['--trajectory-jit', '--real-sampling', plan['real_sampling']])
+        if plan['comparison'] == 'critical_jit':
+            argv.extend(['--real-workers', str(plan['real_workers']), '--no-micro-cache-trim',
+                         '--policy-lr', str(plan['learning_rate']), '--value-lr', str(plan['learning_rate'])])
     elif plan.get('comparison') == 'trajectory_layout':
         argv.append('--no-micro-cache-trim')
     return argv
@@ -164,10 +183,11 @@ def run(plan_file):
                experiment_root=str(root),source_path=str(ENGINE),candidate='weaver_integrated_v1',
                pipeline_config_path=str(root/'git-pipeline.json'),model_free=True,batch_autotune=True,
                num_eval_workers=0,owned=[],supervisor=safe.proc_identity(os.getpid()))
-    pulse = plan.get('comparison') == 'admission_pulse'
-    if pulse:
+    if plan.get('comparison') in ('admission_pulse','critical_jit'):
         state.update(trajectory_jit=True, real_sampling=plan['real_sampling'],
                      initial_policy={'checkpoint': str(path)})
+        if plan['comparison'] == 'critical_jit':
+            state.update(real_workers=plan['real_workers'],no_micro_cache_trim=True)
     elif plan.get('comparison') == 'trajectory_layout':
         state['no_micro_cache_trim'] = True
     env=formal_environment(state,data,pre)

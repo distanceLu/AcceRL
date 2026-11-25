@@ -105,11 +105,17 @@ def freeze_sampling_round(owner, count, cohort_id):
     return receipt
 
 
-def freeze_layout_round(owner, count, key, pool_size, seed):
+def freeze_layout_round(owner, count, key, pool_size, seed, *, exposures=None):
     from real_episode_sampling import _uniform_block
 
     real = owner.fresh_store
     eligible = [sid for sid, sample in real.samples.items() if real._eligible(sample)]
+    if exposures is not None:
+        def survives(sample):
+            birth = real.segments[sample['segment_id']].versions[sample['index']]['policy']
+            return (real.versions[0] - birth + exposures - 1 <= real.config.max_policy_age and
+                    sample['uses'] == sample['reserved'] == 0 and exposures <= real.config.max_sample_uses)
+        eligible = [sid for sid in eligible if survives(real.samples[sid])]
     if len(eligible) < pool_size:
         return dict(ready=False, eligible_before_limit=len(eligible), pool_size=pool_size)
     # 入库时整条轨迹按时间顺序写入，截取末尾即得到最新合格片段。
@@ -140,6 +146,78 @@ def freeze_layout_round(owner, count, key, pool_size, seed):
                        preserve_rank_shards=name=='preserve') for name in LAYOUT_ARMS}
     owner._gpu_trial = dict(key=key, busy=False, receipt=receipt, draws=draws)
     return receipt
+
+
+def _pin_critical(store, key, version, ids):
+    token = f'critical-jit:{key}:v{version}'
+    if token in store.reservations or any(not store._eligible(store.samples[sid]) for sid in ids):
+        raise ValueError('Cannot reserve the fixed critical cohort at the current policy')
+    store.reservations[token] = set(ids)
+    for sid in ids:
+        store.samples[sid]['reserved'] += 1
+    store._model_free_counts = None
+    return token
+
+
+def freeze_critical(owner, key, pool_size, seed, exposures):
+    store = owner.fresh_store
+    if (not owner.fresh_config.real_only or not owner.fresh_config.refresh_gae or
+            not owner.fresh_config.replay_age_limits or owner.real_sampling != 'uniform_blocks' or
+            len(owner.fresh_critics) != 4 or not owner.fresh_refresh_prune or
+            getattr(owner,'_model_free_admission',None) or getattr(owner,'_gpu_trial',None) or
+            exposures not in (1, 3, 4) or pool_size < 576):
+        raise ValueError('Invalid fixed-cohort critical JIT admission')
+    receipt = freeze_layout_round(owner, 576, key, pool_size, seed, exposures=exposures)
+    if receipt['ready']:
+        version = store.versions[0]
+        ids = receipt['sample_ids']
+        owner._gpu_trial['critical'] = dict(remaining=exposures, next_version=version,
+            token=_pin_critical(store,key,version,ids), admitted_version=None)
+        receipt.update(planned_charged_exposures=exposures, max_policy_age=store.config.max_policy_age,
+                       max_sample_uses=store.config.max_sample_uses)
+    return receipt
+
+
+def critical_decision(owner, key, version, high_next):
+    trial, store = owner._gpu_trial, owner.fresh_store
+    state = trial['critical']
+    ids = trial['receipt']['sample_ids']
+    if (trial['key'] != key or version != state['next_version'] or version != store.versions[0] or
+            state['remaining'] <= 0 or store.reservations.get(state['token']) != set(ids)):
+        raise ValueError('Critical cohort reservation or publication differs')
+    ages, uses = [], []
+    for sid in ids:
+        sample = store.samples[sid]
+        birth = store.segments[sample['segment_id']].versions[sample['index']]['policy']
+        ages.append(version - birth)
+        uses.append(sample['uses'])
+        if (sample['reserved'] != 1 or not store._eligible(dict(sample,reserved=0)) or
+                ages[-1] + state['remaining'] - 1 > store.config.max_policy_age or
+                uses[-1] + state['remaining'] > store.config.max_sample_uses):
+            raise ValueError('Frozen exposure would exceed the live replay age or use limit')
+    stock = store.model_free_inventory(576)
+    ready = stock['eligible_next'] >= high_next and stock['next_two_versions_ready']
+    state['admitted_version'] = version if ready else None
+    return dict(ready=ready, observed_ns=time.time_ns(), stock=stock, reserved_ids=len(ids),
+                min_age=min(ages), max_age=max(ages), min_uses_before=min(uses), max_uses_before=max(uses),
+                exposures_remaining=state['remaining'], sample_ids_sha256=trial['receipt']['sample_ids_sha256'])
+
+
+def commit_critical(owner, key, version, consumed):
+    store, trial = owner.fresh_store, owner._gpu_trial
+    state = trial['critical']
+    ids = trial['receipt']['sample_ids']
+    if (trial['key'] != key or state['admitted_version'] != version or
+            version != store.versions[0] or version != state['next_version'] or
+            len(consumed) != 576 or set(consumed) != set(ids)):
+        raise ValueError('Cannot charge an unadmitted, stale or incomplete fixed cohort')
+    store.commit(state['token'], consumed)
+    state['remaining'] -= 1
+    state['next_version'] += 1
+    state['admitted_version'] = None
+    state['token'] = _pin_critical(store,key,version+1,ids) if state['remaining'] else None
+    return dict(charged=576, version=version, remaining=state['remaining'], charged_ns=time.time_ns(),
+                sample_ids_sha256=trial['receipt']['sample_ids_sha256'])
 
 
 async def freeze_trial(owner, count, cohort_id, *, sampling=False, layout_pool_size=None, layout_seed=None):
@@ -207,6 +285,9 @@ def release_trial(owner, cohort_id):
         return False
     if frozen['key'] != str(cohort_id) or frozen['busy'] or not frozen.get('receipt'):
         raise RuntimeError('Cannot release a different or active GPU cohort')
+    token = frozen.get('critical', {}).get('token')
+    if token:
+        owner.fresh_store.cancel(token)
     owner._gpu_trial = None
     return True
 
