@@ -1,12 +1,14 @@
 """Freeze real model inputs once and dispatch the same cohort to both timed GPU arms."""
 import asyncio
 from collections import defaultdict
+import gzip
 import hashlib
 import json
 import os
 from pathlib import Path
 import random
 import re
+import sys
 import tempfile
 import time
 
@@ -70,9 +72,27 @@ def _persist(directory, frozen, cohort_id):
                 segment_bytes=sum(row['bytes'] for row in paths.values()))
 
 
-def freeze_sampling_round(owner, count, cohort_id):
+def _sampling_inventory(store, cohort_id):
+    """Capture sampler inputs in admission order. Array index is the chunk's physical index."""
+    segments = []
+    for segment in store.segments.values():
+        samples = [store.samples[segment.sample_id(i)] for i in range(segment.count)]
+        segments.append(dict(segment_id=segment.segment_id, episode_id=segment.episode_id,
+            source=segment.source, count=segment.count, terminated=bool(segment.terminated[-1]),
+            truncated=bool(segment.truncated[-1]), policy_versions=[v['policy'] for v in segment.versions],
+            uses=[s['uses'] for s in samples], reserved=[s['reserved'] for s in samples],
+            eligible=[store._eligible(s) for s in samples]))
+    config = {name: getattr(store.config, name) for name in
+              ('real_only', 'real_policy_replay', 'replay_age_limits', 'max_policy_age', 'max_sample_uses')}
+    return dict(format='weaver_sampling_inventory_v1', cohort_id=cohort_id, capacity=store.capacity,
+                versions=store.versions, config=config, python_version=sys.version.split()[0],
+                rng_state=store.rng.getstate(), draw_order=SAMPLING_MODES, segments=segments)
+
+
+def freeze_sampling_round(owner, count, cohort_id, output):
     """三次抽样在同一 actor 调用内完成，中间不让出执行权、不消耗样本。"""
     real = owner.fresh_store
+    inventory = _sampling_inventory(real, cohort_id)
     draws, receipts = {}, {}
     for mode in SAMPLING_MODES:
         started = time.perf_counter()
@@ -92,13 +112,22 @@ def freeze_sampling_round(owner, count, cohort_id):
                 sampled.segments[key] = real.segments[key]
         finally:
             real.cancel(token)
+        preserve_rank_shards = mode != 'chunks'
         receipt = dict(sample_ids=list(ids), sample_ids_sha256=_digest(ids), trajectories=len(sampled.segments),
-                       sampling_seconds=sampling_s, sampling=sampling)
+                       sampling_seconds=sampling_s, sampling=sampling, preserve_rank_shards=preserve_rank_shards)
         draws[mode] = dict(key=cohort_id+'-'+mode, ids=ids, store=sampled, receipt=receipt,
-                           preserve_rank_shards=mode!='chunks')
+                           preserve_rank_shards=preserve_rank_shards)
         receipts[mode] = receipt
+    manifest = Path('frozen') / (cohort_id + '.inventory.json.gz')
+    path = output / manifest
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise FileExistsError(f'Trial inventory manifest already exists: {path}')
+    blob = gzip.compress(json.dumps(inventory, separators=(',', ':')).encode(), compresslevel=3, mtime=0)
+    _atomic_file(path, lambda f: f.write(blob))
     receipt = dict(ready=True, cohort_id=cohort_id, version=real.versions[0], n=count,
                    replay_resident_at_draw=len(real.samples), real_admitted_at_draw=owner.fresh_admitted_chunks['real'],
+                   inventory_manifest=manifest.as_posix(), inventory_sha256=hashlib.sha256(blob).hexdigest(),
                    draws=receipts)
     # 保留三组样本的轨迹引用，采集端在测速期间可以继续逐出旧数据。
     owner._gpu_trial = dict(key=cohort_id, busy=False, receipt=receipt, draws=draws)
@@ -241,7 +270,7 @@ async def freeze_trial(owner, count, cohort_id, *, sampling=False, layout_pool_s
             return previous['receipt']
         raise RuntimeError('A frozen trial already exists or is being written')
     if sampling:
-        return freeze_sampling_round(owner, count, key)
+        return freeze_sampling_round(owner, count, key, Path(output))
     if layout_pool_size is not None:
         return freeze_layout_round(owner, count, key, layout_pool_size, layout_seed)
     real = owner.fresh_store

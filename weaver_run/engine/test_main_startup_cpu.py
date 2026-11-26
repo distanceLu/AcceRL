@@ -166,8 +166,12 @@ class Actor:
                 raise AssertionError("Mismatched producer release")
             self.context.actions.append(("release", kind, self.rank))
             return dict(acknowledgement)
-        if method == "get_training_state":
-            return {"rank": self.rank, "gpu": {"physical_gpu": str(self.context.physical_gpu_ids[self.rank])}, "pid": self.pid,
+        if method in ("get_gpu_binding", "get_training_state"):
+            physical = str(self.context.physical_gpu_ids[self.rank])
+            gpu = dict(physical_gpu=physical, uuid=f"GPU-fixture-{physical}", visible_sm_count=78, mps_client_percent=100)
+            if method == "get_gpu_binding":
+                return gpu
+            return {"rank": self.rank, "gpu": gpu, "pid": self.pid,
                     "training_role": self.kind, "world_size": 4, "distributed_world_size": 4,
                     "group_port": self.port, "engines": {self.kind: {"global_steps": 0, "skipped_steps": 0}},
                     "policy_steps": 0, "ctrl_steps": 0, "reward_steps": 0}
@@ -249,9 +253,11 @@ class Context:
         from pipeline_budget import PipelineBudgetConfig
         from world_backends.libero import validate_online_schema
         from fresh_config import FreshConfig
+        from training_topology import validate_trainer_mps_bindings
         from world_backend_runtime import isolated_online_weaver, validate_online_runtime_arguments
         space = {"load_backend_config": load_backend_config, "build_service_plan": build_service_plan,
                  "FreshConfig": FreshConfig, "isolated_online_weaver": isolated_online_weaver,
+                 "validate_trainer_mps_bindings": validate_trainer_mps_bindings,
                  "validate_online_runtime_arguments": validate_online_runtime_arguments,
                  "PipelineBudgetConfig": PipelineBudgetConfig, "context_geometry": context_geometry,
                  "validate_online_schema": validate_online_schema, "ACTION_DIM": 7,

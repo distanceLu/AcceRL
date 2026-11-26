@@ -4453,7 +4453,8 @@ def main(args):
     fixed_validation_config = ModelFreeControlConfig.from_args(args) if model_free else None
     trajectory_jit = os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
     real_sampling = os.environ.get('ACCERL_REAL_SAMPLING', 'chunks')
-    if real_sampling not in ('chunks', 'whole_episodes', 'uniform_blocks') or (real_sampling != 'chunks' and not trajectory_jit):
+    from real_episode_sampling import REAL_BLOCK_SAMPLING, REAL_SAMPLING
+    if real_sampling not in REAL_SAMPLING or (real_sampling != 'chunks' and not trajectory_jit):
         raise ValueError('Real episode sampling requires the model-free trajectory JIT trainer')
     if trajectory_jit and (not model_free or not batch_autotune or args.num_trainer_gpus != 4
             or args.num_inference_actors != 4 or args.num_eval_workers != 0
@@ -4494,8 +4495,8 @@ def main(args):
         model_free=model_free, real_workers=pipeline_config.real_workers, trajectory_jit=trajectory_jit,
         real_sampling=real_sampling, inventory_gate=rollout_inventory_gate)
     if rollout_inventory_gate and (not model_free or pipeline_config.real_workers != 8
-            or not trajectory_jit or real_sampling != 'uniform_blocks'):
-        raise ValueError('Rollout inventory gate requires the eight-worker model-free uniform_blocks JIT recipe')
+            or not trajectory_jit or real_sampling not in REAL_BLOCK_SAMPLING):
+        raise ValueError('Rollout inventory gate requires eight-worker model-free JIT with uniform_blocks or first_use_blocks')
     if model_free and not pipeline_config.initial_state_enabled:
         raise ValueError('Model-free stopping requires explicit initial-state allocation and budget accounting')
     if pipeline_config.inventory_refill_enabled and (not fresh_replay

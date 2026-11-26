@@ -18,7 +18,7 @@ from test_model_free_launch_cpu import launch, training, site, HERE
 
 class BatchAutotuneLaunchTests(unittest.TestCase):
     def test_real_sampling_reaches_queue_runner_and_driver(self):
-        for mode in ('whole_episodes', 'uniform_blocks'):
+        for mode in ('whole_episodes', 'uniform_blocks', 'first_use_blocks'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
                 stage = Path(temp)
                 (stage / 'mps.json').write_bytes(b'{}')
@@ -46,6 +46,13 @@ class BatchAutotuneLaunchTests(unittest.TestCase):
             launch.real_sampling_options(False, 'whole_episodes')
         with self.assertRaisesRegex(ValueError, 'interval'):
             launch.fixed_validation_options(True, 0, {'interval_env_steps':100000}, real_sampling='whole_episodes')
+
+    def test_first_use_blocks_supports_the_existing_eight_worker_controls(self):
+        recipe = dict(model_free=True, real_workers=8, trajectory_jit=True, real_sampling='first_use_blocks')
+        self.assertTrue(launch.rollout_options(**recipe, rollout_inventory_gate=True)['rollout_inventory_gate'])
+        self.assertEqual(launch.rollout_options(**recipe, real_episodes_per_minute=22.2)['real_episodes_per_minute'], 22.2)
+        with self.assertRaises(ValueError):
+            launch.rollout_options(**recipe, rollout_inventory_gate=True, real_episodes_per_minute=22.2)
 
     def test_trajectory_jit_reaches_driver_without_a_benchmark_plan(self):
         for mf, evaluation, tuned in ((False,0,True),(True,2,True),(True,0,False)):

@@ -5,6 +5,8 @@ from collections import Counter
 RANKS = 4
 RANK_CHUNKS = 144
 GLOBAL_CHUNKS = RANKS * RANK_CHUNKS
+REAL_BLOCK_SAMPLING = ('uniform_blocks', 'first_use_blocks')
+REAL_SAMPLING = ('chunks', 'whole_episodes', *REAL_BLOCK_SAMPLING)
 
 
 def _whole_rank(episodes, groups):
@@ -54,11 +56,7 @@ def _whole_pack(store, complete, groups):
     return None, 'four_rank_exact_pack_not_found'
 
 
-def _uniform_block(rng, groups):
-    # 任意固定回合排列中，每个合格 chunk 恰好被 576 个环起点覆盖。
-    episodes = list(groups)
-    rng.shuffle(episodes)
-    ring = [sid for episode in episodes for sid in groups[episode]]
+def _draw_block(rng, ring):
     start = rng.randrange(len(ring))
     stop = start + GLOBAL_CHUNKS
     selected = ring[start:stop]
@@ -67,10 +65,31 @@ def _uniform_block(rng, groups):
     return selected
 
 
+def _shuffled_ring(rng, groups):
+    episodes = list(groups)
+    rng.shuffle(episodes)
+    return [sid for episode in episodes for sid in groups[episode]]
+
+
+def _uniform_block(rng, groups):
+    return _draw_block(rng, _shuffled_ring(rng, groups))
+
+
+def _first_use_block(store, groups):
+    ring = _shuffled_ring(store.rng, groups)
+    first = _draw_block(store.rng, ring)
+    second = _draw_block(store.rng, ring)
+    # An outstanding reservation already claims this sample's first use.
+    scores = [sum(store.samples[sid]['uses'] == 0 and store.samples[sid]['reserved'] == 0
+                  for sid in block) for block in (first, second)]
+    selected = second if scores[1] > scores[0] else first
+    return selected, dict(candidate_first_use_chunks=scores, selected_first_use_chunks=max(scores))
+
+
 def choose(store, count, mode):
     from fresh_policy_replay import FreshReplayNotReady
 
-    if mode not in ('uniform_blocks', 'whole_episodes'):
+    if mode != 'whole_episodes' and mode not in REAL_BLOCK_SAMPLING:
         raise ValueError(f'Unknown real Replay sampling mode: {mode!r}')
     if not store.config.real_only or count != GLOBAL_CHUNKS:
         raise ValueError('Real episode sampling requires a real-only batch of four 144-chunk ranks')
@@ -94,8 +113,11 @@ def choose(store, count, mode):
 
     selected = None
     fallback = None
+    block_details = {}
     if mode == 'whole_episodes':
         selected, fallback = _whole_pack(store, complete, groups)
+    elif mode == 'first_use_blocks':
+        selected, block_details = _first_use_block(store, groups)
     if selected is None:
         selected = _uniform_block(store.rng, groups)
 
@@ -111,5 +133,5 @@ def choose(store, count, mode):
                    complete_eligible_segments=len(complete), selected_segments=len(counts),
                    complete_segments_selected=sum(counts[episode] == store.segments[episode].count
                                                   for episode in complete),
-                   rank_split_segments=sum(value > 1 for value in visits.values()))
+                   rank_split_segments=sum(value > 1 for value in visits.values()), **block_details)
     return selected, details

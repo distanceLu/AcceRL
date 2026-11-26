@@ -19,9 +19,9 @@ from test_model_free_critic_pruning_cpu import TinyPolicy, real_segment
 
 
 class PackedObjectiveTests(unittest.TestCase):
-    def test_both_samplers_preserve_full_gae_and_actually_accumulated_gradients(self):
+    def test_episode_samplers_preserve_full_gae_and_actually_accumulated_gradients(self):
         torch.set_num_threads(1)
-        for mode in ('whole_episodes', 'uniform_blocks'):
+        for mode in ('whole_episodes', 'uniform_blocks', 'first_use_blocks'):
             for fast in (False, True):
                 with self.subTest(mode=mode, fast=fast), torch.random.fork_rng():
                     torch.manual_seed(1729)

@@ -14,7 +14,7 @@ from training_topology import GlobalBatchCoordinator
 
 class TrajectoryReplayTests(unittest.TestCase):
     def test_episode_protocol_preserves_admitted_rank_members_and_full_suffix_geometry(self):
-        for requested in ('whole_episodes', 'uniform_blocks'):
+        for requested in ('whole_episodes', 'uniform_blocks', 'first_use_blocks'):
             with self.subTest(requested=requested), patch.dict(os.environ,
                     ACCERL_TRAJECTORY_JIT='1', ACCERL_REAL_SAMPLING=requested):
                 replay = runtime_replay_class()(2400, dict(real_only=True, real_fraction=1.,

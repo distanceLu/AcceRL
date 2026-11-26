@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 ENGINE = HERE / "engine"
 RECIPE = HERE / "recipe"
+from engine.real_episode_sampling import REAL_BLOCK_SAMPLING, REAL_SAMPLING
 from git_version import BRANCH, published
 REFERENCE_SERVER = "h20-xyff52ab-0001"
 SITE_ENTRY = Path("/mnt/data/lcx1/dong/WEAVER/run.sh")
@@ -224,9 +225,6 @@ def trajectory_jit_options(model_free, num_eval_workers, batch_autotune, traject
     return trajectory_jit
 
 
-REAL_SAMPLING = ('chunks', 'whole_episodes', 'uniform_blocks')
-
-
 def add_real_sampling_argument(parser):
     parser.add_argument('--real-sampling', choices=REAL_SAMPLING, default='chunks',
                         help='Real Replay selection for the four-rank trajectory JIT trainer.')
@@ -265,15 +263,15 @@ def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False, rollo
     require(type(real_episodes_per_minute) in (float, int) and math.isfinite(real_episodes_per_minute)
             and real_episodes_per_minute >= 0, 'Invalid real episode rate')
     require(not real_episodes_per_minute or (model_free and real_workers == 8 and trajectory_jit
-            and real_sampling == 'uniform_blocks' and not rollout_inventory_gate),
-            'Fixed rate requires eight-worker uniform_blocks JIT with inventory gate disabled')
+            and real_sampling in REAL_BLOCK_SAMPLING and not rollout_inventory_gate),
+            'Fixed rate requires eight-worker block sampling JIT with inventory gate disabled')
     require(type(compile_action_inference) is bool, 'compile_action_inference must be bool')
     require(not compile_action_inference or (model_free and trajectory_jit),
             '--compile-action-inference requires --model-free and --trajectory-jit')
     require(type(rollout_inventory_gate) is bool, 'rollout inventory gate must be bool')
     require(not rollout_inventory_gate or (model_free and real_workers == 8 and trajectory_jit and
-                                          real_sampling == 'uniform_blocks'),
-            'Rollout inventory gate requires --model-free --real-workers 8 --trajectory-jit --real-sampling uniform_blocks')
+                                          real_sampling in REAL_BLOCK_SAMPLING),
+            'Rollout inventory gate requires eight-worker model-free JIT with uniform_blocks or first_use_blocks')
     require(type(real_workers) is int and real_workers in (4, 8), 'Model-free rollout count must be 4 or 8')
     require(type(no_micro_cache_trim) is bool, 'no_micro_cache_trim must be bool')
     require(model_free or (real_workers == 4 and not no_micro_cache_trim),

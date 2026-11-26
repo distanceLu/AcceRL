@@ -154,10 +154,13 @@ cd /mnt/data/lcx1/dong/WEAVER
 | `chunks`（默认） | 从当前合格的 chunk 无放回均匀抽样，再把同轨迹的计算尽量放到同卡。 |
 | `whole_episodes` | 只从每个 chunk 都合格的完整回合中，随机化装出四份各 144 个 chunk。有限次搜索未装满时，该次改用 `uniform_blocks` 并记录原因。该模式适合测量整回合计算的速度。 |
 | `uniform_blocks` | 随机排列回合，组内按时间排列合格 chunk，从均匀随机起点沿环取 576 个不同 ID，再每卡分 144 个。对一次固定的合格池，每个 chunk 的入选概率均为 576 除以合格数，相邻 chunk 常会一起入选。 |
+| `first_use_blocks` | 在同一条随机排列的轨迹环上独立取两个起点，各取 576 个不同 ID。选出未使用且未预留的 chunk 更多的一块，平局时选第一块。每次预留记录两个候选及入选块的首次使用数。 |
 
-两种新模式都保留原轨迹终点。中间有超龄或用满的 chunk、环回起点、或轨迹跨卡时，Trainer 仍按原后缀计算 GAE。仅选中的 ID 产生训练损失、进入 EMA 并记一次 Replay 使用。每卡仍运行 9 个 16 样本微批，动作 token 分母沿用预留时每 8 个样本的有效 token 数。首个 EMA 窗口包含初始化前向，统计稳态前向和速度时应单列。
+上述采样模式都保留原轨迹终点。中间有超龄或用满的 chunk、环回起点、或轨迹跨卡时，Trainer 仍按原后缀计算 GAE。仅选中的 ID 产生训练损失、进入 EMA 并记一次 Replay 使用。每卡仍运行 9 个 16 样本微批，动作 token 分母沿用预留时每 8 个样本的有效 token 数。首个 EMA 窗口包含初始化前向，统计稳态前向和速度时应单列。
 
 原站固定 P189 权重的短测通过 `./run.sh bench-episode-sampling --id p189-sampling-compare` 提交，使用 `./run.sh bench-episode-sampling-status --id p189-sampling-compare` 查询。同一时点的 Replay 库存分别产生三种采样的 cohort，三臂均运行 JIT。短测比较采样及更新时间；达到同一成功率的墙钟与动作数需要用正式训练测量。
+
+每轮短测在输出目录的 `frozen/<cohort>.inventory.json.gz` 保存抽样前的回合顺序、行为版本、使用与预留次数、合格标记和随机数状态。回执中的 `inventory_sha256` 可核验清单，`draws` 记录各采样器按序选中的 ID 和四卡分片方式。
 
 原站 GPU 4–7 空闲时可运行 `./run.sh bench-admission-pulse --id p189-admission-pulse`，用 `bench-admission-pulse-status` 和同一 ID 查状态。三组使用相同的 P189 权重、零学习率和等概率连续采样。正常组照常采集和更新，另外两组在首次更新边界分别暂缓新动作请求或新训练更新 5 秒。每组连续观察三次更新，计时包含这 5 秒。三个条件轮换顺序，各测三次。实验目录中的 `plan.json` 记录提交号与配置，`result.json` 记录各次观测。
 
@@ -181,7 +184,7 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 ### 固定真实回合的发放速率
 
-8 个真实 worker 的 `uniform_blocks` 轨迹 JIT 作业可加 `--real-episodes-per-minute 22.2`。8 个环境合计每隔至少 2.70 秒开放一个新回合，已有回合继续执行；环境忙时实际发放率可以更低。默认值 0 关闭限速。固定限速与 `--rollout-inventory-gate` 分别用于静态和自适应对照，两者均可搭配 `--compile-action-inference`。实际发放率由初态队列的租约时间戳计算。
+8 个真实 worker 的 `uniform_blocks` 和 `first_use_blocks` 轨迹 JIT 作业可加 `--real-episodes-per-minute 22.2`。8 个环境合计每隔至少 2.70 秒开放一个新回合，已有回合继续执行；环境忙时实际发放率可以更低。默认值 0 关闭限速。固定限速与 `--rollout-inventory-gate` 分别用于静态和自适应对照，两者均可搭配 `--compile-action-inference`。实际发放率由初态队列的租约时间戳计算。
 
 ## 验证范围
 

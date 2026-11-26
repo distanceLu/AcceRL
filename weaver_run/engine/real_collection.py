@@ -15,6 +15,7 @@ import time
 
 from initial_state_scheduler import InitialStateScheduler
 from pipeline_budget import PipelineBudgetConfig, PipelineBudgetError, LeaseExpiredError
+from real_episode_sampling import REAL_BLOCK_SAMPLING
 
 
 def _episode_rate(value):
@@ -27,8 +28,8 @@ def _episode_rate(value):
 def configured_episode_rate(value, *, model_free, real_workers, trajectory_jit, real_sampling, inventory_gate):
     rate = _episode_rate(value)
     if rate and (not model_free or real_workers != 8 or not trajectory_jit
-                 or real_sampling != 'uniform_blocks' or inventory_gate):
-        raise ValueError('Fixed episode rate requires the eight-worker model-free uniform_blocks JIT '
+                 or real_sampling not in REAL_BLOCK_SAMPLING or inventory_gate):
+        raise ValueError('Fixed episode rate requires eight-worker model-free block sampling JIT '
                          'recipe with inventory gating disabled')
     return rate
 

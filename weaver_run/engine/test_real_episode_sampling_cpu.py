@@ -87,6 +87,36 @@ class EpisodeSamplingTests(unittest.TestCase):
         self.assertNotIn(token, store.reservation_sampling)
         self.assertEqual(sum(s['uses'] for s in store.samples.values()), 577)
 
+    def test_first_use_blocks_choose_higher_coverage_on_the_same_ring(self):
+        store = make_store([300, 302])
+        # Seed 7 keeps the episode order and proposes starts 154 and 404
+        # on the 600 eligible chunks. Both windows wrap around the ring.
+        store.samples['1:chunk300']['uses'] = 4
+        store.samples['1:chunk301']['reserved'] = 4
+        for index in range(80, 104):
+            store.samples[f'1:chunk{index}']['uses'] = 1
+        # Already claimed by an outstanding reservation, still eligible for reuse.
+        store.samples['1:chunk78']['reserved'] = 1
+        token, ids = store.reserve(576, real_sampling='first_use_blocks')
+        audit = store.reservation_sampling[token]
+        self.assertEqual(audit['actual'], 'first_use_blocks')
+        self.assertEqual(audit['candidate_first_use_chunks'], [551, 575])
+        self.assertEqual(audit['selected_first_use_chunks'], 575)
+        self.assertEqual(ids, [f'1:chunk{i}' for i in range(104, 300)] +
+                         [f'0:chunk{i}' for i in range(300)] +
+                         [f'1:chunk{i}' for i in range(80)])
+        store.cancel(token)
+        self.assertEqual(store.samples['1:chunk78']['reserved'], 1)
+
+    def test_first_use_tie_keeps_the_uniform_first_proposal(self):
+        uniform = make_store([300, 302])
+        priority = make_store([300, 302])
+        uniform_token, expected = uniform.reserve(576, real_sampling='uniform_blocks')
+        token, ids = priority.reserve(576, real_sampling='first_use_blocks')
+        self.assertEqual(ids, expected)
+        self.assertEqual(priority.reservation_sampling[token]['candidate_first_use_chunks'], [576, 576])
+        self.assertNotIn('candidate_first_use_chunks', uniform.reservation_sampling[uniform_token])
+
     def test_age_limit_and_unchanged_default_uniform_draw(self):
         store = make_store([200]*3)
         expected = random.Random(7).sample(list(store.samples), 576)

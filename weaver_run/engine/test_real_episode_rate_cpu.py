@@ -79,11 +79,16 @@ class RealEpisodeRateTests(unittest.TestCase):
                 parsed('12', **settings)
 
     def test_formal_rate_reaches_single_global_owner_from_real_driver(self):
+        for mode in ('uniform_blocks', 'first_use_blocks'):
+            with self.subTest(mode=mode):
+                self.check_formal_rate_owner(mode)
+
+    def check_formal_rate_owner(self, mode):
         import test_main_startup_cpu as startup
         context = startup.Context()
         ns = context.namespace()
         ns['os'].environ.update(ACCERL_REAL_EPISODES_PER_MINUTE='22.2', ACCERL_TRAJECTORY_JIT='1',
-                                ACCERL_REAL_SAMPLING='uniform_blocks')
+                                ACCERL_REAL_SAMPLING=mode)
         args = startup.arguments(validate_only=True, overrides=(
             '--model-free', '--num-eval-workers', '0', '--batch-autotune',
             '--fixed-validation-interval-env-steps', '0',
