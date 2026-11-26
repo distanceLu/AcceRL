@@ -619,6 +619,13 @@ class ModelFreeLaunchTests(unittest.TestCase):
         self.assertEqual((env['ACCERL_MODEL_FREE_REAL_WORKERS'], env['ACCERL_TRIM_MICRO_CACHE'],
                           env['ACCERL_TRIM_IDLE_CACHE']), ('8','0','1'))
         self.assertNotIn('ACCERL_JIT_BENCH_PLAN', env)
+        self.assertEqual(env['ACCERL_FAST_JIT_BOUNDARIES'], '0')
+        with patch.dict(os.environ, variables, clear=True), patch.object(os, 'chdir'), patch.object(os, 'execve') as execute:
+            launch.exec_managed_driver(['--model-free', '--batch-autotune', '--trajectory-jit',
+                                        '--num-eval-workers', '0', *launch.rollout_arguments(**selected)])
+        fast_env = execute.call_args.args[2]
+        self.assertEqual((fast_env['ACCERL_TRIM_MICRO_CACHE'], fast_env['ACCERL_TRIM_IDLE_CACHE'],
+                          fast_env['ACCERL_FAST_JIT_BOUNDARIES']), ('0', '0', '1'))
         with self.assertRaises(ValueError):
             launch.rollout_options(False, real_workers=8)
 

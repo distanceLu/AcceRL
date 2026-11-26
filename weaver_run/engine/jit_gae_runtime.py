@@ -29,7 +29,7 @@ def _sum(tensor):
     return tensor
 
 
-def _checked(fn, device, valid=None, probe=None):
+def _checked(fn, device, valid=None, probe=None, timings=None):
     """All ranks reach the same failure vote before a backward collective.
 
 This does not promise recovery from a broken CUDA context/NCCL process. Such a
@@ -38,17 +38,20 @@ failure remains a failed job; no further optimizer window is admitted.
     error, result = None, None
     try:
         result = fn()
+        failed = (~valid(result)).to(torch.int32) if valid is not None else torch.zeros((), dtype=torch.int32, device=device)
     except Exception as exc:
         error = exc
-    failed = torch.tensor(int(error is not None), device=device)
-    if error is None and valid is not None:
-        failed = (~valid(result)).to(failed.dtype)
+        failed = torch.ones((), dtype=torch.int32, device=device)
     if probe is not None:
         probe.mark('forward_ready')
+    if timings is not None:
+        vote_started = time.monotonic()
     _sum(failed)
     if probe is not None:
         voted = probe.mark('vote_done')
     failure = bool(failed)
+    if timings is not None:
+        timings['forward_vote_host_wait_s'] += time.monotonic() - vote_started
     if probe is not None:
         probe.vote_complete(voted)
     if failure:
@@ -60,7 +63,7 @@ def _same_state(state):
     if _distributed():
         rows = [torch.empty_like(state) for _ in range(dist.get_world_size())]
         dist.all_gather(rows, state)
-        if any(not torch.equal(state, row) for row in rows):
+        if not bool((torch.stack(rows) == state).all()):
             raise RuntimeError('JIT rank version, EMA or accumulation recipe differs')
 
 
@@ -162,9 +165,11 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     device = next(owner.model.parameters()).device
     version = int(owner.global_step)
     micro = owner.train_batch_size
+    fast = os.environ.get('ACCERL_FAST_JIT_BOUNDARIES') == '1'
     owner._jit_receipts = None
     owner._jit_times=dict.fromkeys(('input_prepare_host_call_wall_s','no_grad_forward_host_call_wall_s',
-        'selected_forward_host_call_wall_s','gae_host_call_wall_s','backward_step_host_call_wall_s'),0.)
+        'selected_forward_host_call_wall_s','gae_host_call_wall_s','backward_step_host_call_wall_s',
+        'forward_vote_host_wait_s'),0.)
 
     def prepare():
         if config.jit_gae_mode not in ('trainer_separate', 'fused'):
@@ -205,29 +210,28 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                     or (denominators > 8 * masks.shape[1] * masks.shape[2]).any()):
                 raise ValueError('Invalid original eight-sample token denominator')
             weights = np.float32(.5) / denominators.astype(np.float32)
-        return segments, bundles, masks, weights
+        tokens = np.asarray(actions_np, dtype=np.int64)
+        if fast and (tokens.min() < 0 or tokens.max() >= old_logits_np.shape[-1]):
+            raise ValueError('Action token outside categorical support')
+        # Stage the complete gather order here. Each micro uses a device view.
+        order = [b.selected for b in bundles]
+        return (segments, bundles, masks, weights,
+                torch.as_tensor(tokens, device=device), torch.as_tensor(old_logits_np, device=device, dtype=torch.float32),
+                torch.as_tensor(masks, device=device), torch.as_tensor(weights, device=device),
+                torch.tensor(order, device=device, dtype=torch.long))
 
-    segments,bundles,masks,weights = _checked(prepare, device)
-    # These small, immutable selected-cohort tensors cross H2D once per rank
-    # window. Images and variable-length context inputs remain micro-bounded.
-    action_device,old_device,mask_device,weight_device = _checked(lambda: (
-        torch.tensor(actions_np,device=device,dtype=torch.long),
-        torch.tensor(old_logits_np,device=device,dtype=torch.float32),
-        torch.tensor(masks,device=device,dtype=torch.bool),
-        torch.tensor(weights,device=device,dtype=torch.float32)),device)
+    (segments, bundles, masks, weights, action_device, old_device,
+     mask_device, weight_device, order_device) = _checked(prepare, device)
     if not hasattr(owner, 'advantage_ema'):
         owner.advantage_ema = AdvantageEMA(device, config.advantage_ema_beta, config.advantage_scale_floor)
     ema = owner.advantage_ema
     expected = ema.updates
     before_steps, before_skips = int(owner.model.global_steps), int(owner.model.skipped_steps)
-    _same_state(torch.stack([ema.mean, ema.variance, ema.mean.new_tensor(expected),
-        ema.mean.new_tensor(version), ema.mean.new_tensor(len(bundles)),
-        ema.mean.new_tensor(micro), ema.mean.new_tensor(before_steps), ema.mean.new_tensor(before_skips),
-        ema.mean.new_tensor(ema.beta),ema.mean.new_tensor(ema.scale_floor),
-        ema.mean.new_tensor(('optimizer_window','ema_zscore','ema_rms').index(config.advantage_norm)),
-        ema.mean.new_tensor(('trainer_separate','fused').index(config.jit_gae_mode)),
-        ema.mean.new_tensor(owner.capture_policy_metadata['fresh_versions'][1]),
-        ema.mean.new_tensor(config.policy_sampling == 'imagined_trajectories')]))
+    recipe_state = ema.mean.new_tensor([expected, version, len(bundles), micro, before_steps, before_skips,
+        ema.beta, ema.scale_floor, ('optimizer_window','ema_zscore','ema_rms').index(config.advantage_norm),
+        ('trainer_separate','fused').index(config.jit_gae_mode), owner.capture_policy_metadata['fresh_versions'][1],
+        config.policy_sampling == 'imagined_trajectories', fast])
+    _same_state(torch.cat((torch.stack((ema.mean, ema.variance)), recipe_state)))
     counters = dict(context_only_states=0, prepass_selected_and_context_states=0,
                     no_grad_forward_calls=0, selected_grad_states=0, selected_grad_forward_calls=0)
     separate = config.jit_gae_mode == 'trainer_separate'
@@ -244,6 +248,8 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         context_timer.layout_normalization = (mean,scale)
     # Freeze once for the entire GAS window; do not mutate EMA inside the loop.
     gae = ReverseGAE(segments, device)
+    batched_context = fast and not need_prepass and context_timer is None
+    window_context = {}
     sums = torch.zeros(3, device=device, dtype=torch.float64)
     metrics, receipt_tensors, receipt_indices = [], [], []
     probe = None
@@ -259,9 +265,19 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
             if probe is not None:
                 probe.begin(number)
             def forward():
-                values = {} if separate else _forward_values(owner,
-                    [n for n in bundle.nodes if n.selected is None],segments,config.jit_context_micro,counters,
-                    timer=context_timer, bundle=number)
+                if batched_context:
+                    # No parameter update occurs until all GAS micros complete.
+                    # Keep detached values only; reuse each original suffix node
+                    # in its original reverse-GAE order.
+                    if number == 0:
+                        context_nodes = [n for b in bundles for n in b.nodes if n.selected is None]
+                        window_context.update(_forward_values(owner, context_nodes, segments, micro, counters))
+                    values = {(n.segment,n.index): window_context[(n.segment,n.index)]
+                              for n in bundle.nodes if n.selected is None}
+                else:
+                    values = {} if separate else _forward_values(owner,
+                        [n for n in bundle.nodes if n.selected is None],segments,config.jit_context_micro,counters,
+                        timer=context_timer, bundle=number)
                 inputs = _inputs(owner,[observations[i] for i in indices])
                 start=time.monotonic();logits,value = owner.model.forward(inputs)
                 owner._jit_times['selected_forward_host_call_wall_s']+=time.monotonic()-start
@@ -274,7 +290,7 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                 start=time.monotonic();advantage,target = targets[number] if separate else gae.consume(bundle,values)
                 owner._jit_times['gae_host_call_wall_s']+=time.monotonic()-start
                 normalized = ((advantage.double()-mean)/scale).float().detach()
-                index=torch.tensor(indices,device=device,dtype=torch.long)
+                index = order_device[number]
                 actions=action_device.index_select(0,index)
                 old=old_device.index_select(0,index)
                 mask=mask_device.index_select(0,index)
@@ -282,10 +298,11 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                 loss,metric = masked_policy_loss(logits,value,actions,old,normalized,target,mask,weight,
                     vf_coef=owner.vf_coef, ent_coef=owner.ent_coef, kl_coef=owner.kl_coef,
                     clip_mode=owner.clip_mode, clip_eps=owner.clip_eps,
-                    actor_enabled=version >= owner.policy_train_start_step)
+                    actor_enabled=version >= owner.policy_train_start_step, action_tokens_checked=fast)
                 return loss,metric,advantage,target
             loss,metric,advantage,target = _checked(forward, device,
-                valid=lambda rows:torch.stack([torch.isfinite(t).all() for t in rows]).all(), probe=probe)
+                valid=lambda rows:torch.stack([torch.isfinite(t).all() for t in rows]).all(), probe=probe,
+                timings=owner._jit_times)
             sums += raw_sums(advantage)
             metrics.append(metric)
             receipt_tensors.append(torch.stack((advantage,target),dim=1))
@@ -316,9 +333,7 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         counters['selected_grad_states']]))))
     sums=totals[:3]
     expected_count = len(observations)*(dist.get_world_size() if _distributed() else 1)
-    if not bool(sums[0] == expected_count):
-        raise RuntimeError('EMA statistics must cover selected chunks only, on every rank')
-    ema.commit(sums,expected_updates=expected,optimizer_succeeded=True)
+    ema.commit(sums, expected_updates=expected, optimizer_succeeded=True, expected_count=expected_count)
     batch_mean, batch_variance = moments(sums)
     # One packed result readback after the successful optimizer boundary. Required
     # finite/error votes above remain explicit synchronization points.
@@ -327,7 +342,9 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                                                        batch_mean,batch_variance.sqrt())).float())).detach()
     if probe is not None:
         anchor = probe.mark('packed')
+    readback_start = time.monotonic()
     packed = packed_device.cpu().numpy()
+    packed_readback_s = time.monotonic() - readback_start
     if probe is not None:
         probe.finish(anchor, time.time_ns())
     del packed_device
@@ -336,7 +353,9 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     receipt_rows = packed[split:-9].reshape(-1,2)
     owner._jit_receipts = [dict(sample_id=observations[i]['_jit_sample_id'],advantage=float(row[0]),
         value_target=float(row[1]),refresh_policy_version=version) for i,row in zip(receipt_indices,receipt_rows)]
+    trim_start = time.monotonic()
     trim('idle')
+    idle_trim_s = time.monotonic() - trim_start
     elapsed = time.monotonic()-started
     owner.telemetry.event('jit_gae_optimizer_window',details=dict(rank=owner.rank,policy_version=version,
         mode=config.jit_gae_mode,normalization=config.advantage_norm,ema_updates=ema.updates,
@@ -350,7 +369,9 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         global_no_grad_states=int(packed[-8]),global_selected_grad_states=int(packed[-7]),
         global_unique_suffix_states=owner.capture_policy_metadata.get('jit_global_suffix_states'),
         original_shared_full_refresh_states=owner.capture_policy_metadata.get('jit_full_refresh_states'),
-        initialization_prepass=bool(need_prepass),
+        initialization_prepass=bool(need_prepass), fast_jit_boundaries=fast, batched_window_context=batched_context,
+        packed_readback_host_wall_s=packed_readback_s, idle_trim_host_wall_s=idle_trim_s,
+        context_forward_batch_limit=micro if batched_context else config.jit_context_micro,
         prepass_and_setup_s=prepass_s,wall_s=elapsed,weights_only_resume='reset_ema',
         timing_scope='host call wall, may enqueue GPU work or include implicit waits; not GPU kernel duration',
         selected_aux_h2d_payload_bytes=int(actions_np.nbytes+old_logits_np.nbytes+masks.nbytes+weights.nbytes),

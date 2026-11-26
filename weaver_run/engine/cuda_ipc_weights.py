@@ -1,8 +1,9 @@
 """Rank-local CUDA IPC weight transport for colocated ZeRO-2 owners.
 
 Only control metadata crosses Ray. Inference keeps its own Parameters and copies
-from IPC views; it never aliases its live model to the trainer. Both ends retain
-the existing full CPU SHA256 verification, so verification still incurs D2H.
+from IPC views; it never aliases its live model to the trainer. The exporter
+attests every byte with the historical SHA256. Optimized policy receivers compare
+all destination bytes on GPU against the still-held source before releasing it.
 This module does not initialize CUDA at import time and never silently falls back
 to CPU transport. The caller must gate training with ``assert_idle`` and keep the
 exporting actor alive until all matching inference ACKs have been received.
@@ -25,10 +26,12 @@ import threading
 import uuid as uuid_module
 import weakref
 
-from training_topology import _publication_state, _weight_hash, _weight_version
+from training_topology import _publication_state, _weight_descriptor, _weight_hash, _weight_version
 
 
 PROTOCOL = "accerl.cuda_ipc.weights.v1"
+GPU_BYTE_COMPARE = "source_sha256_gpu_byte_compare"
+VERIFY_GROUP_BYTES = 16 << 20
 INVENTORY_KEYS = ("kind", "version", "hash", "bytes", "tensor_count")
 REBUILD_PARAMETERS = (
     "tensor_cls", "tensor_size", "tensor_stride", "tensor_offset", "storage_cls",
@@ -130,6 +133,70 @@ def metadata_fingerprint(payload):
                                     separators=(",", ":")).encode()).hexdigest()
 
 
+def _checked_fingerprint(payload):
+    if "verification" not in payload and "control_sha256" not in payload:
+        return metadata_fingerprint(payload)
+    if payload.get("verification") != GPU_BYTE_COMPARE or payload.get("kind") != "policy":
+        raise ValueError("Unknown IPC weight verification mode")
+    fingerprint = metadata_fingerprint({k: v for k, v in payload.items() if k != "control_sha256"})
+    if fingerprint != payload.get("control_sha256"):
+        raise ValueError("IPC source inventory or handle metadata changed in transit")
+    return fingerprint
+
+
+def _group_slices(weights, limit):
+    start = total = 0
+    for i, (_, value) in enumerate(weights):
+        size = value.numel() * value.element_size()
+        if i > start and total + size > limit:
+            yield slice(start, i)
+            start, total = i, 0
+        total += size
+    if start < len(weights):
+        yield slice(start, len(weights))
+
+
+def _packed_bytes(tensors):
+    import torch
+    views = [v.detach().contiguous().reshape(-1).view(torch.uint8) for v in tensors]
+    # An individual large, contiguous tensor needs no secondary device allocation.
+    return views[0] if len(views) == 1 else torch.cat(views)
+
+
+def _grouped_policy_hash(weights, limit=VERIFY_GROUP_BYTES):
+    """Preserve the exact historical digest; transfer each group to host once."""
+    digest = hashlib.sha256(b"policy\n")
+    for section in _group_slices(weights, limit):
+        group = weights[section]
+        flat = _packed_bytes([v for _, v in group])
+        if flat.numel() > limit:  # _group_slices places oversized parameters alone.
+            name, value = group[0]
+            digest.update(_weight_descriptor(name, value))
+            for piece in flat.split(limit):
+                digest.update(memoryview(piece.cpu().numpy()))
+            continue
+        view = memoryview(flat.cpu().numpy())
+        offset = 0
+        for name, value in group:
+            digest.update(_weight_descriptor(name, value))
+            end = offset + value.numel() * value.element_size()
+            digest.update(view[offset:end])
+            offset = end
+    return digest.hexdigest()
+
+
+def _copied_bytes_match(weights, shared, limit=VERIFY_GROUP_BYTES):
+    """Compare raw bytes (including NaN payloads), synchronizing once at the end."""
+    import torch
+    checks = []
+    for section in _group_slices(weights, limit):
+        local = _packed_bytes([v for _, v in weights[section]])
+        remote = _packed_bytes(shared[section])
+        for destination, source in zip(local.split(limit), remote.split(limit)):
+            checks.append((destination == source).all())
+    return bool(torch.stack(checks).all().item())
+
+
 def _handle(value, label, nullable=True):
     if value is None and nullable:
         return
@@ -229,7 +296,7 @@ def _decode_reduction(torch, item):
     args[4] = (torch.storage.TypedStorage if args[4] == "torch.storage.TypedStorage"
                else torch.UntypedStorage)
     args[5], args[6] = getattr(torch, _DTYPES[args[5]]), 0
-    element_size = torch.empty((), dtype=args[5], device="cpu").element_size()
+    element_size = args[5].itemsize
     if math.prod(item["size"]):
         last_element = args[3] + sum((n - 1) * stride for n, stride in zip(item["size"], item["stride"]))
         if (last_element + 1) * element_size > args[8]:
@@ -348,21 +415,28 @@ class CudaIPCWeightExporter:
             token = uuid_module.uuid4().hex
             self._active = {"token": token, "refs": refs, "payload": None, "event": None}
             torch.cuda.synchronize(0)
-            inventory = {"kind": self.kind, "version": version,
-                         "hash": _weight_hash(refs, self.kind, publication),
+            fast_verify = self.kind == "policy" and os.environ.get("ACCERL_FAST_JIT_BOUNDARIES") == "1"
+            content_hash = _grouped_policy_hash(refs) if fast_verify else _weight_hash(refs, self.kind, publication)
+            inventory = {"kind": self.kind, "version": version, "hash": content_hash,
                          "bytes": sum(value.numel() * value.element_size() for _, value in refs),
                          "tensor_count": len(refs)}
             if publication is not None:
                 inventory["publication"] = publication
             event = torch.cuda.Event(interprocess=True, enable_timing=False)
             event.record(torch.cuda.current_stream(0))
-            event.synchronize()
+            if not fast_verify:
+                event.synchronize()
             self._active["event"] = event
             tensors = [_encode_reduction(torch, name, value) for name, value in refs]
             payload = {"protocol": PROTOCOL, "kind": self.kind, "uuid": self.uuid,
                        "rank": self.rank, "run_id": self.run_id, "token": token,
                        "source": process_identity(), "runtime": runtime,
                        "inventory": inventory, "ready_event": event.ipc_handle(), "tensors": tensors}
+            if fast_verify:
+                payload["verification"] = GPU_BYTE_COMPARE
+                # Bind the content digest to the version, exporter, and exact IPC
+                # views used in the receiver's full device-to-device comparison.
+                payload["control_sha256"] = metadata_fingerprint(payload)
             validate_payload(payload, self.kind, self.uuid, self.run_id, self.rank)
             self._active["payload"] = payload
             return payload
@@ -399,7 +473,10 @@ def apply_cuda_ipc_weights(module, payload, kind, expected_uuid, run_id, rank, *
     selected, publication = _publication_state(module, kind, inventory["version"], world_backend)
     if inventory.get("publication") != publication:
         raise ValueError("CUDA IPC publication differs from the destination backend bundle")
-    fingerprint = metadata_fingerprint(payload)
+    fingerprint = _checked_fingerprint(payload)
+    # The producer selected this protocol for the publication. Every receiver
+    # applies the same verified mode even if actor-specific env vars differ.
+    fast_verify = payload.get("verification") == GPU_BYTE_COMPARE
     with _RECEIVERS_LOCK:
         state = _RECEIVERS.setdefault(module, {"lock": threading.RLock(), "last": {}, "failed": False})
     with state["lock"]:
@@ -451,18 +528,22 @@ def apply_cuda_ipc_weights(module, payload, kind, expected_uuid, run_id, rank, *
             torch.cuda.synchronize(0)
             ready = torch.cuda.Event.from_ipc_handle(0, payload["ready_event"])
             torch.cuda.current_stream(0).wait_event(ready)
-            ready.synchronize()
+            if not fast_verify:
+                ready.synchronize()
             from torch.multiprocessing.reductions import rebuild_cuda_tensor
             for args in decoded:
                 shared.append(rebuild_cuda_tensor(*args))
             with torch.no_grad():
                 for (_, destination), source_tensor in zip(selected, shared):
                     destination.copy_(source_tensor)
-            torch.cuda.synchronize(0)
-            loaded_hash = _weight_hash(selected, kind, publication)
-            if loaded_hash != inventory["hash"]:
-                raise RuntimeError("Loaded CUDA IPC inference weights differ from source SHA256")
-            ack = dict(inventory, hash=loaded_hash)
+            if fast_verify:
+                if not _copied_bytes_match(selected, shared):
+                    raise RuntimeError("Loaded CUDA IPC policy bytes differ from held exporter views")
+            else:
+                torch.cuda.synchronize(0)
+                if _weight_hash(selected, kind, publication) != inventory["hash"]:
+                    raise RuntimeError("Loaded CUDA IPC inference weights differ from source SHA256")
+            ack = dict(inventory)
             # Only this ACK allows exporter.finish and the next optimizer step.
             state["last"][kind] = {"token": payload["token"], "fingerprint": fingerprint, "ack": ack}
             state["failed"] = False

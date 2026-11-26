@@ -264,7 +264,8 @@ def report(data, state):
         if state.get('batch_autotune'):
             lines[3]=f'Real{real_workers} / Imag0，Policy 四卡 ZeRO2 global576；前期按六更新窗口校准 refresh batch 与训练 micro/GAS，之后冻结。实际配置见 BatchAutotune 遥测。'
         if state.get('trajectory_jit'):
-            lines[3]=f'Real{real_workers} / Imag0，Policy 四卡 ZeRO2，global 576；同轨迹集中，每卡144，训练微批16×9，上下文微批2，优势使用EMA归一化。'
+            context = '预热上下文微批2，稳态合并后缀至每批最多16' if state.get('no_micro_cache_trim') else '上下文微批2'
+            lines[3]=f'Real{real_workers} / Imag0，Policy 四卡 ZeRO2，global 576；同轨迹集中，每卡144，训练微批16×9，{context}，优势使用EMA归一化。'
         target = state.get('model_free_success_target')
         if target:
             lines += ['', f"最近 {target['window_size']} 个有效真实训练回合首次达到 {target['window_successes']} 次成功即停止更新并保存。固定评测用于诊断，实际预算耗尽也会停止。"]

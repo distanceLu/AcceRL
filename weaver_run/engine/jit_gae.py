@@ -37,7 +37,7 @@ class ReverseGAE:
 
 def masked_policy_loss(logits, value, actions, old_logits, advantages, targets,
                        masks, token_weights, *, vf_coef, ent_coef, kl_coef,
-                       clip_mode, clip_eps, actor_enabled=True):
+                       clip_mode, clip_eps, actor_enabled=True, action_tokens_checked=False):
     """Preserve original micro token weighting even when reverse order regroups it.
 
     token_weights[i] = 1 / valid_tokens_in_original_micro(i). DeepSpeed's fixed
@@ -49,8 +49,14 @@ def masked_policy_loss(logits, value, actions, old_logits, advantages, targets,
     zero = vloss.new_zeros(())
     if not actor_enabled:
         return vloss, torch.stack((vloss.detach(), zero, vloss.detach(), zero, zero, zero, zero))
-    dist = torch.distributions.Categorical(logits=logits)
-    old = torch.distributions.Categorical(logits=old_logits.detach())
+    # The formal fast path checks action support once on the CPU and checks
+    # finite loss/metrics on all ranks before backward. Categorical's default
+    # argument and sample validation would read CUDA scalars for each log_prob.
+    validate = False if action_tokens_checked else None
+    if action_tokens_checked and logits.shape != old_logits.shape:
+        raise ValueError('Current and stored action distributions must share geometry')
+    dist = torch.distributions.Categorical(logits=logits, validate_args=validate)
+    old = torch.distributions.Categorical(logits=old_logits.detach(), validate_args=validate)
     ratio = (dist.log_prob(actions)-old.log_prob(actions)).exp()
     adv = advantages.detach()[:, None, None]
     if clip_mode == 'gipo':

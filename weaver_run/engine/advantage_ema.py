@@ -13,7 +13,7 @@ def moments(sums):
 
 def raw_sums(values):
     values = values.detach().to(torch.float64)
-    return torch.stack((values.new_tensor(values.numel()), values.sum(), values.square().sum()))
+    return torch.stack((values.new_full((), values.numel()), values.sum(), values.square().sum()))
 
 
 class AdvantageEMA:
@@ -43,12 +43,15 @@ class AdvantageEMA:
             return mean, variance.clamp_min(1e-12).sqrt() + 1e-8
         return mean, variance.sqrt().clamp_min(self.scale_floor)
 
-    def commit(self, sums, *, expected_updates, optimizer_succeeded):
+    def commit(self, sums, *, expected_updates, optimizer_succeeded, expected_count=None):
         if expected_updates != self.updates:
             raise RuntimeError('Duplicate or out-of-order EMA commit')
         if not optimizer_succeeded:
             return False
-        if sums.shape != (3,) or not bool(torch.isfinite(sums).all()) or not bool(sums[0] > 0):
+        if sums.shape != (3,):
+            raise ValueError('Invalid global advantage moments')
+        valid_count = sums[0] > 0 if expected_count is None else sums[0] == expected_count
+        if not bool(valid_count & torch.isfinite(sums).all()):
             raise ValueError('Invalid global advantage moments')
         mean, variance = moments(sums)
         if self.updates:

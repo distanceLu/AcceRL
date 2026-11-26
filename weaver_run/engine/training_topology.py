@@ -246,6 +246,12 @@ def _publication_state(module, kind, version, world_backend=None, *, for_export=
     return weights, publication
 
 
+def _weight_descriptor(name, tensor):
+    import json
+    return (json.dumps([name, list(tensor.shape), str(tensor.dtype)],
+                       ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def _weight_hash(weights, kind, publication=None):
     """Hash raw CPU bytes, including bfloat16, one tensor at a time."""
     import hashlib
@@ -259,9 +265,7 @@ def _weight_hash(weights, kind, publication=None):
     for name, tensor in weights:
         # reshape handles scalar buffers; uint8 avoids NumPy's lack of bf16.
         cpu_tensor = tensor.detach().to(device="cpu").contiguous()
-        descriptor = json.dumps([name, list(cpu_tensor.shape), str(cpu_tensor.dtype)],
-                                ensure_ascii=True, separators=(",", ":"))
-        digest.update(descriptor.encode("utf-8") + b"\n")
+        digest.update(_weight_descriptor(name, cpu_tensor))
         digest.update(cpu_tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 

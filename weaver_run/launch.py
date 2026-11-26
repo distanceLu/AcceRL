@@ -289,6 +289,16 @@ def rollout_arguments(real_workers=4, no_micro_cache_trim=False, rollout_invento
     return args
 
 
+def trainer_cache_environment(trajectory_jit, no_micro_cache_trim, env):
+    # Frozen diagnostic runs compare against the original allocator and IPC path.
+    fast = trajectory_jit and no_micro_cache_trim and not env.get('ACCERL_JIT_BENCH_PLAN')
+    return {
+        'ACCERL_TRIM_MICRO_CACHE': '0' if no_micro_cache_trim else '1',
+        'ACCERL_TRIM_IDLE_CACHE': '0' if fast else '1',
+        'ACCERL_FAST_JIT_BOUNDARIES': '1' if fast else '0',
+    }
+
+
 def effective_pipeline(model_free=False, real_workers=4):
     if not model_free:
         return read(RECIPE/'pipeline_config.json')
@@ -337,8 +347,7 @@ def exec_managed_driver(overrides=()):
     env['ACCERL_ROLLOUT_INVENTORY_GATE'] = str(int(selected.rollout_inventory_gate))
     if selected.model_free:
         env['ACCERL_MODEL_FREE_REAL_WORKERS'] = str(workers)
-        # 让训练器复用微批缓存，更新结束时仍交还显存给同卡推理。
-        env['ACCERL_TRIM_MICRO_CACHE'] = '0' if no_micro_cache_trim else '1'
+        env.update(trainer_cache_environment(selected.trajectory_jit, no_micro_cache_trim, env))
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
     from engine.policy_source import training_pythonpath
@@ -405,7 +414,7 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(batch_autotune)),ACCERL_MODEL_FREE=str(int(model_free)),ACCERL_NUM_EVAL_WORKERS=str(mode_options(model_free,num_eval_workers)['num_eval_workers']))
     if model_free:
         env['ACCERL_MODEL_FREE_REAL_WORKERS'] = str(real_workers)
-        env['ACCERL_TRIM_MICRO_CACHE'] = '0' if no_micro_cache_trim else '1'
+        env.update(trainer_cache_environment(trajectory_jit, no_micro_cache_trim, env))
         env.pop('ACCERL_WORLD_BACKEND_CONFIG',None)
         env.pop('ACCERL_COST_SCHEDULER_CONFIG',None)
     return [sys.executable,str(ENGINE/"train.py"),*argv],env,host

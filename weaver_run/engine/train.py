@@ -1597,6 +1597,10 @@ class RolloutWorkerActor(BaseWorkerActor):
                 lineage_sample(self,segment.sample_id(index),(version['lineage_group_id'],),
                     replay='policy',episode_id=self.capture_episode_id,sample_index=index,
                     segment_id=segment.segment_id,source=source,consumers=['policy_train'])
+            if (source == 'real' and self.model_free and os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+                    and os.environ.get('ACCERL_FAST_JIT_BOUNDARIES') == '1'):
+                from jit_pixel_store import stage_segment_pixels
+                segment = stage_segment_pixels(segment, ray.put)
             ray.get(self.replay.add_segment.remote(segment))
             if source == 'imagined':
                 self.pipeline_generated_samples = getattr(self,'pipeline_generated_samples',0) + segment.count
@@ -3943,12 +3947,17 @@ class TrainerActor(TrainerActorCom):
                          else self.batch_coordinator.sample_wm.remote(self.rank, local_size, self.training_role))
         else:
             raw = await replay.sample.remote(local_size)
+        pixel_blocks = 0
         if isinstance(raw, dict) and 'trajectory_jit_shard_ref' in raw:
             raw = await raw['trajectory_jit_shard_ref']
+            if os.environ.get('ACCERL_FAST_JIT_BOUNDARIES') == '1':
+                from jit_pixel_store import resolve_shard_pixels
+                raw, pixel_blocks = await asyncio.get_running_loop().run_in_executor(
+                    self._prep_executor, resolve_shard_pixels, raw, ray.get)
         elapsed = time.time() - started
         self.telemetry.event("data_fetch", start_ns=int(started * 1e9), end_ns=now_ns(),
                              duration_ns=int(elapsed * 1e9), replay="policy" if policy else "wm",
-                             serial_cpu_prefetch=True, gpu_prepared=False)
+                             serial_cpu_prefetch=True, gpu_prepared=False, staged_pixel_blocks=pixel_blocks)
         return {"raw": raw, "sample_time": elapsed}
 
     async def _serial_publish_batch(self, policy_step):
@@ -4017,7 +4026,7 @@ class TrainerActor(TrainerActorCom):
         token = torch.tensor([key[0], model_id, boundary], dtype=torch.int64, device="cuda")
         tokens = [torch.empty_like(token) for _ in range(self.world_size)]
         distributed.all_gather(tokens, token)
-        values = [item.cpu().tolist() for item in tokens]
+        values = torch.stack(tokens).cpu().tolist()
         if any(value != [key[0], model_id, boundary] for value in values):
             raise RuntimeError(f"Serial four-rank phase keys disagree: {values}")
 
@@ -4069,7 +4078,7 @@ class TrainerActor(TrainerActorCom):
                     token = torch.tensor(choice, dtype=torch.int64, device='cuda')
                     tokens = [torch.empty_like(token) for _ in range(self.world_size)]
                     distributed.all_gather(tokens, token)
-                    if any(item.cpu().tolist() != list(choice) for item in tokens):
+                    if any(row != list(choice) for row in torch.stack(tokens).cpu().tolist()):
                         raise RuntimeError('Four ranks disagree on autotuned Policy micro-batch')
                     batch_options['micro'] = choice[1]
                 self._policy_joint_batch_mode.begin(policy_step, **batch_options)
@@ -4085,15 +4094,20 @@ class TrainerActor(TrainerActorCom):
             if self.training_role == "policy":
                 self._policy_joint_batch_mode.complete(policy_step)
             self.next_ready_batch = self.next_ready_wm_batch = None
-            import gc
-            gc.collect()
-            torch.cuda.synchronize()
-            self.telemetry.flush(force_gpu=True)
-            torch.cuda.empty_cache()
+            retain_cache = self.training_role == 'policy' and os.environ.get('ACCERL_FAST_JIT_BOUNDARIES') == '1'
+            if not retain_cache:
+                import gc
+                gc.collect()
+                torch.cuda.synchronize()
+                self.telemetry.flush(force_gpu=True)
+                torch.cuda.empty_cache()
             self._serial_key_barrier(key, 1)
-            # The key collective's temporary tensors are now also unreferenced.
+            # Drain all trainer streams before ACK and before releasing the batch.
             torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            if retain_cache:
+                self.telemetry.flush(force_gpu=True)
+            else:
+                torch.cuda.empty_cache()
             self._serial_phase.complete(key)
             if self._serial_prefetch is not None:
                 self._serial_prefetch.release_in_use()
@@ -4107,7 +4121,8 @@ class TrainerActor(TrainerActorCom):
                 "policy_step": policy_step, "model": self.training_role, "rank": self.rank,
                 "phase_key": list(key), "cpu_prefetch_only": True, "trained": bool(trained),
                 "cohort": None if self.training_role == "policy" else result["wm_cohort"],
-                "gpu_batch_refs_released": True, "completion": "cuda_sync_and_empty_cache",
+                "gpu_batch_refs_released": True,
+                "completion": "cuda_sync_cache_retained" if retain_cache else "cuda_sync_and_empty_cache",
                 **self._serial_memory()})
             self.telemetry.flush()
             return result
@@ -4928,6 +4943,7 @@ def main(args):
                 # neither rebuilds CUDA tensors nor receives full weight snapshots.
                 packets = ray.get(payloads, timeout=120)
                 publication_timing["export_ready_ns"] = time.time_ns()
+                publication_timing["verification"] = packets[0].get("verification", "dual_cpu_sha256")
                 inventories = [packet["inventory"] for packet in packets]
                 if len({(item["version"], item["hash"]) for item in inventories}) != 1:
                     raise RuntimeError(f"Training weights diverged before {kind} IPC sync: {inventories}")

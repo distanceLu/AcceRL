@@ -3,6 +3,8 @@ from copy import deepcopy
 import random
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+import os
 
 import numpy as np
 import torch
@@ -20,11 +22,12 @@ class PackedObjectiveTests(unittest.TestCase):
     def test_both_samplers_preserve_full_gae_and_actually_accumulated_gradients(self):
         torch.set_num_threads(1)
         for mode in ('whole_episodes', 'uniform_blocks'):
-            with self.subTest(mode=mode), torch.random.fork_rng():
-                torch.manual_seed(1729)
-                self.check_update(mode)
+            for fast in (False, True):
+                with self.subTest(mode=mode, fast=fast), torch.random.fork_rng():
+                    torch.manual_seed(1729)
+                    self.check_update(mode, fast)
 
-    def check_update(self, mode):
+    def check_update(self, mode, fast):
         store = SegmentReplay(2400, FreshConfig.from_world_config({'backend': 'model_free'}),
                               rng=random.Random(123))
         store.set_versions(5, 0)
@@ -63,9 +66,16 @@ class PackedObjectiveTests(unittest.TestCase):
                 vf_coef=.5, ent_coef=.01, kl_coef=.1, clip_mode='gipo', clip_eps=.2, policy_train_start_step=0,
                 advantage_ema=ema, telemetry=SimpleNamespace(event=lambda *args, **kwargs: None),
                 _verify_optimizer_update=lambda *args: None)
-            run_jit_policy_update(owner, packed[0], packed[1], packed[3], micro_begin=lambda *a, **k: None,
-                                  micro_end=lambda *a, **k: None, trim=lambda _: None,
-                                  original_denominators=denominators.numpy())
+            events = []
+            owner.telemetry = SimpleNamespace(event=lambda name, details: events.append(details))
+            with patch.dict(os.environ, ACCERL_FAST_JIT_BOUNDARIES=str(int(fast))):
+                run_jit_policy_update(owner, packed[0], packed[1], packed[3], micro_begin=lambda *a, **k: None,
+                                      micro_end=lambda *a, **k: None, trim=lambda _: None,
+                                      original_denominators=denominators.numpy())
+            stats = events[-1]
+            self.assertEqual(stats['batched_window_context'], fast)
+            if fast:
+                self.assertEqual(stats['no_grad_forward_calls'], (stats['context_only_states'] + 15) // 16)
             rows, actions, advantages, old_logits, targets = reference_batch
             receipt = {row['sample_id']: row for row in owner._jit_receipts}
             self.assertEqual(set(receipt), set(selected))
