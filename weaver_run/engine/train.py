@@ -41,7 +41,7 @@ from reward_features import install_reward_features_only
 from memory_policy import install_reward_checkpointing
 from training_topology import (
     DUAL_LAYOUT, FOUR_LAYOUT, SPLIT_LAYOUT, parse_gpu_ids, build_bindings, ray_init_options, actor_options,
-    verify_bound_gpu, successful_updates, GlobalBatchCoordinator, combine_wm_metrics,
+    verify_bound_gpu, validate_trainer_mps_bindings, successful_updates, GlobalBatchCoordinator, combine_wm_metrics,
     export_cpu_weights, apply_cpu_weights,
 )
 from shared_inference import PolicyRewardInferenceActor, RewardInferenceHandle
@@ -1856,6 +1856,9 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         self._bg_task = loop.create_task(self._loop())
         self._bg_task.add_done_callback(self._on_bg_task_done)
         print(f"InferenceActor {self.actor_id} 初始化于 GPU: {ray.get_gpu_ids()} (批次超时: {inference_timeout_ms}ms)")
+
+    def get_gpu_binding(self):
+        return self.gpu_binding
 
     def get_model_keys(self):
         if self.model is None:
@@ -5007,6 +5010,13 @@ def main(args):
     states = ray.get([trainer.get_training_state.remote() for trainer in all_trainers])
     if split_training:
         validate_split_owners(states, bindings, active_kinds)
+    if model_free and split_training and os.environ.get('ACCERL_USE_MPS') == '1':
+        trainer_gpus = [state['gpu'] for state in states]
+        infer_gpus = ray.get([actor.get_gpu_binding.remote() for actor in inference_pool])
+        trainer_percent = int(os.environ.get('ACCERL_TRAINER_MPS_PERCENT', '100'))
+        validate_trainer_mps_bindings(trainer_gpus, infer_gpus, trainer_percent)
+        experiment.event('trainer_mps_verified', details=dict(trainer_mps_percent=trainer_percent,
+                         trainers=trainer_gpus, policy_inference=infer_gpus))
     print("[Training topology] " + json.dumps(states, ensure_ascii=False), flush=True)
     if args.gpu_layout == DUAL_LAYOUT:
         print("[Independent inference queues] " + json.dumps(ray.get(shared_inference.get_inference_owners.remote())), flush=True)

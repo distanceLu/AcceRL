@@ -114,6 +114,13 @@ def actor_options(bindings, role, rank=0, layout=DUAL_LAYOUT, active_kinds=None,
         raise ValueError("Unknown fixed GPU layout: %s" % layout)
     binding = bindings[slot]
     mps_env = _mps_runtime_env()
+    trainer_percent = int(os.environ.get("ACCERL_TRAINER_MPS_PERCENT", "100"))
+    if trainer_percent != 100:
+        if not (1 <= trainer_percent < 100 and mps_env and layout == SPLIT_LAYOUT and kinds == ("policy",)):
+            raise ValueError("Trainer MPS cap requires a model-free split layout and an active MPS service")
+        if role == "policy_trainer":
+            # Ray sets this on the trainer worker before the first CUDA context.
+            mps_env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(trainer_percent)
     return {
         "num_gpus": 0,
         "max_restarts": 0,
@@ -367,7 +374,8 @@ def verify_bound_gpu():
     if torch.cuda.device_count() != 1:
         raise RuntimeError("A bound model actor must see exactly one GPU")
     torch.cuda.set_device(0)
-    actual = str(torch.cuda.get_device_properties(0).uuid)
+    properties = torch.cuda.get_device_properties(0)
+    actual = str(properties.uuid)
     if actual.removeprefix("GPU-").lower() != expected.removeprefix("GPU-").lower():
         raise RuntimeError("GPU binding mismatch: expected %s, got %s" % (expected, actual))
     if os.environ.get("ACCERL_USE_MPS") == "1":
@@ -375,8 +383,25 @@ def verify_bound_gpu():
         _install_mps_nvml_mapping(os.environ.get("ACCERL_PHYSICAL_GPU"))
     binding = {"physical_gpu": os.environ["ACCERL_PHYSICAL_GPU"], "uuid": actual,
                "cuda_local_device": 0}
+    if os.environ.get("ACCERL_USE_MPS") == "1" and os.environ.get("ACCERL_MODEL_FREE") == "1":
+        binding.update(visible_sm_count=int(properties.multi_processor_count),
+                       mps_client_percent=int(os.environ.get("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", "100")))
     print("[GPU binding] %s" % binding, flush=True)
     return binding
+
+
+def validate_trainer_mps_bindings(trainers, inference, percent):
+    """Compare each trainer's visible resources against its own uncapped inference peer."""
+    if len(trainers) != 4 or len(inference) != 4 or len({g['uuid'] for g in inference}) != 4:
+        raise ValueError("Trainer MPS verification requires four distinct, paired GPUs")
+    for trainer, infer in zip(trainers, inference):
+        sm, full = trainer.get("visible_sm_count"), infer.get("visible_sm_count")
+        if (trainer["uuid"] != infer["uuid"] or trainer["physical_gpu"] != infer["physical_gpu"]
+                or trainer.get("mps_client_percent") != percent or infer.get("mps_client_percent") != 100
+                or type(sm) is not int or type(full) is not int or not 0 < sm <= full
+                or (sm == full) != (percent == 100)):
+            raise ValueError(f"Trainer MPS cap {percent}% did not yield the expected CUDA context "
+                             f"on its paired card: trainer={trainer}, inference={infer}")
 
 
 def successful_updates(before_steps, before_skips, engine):

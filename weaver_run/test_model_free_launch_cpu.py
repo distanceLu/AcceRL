@@ -34,6 +34,50 @@ site = module('model_free_site_cli', HERE / 'reference_site/cli.py')
 
 
 class ModelFreeLaunchTests(unittest.TestCase):
+    def test_trainer_mps_reaches_only_policy_trainers(self):
+        from training_topology import actor_options, SPLIT_LAYOUT, validate_trainer_mps_bindings
+        flag, key = '--trainer-mps-percent', 'ACCERL_TRAINER_MPS_PERCENT'
+        options = dict(model_free=True, trajectory_jit=True, batch_autotune=True, num_eval_workers=0,
+                       real_sampling='uniform_blocks', real_workers=8, trainer_mps_percent=80)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'mps.json').write_bytes(b'{}')
+            with patch.object(site, 'PARENT', root), patch.object(site, 'revision', return_value='a'*40), \
+                 patch.object(site, 'PROFILES', {'restore': {'mps_receipt': site.digest(b'{}')}}):
+                record = site.make_spec('restore', 'mps80', root, root, checkout=site.CHECKOUT, **options)
+            self.assertEqual(record['trainer_mps_percent'], 80)
+            argv = record['job']['argv']
+            self.assertEqual(argv[argv.index(flag)+1], '80')
+            args = types.SimpleNamespace(source=HERE/'engine', root=root, **options)
+            mode = training.mode_kwargs(args)
+            self.assertEqual(mode['trainer_mps_percent'], 80)
+            self.assertEqual(training.launch_environment(root, args.source, {}, **mode)[key], '80')
+            command = training.runner_command(args)
+            with patch.dict(os.environ, dict(ACCERL_PIPELINE_CONFIG='p', ACCERL_FINAL_CHECKPOINT='w'), clear=True), \
+                 patch.object(os, 'chdir'), patch.object(os, 'execve') as execute:
+                launch.exec_managed_driver(command[command.index('--model-free'):])
+                self.assertEqual(execute.call_args.args[2][key], '80')
+        cards = [dict(index=str(i), uuid=str(i), resource=str(i)) for i in range(4)]
+        cap_key = 'CUDA_MPS_ACTIVE_THREAD_PERCENTAGE'
+        with patch.dict(os.environ, {key:'80', 'ACCERL_USE_MPS':'1', 'CUDA_MPS_PIPE_DIRECTORY':str(HERE)}, clear=True):
+            for i in range(4):
+                trainer = actor_options(cards, 'policy_trainer', i, SPLIT_LAYOUT, ('policy',))
+                infer = actor_options(cards, 'policy', i, SPLIT_LAYOUT, ('policy',))
+                self.assertEqual(trainer['runtime_env']['env_vars'][cap_key], '80')
+                self.assertNotIn(cap_key, infer['runtime_env']['env_vars'])
+        trainers = [dict(uuid=str(i), physical_gpu=str(i), mps_client_percent=80, visible_sm_count=60) for i in range(4)]
+        inference = [dict(uuid=str(i), physical_gpu=str(i), mps_client_percent=100, visible_sm_count=78) for i in range(4)]
+        validate_trainer_mps_bindings(trainers, inference, 80)
+        with self.assertRaises(ValueError):
+            validate_trainer_mps_bindings(trainers, inference[::-1], 80)
+        trainers[0]['visible_sm_count'] = 78
+        with self.assertRaises(ValueError):
+            validate_trainer_mps_bindings(trainers, inference, 80)
+        self.assertNotIn(flag, launch.rollout_arguments())
+        for value in (False, 0, 101):
+            with self.assertRaises(ValueError):
+                launch.rollout_options(True, trainer_mps_percent=value)
+
     def test_fixed_episode_rate_reaches_driver_and_frozen_experiment(self):
         options = dict(model_free=True, trajectory_jit=True, batch_autotune=True, num_eval_workers=0,
                        real_sampling='uniform_blocks', real_workers=8, real_episodes_per_minute=22.2)

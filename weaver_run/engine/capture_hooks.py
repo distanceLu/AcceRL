@@ -512,6 +512,9 @@ def _init_wrapper(original, role):
         if getattr(self, "telemetry", None) is None:
             self.telemetry = Telemetry(effective_role, actor_id)
         details = {"role": effective_role, "seed": self.capture_seed}
+        binding = getattr(self, "gpu_binding", None)
+        if binding and "visible_sm_count" in binding:
+            details['gpu_binding'] = binding
         if role == "trainer":
             details.update(training_role=training_role, seed_role=role)
         self.telemetry.event("actor_init", start_ns=start, end_ns=now_ns(),
