@@ -163,97 +163,72 @@ def _packed_bytes(tensors):
     return views[0] if len(views) == 1 else torch.cat(views)
 
 
-def _grouped_policy_hash(weights, limit=VERIFY_GROUP_BYTES):
-    """Preserve the exact historical digest; overlap CUDA D2H DMA with CPU SHA256."""
-    import torch
-
-    digest = hashlib.sha256(b"policy\n")
-    if not weights:
-        return digest.hexdigest()
-
-    on_cuda = any(v.device.type == "cuda" for _, v in weights)
-    if not on_cuda:
-        for section in _group_slices(weights, limit):
-            group = weights[section]
-            flat = _packed_bytes([v for _, v in group])
-            if flat.numel() > limit:  # _group_slices places oversized parameters alone.
-                name, value = group[0]
-                digest.update(_weight_descriptor(name, value))
-                for piece in flat.split(limit):
-                    digest.update(memoryview(piece.cpu().numpy()))
-                continue
-            view = memoryview(flat.cpu().numpy())
-            offset = 0
-            for name, value in group:
-                digest.update(_weight_descriptor(name, value))
-                end = offset + value.numel() * value.element_size()
-                digest.update(view[offset:end])
-                offset = end
-        return digest.hexdigest()
-
-    # Build descriptors + GPU byte chunks and double-buffer async D2H into pinned host memory.
-    device = next(v.device for _, v in weights if v.device.type == "cuda")
-    copy_stream = torch.cuda.Stream(device=device)
-    copy_stream.wait_stream(torch.cuda.current_stream(device))
-    # Each task is (gpu_piece_or_None, [(descriptor_bytes, start, end), ...]).
-    tasks = []
-    with torch.cuda.stream(copy_stream):
-        for section in _group_slices(weights, limit):
-            group = weights[section]
-            flat = _packed_bytes([v for _, v in group])
-            if flat.numel() > limit:
-                name, value = group[0]
-                desc = _weight_descriptor(name, value)
-                for idx, piece in enumerate(flat.split(limit)):
-                    n = piece.numel()
-                    tasks.append((piece, [(desc if idx == 0 else None, 0, n)]))
-                continue
+def _policy_hash_chunks(weights, limit):
+    for section in _group_slices(weights, limit):
+        group = weights[section]
+        flat = _packed_bytes([v for _, v in group])
+        if flat.numel() > limit:
+            # _group_slices isolates oversized parameters. Hash its header once.
+            name, value = group[0]
+            header = _weight_descriptor(name, value)
+            for piece in flat.split(limit):
+                yield piece, [(header, 0, piece.numel())]
+                header = b""
+        else:
             meta = []
             offset = 0
             for name, value in group:
                 end = offset + value.numel() * value.element_size()
                 meta.append((_weight_descriptor(name, value), offset, end))
                 offset = end
-            tasks.append((flat if flat.numel() else None, meta))
+            yield flat, meta
 
-    buf_size = max((piece.numel() for piece, _ in tasks if piece is not None), default=0)
-    if buf_size == 0:
-        for _, meta in tasks:
-            for desc, _, _ in meta:
-                if desc is not None:
-                    digest.update(desc)
+
+def _grouped_policy_hash(weights, limit=VERIFY_GROUP_BYTES):
+    """Hash in inventory order with at most two in-flight CUDA-to-host groups."""
+    import torch
+
+    digest = hashlib.sha256(b"policy\n")
+
+    def consume(host_bytes, meta):
+        view = memoryview(host_bytes.numpy())
+        for header, start, end in meta:
+            digest.update(header)
+            digest.update(view[start:end])
+
+    chunks = _policy_hash_chunks(weights, limit)
+    if not weights or weights[0][1].device.type != "cuda":
+        for piece, meta in chunks:
+            consume(piece.cpu(), meta)
         return digest.hexdigest()
 
-    pinned = [torch.empty(buf_size, dtype=torch.uint8, pin_memory=True) for _ in range(2)]
-    events = [torch.cuda.Event() for _ in range(2)]
-    inflight_refs = [None, None]
+    device = weights[0][1].device
+    copy_stream = torch.cuda.Stream(device=device)
+    copy_stream.wait_stream(torch.cuda.current_stream(device))
+    size = min(limit, sum(v.numel() * v.element_size() for _, v in weights))
+    pinned = [torch.empty(size, dtype=torch.uint8, pin_memory=True) for _ in range(2)]
+    events = [torch.cuda.Event() for _ in pinned]
 
-    def enqueue(index):
-        slot = index & 1
-        piece, _ = tasks[index]
-        inflight_refs[slot] = piece
-        if piece is not None:
-            with torch.cuda.stream(copy_stream):
-                pinned[slot][: piece.numel()].copy_(piece, non_blocking=True)
-                events[slot].record(copy_stream)
+    def finish(transfer):
+        event, host_bytes, meta = transfer
+        event.synchronize()
+        consume(host_bytes, meta)
 
-    enqueue(0)
-    for index in range(len(tasks)):
-        if index + 1 < len(tasks):
-            enqueue(index + 1)
-        slot = index & 1
-        piece, meta = tasks[index]
-        if piece is not None:
-            events[slot].synchronize()
-            view = memoryview(pinned[slot][: piece.numel()].numpy())
-        else:
-            view = memoryview(b"")
-        inflight_refs[slot] = None
-        for desc, start, end in meta:
-            if desc is not None:
-                digest.update(desc)
-            if end > start:
-                digest.update(view[start:end])
+    previous = None
+    # Packing and D2H share one stream, so its allocator may safely recycle a
+    # temporary packing tensor after its copy is enqueued. The exporter holds
+    # the original parameter views until the receiver acknowledges publication.
+    with torch.cuda.stream(copy_stream):
+        for index, (piece, meta) in enumerate(chunks):
+            slot = index % 2
+            host_bytes = pinned[slot][:piece.numel()]
+            host_bytes.copy_(piece, non_blocking=True)
+            events[slot].record(copy_stream)
+            if previous is not None:
+                finish(previous)
+            previous = events[slot], host_bytes, meta
+        if previous is not None:
+            finish(previous)
     return digest.hexdigest()
 
 

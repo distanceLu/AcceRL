@@ -327,6 +327,34 @@ class DeferredForwardVoteTests(unittest.TestCase):
 
 
 class TrainerCompileTests(unittest.TestCase):
+    def test_compile_must_preserve_optimizer_parameter_objects(self):
+        class ReplacingProjector(nn.Linear):
+            def compile(self, **kwargs):
+                self.weight = nn.Parameter(self.weight.detach().clone())
+        policy = nn.Module()
+        policy.vla = nn.Module()
+        policy.vla.projector = ReplacingProjector(2, 2)
+        with patch('trainer_compile.configure_compile_cache', return_value={}), \
+                self.assertRaisesRegex(RuntimeError, "inventory"):
+            compile_policy_trainer(policy, enabled=True)
+
+    def test_explicit_eager_and_inductor_runs_use_matching_tf32_settings(self):
+        with patch.dict(os.environ, ACCERL_COMPILE_TRAINER="0"), \
+                patch.object(torch.cuda, "is_available", return_value=True):
+            old_mm = torch.backends.cuda.matmul.allow_tf32
+            old_conv = torch.backends.cudnn.allow_tf32
+            try:
+                torch.backends.cuda.matmul.allow_tf32 = False
+                torch.backends.cudnn.allow_tf32 = False
+                receipt = compile_policy_trainer(nn.Linear(1, 1))
+                self.assertFalse(receipt["compiled"])
+                self.assertTrue(receipt["tf32_enabled"])
+                self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
+                self.assertTrue(torch.backends.cudnn.allow_tf32)
+            finally:
+                torch.backends.cuda.matmul.allow_tf32 = old_mm
+                torch.backends.cudnn.allow_tf32 = old_conv
+
     def test_compile_flag_cache_scoping_and_in_place_inventory_preservation(self):
         self.assertFalse(compile_trainer_enabled({"ACCERL_FAST_JIT_BOUNDARIES": "0"}))
         self.assertTrue(compile_trainer_enabled({"ACCERL_FAST_JIT_BOUNDARIES": "1"}))

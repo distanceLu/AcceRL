@@ -30,7 +30,10 @@ def compile_trainer_enabled(env=None) -> bool:
 def configure_compile_cache(env=None, *, rank=None) -> dict:
     """Place Inductor and Triton caches on the data disk, never /home."""
     environ = os.environ if env is None else env
-    if environ.get("TORCHINDUCTOR_CACHE_DIR") and environ.get("TRITON_CACHE_DIR"):
+    managed_site = _SITE_CACHE_ROOT.parent.is_dir() and bool(environ.get("ACCERL_RUN_ID"))
+    if managed_site:
+        cache_root = _SITE_CACHE_ROOT
+    elif environ.get("TORCHINDUCTOR_CACHE_DIR") and environ.get("TRITON_CACHE_DIR"):
         cache_root = Path(environ["TORCHINDUCTOR_CACHE_DIR"]).parent
     elif _SITE_CACHE_ROOT.parent.is_dir():
         cache_root = _SITE_CACHE_ROOT
@@ -40,6 +43,10 @@ def configure_compile_cache(env=None, *, rank=None) -> dict:
         cache_root = Path(tempfile.gettempdir()) / "accerl_torch_cache"
 
     scoped_root = cache_root / f"rank_{rank}" if rank is not None else cache_root
+    if managed_site:
+        # The submission shell may have set one shared (or home-directory) cache.
+        environ["TORCHINDUCTOR_CACHE_DIR"] = str(scoped_root / "inductor")
+        environ["TRITON_CACHE_DIR"] = str(scoped_root / "triton")
     inductor_dir = Path(environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(scoped_root / "inductor")))
     triton_dir = Path(environ.setdefault("TRITON_CACHE_DIR", str(scoped_root / "triton")))
     environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
@@ -61,6 +68,16 @@ def eager_inference_context():
     return nullcontext()
 
 
+def compile_counters():
+    """Per-process Dynamo/Inductor counters, sampled around a real training update."""
+    from torch._dynamo.utils import counters
+    return dict(unique_graphs=counters['stats']['unique_graphs'],
+                calls_captured=counters['stats']['calls_captured'],
+                fxgraph_cache_hit=counters['inductor']['fxgraph_cache_hit'],
+                fxgraph_cache_miss=counters['inductor']['fxgraph_cache_miss'],
+                fxgraph_cache_bypass=counters['inductor']['fxgraph_cache_bypass'])
+
+
 def _unwrap_vla(base_model):
     vla = getattr(base_model, "vla", None)
     if vla is None:
@@ -76,9 +93,9 @@ def _unwrap_vla(base_model):
 
 
 def _snapshot_inventory(module):
-    params = tuple((name, tuple(p.shape), str(p.dtype), bool(p.requires_grad))
+    params = tuple((name, id(p), tuple(p.shape), str(p.dtype), bool(p.requires_grad))
                    for name, p in module.named_parameters(recurse=True))
-    buffers = tuple((name, tuple(b.shape), str(b.dtype))
+    buffers = tuple((name, id(b), tuple(b.shape), str(b.dtype))
                     for name, b in module.named_buffers(recurse=True))
     return params, buffers
 
@@ -89,6 +106,7 @@ def compile_policy_trainer(base_model, *, enabled=None, backend="inductor", mode
     receipt = {
         "enabled": active,
         "compiled": False,
+        "phase": "lazy_registration",
         "backend": backend,
         "mode": mode,
         "dynamic": dynamic,
@@ -98,6 +116,11 @@ def compile_policy_trainer(base_model, *, enabled=None, backend="inductor", mode
         "tf32_enabled": False,
         "reason": None,
     }
+    # Keep the explicit eager/Inductor comparison at the same math precision.
+    if (active or os.environ.get("ACCERL_COMPILE_TRAINER") == "0") and torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        receipt["tf32_enabled"] = True
     if not active:
         receipt["reason"] = "disabled"
         return receipt
@@ -109,11 +132,6 @@ def compile_policy_trainer(base_model, *, enabled=None, backend="inductor", mode
     if vla is None:
         receipt["reason"] = "missing_vla"
         return receipt
-
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        receipt["tf32_enabled"] = True
 
     receipt.update(configure_compile_cache(rank=rank))
     try:

@@ -74,6 +74,10 @@ cd /mnt/data/lcx1/dong/WEAVER
     --compile-action-inference --id mf8-compiled-action
 ```
 
+训练器的块级 Inductor 编译可通过 `--trainer-compile on` 或 `--trainer-compile off` 独立选择，两组显式设置采用相同的 TF32 开关。默认 `auto` 随快速 JIT 边界配置决定是否注册编译。每个 rank 的 `policy_trainer_compiled` 记录注册的模块数量，`policy_trainer_compile_first_update` 记录首个实际优化步的耗时和 Dynamo/Inductor 图计数增量。比较稳态时另列第一步的冷启动时间。
+
+原站复跑历史对照时，可向 `run.sh start restore` 传入 `--source-commit` 和完整 SHA。入口会校验维护分支与 GitHub 一致、核对该提交属于已发布历史，并将实际训练提交写入实验记录。
+
 该命令持续采集真实回合。实验记录与运行状态中的 `compile_action_inference` 标识本次选择。推理副本优先捕获产生动作 logits 与 value 的完整前向（`full_logits_value`），也支持只捕获视觉编码与投影（`vision_projector`）。`compiled_policy_validation` 记录与同版本普通前向的比对结果，`compiled_policy_stats` 记录各范围实际回放次数、回退原因和捕获失败次数。
 
 TensorBoard 原站仍写到 `AcceRL-scheduler/runs/Libero/` 的监控目录，实验名明确包含 `ModelFree_Real4_Imag0_Eval0` 或 `Eval4`。保留 Policy/Value loss、真实平均回报与幕长、Policy熵/KL，新增显式真实成功率、Policy/Value学习率、累计真实动作数、完成回合的动作吞吐及更新速度。完成回合动作吞吐按两次日志间已完成回合累计动作数计算，可能随回合完成出现波动，不是逐动作即时计时。

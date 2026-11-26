@@ -258,7 +258,11 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
         from critical_probe import TrainerProbe
         probe = TrainerProbe.for_update(owner, version + 1)
-    deferred_vote = fast and probe is None and os.environ.get('ACCERL_DEFERRED_FORWARD_VOTE', '1') != '0'
+    # ZeRO-2 can reduce gradients in every backward, including non-boundary
+    # micros. All ranks must agree the forward succeeded before entering it.
+    distributed_backward = _distributed() and dist.get_world_size() > 1
+    deferred_vote = (fast and probe is None and not distributed_backward
+                     and os.environ.get('ACCERL_DEFERRED_FORWARD_VOTE', '1') != '0')
     deferred_failed = torch.zeros((), dtype=torch.int32, device=device) if deferred_vote else None
     deferred_error = None
     last_bundle = len(bundles) - 1

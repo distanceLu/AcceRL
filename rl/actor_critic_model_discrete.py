@@ -241,7 +241,7 @@ class ActorCritic(nn.Module):
                                   torch.zeros_like(embedded[:, before_actions:-1]), embedded[:, -1:]), dim=1)
             sequence, attention = self.vla._build_multimodal_attention(embedded, patches, attention_mask)
             lm = self.vla.language_model
-            if hasattr(lm, 'model') and hasattr(lm, 'lm_head') and getattr(getattr(lm, 'config', None), 'pretraining_tp', 1) <= 1:
+            if self._can_slice_action_head():
                 result = lm.model(
                     inputs_embeds=sequence, attention_mask=attention,
                     position_ids=None, past_key_values=None, use_cache=False,
@@ -281,18 +281,31 @@ class ActorCritic(nn.Module):
         value = self.value_head(pooled).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
-    def _can_use_action_only_fast_path(self, inputs_batch: Dict[str, Any]) -> bool:
+    def _can_slice_action_head(self) -> bool:
         lm = getattr(self.vla, "language_model", None)
+        if not hasattr(lm, "model") or not hasattr(lm, "lm_head"):
+            return False
+        config = getattr(lm, "config", None)
+        output_attentions = getattr(self.vla.config, "output_attentions", None)
+        if output_attentions is None:
+            output_attentions = getattr(config, "output_attentions", False)
+        # The site's patched SDPA chooses a different attention implementation
+        # when weights are requested. A stochastic head also needs the original
+        # full sequence shape to preserve its mask and downstream RNG state.
+        if output_attentions or getattr(config, "pretraining_tp", 1) > 1:
+            return False
+        return not any(m.training and isinstance(m, nn.modules.dropout._DropoutNd) and m.p
+                       for m in lm.lm_head.modules())
+
+    def _can_use_action_only_fast_path(self, inputs_batch: Dict[str, Any]) -> bool:
         return (
             not getattr(self.cfg, "use_film", False)
             and not getattr(self.cfg, "use_diffusion", False)
             and not getattr(self.cfg, "use_l1_regression", False)
             and "extra_emb" not in inputs_batch
             and "this_act_emb" not in inputs_batch
-            and lm is not None
-            and hasattr(lm, "model")
-            and hasattr(lm, "lm_head")
-            and getattr(getattr(lm, "config", None), "pretraining_tp", 1) <= 1
+            and self._can_slice_action_head()
+            and (not self.cfg.use_proprio or inputs_batch.get("proprio") is not None)
             and inputs_batch["input_ids"].shape[0] == inputs_batch["pixel_values"].shape[0]
         )
 

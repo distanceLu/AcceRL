@@ -256,7 +256,7 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
@@ -265,7 +265,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     sys.path.insert(0,str(source.parent))
     from launch import batch_autotune_options, trajectory_jit_options, real_sampling_options, rollout_options
     rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
+                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     real_sampling_options(trajectory_jit, real_sampling)
@@ -317,7 +317,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
             'gpu_access_performed': False,'real_sampling':real_sampling,'trajectory_jit':trajectory_jit,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -336,6 +336,8 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     env['ACCERL_BATCH_AUTOTUNE']=str(int(batch_autotune))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit))
     env['ACCERL_REAL_SAMPLING'] = real_sampling
+    if trainer_compile != 'auto':
+        env['ACCERL_COMPILE_TRAINER'] = str(int(trainer_compile == 'on'))
     env['ACCERL_TRAINER_MPS_PERCENT'] = str(trainer_mps_percent)
     env['ACCERL_REAL_EPISODES_PER_MINUTE'] = str(real_episodes_per_minute)
     env['ACCERL_COMPILE_ACTION_INFERENCE'] = str(int(compile_action_inference))
@@ -351,8 +353,10 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     if model_free is not None:
+        if state.get('trainer_compile','auto') != trainer_compile:
+            raise ValueError('Runner trainer compile mode differs from queue request')
         if state.get('trainer_mps_percent', 100) != trainer_mps_percent:
             raise ValueError('Runner trainer MPS percentage differs from queue request')
         if (state.get('real_workers',4),state.get('no_micro_cache_trim',False)) != (real_workers,no_micro_cache_trim):
@@ -932,7 +936,8 @@ def runner_command(args):
     command += real_sampling_arguments(getattr(args, 'real_sampling', 'chunks'))
     command += rollout_arguments(getattr(args,'real_workers',4), getattr(args,'no_micro_cache_trim',False),
                                 getattr(args,'rollout_inventory_gate',False), getattr(args,'compile_action_inference',False),
-                                getattr(args,'real_episodes_per_minute',0.0), getattr(args,'trainer_mps_percent',100))
+                                getattr(args,'real_episodes_per_minute',0.0), getattr(args,'trainer_mps_percent',100),
+                                trainer_compile=getattr(args,'trainer_compile','auto'))
     return command
 
 
@@ -951,6 +956,7 @@ def mode_kwargs(args):
                              getattr(args,'no_micro_cache_trim',False), getattr(args,'rollout_inventory_gate',False),
                              real_episodes_per_minute=getattr(args,'real_episodes_per_minute',0.0),
                              trainer_mps_percent=getattr(args,'trainer_mps_percent',100),
+                             trainer_compile=getattr(args,'trainer_compile','auto'),
                              compile_action_inference=getattr(args,'compile_action_inference',False),
                              trajectory_jit=getattr(args,'trajectory_jit',False), real_sampling=real_sampling)
     if selected['model_free']:

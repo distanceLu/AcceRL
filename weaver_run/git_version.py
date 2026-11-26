@@ -43,6 +43,16 @@ def published(repo, push=False):
     return revision(repo, commit)
 
 
+def source_revision(repo, branch_head, requested):
+    """Resolve an explicit historical run against the verified maintenance branch."""
+    if requested is None:
+        return branch_head
+    if not re.fullmatch(r"[0-9a-f]{40}", requested) or git(repo, "cat-file", "-t", requested) != "commit":
+        raise ValueError("A historical training run requires a full commit SHA")
+    git(repo, "merge-base", "--is-ancestor", requested, branch_head)
+    return requested
+
+
 def pin_worktree(repo, runtime, commit):
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Expected a full Git commit ID")

@@ -244,6 +244,8 @@ def real_sampling_arguments(real_sampling):
 def add_rollout_arguments(parser):
     parser.add_argument('--trainer-mps-percent', type=int, default=100,
                         help='Active-thread cap for each model-free policy trainer MPS client (1–100).')
+    parser.add_argument('--trainer-compile', choices=('auto','on','off'), default='auto',
+                        help='Override policy trainer Inductor compilation for model-free trajectory JIT.')
     parser.add_argument('--real-workers', type=int, choices=(4, 8), default=4)
     parser.add_argument('--no-micro-cache-trim', action='store_true')
     parser.add_argument('--real-episodes-per-minute', type=float, default=0.0,
@@ -255,7 +257,7 @@ def add_rollout_arguments(parser):
 
 
 def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False,
-                    *, trajectory_jit=False, real_sampling='chunks', compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+                    *, trajectory_jit=False, real_sampling='chunks', compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     require(type(trainer_mps_percent) is int and 1 <= trainer_mps_percent <= 100,
             'Trainer MPS percentage must be an integer from 1 to 100')
     require(model_free or trainer_mps_percent == 100,
@@ -276,12 +278,18 @@ def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False, rollo
     require(type(no_micro_cache_trim) is bool, 'no_micro_cache_trim must be bool')
     require(model_free or (real_workers == 4 and not no_micro_cache_trim),
             'Rollout concurrency and micro cache overrides require --model-free')
-    return dict(real_workers=real_workers, no_micro_cache_trim=no_micro_cache_trim,
+    require(trainer_compile in ('auto','on','off')
+            and (trainer_compile == 'auto' or (model_free and trajectory_jit)),
+            '--trainer-compile requires model-free trajectory JIT with a valid mode')
+    explicit = {} if trainer_compile == 'auto' else {'trainer_compile': trainer_compile}
+    return dict(**explicit, real_workers=real_workers, no_micro_cache_trim=no_micro_cache_trim,
                 rollout_inventory_gate=rollout_inventory_gate, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, compile_action_inference=compile_action_inference)
 
 
-def rollout_arguments(real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def rollout_arguments(real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     args = [] if real_workers == 4 else ['--real-workers', str(real_workers)]
+    if trainer_compile != 'auto':
+        args.extend(['--trainer-compile', trainer_compile])
     if trainer_mps_percent != 100:
         args.extend(['--trainer-mps-percent', str(trainer_mps_percent)])
     if no_micro_cache_trim:
@@ -327,7 +335,7 @@ def exec_managed_driver(overrides=()):
     add_fixed_validation_arguments(options)
     selected,other=options.parse_known_args(overrides)
     rollout_options(selected.model_free, selected.real_workers, selected.no_micro_cache_trim,
-                    selected.rollout_inventory_gate, real_episodes_per_minute=selected.real_episodes_per_minute, trainer_mps_percent=selected.trainer_mps_percent, compile_action_inference=selected.compile_action_inference,
+                    selected.rollout_inventory_gate, real_episodes_per_minute=selected.real_episodes_per_minute, trainer_mps_percent=selected.trainer_mps_percent, trainer_compile=selected.trainer_compile, compile_action_inference=selected.compile_action_inference,
                     trajectory_jit=selected.trajectory_jit,
                     real_sampling=selected.real_sampling)
     workers = selected.real_workers
@@ -348,6 +356,8 @@ def exec_managed_driver(overrides=()):
                ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(selected.model_free, selected.num_eval_workers, selected.batch_autotune, selected.trajectory_jit)))
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(selected.trajectory_jit, selected.real_sampling)
+    if selected.trainer_compile != 'auto':
+        env['ACCERL_COMPILE_TRAINER'] = str(int(selected.trainer_compile == 'on'))
     env['ACCERL_TRAINER_MPS_PERCENT'] = str(selected.trainer_mps_percent)
     env['ACCERL_REAL_EPISODES_PER_MINUTE'] = str(selected.real_episodes_per_minute)
     env['ACCERL_COMPILE_ACTION_INFERENCE'] = str(int(selected.compile_action_inference))
@@ -366,9 +376,9 @@ def exec_managed_driver(overrides=()):
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 
-def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                    trajectory_jit=trajectory_jit, real_sampling=real_sampling, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, compile_action_inference=compile_action_inference)
+                    trajectory_jit=trajectory_jit, real_sampling=real_sampling, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
@@ -415,6 +425,8 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
                ACCERL_RAY_TMP=f"/dev/shm/wr_{os.getuid()}_{uuid.uuid4().hex[:10]}",ACCERL_RAY_SPILL=str(work/"ray_spill"))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)))
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(trajectory_jit, real_sampling)
+    if trainer_compile != 'auto':
+        env['ACCERL_COMPILE_TRAINER'] = str(int(trainer_compile == 'on'))
     env['ACCERL_TRAINER_MPS_PERCENT'] = str(trainer_mps_percent)
     env['ACCERL_REAL_EPISODES_PER_MINUTE'] = str(real_episodes_per_minute)
     env['ACCERL_COMPILE_ACTION_INFERENCE'] = str(int(compile_action_inference))
@@ -557,7 +569,7 @@ def main():
     args=parser.parse_args()
     selected=mode_options(args.model_free,args.num_eval_workers)
     rollout = rollout_options(args.model_free, args.real_workers, args.no_micro_cache_trim,
-                              args.rollout_inventory_gate, real_episodes_per_minute=args.real_episodes_per_minute, trainer_mps_percent=args.trainer_mps_percent, compile_action_inference=args.compile_action_inference,
+                              args.rollout_inventory_gate, real_episodes_per_minute=args.real_episodes_per_minute, trainer_mps_percent=args.trainer_mps_percent, trainer_compile=args.trainer_compile, compile_action_inference=args.compile_action_inference,
                               trajectory_jit=args.trajectory_jit,
                               real_sampling=args.real_sampling)
     selected.update(rollout)

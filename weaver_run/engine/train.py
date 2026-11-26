@@ -3087,6 +3087,9 @@ class TrainerActor(TrainerActorCom):
                 self._trainer_compile_receipt = compile_receipt
                 self.telemetry.event("policy_trainer_compiled", details=dict(rank=self.rank, **compile_receipt))
                 self.telemetry.flush()
+                if os.environ.get("ACCERL_COMPILE_TRAINER") == "1" and not compile_receipt["compiled"]:
+                    raise RuntimeError(f"Trainer compilation requested but no blocks registered: {compile_receipt}")
+                self._record_compile_activity = compile_receipt["compiled"] or os.environ.get("ACCERL_COMPILE_TRAINER") == "0"
                 if compile_receipt.get("compiled"):
                     print(
                         f"TrainerActor Rank {self.rank}: in-place torch.compile enabled "
@@ -3866,7 +3869,18 @@ class TrainerActor(TrainerActorCom):
             global_mean = global_sum / torch.clamp(global_count, min=1.0)
             global_var = torch.clamp(global_sq_sum / torch.clamp(global_count, min=1.0) - global_mean * global_mean, min=1e-12)
             global_std = torch.sqrt(global_var)
+        if getattr(self, '_record_compile_activity', False):
+            from trainer_compile import compile_counters
+            before = compile_counters()
+            started = time.monotonic()
         policy_result = self._train_policy(inputs_batch, act_token_t, adv_t, logits_old_t, v_targ_t, global_mean, global_std, current_lrs)
+        if getattr(self, '_record_compile_activity', False):
+            delta = {name: value-before[name] for name,value in compile_counters().items()}
+            self.telemetry.event('policy_trainer_compile_first_update', details=dict(rank=self.rank,
+                optimizer_step=self.global_step, registered=self._trainer_compile_receipt['compiled'],
+                train_wall_s=time.monotonic()-started, counters_delta=delta))
+            self.telemetry.flush()
+            self._record_compile_activity = False
 
         perf_metrics = {
             "policy_sample_time": policy_sample_time, "policy_prep_time": policy_prep_time,

@@ -17,6 +17,7 @@ import tokenizers
 import torch
 import torch.nn as nn
 import transformers
+from timm.layers import DropPath, PatchDropout
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
@@ -183,6 +184,22 @@ class PrismaticVisionBackbone(nn.Module):
         """
         self.num_images_in_input = num_images_in_input
 
+    def train(self, mode: bool = True):
+        self._view_sensitive_layers = None
+        return super().train(mode)
+
+    def _use_serial_views(self):
+        # LoRA adapters are installed after the towers are constructed. Inspect the
+        # finished modules on first use, outside the ordinary per-forward hot path.
+        if getattr(self, "_view_sensitive_layers", None) is None:
+            self._view_sensitive_layers = tuple(m for m in self.modules() if
+                isinstance(m, nn.modules.batchnorm._BatchNorm) or
+                (isinstance(m, nn.modules.dropout._DropoutNd) and m.p) or
+                (isinstance(m, DropPath) and m.drop_prob) or
+                (isinstance(m, PatchDropout) and m.prob))
+        return any(m.training or (isinstance(m, nn.modules.batchnorm._BatchNorm) and not m.track_running_stats)
+                   for m in self._view_sensitive_layers)
+
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """
         Implements the forward pass for the vision backbone.
@@ -206,12 +223,18 @@ class PrismaticVisionBackbone(nn.Module):
         else:
             assert self.use_fused_vision_backbone, "Multi-image inputs require using fused backbone!"
 
-            # Batch all views along dim=0 so DINOv2 and SigLIP each execute once at B * num_images
-            # instead of looping serially per view, doubling ViT SM occupancy and halving launches.
             bsz, channels, height, width = pixel_values.shape
             n_imgs = self.num_images_in_input
             if channels != 6 * n_imgs:
                 raise ValueError(f"Expected {6 * n_imgs} channels for {n_imgs} images, got {channels}")
+            if self._use_serial_views():
+                patches = []
+                for view in pixel_values.split(6, dim=1):
+                    regular, fused = view.split(3, dim=1)
+                    patches.append(torch.cat((self.featurizer(regular), self.fused_featurizer(fused)), dim=2))
+                return torch.cat(patches, dim=1)
+
+            # Independent views share one call per tower; reshape restores sample/view order.
             views = pixel_values.reshape(bsz, n_imgs, 6, height, width)
             regular_imgs = views[:, :, :3].contiguous().reshape(bsz * n_imgs, 3, height, width)
             fused_imgs = views[:, :, 3:].contiguous().reshape(bsz * n_imgs, 3, height, width)

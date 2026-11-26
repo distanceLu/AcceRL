@@ -17,6 +17,37 @@ from test_model_free_launch_cpu import launch, training, site, HERE
 
 
 class BatchAutotuneLaunchTests(unittest.TestCase):
+    def test_trainer_compile_is_frozen_and_survives_the_formal_queue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            stage = Path(temp)
+            (stage/'mps.json').write_bytes(b'{}')
+            recipe = dict(model_free=True, num_eval_workers=0, batch_autotune=True,
+                          trajectory_jit=True, no_micro_cache_trim=True)
+            for setting in ('auto', 'on', 'off'):
+                options = launch.rollout_options(True, trajectory_jit=True, no_micro_cache_trim=True,
+                                                 trainer_compile=setting)
+                self.assertEqual('trainer_compile' in options, setting != 'auto')
+                with patch.object(site, 'PARENT', stage), patch.object(site, 'revision', return_value='a'*40), \
+                        patch.object(site, 'PROFILES', {'restore': {'mps_receipt': site.digest(b'{}')}}):
+                    record = site.make_spec('restore', 'compile-test', stage, stage, checkout=HERE.parent,
+                                            **recipe, trainer_compile=setting)
+                self.assertEqual(record.get('trainer_compile', 'auto'), setting)
+                args = types.SimpleNamespace(source=HERE/'engine', root=stage, **recipe, trainer_compile=setting)
+                runner = training.runner_command(args)
+                self.assertEqual(training.mode_kwargs(args).get('trainer_compile','auto'), setting)
+                for cmd in (record['job']['argv'],runner):
+                    self.assertEqual('--trainer-compile' in cmd, setting != 'auto')
+                    if setting != 'auto':
+                        self.assertEqual(cmd[cmd.index('--trainer-compile')+1], setting)
+                env = dict(ACCERL_PIPELINE_CONFIG='/pipeline', ACCERL_FINAL_CHECKPOINT='/out')
+                with patch.dict(os.environ,env,clear=True), patch.object(os,'chdir'), patch.object(os,'execve') as child:
+                    launch.exec_managed_driver(runner[runner.index('--model-free'):])
+                expected = None if setting == 'auto' else str(int(setting == 'on'))
+                self.assertEqual(child.call_args.args[2].get('ACCERL_COMPILE_TRAINER'),expected)
+                self.assertNotIn('--trainer-compile',child.call_args.args[1])
+        with self.assertRaisesRegex(ValueError, 'trajectory'):
+            launch.rollout_options(True, trainer_compile='on')
+
     def test_real_sampling_reaches_queue_runner_and_driver(self):
         for mode in ('whole_episodes', 'uniform_blocks', 'first_use_blocks'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:

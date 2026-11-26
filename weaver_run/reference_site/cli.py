@@ -28,7 +28,7 @@ CHECKOUT = HERE.parents[1]
 RUNTIME = HOME / ".git-runtime"
 LEGACY_CLI = HOME / ".launcher/8daa6667c03361e298fc81233978f2fd9b76ee9ed3803726e8af7d218a1aef14/cli.py"
 sys.path.insert(0, str(CHECKOUT / "weaver_run"))
-from git_version import BRANCH, published, revision, pin_worktree
+from git_version import BRANCH, published, revision, pin_worktree, source_revision
 LABEL = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}\Z")
 
 
@@ -96,7 +96,7 @@ def handoff_verified():
                 "前序训练或 P0 回放队列记录不匹配")
 
 
-def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     require(profile=="restore", "This branch manages the original training profile")
     commit=revision(checkout)
     source=checkout/"weaver_run/engine"
@@ -104,7 +104,7 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False
     from launch import rollout_options, rollout_arguments, real_sampling_options, real_sampling_arguments, expand, settings, mode_options, effective_pipeline, fixed_validation_options, fixed_validation_arguments, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
     rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
+                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     if model_free:
         selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
@@ -158,6 +158,8 @@ def check_record(record):
     require(result.get("valid") and validation["gpu_access_performed"] is False
             and validation["git_commit"]==record["git_commit"], "Queue CPU admission failed")
     if record.get("model_free"):
+        require(validation.get('trainer_compile','auto') == record.get('trainer_compile','auto'),
+                'Validated trainer compile mode differs from the job')
         require(validation.get('trainer_mps_percent', 100) == record.get('trainer_mps_percent', 100),
                 'Validated trainer MPS percentage differs from the job')
         require(validation.get('real_episodes_per_minute', 0.0) == record.get('real_episodes_per_minute', 0.0),
@@ -203,6 +205,8 @@ def summary(record, job):
     result['real_sampling'] = record.get('real_sampling', 'chunks')
     result.update(trajectory_jit=record.get('trajectory_jit',False),batch_autotune=record.get("batch_autotune",False),model_free=record.get("model_free",False),num_eval_workers=record.get("num_eval_workers",3))
     if record.get('model_free'):
+        if 'trainer_compile' in record:
+            result['trainer_compile'] = record['trainer_compile']
         result['trainer_mps_percent'] = record.get('trainer_mps_percent', 100)
         result.update(real_workers=record.get('real_workers',4), no_micro_cache_trim=record.get('no_micro_cache_trim',False),
                       rollout_inventory_gate=record.get('rollout_inventory_gate',False),
@@ -225,11 +229,11 @@ def save_submission(root, item):
         json_write(path,receipt)
 
 
-def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def start(profile,label, *, source_commit=None, model_free=False, num_eval_workers=None, fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     from launch import rollout_options, real_sampling_options, mode_options, fixed_validation_options, batch_autotune_options, trajectory_jit_options
     selected=mode_options(model_free,num_eval_workers)
     rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
+                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     if model_free:
         selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(model_free,num_eval_workers,batch_autotune)
@@ -240,7 +244,9 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     defaults = dict(model_free=False, batch_autotune=False, trajectory_jit=False, trainer_mps_percent=100,
                     num_eval_workers=3, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0)
     def same_mode(record):
-        return record["profile"] == profile and all(record.get(k, defaults.get(k)) == v
+        if source_commit is not None and record.get("git_commit") != source_commit:
+            return False
+        return record.get('trainer_compile','auto') == trainer_compile and record["profile"] == profile and all(record.get(k, defaults.get(k)) == v
                                                      for k, v in selected.items())
     latest_label=latest()
     if not label and latest_label:
@@ -265,7 +271,8 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
         require(lookup("weaver-run-"+label) is None,"该提交编号已有其他记录")
         ready()
         require(CHECKOUT==(HOME/"code").resolve(), "Start new runs from the maintained WEAVER/code checkout.")
-        pin_worktree(CHECKOUT, RUNTIME, revision(CHECKOUT))
+        branch_head = published(CHECKOUT) if source_commit else revision(CHECKOUT)
+        pin_worktree(CHECKOUT, RUNTIME, source_revision(CHECKOUT, branch_head, source_commit))
         with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".staging-") as staging:
             staged=Path(staging)/"output"
             staged.mkdir(mode=0o700)
@@ -274,7 +281,7 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     if not r.get("git_commit"):
         raise ValueError("Use a new label for a Git-backed experiment")
     ready()
-    require(revision(CHECKOUT)==revision(RUNTIME,r["git_commit"]),
+    require(source_revision(CHECKOUT, revision(CHECKOUT), source_commit)==revision(RUNTIME,r["git_commit"]),
             "Prepared experiment belongs to another commit; use a fresh label")
     with tempfile.TemporaryDirectory(dir=EXPERIMENTS,prefix=".verify-") as temp:
         expected=make_spec(profile,label,root,Path(temp),model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,**rollout)
@@ -293,7 +300,7 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     print(f"正在校验 {profile}，实验名 {label}，输出 {root}",file=sys.stderr,flush=True)
     check_record(r)
     ready()
-    require(published(CHECKOUT, push=True)==r["git_commit"], "Published branch moved during admission")
+    require(source_revision(CHECKOUT, published(CHECKOUT, push=True), source_commit)==r["git_commit"], "Published branch moved during admission")
     revision(RUNTIME,r["git_commit"])
     ready()
     json_write(EXPERIMENTS/".last.json",label)
@@ -302,13 +309,13 @@ def start(profile,label, *, model_free=False, num_eval_workers=None, fixed_valid
     return summary(r,item)
 
 
-def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100):
+def offline_check(profile, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
     with tempfile.TemporaryDirectory(prefix=".cpu-check-",dir=EXPERIMENTS) as d:
         temp=Path(d)
         root=temp/"output"
         root.mkdir()
         r=make_spec(profile,"validation-"+profile,root,root,checkout=CHECKOUT,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,trajectory_jit=trajectory_jit,real_sampling=real_sampling,
-                    real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim,rollout_inventory_gate=rollout_inventory_gate, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, compile_action_inference=compile_action_inference)
+                    real_workers=real_workers,no_micro_cache_trim=no_micro_cache_trim,rollout_inventory_gate=rollout_inventory_gate, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference)
         check_record(r)
         # Production agent.py is pinned to its live root. Exercise the same
         # QueueStore.create used by the create API in a private workerless DB.
@@ -415,10 +422,11 @@ def main():
     from launch import add_rollout_arguments, rollout_options, add_real_sampling_argument, real_sampling_options, add_fixed_validation_arguments, fixed_validation_options, fixed_validation_overrides, batch_autotune_options, trajectory_jit_options
     add_rollout_arguments(p)
     add_real_sampling_argument(p)
+    p.add_argument("--source-commit", help="Replay a published ancestor of the maintained branch (start only)")
     add_fixed_validation_arguments(p)
     opts=p.parse_args()
     rollout = rollout_options(opts.model_free, opts.real_workers, opts.no_micro_cache_trim,
-                              opts.rollout_inventory_gate, real_episodes_per_minute=opts.real_episodes_per_minute, trainer_mps_percent=opts.trainer_mps_percent, compile_action_inference=opts.compile_action_inference,
+                              opts.rollout_inventory_gate, real_episodes_per_minute=opts.real_episodes_per_minute, trainer_mps_percent=opts.trainer_mps_percent, trainer_compile=opts.trainer_compile, compile_action_inference=opts.compile_action_inference,
                               trajectory_jit=opts.trajectory_jit,
                               real_sampling=opts.real_sampling)
     batch_autotune_options(opts.model_free,opts.num_eval_workers,opts.batch_autotune)
@@ -427,6 +435,8 @@ def main():
     validation=fixed_validation_options(opts.model_free,opts.num_eval_workers,fixed_validation_overrides(opts),real_sampling=opts.real_sampling)
     args=opts.args.copy()
     action=args.pop(0) if args and args[0] in ("list","check","start","status","stop") else "start"
+    if opts.source_commit and action != "start":
+        p.error("--source-commit applies to start only")
     profile=args.pop(0) if args else "restore"
     profile="restore" if profile=="original" else profile
     if action=="check" and profile not in PROFILES and profile!="all":
@@ -453,7 +463,7 @@ def main():
     if action=="start":
         with (EXPERIMENTS/".launch.lock").open("a") as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
-            result=start(profile,opts.label,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit,real_sampling=opts.real_sampling,**rollout)
+            result=start(profile,opts.label,source_commit=opts.source_commit,model_free=opts.model_free,num_eval_workers=opts.num_eval_workers,fixed_validation=validation,batch_autotune=opts.batch_autotune,trajectory_jit=opts.trajectory_jit,real_sampling=opts.real_sampling,**rollout)
     else:
         label=opts.label or latest()
         if not label and action=="status":
