@@ -111,8 +111,10 @@ def _inputs(owner, observations):
 
 
 def _forward_values(owner, nodes, segments, micro, counters, *, timer=None, bundle=None):
+    from trainer_compile import eager_inference_context
+
     values = {}
-    with torch.no_grad():
+    with torch.no_grad(), eager_inference_context():
         for offset in range(0, len(nodes), micro):
             group = nodes[offset:offset+micro]
             marker = timer.begin(bundle, len(group)) if timer is not None else None
@@ -256,6 +258,10 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
     if os.environ.get('ACCERL_JIT_BENCH_PLAN'):
         from critical_probe import TrainerProbe
         probe = TrainerProbe.for_update(owner, version + 1)
+    deferred_vote = fast and probe is None and os.environ.get('ACCERL_DEFERRED_FORWARD_VOTE', '1') != '0'
+    deferred_failed = torch.zeros((), dtype=torch.int32, device=device) if deferred_vote else None
+    deferred_error = None
+    last_bundle = len(bundles) - 1
     prepass_s = time.monotonic()-started
     for number,bundle in enumerate(bundles):
         indices = list(bundle.selected)
@@ -300,9 +306,30 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
                     clip_mode=owner.clip_mode, clip_eps=owner.clip_eps,
                     actor_enabled=version >= owner.policy_train_start_step, action_tokens_checked=fast)
                 return loss,metric,advantage,target
-            loss,metric,advantage,target = _checked(forward, device,
-                valid=lambda rows:torch.stack([torch.isfinite(t).all() for t in rows]).all(), probe=probe,
-                timings=owner._jit_times)
+            if deferred_vote:
+                loss = metric = advantage = target = None
+                if deferred_error is None:
+                    try:
+                        loss,metric,advantage,target = forward()
+                        valid = torch.stack([torch.isfinite(t).all() for t in (loss,metric,advantage,target)]).all()
+                        deferred_failed = deferred_failed | (~valid).to(torch.int32)
+                    except Exception as exc:
+                        deferred_error = exc
+                        deferred_failed = torch.ones((), dtype=torch.int32, device=device)
+                if number == last_bundle:
+                    vote_started = time.monotonic()
+                    _sum(deferred_failed)
+                    any_failed = bool(deferred_failed)
+                    owner._jit_times['forward_vote_host_wait_s'] += time.monotonic() - vote_started
+                    if any_failed:
+                        raise RuntimeError('JIT rank preparation/forward failed or nonfinite; stop the rank group') from deferred_error
+                elif deferred_error is not None:
+                    micro_end(owner,capture,owner.model)
+                    continue
+            else:
+                loss,metric,advantage,target = _checked(forward, device,
+                    valid=lambda rows:torch.stack([torch.isfinite(t).all() for t in rows]).all(), probe=probe,
+                    timings=owner._jit_times)
             sums += raw_sums(advantage)
             metrics.append(metric)
             receipt_tensors.append(torch.stack((advantage,target),dim=1))
@@ -370,6 +397,7 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         global_unique_suffix_states=owner.capture_policy_metadata.get('jit_global_suffix_states'),
         original_shared_full_refresh_states=owner.capture_policy_metadata.get('jit_full_refresh_states'),
         initialization_prepass=bool(need_prepass), fast_jit_boundaries=fast, batched_window_context=batched_context,
+        deferred_forward_vote=deferred_vote,
         packed_readback_host_wall_s=packed_readback_s, idle_trim_host_wall_s=idle_trim_s,
         context_forward_batch_limit=micro if batched_context else config.jit_context_micro,
         prepass_and_setup_s=prepass_s,wall_s=elapsed,weights_only_resume='reset_ema',

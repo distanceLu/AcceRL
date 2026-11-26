@@ -3081,6 +3081,19 @@ class TrainerActor(TrainerActorCom):
                 )
             print(f"TrainerActor Rank {self.rank}: Actor DeepSpeed engine (bf16) 初始化完成。")
 
+            if self.training_role == "policy":
+                from trainer_compile import compile_policy_trainer
+                compile_receipt = compile_policy_trainer(self.base_model, rank=self.rank)
+                self._trainer_compile_receipt = compile_receipt
+                self.telemetry.event("policy_trainer_compiled", details=dict(rank=self.rank, **compile_receipt))
+                self.telemetry.flush()
+                if compile_receipt.get("compiled"):
+                    print(
+                        f"TrainerActor Rank {self.rank}: in-place torch.compile enabled "
+                        f"(llama={compile_receipt['llama_layers']}, vision={compile_receipt['vision_blocks']}, "
+                        f"projector={compile_receipt['projector_compiled']}, tf32={compile_receipt['tf32_enabled']})."
+                    )
+
             n_total = sum(p.numel() for p in model.parameters())
             n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
             print(f"Actor 总参数量: {n_total:,}, 可训练参数量: {n_trainable:,}")

@@ -665,6 +665,45 @@ def normalize_proprio(norm_stats, proprio: Any) -> np.ndarray:
     return normalized_proprio
 
 
+class _PreparedBatch(dict):
+    """Dict subclass carrying CPU-verified static-layout metadata without adding dict keys."""
+
+    __slots__ = ("unpadded_action_layout",)
+
+    def __init__(self, *args, unpadded_action_layout: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unpadded_action_layout = bool(unpadded_action_layout)
+
+
+def _is_unpadded_action_layout_cpu(inputs_list: List[Dict[str, Any]], max_len: int) -> bool:
+    action_count = ACTION_DIM * NUM_ACTIONS_CHUNK
+    if max_len < action_count + 2:
+        return False
+    for it in inputs_list:
+        labels = it.get("labels")
+        attention = it.get("attention_mask")
+        input_ids = it.get("input_ids")
+        if (
+            labels is None
+            or attention is None
+            or input_ids is None
+            or labels.device.type != "cpu"
+            or attention.device.type != "cpu"
+            or input_ids.size(1) != max_len
+            or labels.shape != input_ids.shape
+            or attention.shape != input_ids.shape
+        ):
+            return False
+        if not bool(
+            (attention == 1).all()
+            & (labels[:, : -action_count - 1] == IGNORE_INDEX).all()
+            & (labels[:, -action_count - 1 : -1] > ACTION_TOKEN_BEGIN_IDX).all()
+            & (labels[:, -1] == STOP_INDEX).all()
+        ):
+            return False
+    return True
+
+
 def batch_process_obs(pad_id, inputs_list: List[Dict[str, Any]], device, max_len=None) -> Dict[str, torch.Tensor]:
     """
     Right-pad variable-length sequences across a list of samples and stack into a batch on self.vla.device.
@@ -678,6 +717,8 @@ def batch_process_obs(pad_id, inputs_list: List[Dict[str, Any]], device, max_len
     else:
         max_len = max_len_t
 
+    unpadded_layout = _is_unpadded_action_layout_cpu(inputs_list, max_len)
+
     # 对每条样本进行右侧 padding
     for it in inputs_list:
         cur_len = it["input_ids"].size(1)
@@ -685,20 +726,20 @@ def batch_process_obs(pad_id, inputs_list: List[Dict[str, Any]], device, max_len
             pad_amt = max_len - cur_len
             bsz = it["input_ids"].size(0)  # 通常为 1
 
-            # input_ids: pad_id
+            # input_ids: 用 pad_id
             pad_ids = it["input_ids"].new_full((bsz, pad_amt), pad_id)
             it["input_ids"] = torch.cat([it["input_ids"], pad_ids], dim=1)
 
-            # attention_mask: 0
+            # attention_mask: 用 0
             pad_mask = it["attention_mask"].new_zeros((bsz, pad_amt))
             it["attention_mask"] = torch.cat([it["attention_mask"], pad_mask], dim=1)
 
-            # labels: -100
+            # labels: 用 -100
             pad_labels = it["labels"].new_full((bsz, pad_amt), -100)
             it["labels"] = torch.cat([it["labels"], pad_labels], dim=1)
 
     # 聚合成 batch，并移动到目标设备
-    inputs: Dict[str, torch.Tensor] = {}
+    inputs: Dict[str, torch.Tensor] = _PreparedBatch(unpadded_action_layout=unpadded_layout)
     keys = inputs_list[0].keys()
     for k in keys:
         tensors = [it[k] for it in inputs_list]

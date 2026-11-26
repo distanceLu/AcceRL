@@ -232,8 +232,6 @@ class ActorCritic(nn.Module):
 
     def real_action_from_patches(self, input_ids, patches, attention_mask):
         """No sampled actions, dynamic boolean indexing, or updates to policy weights."""
-        from compiled_policy_inference import static_action_outputs
-
         with torch.autocast('cuda', dtype=self.model_dtype, cache_enabled=False):
             embedded = self.vla.get_input_embeddings()(input_ids)
             # CPU admission checked the exact (prompt, 56 actions, STOP) layout.
@@ -242,10 +240,26 @@ class ActorCritic(nn.Module):
             embedded = torch.cat((embedded[:, :before_actions],
                                   torch.zeros_like(embedded[:, before_actions:-1]), embedded[:, -1:]), dim=1)
             sequence, attention = self.vla._build_multimodal_attention(embedded, patches, attention_mask)
-            result = self.vla.language_model(inputs_embeds=sequence, attention_mask=attention,
-                                            position_ids=None, past_key_values=None, use_cache=None,
-                                            output_attentions=self.vla.config.output_attentions,
-                                            output_hidden_states=True, return_dict=True)
+            lm = self.vla.language_model
+            if hasattr(lm, 'model') and hasattr(lm, 'lm_head') and getattr(getattr(lm, 'config', None), 'pretraining_tp', 1) <= 1:
+                result = lm.model(
+                    inputs_embeds=sequence, attention_mask=attention,
+                    position_ids=None, past_key_values=None, use_cache=False,
+                    output_attentions=False, output_hidden_states=False, return_dict=True,
+                )
+                selected = slice(-self.real_action_count - 2, -2)
+                action_hidden = result.last_hidden_state[:, selected].contiguous()
+                action_logits = lm.lm_head(action_hidden).float()
+                fast_hidden = action_hidden
+            else:
+                fast_hidden = None
+                result = lm(inputs_embeds=sequence, attention_mask=attention,
+                            position_ids=None, past_key_values=None, use_cache=None,
+                            output_attentions=self.vla.config.output_attentions,
+                            output_hidden_states=True, return_dict=True)
+        if fast_hidden is not None:
+            return action_logits, self._compute_value_from_hidden(fast_hidden.to(self.model_dtype).detach())
+        from compiled_policy_inference import static_action_outputs
         return static_action_outputs(result.logits, result.hidden_states[-1], self.real_action_count,
                                      lambda h: self._compute_value_from_hidden(h.to(self.model_dtype)))
 
@@ -267,6 +281,91 @@ class ActorCritic(nn.Module):
         value = self.value_head(pooled).squeeze(-1)  # (B,)
         return value.to(torch.float32)
 
+    def _can_use_action_only_fast_path(self, inputs_batch: Dict[str, Any]) -> bool:
+        lm = getattr(self.vla, "language_model", None)
+        return (
+            not getattr(self.cfg, "use_film", False)
+            and not getattr(self.cfg, "use_diffusion", False)
+            and not getattr(self.cfg, "use_l1_regression", False)
+            and "extra_emb" not in inputs_batch
+            and "this_act_emb" not in inputs_batch
+            and lm is not None
+            and hasattr(lm, "model")
+            and hasattr(lm, "lm_head")
+            and getattr(getattr(lm, "config", None), "pretraining_tp", 1) <= 1
+            and inputs_batch["input_ids"].shape[0] == inputs_batch["pixel_values"].shape[0]
+        )
+
+    def _forward_action_only(self, inputs_batch: Dict[str, Any], return_vit_out: bool = False):
+        """Skip 33-layer hidden-state tuples, full-sequence lm_head, and redundant CUDA syncs."""
+        from contextlib import nullcontext
+
+        device = inputs_batch["pixel_values"].device
+        ctx = torch.autocast("cuda", dtype=self.model_dtype) if device.type == "cuda" else nullcontext()
+        unpadded = bool(getattr(inputs_batch, "unpadded_action_layout", False))
+        with ctx:
+            embedded = self.vla.get_input_embeddings()(inputs_batch["input_ids"])
+            projected_patch_embeddings = self.vla._process_vision_features(
+                inputs_batch["pixel_values"].to(self.model_dtype), use_film=False
+            )
+            if self.cfg.use_proprio and inputs_batch.get("proprio") is not None:
+                projected_patch_embeddings = self.vla._process_proprio_features(
+                    projected_patch_embeddings,
+                    inputs_batch["proprio"].to(self.model_dtype),
+                    self.proprio_projector,
+                )
+            if unpadded:
+                before_actions = embedded.shape[1] - self.real_action_count - 1
+                embedded = torch.cat(
+                    (
+                        embedded[:, :before_actions],
+                        torch.zeros_like(embedded[:, before_actions:-1]),
+                        embedded[:, -1:],
+                    ),
+                    dim=1,
+                )
+                attn_arg = None
+            else:
+                all_actions_mask = self.vla._process_action_masks(inputs_batch["labels"]).unsqueeze(-1)
+                embedded = embedded * ~all_actions_mask
+                attn_arg = inputs_batch["attention_mask"]
+
+            sequence, multimodal_attention_mask = self.vla._build_multimodal_attention(
+                embedded, projected_patch_embeddings, attn_arg
+            )
+            lm = self.vla.language_model
+            lm_out = lm.model(
+                input_ids=None,
+                attention_mask=multimodal_attention_mask,
+                position_ids=None,
+                past_key_values=None,
+                inputs_embeds=sequence,
+                use_cache=False,
+                output_attentions=False,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+            last_hidden = lm_out.last_hidden_state
+            if unpadded:
+                selected = slice(-self.real_action_count - 2, -2)
+                action_hidden = last_hidden[:, selected].contiguous()
+            else:
+                ground_truth_token_ids = inputs_batch["labels"][:, 1:].to(self.device)
+                action_mask = get_current_action_mask(ground_truth_token_ids) | get_next_actions_mask(
+                    ground_truth_token_ids
+                )
+                num_patches = self._compute_num_patches()
+                text_hidden = last_hidden[:, num_patches:-1]
+                bsz, _, dim = text_hidden.shape
+                action_hidden = text_hidden[action_mask].reshape(bsz, self.real_action_count, dim).contiguous()
+            action_logits = lm.lm_head(action_hidden).float()
+
+        actions_hidden_states = action_hidden.to(self.model_dtype)
+        value = self._compute_value_from_hidden(actions_hidden_states.detach())
+        if return_vit_out:
+            return action_logits, value.to(torch.float32), projected_patch_embeddings
+        return action_logits, value.to(torch.float32)
+
     def forward(self, inputs_batch: Dict[str, Any], return_vit_out=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -277,6 +376,9 @@ class ActorCritic(nn.Module):
         for k in ("input_ids", "attention_mask", "pixel_values", "labels", "proprio"):
             if k not in inputs_batch:
                 warnings.warn(f"inputs_batch missing key: {k}", UserWarning)
+
+        if self._can_use_action_only_fast_path(inputs_batch):
+            return self._forward_action_only(inputs_batch, return_vit_out=return_vit_out)
 
         # 1. VLA前向传播获取隐藏状态和logits
         output = self._forward_vla(inputs_batch)

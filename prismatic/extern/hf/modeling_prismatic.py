@@ -206,25 +206,20 @@ class PrismaticVisionBackbone(nn.Module):
         else:
             assert self.use_fused_vision_backbone, "Multi-image inputs require using fused backbone!"
 
-            # Split `pixel_values` into individual images (each with 6 channels: 3 for SigLIP + 3 for DINOv2)
-            images = torch.split(pixel_values, [6] * self.num_images_in_input, dim=1)
+            # Batch all views along dim=0 so DINOv2 and SigLIP each execute once at B * num_images
+            # instead of looping serially per view, doubling ViT SM occupancy and halving launches.
+            bsz, channels, height, width = pixel_values.shape
+            n_imgs = self.num_images_in_input
+            if channels != 6 * n_imgs:
+                raise ValueError(f"Expected {6 * n_imgs} channels for {n_imgs} images, got {channels}")
+            views = pixel_values.reshape(bsz, n_imgs, 6, height, width)
+            regular_imgs = views[:, :, :3].contiguous().reshape(bsz * n_imgs, 3, height, width)
+            fused_imgs = views[:, :, 3:].contiguous().reshape(bsz * n_imgs, 3, height, width)
 
-            # Process each image and collect patches
-            all_patches = []
-            for img in images:
-                # Split each image further into two stacks of channels (each with 3 channels)
-                img_regular, img_fused = torch.split(img, [3, 3], dim=1)
-
-                # Get patches from both SigLIP and DINOv2 vision transformers
-                patches = self.featurizer(img_regular)
-                patches_fused = self.fused_featurizer(img_fused)
-
-                # Concatenate SigLIP and DINOv2 patches along the hidden dimension
-                combined_patches = torch.cat([patches, patches_fused], dim=2)
-                all_patches.append(combined_patches)
-
-            # Concatenate all patches along the patch dimension
-            return torch.cat(all_patches, dim=1)
+            patches = self.featurizer(regular_imgs)
+            patches_fused = self.fused_featurizer(fused_imgs)
+            combined = torch.cat([patches, patches_fused], dim=2)
+            return combined.reshape(bsz, n_imgs * combined.shape[1], combined.shape[2])
 
 
 # === Prismatic Projector (nn.Module) Definitions ===
@@ -535,10 +530,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         # Extract action masks
         all_actions_mask = self._process_action_masks(labels)
 
-        # Extract the language portion of the input embeddings (i.e. remove the action tokens portion)
-        language_embeddings = input_embeddings[~all_actions_mask].reshape(
-            input_embeddings.shape[0], -1, input_embeddings.shape[2]
-        )  # (B, lang_seq_len, llm_dim)
+        # Extract the language portion only when FiLM consumes it; boolean indexing syncs CUDA.
+        language_embeddings = None
+        if use_film:
+            language_embeddings = input_embeddings[~all_actions_mask].reshape(
+                input_embeddings.shape[0], -1, input_embeddings.shape[2]
+            )  # (B, lang_seq_len, llm_dim)
 
         # Get visual features
         projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
@@ -672,10 +669,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             # Extract action masks
             all_actions_mask = self._process_action_masks(labels)
 
-            # Extract the language portion of the input embeddings (i.e. remove the action tokens portion)
-            language_embeddings = input_embeddings[~all_actions_mask].reshape(
-                input_embeddings.shape[0], -1, input_embeddings.shape[2]
-            )  # (B, lang_seq_len, llm_dim)
+            # Extract the language portion only when FiLM consumes it; boolean indexing syncs CUDA.
+            language_embeddings = None
+            if use_film:
+                language_embeddings = input_embeddings[~all_actions_mask].reshape(
+                    input_embeddings.shape[0], -1, input_embeddings.shape[2]
+                )  # (B, lang_seq_len, llm_dim)
 
             # Get visual features
             projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
