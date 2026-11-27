@@ -12,7 +12,7 @@ import torch.distributed as dist
 from batch_autotune_runtime import configure_training
 from gpu_trial_replay import _digest
 from jit_gae_runtime import _checked, run_balanced_trajectory_update
-from paired_gpu_trainer import _validate, layout_receipt
+from paired_gpu_trainer import _validate, layout_receipt, resolve_trial_observations
 from trainer_compile import compile_counters
 
 
@@ -161,7 +161,8 @@ def _prepare(owner, shard, phase, micro):
             _restore_adam(optimizer, moments)
             ema.mean.copy_(mean)
             ema.variance.copy_(variance)
-    return actions, logits
+    observations = resolve_trial_observations(shard['observations'])
+    return observations, actions, logits
 
 
 def run_shape_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
@@ -170,7 +171,7 @@ def run_shape_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
         raise ValueError(f'Unknown shape comparison arm {arm!r}')
     phase, micro = match[1], int(match[2])
     device = next(owner.model.parameters()).device
-    actions, logits = _checked(lambda: _prepare(owner, shard, phase, micro), device)
+    observations, actions, logits = _checked(lambda: _prepare(owner, shard, phase, micro), device)
     version = owner.global_step
     step = version + 1
     configure_training(owner, step, micro)
@@ -203,7 +204,7 @@ def run_shape_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
         torch.cuda.reset_peak_memory_stats(device)
         start_ns = time.time_ns()
         started = time.perf_counter()
-        metrics = run_balanced_trajectory_update(owner, shard['observations'], actions, logits,
+        metrics = run_balanced_trajectory_update(owner, observations, actions, logits,
             shard['original_denominators'], micro_begin=begin, micro_end=micro_end, trim=trim,
             paired_micro=micro, before_optimizer_step=inspect if phase == 'audit' else None)
         owner._policy_joint_batch_mode.complete(step)

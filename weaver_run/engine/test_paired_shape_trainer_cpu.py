@@ -74,6 +74,60 @@ class ShapeTrainerTests(unittest.TestCase):
             torch.testing.assert_close(value, snapshot[1][0][key], rtol=0, atol=0)
         torch.testing.assert_close(master, torch.tensor([3., -2.]), rtol=0, atol=0)
 
+    def test_resolve_trial_observations_hydrates_staged_pixels_for_paired_arms(self):
+        from dataclasses import replace
+        from jit_gae_plan import build_plan
+        from jit_pixel_store import StoredPixels, stage_segment_pixels
+        from paired_gpu_trainer import resolve_trial_observations
+        from test_fresh_policy_replay_cpu import segment
+
+        blocks = {}
+
+        def put(array):
+            key = len(blocks)
+            blocks[key] = array.copy()
+            return key
+
+        def get(keys):
+            return [blocks[key] for key in keys]
+
+        seg = segment('ep0', 'real', count=4, terminal=False)
+        original_obs = tuple(
+            dict(obs, pixel_values=(torch.arange(24).reshape(1, 2, 3, 4) + i).to(torch.bfloat16))
+            for i, obs in enumerate(seg.observations)
+        )
+        staged = stage_segment_pixels(replace(seg, observations=original_obs), put)
+        descriptor = dict(
+            segment_id=staged.segment_id, count=staged.count, source=staged.source,
+            observations=(None,) + staged.observations[1:], rewards=staged.rewards,
+            terminated=staged.terminated, truncated=staged.truncated,
+            gamma=staged.gamma, lambda_=staged.lambda_,
+        )
+        shard_obs = [
+            dict(staged.observations[i], _jit_sample_id=staged.sample_id(i),
+                 _jit_segment=descriptor, _jit_index=i, _jit_version=0,
+                 _fresh_action_mask=staged.action_mask[i])
+            for i in (3, 1)
+        ]
+        self.assertIsInstance(shard_obs[0]['pixel_values'], StoredPixels)
+
+        resolved = resolve_trial_observations(shard_obs, get=get)
+        self.assertEqual(len(resolved), 2)
+        contexts, _ = build_plan(resolved, 1, 0)
+        for idx in range(1, 5):
+            px = contexts['ep0']['observations'][idx]['pixel_values']
+            self.assertIsInstance(px, torch.Tensor)
+            torch.testing.assert_close(px, original_obs[idx]['pixel_values'], rtol=0, atol=0)
+        for obs, orig_idx in zip(resolved, (3, 1)):
+            self.assertIsInstance(obs['pixel_values'], torch.Tensor)
+            torch.testing.assert_close(obs['pixel_values'], original_obs[orig_idx]['pixel_values'], rtol=0, atol=0)
+        # Batched concatenation (where StoredPixels failed on GPU) must succeed cleanly
+        stacked = torch.cat([obs['pixel_values'] for obs in resolved], dim=0)
+        self.assertEqual(tuple(stacked.shape), (2, 2, 3, 4))
+
+        # Already-hydrated observations pass through untouched without calling get
+        self.assertIs(resolve_trial_observations(resolved, get=lambda _: self.fail('unexpected fetch')), resolved)
+
 
 if __name__ == '__main__':
     unittest.main()

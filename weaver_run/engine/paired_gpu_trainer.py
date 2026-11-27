@@ -134,12 +134,29 @@ def _validate(owner, arm, shard):
     return actions, old
 
 
+def resolve_trial_observations(observations, *, get=None):
+    """Hydrate Ray-staged JIT pixel handles before entering timed GPU arms."""
+    from jit_pixel_store import StoredPixels, resolve_shard_pixels
+
+    if not any(isinstance(obs.get('pixel_values'), StoredPixels) for obs in observations):
+        return observations
+    if get is None:
+        import ray
+        get = ray.get
+    (resolved,), _ = resolve_shard_pixels((observations,), get)
+    return resolved
+
+
 def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
     if arm.startswith('shape_'):
         from paired_shape_trainer import run_shape_arm
         return run_shape_arm(owner, arm, shard, micro_begin=micro_begin, micro_end=micro_end, trim=trim)
     device = next(owner.model.parameters()).device
-    actions, old_logits = _checked(lambda: _validate(owner, arm, shard), device)
+    def _prepare_arm():
+        actions, old_logits = _validate(owner, arm, shard)
+        observations = resolve_trial_observations(shard['observations']) if arm == 'jit' else shard['observations']
+        return observations, actions, old_logits
+    observations, actions, old_logits = _checked(_prepare_arm, device)
     version = int(owner.global_step)
     step = version + 1
     configure_training(owner, step, 16)
@@ -171,7 +188,7 @@ def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
             metrics = owner._train_policy(*prepared, center, scale, {})
             del prepared
         else:
-            metrics = run_balanced_trajectory_update(owner, shard['observations'], actions, old_logits,
+            metrics = run_balanced_trajectory_update(owner, observations, actions, old_logits,
                 shard['original_denominators'], micro_begin=micro_begin, micro_end=micro_end,
                 trim=trim, context_timer=timer)
     finally:
