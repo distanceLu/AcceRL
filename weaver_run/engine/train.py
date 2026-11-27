@@ -2157,15 +2157,29 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
             if self._policy_dispatch is not None:
                 await self._scheduled_policy_step()
                 continue
-            should_process = self.requests and (
-                len(self.requests) >= self.batch_size or
-                time.time() - self.last_process_time > self.timeout_sec
+            batch_limit = getattr(self, "training_batch_limit", None)
+            effective_batch = self.batch_size if batch_limit is None else max(1, min(self.batch_size, batch_limit))
+            # Compiled CUDA Graph action inference serves single-item real_rollout
+            # requests (B=1). Dispatch immediately instead of waiting for batch_size
+            # or timeout_sec, and keep count=1 so concurrent arrivals do not coalesce
+            # into a B>1 eager fallback.
+            immediate_compiled = (
+                bool(self.requests)
+                and self.compiled_actions is not None
+                and bool(self.requests[0][2])
+            )
+            should_process = bool(self.requests) and (
+                immediate_compiled
+                or len(self.requests) >= effective_batch
+                or time.time() - self.last_process_time > self.timeout_sec
             )
             if not should_process:
                 await asyncio.sleep(0.0005)
                 continue
 
-            count = min(len(self.requests), getattr(self, "training_batch_limit", len(self.requests)))
+            count = 1 if immediate_compiled else (
+                len(self.requests) if batch_limit is None else min(len(self.requests), max(1, batch_limit))
+            )
             requests_to_process, self.requests = self.requests[:count], self.requests[count:]
             promises_to_process, self.promises = self.promises[:count], self.promises[count:]
             capture_batch = batch_begin(self, requests_to_process, promises_to_process)
@@ -2214,6 +2228,9 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
                 _trim_cuda_cache("idle")
                 loop_duration = time.time() - t_loop_start
                 self.stats_actor.add_timing_metric.remote("Inference/loop_time_s", loop_duration)
+                # Yield between consecutive dispatches so weight publication and
+                # health RPCs are not starved under back-to-back B=1 execution.
+                await asyncio.sleep(0)
             except Exception as e:
                 import traceback
                 print(f"[ERROR] InferenceActor {self.actor_id} 批处理失败: {e}", flush=True)

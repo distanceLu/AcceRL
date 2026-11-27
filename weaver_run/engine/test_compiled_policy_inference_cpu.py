@@ -224,6 +224,131 @@ class InferenceTests(unittest.TestCase):
                     optimized.assert_not_called()
                     model.assert_called_once_with(prepared)
 
+    def test_compiled_real_rollout_dispatches_immediately_without_timeout_or_b2_coalescing(self):
+        source = Path(__file__).with_name('train.py')
+        actor = next(n for n in ast.parse(source.read_text(encoding='utf8')).body
+                     if isinstance(n, ast.ClassDef) and n.name == 'InferenceActor')
+        methods = [n for n in actor.body if getattr(n, 'name', '') in ('request', '_loop')]
+        def noop(*args, **kwargs):
+            pass
+        ns = dict(torch=torch, np=np, asyncio=asyncio, time=time, NUM_ACTIONS_CHUNK=8, ACTION_DIM=7,
+                  current_request_metadata=Mock(return_value={'workflow': 'real_rollout'}),
+                  batch_begin=noop, batch_end=noop, stage_begin=noop, stage_end=noop, _trim_cuda_cache=noop)
+        exec(compile(ast.Module(body=methods, type_ignores=[]), str(source), 'exec'), ns)
+
+        raw = self.batch
+        seen_batches = []
+        def prepare_batch(items):
+            seen_batches.append(len(items))
+            return {'batch_size': len(items)}
+        def run_compiled(prepared, version, *, original=None):
+            bsz = prepared['batch_size']
+            self.assertEqual(bsz, 1)
+            self.assertIs(original, raw)
+            return torch.zeros(bsz, 56, 4), torch.full((bsz,), 3.0)
+        def post_process(scores, deterministic):
+            bsz = scores.shape[0]
+            return None, torch.zeros(bsz, 56, dtype=torch.long), np.zeros((bsz, 8, 7), dtype=np.float32)
+
+        model = Mock(side_effect=AssertionError('eager model should not run for compiled real_rollout'))
+        model.prepare_inputs_batch.side_effect = prepare_batch
+        model.post_process.side_effect = post_process
+        model.vla._unnormalize_actions.side_effect = lambda a, key: a
+        optimized = Mock(side_effect=run_compiled)
+        # Production-like settings: batch_size=8, timeout_sec=0.300, training_batch_limit=2,
+        # and last_process_time set right now (so timeout_sec has NOT expired!).
+        owner = SimpleNamespace(_policy_dispatch=None, requests=[], promises=[], batch_size=8,
+                                timeout_sec=0.300, training_batch_limit=2, last_process_time=time.time(),
+                                model=model, compiled_actions=optimized, cfg=SimpleNamespace(unnorm_key='test'),
+                                stats_actor=Mock(), _check_inference_health=noop, capture_model_version=9)
+
+        async def serve_back_to_back_and_concurrent():
+            worker = asyncio.create_task(ns['_loop'](owner))
+            try:
+                t0 = time.monotonic()
+                # 1. Single arrival right after last_process_time must not sleep 300ms.
+                await asyncio.wait_for(ns['request'](owner, raw, deterministic=False), timeout=0.15)
+                # 2. Second back-to-back arrival immediately after must also not sleep 300ms.
+                await asyncio.wait_for(ns['request'](owner, raw, deterministic=False), timeout=0.15)
+                # 3. Two simultaneous arrivals must execute as two B=1 compiled calls, not one B=2 fallback.
+                r1, r2 = await asyncio.wait_for(
+                    asyncio.gather(ns['request'](owner, raw, deterministic=False),
+                                   ns['request'](owner, raw, deterministic=False)),
+                    timeout=0.15,
+                )
+                return time.monotonic() - t0, r1[4], r2[4]
+            finally:
+                worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker
+
+        elapsed, v1, v2 = asyncio.run(serve_back_to_back_and_concurrent())
+        self.assertLess(elapsed, 0.15)
+        self.assertEqual((v1, v2), (3.0, 3.0))
+        self.assertEqual(seen_batches, [1, 1, 1, 1])
+        self.assertEqual(optimized.call_count, 4)
+
+    def test_eager_and_eval_respect_effective_training_batch_limit_without_waiting_for_batch8(self):
+        source = Path(__file__).with_name('train.py')
+        actor = next(n for n in ast.parse(source.read_text(encoding='utf8')).body
+                     if isinstance(n, ast.ClassDef) and n.name == 'InferenceActor')
+        methods = [n for n in actor.body if getattr(n, 'name', '') in ('request', '_loop')]
+        def noop(*args, **kwargs):
+            pass
+        ns = dict(torch=torch, np=np, asyncio=asyncio, time=time, NUM_ACTIONS_CHUNK=8, ACTION_DIM=7,
+                  current_request_metadata=Mock(return_value={'workflow': 'evaluation'}),
+                  batch_begin=noop, batch_end=noop, stage_begin=noop, stage_end=noop, _trim_cuda_cache=noop)
+        exec(compile(ast.Module(body=methods, type_ignores=[]), str(source), 'exec'), ns)
+
+        raw = self.batch
+        seen_batches = []
+        def prepare_batch(items):
+            seen_batches.append(len(items))
+            return {'batch_size': len(items)}
+        def run_eager(prepared):
+            bsz = prepared['batch_size']
+            return torch.zeros(bsz, 56, 4), torch.full((bsz,), 5.0)
+        def post_process(scores, deterministic):
+            bsz = scores.shape[0]
+            return None, torch.zeros(bsz, 56, dtype=torch.long), np.zeros((bsz, 8, 7), dtype=np.float32)
+
+        model = Mock(side_effect=run_eager)
+        model.prepare_inputs_batch.side_effect = prepare_batch
+        model.post_process.side_effect = post_process
+        model.vla._unnormalize_actions.side_effect = lambda a, key: a
+        owner = SimpleNamespace(_policy_dispatch=None, requests=[], promises=[], batch_size=8,
+                                timeout_sec=0.300, training_batch_limit=2, last_process_time=time.time(),
+                                model=model, compiled_actions=None, cfg=SimpleNamespace(unnorm_key='test'),
+                                stats_actor=Mock(), _check_inference_health=noop, capture_model_version=9)
+
+        async def serve_cases():
+            worker = asyncio.create_task(ns['_loop'](owner))
+            try:
+                # Two concurrent eager requests match training_batch_limit=2 and dispatch immediately (<300ms).
+                t0 = time.monotonic()
+                await asyncio.wait_for(
+                    asyncio.gather(ns['request'](owner, raw, deterministic=True),
+                                   ns['request'](owner, raw, deterministic=True)),
+                    timeout=0.15,
+                )
+                t_pair = time.monotonic() - t0
+                # With training_batch_limit=1 (periodic fixed validation), one request dispatches immediately.
+                owner.training_batch_limit = 1
+                owner.last_process_time = time.time()
+                t1 = time.monotonic()
+                await asyncio.wait_for(ns['request'](owner, raw, deterministic=True), timeout=0.15)
+                t_single = time.monotonic() - t1
+                return t_pair, t_single
+            finally:
+                worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker
+
+        t_pair, t_single = asyncio.run(serve_cases())
+        self.assertLess(t_pair, 0.15)
+        self.assertLess(t_single, 0.15)
+        self.assertEqual(seen_batches, [2, 1])
+
 
 if __name__ == '__main__':
     unittest.main()
