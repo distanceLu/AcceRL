@@ -831,6 +831,74 @@ class ModelFreeLaunchTests(unittest.TestCase):
         report['training']['ctrl']={'global_updates':1}
         self.assertFalse(training.acceptance(state,report,0,[],stop)['passed'])
 
+    def test_twelve_workers_95_mps_and_fp8_base_linear_propagate_through_formal_queue(self):
+        selected = launch.rollout_options(
+            True, real_workers=12, no_micro_cache_trim=True,
+            trajectory_jit=True, real_sampling='uniform_blocks',
+            compile_action_inference=True, trainer_mps_percent=95,
+            trainer_compile='on', fp8_base_linear=True,
+        )
+        self.assertEqual(selected['real_workers'], 12)
+        self.assertEqual(selected['trainer_mps_percent'], 95)
+        self.assertTrue(selected['fp8_base_linear'])
+        argv_flags = launch.rollout_arguments(**selected)
+        self.assertIn('--real-workers', argv_flags)
+        self.assertEqual(argv_flags[argv_flags.index('--real-workers') + 1], '12')
+        self.assertIn('--trainer-mps-percent', argv_flags)
+        self.assertEqual(argv_flags[argv_flags.index('--trainer-mps-percent') + 1], '95')
+        self.assertIn('--fp8-base-linear', argv_flags)
+
+        effective = launch.effective_pipeline(True, real_workers=12)
+        self.assertEqual((effective['real_workers'], effective['max_real_in_flight']), (12, 12))
+
+        variables = {'ACCERL_PIPELINE_CONFIG': '/pipeline.json', 'ACCERL_FINAL_CHECKPOINT': '/weights'}
+        with patch.dict(os.environ, variables, clear=True), patch.object(os, 'chdir'), patch.object(os, 'execve') as execute:
+            launch.exec_managed_driver([
+                '--model-free', '--batch-autotune', '--trajectory-jit',
+                '--num-eval-workers', '0', '--real-sampling', 'uniform_blocks', *argv_flags,
+            ])
+        _, argv, env = execute.call_args.args
+        self.assertEqual(argv[argv.index('--num-rollout-workers') + 1], '12')
+        self.assertEqual(env['ACCERL_MODEL_FREE_REAL_WORKERS'], '12')
+        self.assertEqual(env['ACCERL_TRAINER_MPS_PERCENT'], '95')
+        self.assertEqual(env['ACCERL_FP8_BASE_LINEAR'], '1')
+
+        root, source = Path('/output'), HERE / 'engine'
+        q_env = training.launch_environment(
+            root, source, {}, model_free=True, num_eval_workers=0, batch_autotune=True,
+            trajectory_jit=True, real_sampling='uniform_blocks', **selected,
+        )
+        self.assertEqual(q_env['ACCERL_MODEL_FREE_REAL_WORKERS'], '12')
+        self.assertEqual(q_env['ACCERL_TRAINER_MPS_PERCENT'], '95')
+        self.assertEqual(q_env['ACCERL_FP8_BASE_LINEAR'], '1')
+
+        with tempfile.TemporaryDirectory() as temp:
+            stage = Path(temp)
+            (stage / 'mps.json').write_bytes(b'{}')
+            profiles = {'restore': {'mps_receipt': site.digest(b'{}')}}
+            with patch.object(site, 'PARENT', stage), patch.object(site, 'PROFILES', profiles), \
+                    patch.object(site, 'revision', return_value='b' * 40), \
+                    patch('engine.trajectory_jit_initial.reference_policy', return_value={'checkpoint': 'p0'}):
+                record = site.make_spec(
+                    'restore', 'mf12-fp8', stage, stage, checkout=HERE.parent,
+                    model_free=True, num_eval_workers=0, batch_autotune=True,
+                    trajectory_jit=True, real_sampling='uniform_blocks', **selected,
+                )
+            self.assertEqual(record['real_workers'], 12)
+            self.assertEqual(record['trainer_mps_percent'], 95)
+            self.assertTrue(record['fp8_base_linear'])
+            self.assertEqual(record['pipeline']['real_workers'], 12)
+            self.assertIn('--fp8-base-linear', record['job']['argv'])
+            self.assertEqual(record['job']['argv'][record['job']['argv'].index('--real-workers') + 1], '12')
+
+        # Reject invalid worker counts or FP8 without trajectory_jit.
+        with self.assertRaises(ValueError):
+            launch.rollout_options(True, real_workers=10)
+        with self.assertRaises(ValueError):
+            launch.rollout_options(False, real_workers=12)
+        with self.assertRaises(ValueError):
+            launch.rollout_options(True, trajectory_jit=False, fp8_base_linear=True)
+
 
 if __name__ == '__main__':
     unittest.main()

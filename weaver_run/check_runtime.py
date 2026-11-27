@@ -51,6 +51,13 @@ def main():
     if compile_actions == '1' and not (args.model_free and os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
                                        and callable(getattr(torch.cuda, 'CUDAGraph', None))):
         raise ValueError('Compiled action inference requires model-free trajectory JIT and torch.cuda.CUDAGraph')
+    fp8_base = os.environ.get('ACCERL_FP8_BASE_LINEAR', '0')
+    if fp8_base not in ('0', '1'):
+        raise ValueError('ACCERL_FP8_BASE_LINEAR must be 0 or 1')
+    if fp8_base == '1' and not (args.model_free and os.environ.get('ACCERL_TRAJECTORY_JIT') == '1'
+                                and callable(getattr(torch, '_scaled_mm', None))
+                                and hasattr(torch, 'float8_e4m3fn')):
+        raise ValueError('Frozen-base FP8 requires model-free trajectory JIT, torch._scaled_mm, and torch.float8_e4m3fn')
     if args.model_free or count!=3:
         expected.update(num_eval_workers=count,eval_inference_replicas=','.join(map(str,range(count))))
     if args.model_free:

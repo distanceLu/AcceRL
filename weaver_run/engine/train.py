@@ -1860,6 +1860,22 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         self.model = ActorCritic(cfg, torch_dtype=torch_dtype)
         self.model.cuda()
         self.model.eval()
+        self._fp8_base_receipt = None
+        if os.environ.get('ACCERL_FP8_BASE_LINEAR') == '1':
+            from fp8_base_linear import enable_frozen_base_fp8
+            self._fp8_base_receipt = enable_frozen_base_fp8(self.model, role='inference')
+            if getattr(self, 'telemetry', None) is not None:
+                self.telemetry.event('policy_fp8_base_enabled', details=dict(rank=self.actor_id, **self._fp8_base_receipt))
+                self.telemetry.flush()
+            print(
+                f"InferenceActor {actor_id}: frozen-base FP8 enabled "
+                f"(layers={self._fp8_base_receipt['layers_converted']}, scaling={self._fp8_base_receipt['scaling_mode']}, "
+                f"fast_accum={self._fp8_base_receipt['use_fast_accum']}, "
+                f"cos={self._fp8_base_receipt['probe_forward_cos_sim']}, "
+                f"cudagraph_ok={self._fp8_base_receipt['probe_cudagraph_ok']}, "
+                f"delta_mb={self._fp8_base_receipt['net_weight_bytes_delta'] / (1024 ** 2):+.1f}).",
+                flush=True,
+            )
         self.compiled_actions = None
         if os.environ.get('ACCERL_COMPILE_ACTION_INFERENCE') == '1':
             from compiled_policy_inference import CompiledPolicyInference
@@ -3125,6 +3141,22 @@ class TrainerActor(TrainerActorCom):
             print(f"TrainerActor Rank {self.rank}: Actor DeepSpeed engine (bf16) 初始化完成。")
 
             if self.training_role == "policy":
+                self._fp8_base_receipt = None
+                if os.environ.get("ACCERL_FP8_BASE_LINEAR") == "1":
+                    from fp8_base_linear import enable_frozen_base_fp8
+                    fp8_receipt = enable_frozen_base_fp8(self.base_model, role="trainer")
+                    self._fp8_base_receipt = fp8_receipt
+                    self.telemetry.event("policy_fp8_base_enabled", details=dict(rank=self.rank, **fp8_receipt))
+                    self.telemetry.flush()
+                    print(
+                        f"TrainerActor Rank {self.rank}: frozen-base FP8 enabled "
+                        f"(layers={fp8_receipt['layers_converted']}, scaling={fp8_receipt['scaling_mode']}, "
+                        f"fast_accum={fp8_receipt['use_fast_accum']}, "
+                        f"fwd_cos={fp8_receipt['probe_forward_cos_sim']}, "
+                        f"bwd_cos={fp8_receipt['probe_backward_cos_sim']}, "
+                        f"delta_mb={fp8_receipt['net_weight_bytes_delta'] / (1024 ** 2):+.1f}).",
+                        flush=True,
+                    )
                 from trainer_compile import compile_policy_trainer
                 compile_receipt = compile_policy_trainer(self.base_model, rank=self.rank)
                 self._trainer_compile_receipt = compile_receipt
@@ -4569,9 +4601,9 @@ def main(args):
     real_episode_rate = configured_episode_rate(os.environ.get('ACCERL_REAL_EPISODES_PER_MINUTE', '0'),
         model_free=model_free, real_workers=pipeline_config.real_workers, trajectory_jit=trajectory_jit,
         real_sampling=real_sampling, inventory_gate=rollout_inventory_gate)
-    if rollout_inventory_gate and (not model_free or pipeline_config.real_workers != 8
+    if rollout_inventory_gate and (not model_free or pipeline_config.real_workers not in (8, 12)
             or not trajectory_jit or real_sampling not in REAL_BLOCK_SAMPLING):
-        raise ValueError('Rollout inventory gate requires eight-worker model-free JIT with uniform_blocks or first_use_blocks')
+        raise ValueError('Rollout inventory gate requires eight- or twelve-worker model-free JIT with uniform_blocks or first_use_blocks')
     if model_free and not pipeline_config.initial_state_enabled:
         raise ValueError('Model-free stopping requires explicit initial-state allocation and budget accounting')
     if pipeline_config.inventory_refill_enabled and (not fresh_replay

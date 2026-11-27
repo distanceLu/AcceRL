@@ -12,8 +12,8 @@ def real_worker_count():
         workers = int(os.environ['WEAVER_BENCH_REAL_WORKERS'])
     else:
         workers = int(os.environ.get('ACCERL_MODEL_FREE_REAL_WORKERS', 4))
-    if workers not in (4, 8):
-        raise ValueError('Model-free rollout count must be 4 or 8')
+    if workers not in (4, 8, 12):
+        raise ValueError('Model-free rollout count must be 4, 8, or 12')
     return workers
 
 
