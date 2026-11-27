@@ -190,7 +190,7 @@ cd /mnt/data/lcx1/dong/WEAVER
 
 四卡 Model-free JIT 训练加 `--all-spatial-tasks --num-eval-workers 0 --fixed-validation-interval-env-steps 0` 可覆盖任务 0–9。8 个 rollout worker 共用全局 500 个任务与初态组合（每任务 50 个），每轮打乱后分配。每份租约绑定任务、指令和本任务初态。任务 0 的训练上限为 150 个策略动作，任务 1–9 为 220 个。每次 reset 另计 10 个稳定步，均计入全局 1M 模拟器步预算。完整达到本任务上限记为训练失败，预算提前截断单列。最近 1,000 个有效回合首次出现 990 次成功时停训。队列另记实际启动时刻；首次达标的墙钟从该时刻算起。若先用尽预算，记录预算结束和当时的成功率。
 
-十任务作业的 TensorBoard 子目录使用实际 `--id`。两场对照命名为 `261127_compile_sat_mf8_sp10_m100_uniform_h220` 和 `261127_compile_mf8_sp10_m90_whole_h220`，其中 `mf8` 表示 8 个真实采集 worker，`sat` 表示 Trainer 使用 100% MPS 配额。`Rollout/Spatial_Task_<id>/Window_Episodes` 和 `Success_Rate` 给出同一个全局窗口内各任务的回合数与成功率。首次过线回执也保留这十项计数。冻结终评分别评估 P0 和最终策略，贪心和随机各用每任务 50 个固定初态，总计 2,000 个回合，按任务和套件汇总。冻结终评按 OpenVLA 的 Spatial 上限对全部任务执行最多 220 个动作，并在同一条轨迹上统计 150 步内成功和第 151–220 步首次成功，另按训练上限汇总。[OpenVLA-OFT 评测代码](https://github.com/moojink/openvla-oft/blob/main/experiments/robot/libero/run_libero_eval.py)
+十任务作业的 TensorBoard 子目录使用实际 `--id`。两场对照命名为 `261127_compile_sat_mf8_sp10_uniform_h220` 和 `261127_compile_mf8_sp10_m90_whole_h220`，其中 `mf8` 表示 8 个真实采集 worker，`sat` 表示 Trainer 使用 100% MPS 配额。`Rollout/Spatial_Task_<id>/Window_Episodes` 和 `Success_Rate` 给出同一个全局窗口内各任务的回合数与成功率。首次过线回执也保留这十项计数。冻结终评分别评估 P0 和最终策略，贪心和随机各用每任务 50 个固定初态，总计 2,000 个回合，按任务和套件汇总。冻结终评按 OpenVLA 的 Spatial 上限对全部任务执行最多 220 个动作，并在同一条轨迹上统计 150 步内成功和第 151–220 步首次成功，另按训练上限汇总。[OpenVLA-OFT 评测代码](https://github.com/moojink/openvla-oft/blob/main/experiments/robot/libero/run_libero_eval.py)
 
 ### P189 四卡微批配对短测
 

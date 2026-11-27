@@ -116,7 +116,8 @@ class ParallelWorkerTests(unittest.TestCase):
         BASE.atomic_json(self.root / "plan.json", plan)
         BASE.atomic_json(self.root / "shards.json", shards)
         runtime = FakeRuntime()
-        with patch.object(worker_module, "Runtime", return_value=runtime), patch.object(worker_module.signal, "signal"):
+        with patch.object(worker_module, "Runtime", return_value=runtime), \
+                patch.object(worker_module.signal, "signal"), patch.object(sys, "path", list(sys.path)):
             exit_code = worker_module.main([
                 "--source", str(SOURCE), "--plan", str(self.root / "plan.json"),
                 "--shards", str(self.root / "shards.json"), "--worker-index", "0",
