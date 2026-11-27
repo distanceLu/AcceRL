@@ -115,6 +115,7 @@ class SpatialTrainingEnvs:
             raise ValueError('Expected all ten LIBERO-Spatial tasks in suite order')
         self.env = first_env
         self.create_env = create_env
+        self._on_scene_open = None
         first_pool = initial_state_pool_metadata(first_env)
         limits = {k: first_pool[k] for k in ('reset_steps', 'max_action_steps', 'benchmark_action_horizon')}
         tasks = {}
@@ -129,6 +130,11 @@ class SpatialTrainingEnvs:
         self.pool = dict(count=500, sha256=digest, task_suite='libero_spatial', task_names=names,
                          task_pools=tasks, hash_semantics='ordered_suite_task_name_and_pool_sha256', **limits)
 
+    def on_scene_open(self, callback):
+        """Apply a hook to the active scene and each replacement before its first reset."""
+        callback(self.env)
+        self._on_scene_open = callback
+
     def reset(self, assigned):
         global_id = assigned['initial_state_id']
         task, local = spatial_task_state(global_id)
@@ -141,6 +147,8 @@ class SpatialTrainingEnvs:
                         or env.task.name != self.pool['task_names'][task]
                         or initial_state_pool_metadata(env) != self.pool['task_pools'][str(task)]):
                     raise ValueError(f'Spatial task {task} simulator or initial-state pool differs from registry')
+                if self._on_scene_open is not None:
+                    self._on_scene_open(env)
             except BaseException:
                 env.close()
                 raise

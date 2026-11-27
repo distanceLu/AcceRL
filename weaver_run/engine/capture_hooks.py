@@ -475,14 +475,27 @@ def _cpu_method(original, workload):
     return wrapper
 
 
+def _patch_env(owner, environment):
+    for method_name in ("step", "reset"):
+        original = getattr(environment, method_name)
+        if getattr(original, "_weaver_cpu_env_span", False) is True:
+            continue
+
+        @functools.wraps(original)
+        def measured(*args, _original=original, _method=method_name, **kwargs):
+            with _writer(owner).span("cpu_env_" + _method, cuda=False):
+                return _original(*args, **kwargs)
+
+        measured._weaver_cpu_env_span = True
+        setattr(environment, method_name, measured)
+
+
 def _patch_envs(owner):
     for environment in getattr(owner, "envs", []):
-        for method_name in ("step", "reset"):
-            original = getattr(environment, method_name)
-            def measured(*args, _original=original, _method=method_name, **kwargs):
-                with _writer(owner).span("cpu_env_" + _method, cuda=False):
-                    return _original(*args, **kwargs)
-            setattr(environment, method_name, measured)
+        _patch_env(owner, environment)
+    scenes = getattr(owner, "spatial_tasks", None)
+    if scenes is not None:
+        scenes.on_scene_open(functools.partial(_patch_env, owner))
 
 
 def _init_wrapper(original, role):

@@ -2,8 +2,9 @@
 import os
 import unittest
 from collections import Counter
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 
@@ -43,11 +44,50 @@ class Env:
     def close(self):
         self.closed = True
 
+    def step(self, action):
+        if self.closed:
+            raise RuntimeError('using closed scene')
+        return self.task_id, action
+
     def get_name(self):
         return self.task.name
 
 
 class AllSpatialTests(unittest.TestCase):
+    def test_cpu_telemetry_follows_real_scene_across_switches(self):
+        from capture_hooks import _patch_envs
+        from initial_state_env import SpatialTrainingEnvs
+        suite = Suite()
+        first = Env(0, suite)
+        set_real_training_action_horizon(first, 150)
+        scenes = SpatialTrainingEnvs(first, suite, lambda task: Env(task, suite))
+        telemetry = Mock()
+        telemetry.span.side_effect = lambda *args, **kwargs: nullcontext()
+        owner = SimpleNamespace(envs=[], spatial_tasks=scenes, telemetry=telemetry)
+        _patch_envs(owner)
+        for global_id in (0, 51, 52, 1):
+            _patch_envs(owner)
+            task, state = divmod(global_id, 50)
+            obs, _ = scenes.reset(dict(initial_state_id=global_id, env_seed=42, max_action_steps=150))
+            np.testing.assert_equal(obs, suite.get_task_init_states(task)[state])
+            self.assertEqual((task, 3), scenes.env.step(3))
+        self.assertEqual(telemetry.span.call_args_list, [
+            call('cpu_env_reset', cuda=False), call('cpu_env_step', cuda=False)] * 4)
+
+    def test_cpu_telemetry_for_fixed_task_env_is_installed_once(self):
+        from capture_hooks import _patch_envs
+        env = Env(0, Suite())
+        env.episode_idx = 0
+        telemetry = Mock()
+        telemetry.span.side_effect = lambda *args, **kwargs: nullcontext()
+        owner = SimpleNamespace(envs=[env], telemetry=telemetry)
+        _patch_envs(owner)
+        _patch_envs(owner)
+        env.reset(seed=2)
+        self.assertEqual(env.step(7), (0, 7))
+        self.assertEqual(telemetry.span.call_args_list, [
+            call('cpu_env_reset', cuda=False), call('cpu_env_step', cuda=False)])
+
     def test_rollout_worker_uses_leased_task_instruction_and_state(self):
         from initial_state_env import SpatialTrainingEnvs
         from test_pipeline_producers_cpu import make_worker
