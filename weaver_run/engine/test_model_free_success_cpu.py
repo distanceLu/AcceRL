@@ -79,6 +79,23 @@ class ModelFreeSuccessTests(unittest.TestCase):
             with self.subTest(missing=key), self.assertRaises(ValueError):
                 validate_model_free_success(sample)
 
+    def test_spatial_tasks_account_for_the_same_pooled_window_at_first_crossing(self):
+        from model_free_success import validate_model_free_success
+        for i in range(1020):
+            self.clock += 1
+            task = i % 10
+            self.actor.add_episode_return(str(task), 0., 0., 20, int(i >= 12), task_id=task)
+        snapshot = self.crossings()
+        crossing = snapshot['crossings']['99']
+        self.assertEqual(crossing['total_episodes_processed'], 1002)
+        self.assertEqual(crossing['window_by_task'], {str(i): {'episodes': 100, 'successes': 99}
+                                                     for i in range(10)})
+        self.assertEqual(snapshot['window_by_task']['0'], {'episodes': 100, 'successes': 100})
+        crossing['window_by_task']['0']['successes'] = 100
+        with self.assertRaisesRegex(ValueError, 'Per-task'):
+            validate_model_free_success(snapshot)
+        self.assertEqual(self.crossings()['crossings']['99']['window_by_task']['0']['successes'], 99)
+
     def test_nonbinary_outcome_is_rejected_before_counting(self):
         with self.assertRaises(ValueError):
             self.episode(0, .99)

@@ -3,6 +3,7 @@ import importlib.util
 import ast
 import copy
 import datetime
+import argparse
 import json
 import os
 from pathlib import Path
@@ -458,6 +459,51 @@ class ModelFreeLaunchTests(unittest.TestCase):
         self.assertTrue(training.acceptance(state,report,0,[],None)['passed'])
         report['experiment_completed'][0]['details']['budget_status']['reserved_env_steps']=1
         self.assertFalse(training.acceptance(state,report,0,[],None)['passed'])
+
+    def test_all_spatial_tasks_freeze_scope_in_queue_and_driver(self):
+        parser = argparse.ArgumentParser()
+        launch.add_rollout_arguments(parser)
+        self.assertTrue(parser.parse_args(['--all-spatial-tasks']).all_spatial_tasks)
+        for percent, sampler in ((100,'uniform_blocks'), (90,'whole_episodes')):
+            with self.subTest(percent=percent, sampler=sampler):
+                rollout = launch.rollout_options(True, 8, True, trajectory_jit=True,
+                    real_sampling=sampler, trainer_compile='on', trainer_mps_percent=percent,
+                    compile_action_inference=True, all_spatial_tasks=True)
+                self.assertTrue(rollout['all_spatial_tasks'])
+                self.assertIn('--all-spatial-tasks',launch.rollout_arguments(**rollout))
+                options = dict(model_free=True, num_eval_workers=0, batch_autotune=True,
+                               trajectory_jit=True, real_sampling=sampler, **rollout)
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root/'mps.json').write_bytes(b'{}')
+                    with patch.object(site,'PARENT',root), patch.object(site,'revision',return_value='a'*40), \
+                         patch.object(site,'PROFILES',{'restore':{'mps_receipt':site.digest(b'{}')}}):
+                        record = site.make_spec('restore','multi',root,root,checkout=HERE.parent,**options)
+                    self.assertTrue(record['all_spatial_tasks'])
+                    self.assertEqual(record['pipeline']['initial_state_count'],500)
+                    self.assertIn('--all-spatial-tasks',record['job']['argv'])
+                    args = types.SimpleNamespace(source=HERE/'engine',root=root,**options)
+                    kwargs = training.mode_kwargs(args)
+                    self.assertTrue(kwargs['all_spatial_tasks'])
+                    self.assertEqual(training.launch_environment(root,args.source,{},**kwargs)['ACCERL_ALL_SPATIAL_TASKS'],'1')
+                    command = training.runner_command(args)
+                    with patch.dict(os.environ,{'ACCERL_PIPELINE_CONFIG':'p','ACCERL_FINAL_CHECKPOINT':'w'},clear=True), \
+                         patch.object(os,'chdir'), patch.object(os,'execve') as execute:
+                        launch.exec_managed_driver(command[command.index('--model-free'):])
+                    environment = execute.call_args.args[2]
+                    self.assertEqual(environment['ACCERL_ALL_SPATIAL_TASKS'],'1')
+                    self.assertEqual(environment['ACCERL_TRAINER_MPS_PERCENT'],str(percent))
+                    self.assertEqual(environment['ACCERL_REAL_SAMPLING'],sampler)
+        self.assertNotIn('all_spatial_tasks',launch.rollout_options(True))
+        self.assertNotIn('--all-spatial-tasks',launch.rollout_arguments())
+        self.assertEqual(500, launch.effective_pipeline(True,8,all_spatial_tasks=True)['initial_state_count'])
+        self.assertEqual(50, launch.effective_pipeline(True,8)['initial_state_count'])
+        with self.assertRaises(ValueError):
+            launch.rollout_options(False,all_spatial_tasks=True)
+        with self.assertRaises(ValueError):
+            launch.fixed_validation_options(True,4,all_spatial_tasks=True)
+        with self.assertRaises(ValueError):
+            launch.fixed_validation_options(True,0,{'interval_env_steps':100},all_spatial_tasks=True)
 
     def test_fixed_validation_defaults_and_overrides_are_carried_by_training_arguments(self):
         defaults = launch.training_arguments({}, model_free=True, template=[])

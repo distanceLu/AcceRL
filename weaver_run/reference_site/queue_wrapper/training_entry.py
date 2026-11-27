@@ -215,7 +215,8 @@ def validate_cost_scheduler_admission(source):
 def check_cost_scheduler_state(state, source, root):
     if state.get('model_free'):
         from launch import effective_pipeline
-        expected = effective_pipeline(True,real_workers=state.get('real_workers',4))
+        expected = effective_pipeline(True,real_workers=state.get('real_workers',4),
+                                      all_spatial_tasks=state.get('all_spatial_tasks',False))
         if (state.get('cost_scheduler') is not None or state.get('pipeline_config') != expected
                 or state.get('pipeline_config_path') != str(root / 'formal_v3/pipeline_config.json')):
             raise ValueError('Model-free runner real rollout pipeline or cost scheduler differs from the request')
@@ -256,7 +257,7 @@ def measurement_stop_due(receipt, now_monotonic, synchronized_epochs, seconds):
     return start is not None and now_monotonic - start >= seconds
 
 
-def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
+def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto', all_spatial_tasks=False):
     if not source.is_absolute() or not root.is_absolute():
         raise ValueError('Source and experiment root must be absolute paths')
     if source.resolve() != source or root.resolve() != root:
@@ -265,7 +266,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
     sys.path.insert(0,str(source.parent))
     from launch import batch_autotune_options, trajectory_jit_options, real_sampling_options, rollout_options
     rollout = rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
+                              real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, all_spatial_tasks=all_spatial_tasks, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference, trajectory_jit=trajectory_jit, real_sampling=real_sampling)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)
     real_sampling_options(trajectory_jit, real_sampling)
@@ -284,7 +285,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
         sys.path.insert(0,str(source.parent))
         from launch import effective_pipeline, mode_options
         mode_options(True,num_eval_workers)
-        if read_json(root / 'git-pipeline.json') != effective_pipeline(True,real_workers=real_workers):
+        if read_json(root / 'git-pipeline.json') != effective_pipeline(True,real_workers=real_workers,all_spatial_tasks=all_spatial_tasks):
             raise ValueError('Frozen model-free pipeline differs from source')
         backend = {'backend':'model_free','world_trainable':False,'reward_provider':'environment'}
         admission = {'skipped':True,'reason':'model_free_has_no_world_assets'}
@@ -317,7 +318,7 @@ def validate(source, root, git_commit, *, model_free=False,num_eval_workers=None
             'gpu_access_performed': False,'real_sampling':real_sampling,'trajectory_jit':trajectory_jit,'batch_autotune':batch_autotune,'model_free':model_free,'num_eval_workers':num_eval_workers}
 
 
-def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
+def launch_environment(root, source, environ, *, model_free=False,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto', all_spatial_tasks=False):
     env = {k: v for k, v in environ.items()
            if not k.startswith(('ACCERL_', 'ACCE_', 'WEAVER_', 'NSYS_',
                                 'CUDA_INJECTION', 'NVTX_INJECTION'))}
@@ -335,6 +336,7 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
                OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
     env['ACCERL_BATCH_AUTOTUNE']=str(int(batch_autotune))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit))
+    env['ACCERL_ALL_SPATIAL_TASKS'] = str(int(all_spatial_tasks))
     env['ACCERL_REAL_SAMPLING'] = real_sampling
     if trainer_compile != 'auto':
         env['ACCERL_COMPILE_TRAINER'] = str(int(trainer_compile == 'on'))
@@ -353,8 +355,10 @@ def launch_environment(root, source, environ, *, model_free=False,num_eval_worke
     return env
 
 
-def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
+def check_state(state, source, root, run_id=None, supervisor=None, *, model_free=None,num_eval_workers=None,fixed_validation=None,batch_autotune=False,trajectory_jit=False, real_sampling='chunks',real_workers=4,no_micro_cache_trim=False,rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto', all_spatial_tasks=False):
     if model_free is not None:
+        if state.get('all_spatial_tasks', False) != all_spatial_tasks:
+            raise ValueError('Runner LIBERO task scope differs from queue request')
         if state.get('trainer_compile','auto') != trainer_compile:
             raise ValueError('Runner trainer compile mode differs from queue request')
         if state.get('trainer_mps_percent', 100) != trainer_mps_percent:
@@ -383,7 +387,7 @@ def check_state(state, source, root, run_id=None, supervisor=None, *, model_free
             from model_free_completion import rollout_target_config
             if state.get('model_free_success_target') != rollout_target_config():
                 raise ValueError('Runner rollout success target differs from queued training')
-            if state.get('fixed_validation_config') != fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling):
+            if state.get('fixed_validation_config') != fixed_validation_options(model_free,num_eval_workers,fixed_validation,all_spatial_tasks=all_spatial_tasks,real_sampling=real_sampling):
                 raise ValueError('Runner fixed validation configuration differs from queued arguments')
     rid = state.get('run_id', '')
     if (not re.fullmatch(r'weaverintegrated_[A-Za-z0-9_-]+', rid)
@@ -928,7 +932,7 @@ def runner_command(args):
     sys.path.insert(0,str(args.source.parent))
     from launch import (fixed_validation_options, fixed_validation_overrides, fixed_validation_arguments,
                         batch_autotune_options, real_sampling_arguments, rollout_arguments)
-    command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args),real_sampling=getattr(args,'real_sampling','chunks')))
+    command += fixed_validation_arguments(fixed_validation_options(model_free,count,fixed_validation_overrides(args),all_spatial_tasks=getattr(args,'all_spatial_tasks',False),real_sampling=getattr(args,'real_sampling','chunks')))
     if batch_autotune_options(model_free,count,getattr(args,'batch_autotune',False)):
         command += ['--batch-autotune']
     if getattr(args,'trajectory_jit',False):
@@ -937,7 +941,7 @@ def runner_command(args):
     command += rollout_arguments(getattr(args,'real_workers',4), getattr(args,'no_micro_cache_trim',False),
                                 getattr(args,'rollout_inventory_gate',False), getattr(args,'compile_action_inference',False),
                                 getattr(args,'real_episodes_per_minute',0.0), getattr(args,'trainer_mps_percent',100),
-                                trainer_compile=getattr(args,'trainer_compile','auto'))
+                                all_spatial_tasks=getattr(args,'all_spatial_tasks',False), trainer_compile=getattr(args,'trainer_compile','auto'))
     return command
 
 
@@ -946,7 +950,7 @@ def mode_kwargs(args):
     from launch import fixed_validation_options, fixed_validation_overrides, batch_autotune_options, real_sampling_options, rollout_options
     selected=dict(model_free=getattr(args,'model_free',False),num_eval_workers=getattr(args,'num_eval_workers',None))
     real_sampling = real_sampling_options(getattr(args, 'trajectory_jit', False), getattr(args, 'real_sampling', 'chunks'))
-    selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args), real_sampling=real_sampling)
+    selected['fixed_validation']=fixed_validation_options(**selected,overrides=fixed_validation_overrides(args), all_spatial_tasks=getattr(args,'all_spatial_tasks',False),real_sampling=real_sampling)
     selected['batch_autotune']=batch_autotune_options(selected['model_free'],selected['num_eval_workers'],getattr(args,'batch_autotune',False))
     if getattr(args,'trajectory_jit',False):
         selected['trajectory_jit']=True
@@ -956,7 +960,7 @@ def mode_kwargs(args):
                              getattr(args,'no_micro_cache_trim',False), getattr(args,'rollout_inventory_gate',False),
                              real_episodes_per_minute=getattr(args,'real_episodes_per_minute',0.0),
                              trainer_mps_percent=getattr(args,'trainer_mps_percent',100),
-                             trainer_compile=getattr(args,'trainer_compile','auto'),
+                             all_spatial_tasks=getattr(args,'all_spatial_tasks',False), trainer_compile=getattr(args,'trainer_compile','auto'),
                              compile_action_inference=getattr(args,'compile_action_inference',False),
                              trajectory_jit=getattr(args,'trajectory_jit',False), real_sampling=real_sampling)
     if selected['model_free']:

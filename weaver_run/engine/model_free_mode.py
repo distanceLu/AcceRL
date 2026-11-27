@@ -37,7 +37,7 @@ def configure_training_mode(args):
     return True
 
 
-def pipeline_configuration(args, *, real_workers=None):
+def pipeline_configuration(args, *, real_workers=None, all_spatial_tasks=None):
     source = getattr(args, 'pipeline_config', None)
     if not getattr(args, 'model_free', False):
         return PipelineBudgetConfig.from_json(source)
@@ -49,6 +49,10 @@ def pipeline_configuration(args, *, real_workers=None):
         values = json.loads(Path(source).read_text(encoding='utf8'))
     else:
         values = {}
+    if all_spatial_tasks is None:
+        all_spatial_tasks = os.environ.get('ACCERL_ALL_SPATIAL_TASKS') == '1'
+    if all_spatial_tasks:
+        values['initial_state_count'] = 500
     workers = real_worker_count() if real_workers is None else real_workers
     values.update(model_free=True, real_workers=workers, max_real_in_flight=workers,
                   imagination_workers=0, max_imagine_in_flight=0,

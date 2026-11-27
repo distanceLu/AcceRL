@@ -77,10 +77,10 @@ class ManagedEvaluationTests(unittest.TestCase):
             self.assertIs(supervisor.load_adapter(HERE.parent / 'queue_wrapper', source, 'a' * 40), fake)
         fake.verify_git.assert_called_once_with(source.resolve(), 'a' * 40)
 
-    def write_complete(self, root):
+    def write_complete(self, root, **plan_options):
         output = root / 'policy_eval'
         output.mkdir()
-        plan = make_plan()
+        plan = make_plan(**plan_options)
         shards = contract.make_shards(plan)
         reports = completion_reports(plan, shards)
         summary = supervisor.completion_acceptance(
@@ -98,6 +98,25 @@ class ManagedEvaluationTests(unittest.TestCase):
             worker.mkdir(parents=True)
             BASE.atomic_json(worker / 'completed.json', report)
         return output
+
+    def test_all_spatial_admission_and_per_task_ledger_reconstruction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = self.args(root)
+            args.all_spatial_tasks = True
+            args.evaluation_seconds = 72000
+            args.post_stop_grace_seconds = 1800
+            self.assertEqual(queue.validate_budgets(args)['evaluation_seconds'], 72000)
+            self.assertIn('--all-spatial-tasks', queue.evaluation_command(args, 72000))
+            self.assertEqual(contract.choose_deadline(100, 72000, all_spatial_tasks=True), 72100)
+            output = self.write_complete(root, all_spatial_tasks=True)
+            self.assertTrue(queue.evaluation_acceptance(root, 0, [], all_spatial_tasks=True)['passed'])
+            self.assertFalse(queue.evaluation_acceptance(root, 0, [])['passed'])
+            path = output / 'completed.json'
+            result = json.loads(path.read_bytes())
+            del result['per_task']['9']
+            BASE.atomic_json(path, result)
+            self.assertFalse(queue.evaluation_acceptance(root, 0, [], all_spatial_tasks=True)['passed'])
 
     def test_four_complete_workers_52_52_48_48_at_220_pass(self):
         with tempfile.TemporaryDirectory() as tmp:

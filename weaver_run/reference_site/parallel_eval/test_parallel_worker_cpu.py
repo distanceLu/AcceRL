@@ -386,6 +386,40 @@ class ParallelWorkerTests(unittest.TestCase):
             self.assertEqual(runtime.payloads, {})
             self.assertIsNone(runtime.env)
 
+    def test_spatial_worker_switches_simulator_and_checks_each_task_checkpoint_pool(self):
+        plan = BASE.make_plan(self.plan["checkpoints"], all_spatial_tasks=True)
+        pool, torch, libero, initial, snapshot, _ = self.runtime_fakes()
+        pools = {str(i): dict(pool, sha256=f"{i:064x}") for i in range(10)}
+        closed = []
+        def environment(**kw):
+            task = kw["task_id"]
+            return types.SimpleNamespace(task_id=task, task=types.SimpleNamespace(name=f"name{task}"), task_description=f"task {task}",
+                                         close=lambda: closed.append(task))
+        libero.LiberoEnvWrapper = environment
+        initial.initial_state_pool_metadata = lambda env: pools[str(env.task_id)]
+        def suite_snapshot(path, deadline):
+            data, meta = snapshot(path, deadline)
+            data["manifest"]["metadata"]["initial_state_queue"]["pool"] = dict(
+                task_suite="libero_spatial", task_names=[f"name{i}" for i in range(10)], task_pools=copy.deepcopy(pools), count=500)
+            return data, meta
+        runtime = worker_module.Runtime(BASE, SOURCE, APPROVED_GPUS[0])
+        with patch.object(os, "getuid", return_value=1004, create=True), \
+                patch.object(BASE, "load_snapshot", side_effect=suite_snapshot), \
+                patch.object(worker_module.subprocess, "check_output", return_value=APPROVED_GPUS[0] + "\n"), \
+                patch.dict(sys.modules, {"torch": torch, "rl.libero_env": libero, "initial_state_env": initial}), \
+                patch("environment_rendering.prepare_evaluation_renderer"), \
+                patch("environment_rendering.verify_environment_renderer"), \
+                patch.object(BASE, "run_episode", side_effect=lambda m,c,d,env,*rest: env.task_description):
+            runtime.prepare(plan, time.time() + 100, self.root, {})
+            case = next(c for c in plan["cases"] if c["task_id"] == 9)
+            self.assertEqual(runtime.run_case(case, plan["checkpoints"][0], plan, 123), "task 9")
+            self.assertEqual(closed, [0])
+            for checkpoint in runtime.payloads.values():
+                checkpoint["manifest"]["metadata"]["initial_state_queue"]["pool"]["task_pools"]["8"] = pools["9"]
+            with self.assertRaisesRegex(ValueError, "evidenced"):
+                runtime._select_task(8)
+            runtime.close()
+
     def test_runtime_rejects_missing_or_different_saved_pool(self):
         for missing, wrong in ((True, False), (False, True)):
             pool, torch, libero, initial, snapshot, calls = self.runtime_fakes(missing, wrong)

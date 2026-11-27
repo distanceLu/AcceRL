@@ -10,7 +10,7 @@ import random
 import re
 import sys
 
-BASE_EVALUATOR_SHA256='60f017c336964dab15b774497ae09c2de405ba734f7d270f801c7a0d596ea6bf'
+BASE_EVALUATOR_SHA256='84269712a94d13ea1ff30a7a3d39b3776d13167067e5dde55f26b07e22ad4bba'
 APPROVED_GPUS=(
     'GPU-c43d6671-0979-b38d-9eae-4fe0a9d71c8c',
     'GPU-fe0edfe4-b193-1af7-6a98-cbff40214f74',
@@ -36,8 +36,13 @@ def load_base(source):
 
 def check_plan(plan):
     raw={k:v for k,v in plan.items() if k!='sha256'}
+    multi = 'task_ids' in plan
+    tasks = plan.get('task_ids') if multi else [0]
+    if multi and (tasks != list(range(10)) or any(type(i) is not int for i in tasks)
+                  or plan.get('task_suite') != 'libero_spatial' or 'task_id' in plan):
+        raise ValueError('Expected all ten LIBERO-Spatial tasks')
     if (plan.get('sha256')!=digest(raw) or plan.get('protocol')!='accerl_frozen_policy_paired_v1'
-            or plan.get('initial_state_count')!=50 or plan.get('task_id')!=0
+            or plan.get('initial_state_count')!=50 or (not multi and plan.get('task_id')!=0)
             or plan.get('horizon_action_steps')!=220 or plan.get('reset_settling_steps')!=10
             or plan.get('inference_batch_size')!=1 or plan.get('policy_updates_during_evaluation') is not False
             or [c.get('name') for c in plan.get('checkpoints',[])]!=['baseline','final']):
@@ -45,11 +50,6 @@ def check_plan(plan):
     cases=plan.get('cases',[])
     if len({c['pair_id'] for c in cases})!=len(cases) or plan.get('expected_episode_records')!=2*len(cases):
         raise ValueError('Global cases are duplicated or expected counts differ')
-    expected={(repeat,initial,mode) for repeat in range(plan['repeats'])
-              for initial in range(50) for mode in plan['modes']}
-    actual={(c['repeat'],c['initial_state_id'],c['mode']) for c in cases}
-    if len(actual)!=len(cases) or actual!=expected:
-        raise ValueError('Global paired initial-state/mode/repeat coverage differs')
     if type(plan['seed']) is not int or not 0<=plan['seed']<2**31 or type(plan['repeats']) is not int or plan['repeats']<1:
         raise ValueError('Invalid seed or repeat count')
     if not plan['modes'] or len(set(plan['modes']))!=len(plan['modes']) or set(plan['modes'])-{'greedy','stochastic'}:
@@ -57,12 +57,15 @@ def check_plan(plan):
     canonical=[]
     for repeat in range(plan['repeats']):
         order=list(range(50));random.Random(plan['seed']+repeat).shuffle(order)
-        for initial in order:
-            for mode in plan['modes']:
-                canonical.append(dict(pair_id=f'r{repeat}:s{initial}:{mode}',repeat=repeat,initial_state_id=initial,
-                    env_seed=int(digest([plan['seed'],repeat,initial,'environment'])[:8],16)%2**31,
-                    action_seed=int(digest([plan['seed'],repeat,initial,'actions'])[:8],16)%2**31,
-                    mode=mode,deterministic=mode=='greedy'))
+        for task in tasks:
+            for initial in order:
+                key = [plan['seed'],repeat,task,initial] if multi else [plan['seed'],repeat,initial]
+                ident = f'r{repeat}:t{task}:s{initial}' if multi else f'r{repeat}:s{initial}'
+                for mode in plan['modes']:
+                    canonical.append(dict(pair_id=f'{ident}:{mode}',repeat=repeat,initial_state_id=initial,
+                        env_seed=int(digest([*key,'environment'])[:8],16)%2**31,
+                        action_seed=int(digest([*key,'actions'])[:8],16)%2**31,
+                        mode=mode,deterministic=mode=='greedy',**({'task_id': task} if multi else {})))
     if cases!=canonical or any(type(c.get('deterministic')) is not bool for c in cases):
         raise ValueError('Case order, seeds or mode differ from the original paired protocol')
 
@@ -76,7 +79,7 @@ def make_shards(plan,gpu_uuids=APPROVED_GPUS):
              for i,gpu in enumerate(gpu_uuids)]
     groups={}
     for case in plan['cases']:
-        key=(case['repeat'],case['initial_state_id'])
+        key=(case['repeat'],case.get('task_id',0),case['initial_state_id'])
         if key not in groups:groups[key]=len(groups)%4
         workers[groups[key]]['assigned_pair_ids'].append(case['pair_id'])
     for worker in workers:worker['expected_episode_records']=2*len(worker['assigned_pair_ids'])
@@ -97,6 +100,10 @@ def validate_shards(plan,shards):
 
 def validate_worker_row(row,plan,shards,worker_index,run_token,base=None):
     validate_shards(plan,shards)
+    return _checked_assignment_row(row,plan,shards,worker_index,run_token,base)
+
+
+def _checked_assignment_row(row,plan,shards,worker_index,run_token,base):
     if type(worker_index) is not int or not 0<=worker_index<4:
         raise ValueError('Invalid worker index')
     if base is None:raise ValueError('An explicitly reviewed evaluation module is required')
@@ -120,7 +127,7 @@ def merge_rows(plan,shards,worker_rows,run_token,base=None):
     merged={}
     for index in range(4):
         for row in worker_rows[index]:
-            validate_worker_row(row,plan,shards,index,run_token,base)
+            _checked_assignment_row(row,plan,shards,index,run_token,base)
             key=(row['checkpoint'],row['pair_id'])
             if key in merged:raise ValueError('Duplicate completed episode across worker ledgers')
             merged[key]=row
@@ -130,11 +137,12 @@ def merge_rows(plan,shards,worker_rows,run_token,base=None):
             if (checkpoint['name'],case['pair_id']) in merged]
 
 
-def choose_deadline(now,max_seconds,deadline_unix=None,prior_started=None):
+def choose_deadline(now,max_seconds,deadline_unix=None,prior_started=None, *, all_spatial_tasks=False):
     for name,value in [('now',now),('max_seconds',max_seconds)]:
         if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value):
             raise ValueError(name+' must be finite')
-    if not 0<max_seconds<=7200:raise ValueError('The global evaluation budget must be in (0,7200] seconds')
+    cap = 7200 * (10 if all_spatial_tasks else 1)
+    if not 0<max_seconds<=cap:raise ValueError(f'The global evaluation budget must be in (0,{cap}] seconds')
     deadlines=[now+max_seconds]
     if deadline_unix is not None:
         if isinstance(deadline_unix,bool) or not isinstance(deadline_unix,(int,float)) or not math.isfinite(deadline_unix):

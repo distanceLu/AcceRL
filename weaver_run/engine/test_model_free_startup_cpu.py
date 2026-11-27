@@ -13,7 +13,7 @@ from model_free_mode import configure_training_mode, pipeline_configuration
 
 
 class ModelFreeStartupTests(unittest.TestCase):
-    def run_startup(self, evaluation=0):
+    def run_startup(self, evaluation=0, driver_env=None):
         args = startup.arguments(overrides=(
             '--model-free', '--num-eval-workers', str(evaluation),
             '--fixed-validation-interval-env-steps', '0',
@@ -26,12 +26,22 @@ class ModelFreeStartupTests(unittest.TestCase):
                 return True
             return original(actor, method, args, kwargs)
         with patch.object(startup.Actor, 'call', call), patch('checkpoint_evaluation.preserve_initial_checkpoint'):
-            state = startup.execute_definition(startup.startup_ast(), context.namespace())(args)
+            namespace = context.namespace()
+            namespace['os'].environ.update(driver_env or {})
+            state = startup.execute_definition(startup.startup_ast(), namespace)(args)
         return context, state
 
     def test_switch_never_reads_world_assets(self):
         args = startup.arguments(overrides=('--model-free', '--world-backend-config', 'MISSING.json'))
         self.assertEqual(load_backend_config(args).backend, 'model_free')
+
+    def test_spatial_tensorboard_directory_matches_the_queue_label(self):
+        label = '261127_compile_sat_mf8_sp10_m100_uniform'
+        settings = dict(ACCERL_ALL_SPATIAL_TASKS='1', ACCERL_MODEL_FREE_REAL_WORKERS='8',
+                        ACCERL_EXPERIMENT_ROOT='/experiments/' + label, ACCERL_TENSORBOARD_RUNS='/metrics')
+        with patch.dict(os.environ, settings):
+            _, state = self.run_startup(driver_env=settings)
+        self.assertEqual(state['log_dir'], '/metrics/Libero/libero_spatial/' + label)
 
     def test_model_free_default_eval_and_saved_training_budget(self):
         args = startup.arguments(overrides=('--model-free',))

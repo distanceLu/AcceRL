@@ -301,15 +301,22 @@ class Runtime:
             if "bytes" in checkpoint and actual["bytes"] != checkpoint["bytes"]:
                 raise ValueError("Checkpoint byte count differs from the global plan")
             saved_pool = payload["manifest"]["metadata"].get("initial_state_queue", {}).get("pool")
-            # The initial snapshot is legitimately saved before the first real
-            # worker registers its pool.  Final training must have registered it.
-            if saved_pool is None and checkpoint["name"] == "baseline":
-                pass
-            elif (not isinstance(saved_pool, dict) or saved_pool.get("count") != 50
-                  or not isinstance(saved_pool.get("sha256"), str)
-                  or re.fullmatch(r"[0-9a-f]{64}", saved_pool["sha256"]) is None
-                  or "shape" not in saved_pool):
-                raise ValueError("Initial-state pool must be evidenced by the final checkpoint and any populated baseline")
+            # The initial snapshot may predate pool registration.
+            if saved_pool is not None or checkpoint["name"] != "baseline":
+                if "task_ids" in plan:
+                    if (not isinstance(saved_pool, dict) or saved_pool.get("count") != 500
+                            or saved_pool.get("task_suite") != "libero_spatial"
+                            or not isinstance(saved_pool.get("task_names"), list)
+                            or len(saved_pool["task_names"]) != 10 or len(set(saved_pool["task_names"])) != 10
+                            or set(saved_pool.get("task_pools", {})) != {str(i) for i in plan["task_ids"]}):
+                        raise ValueError("Training checkpoint does not cover all ten Spatial initial-state pools")
+                    pools = saved_pool["task_pools"].values()
+                else:
+                    pools = [saved_pool]
+                for pool in pools:
+                    if (not isinstance(pool, dict) or pool.get("count") != 50
+                            or re.fullmatch(r"[0-9a-f]{64}", str(pool.get("sha256"))) is None or "shape" not in pool):
+                        raise ValueError("Initial-state pool must be evidenced by the final checkpoint and any populated baseline")
             self.payloads[checkpoint["name"]] = payload
         recipes = [checkpoint["metadata"]["args"] for checkpoint in plan["checkpoints"]]
         if recipes[0] != recipes[1] or recipes[0]["benchmark"] != "libero_spatial":
@@ -329,9 +336,20 @@ class Runtime:
         if torch.cuda.device_count() != 1:
             raise ValueError("Worker must see exactly one admitted GPU")
         torch.cuda.set_device(0)
+        self.worker_dir = worker_dir
+        self.active_task = None
+        self.all_spatial_tasks = "task_ids" in plan
+        self._select_task(0)
+
+    def _select_task(self, task_id):
+        if self.active_task == task_id:
+            return
+        if self.env is not None:
+            self.env.close()
+            self.env = None
         from rl.libero_env import LiberoEnvWrapper
         from initial_state_env import initial_state_pool_metadata
-        self.env = LiberoEnvWrapper(benchmark_name="libero_spatial", task_id=0,
+        self.env = LiberoEnvWrapper(benchmark_name="libero_spatial", task_id=task_id,
                                    image_size=224, render_mode="rgb_array")
         from environment_rendering import verify_environment_renderer
         verify_environment_renderer()
@@ -340,15 +358,21 @@ class Runtime:
             raise ValueError("Live initial-state pool differs from the fixed 50-state protocol")
         for payload in self.payloads.values():
             saved_pool = payload["manifest"]["metadata"].get("initial_state_queue", {}).get("pool")
+            if self.all_spatial_tasks and saved_pool is not None:
+                if saved_pool["task_names"][task_id] != self.env.task.name:
+                    raise ValueError("Live Spatial task name differs from the training checkpoint")
+                saved_pool = saved_pool["task_pools"][str(task_id)]
             if saved_pool is not None and any(saved_pool.get(key) != pool.get(key)
                                                for key in ("count", "shape", "sha256")):
                 raise ValueError("Live initial-state pool differs from an evidenced training checkpoint")
-        pool_path = worker_dir / "initial_state_pool.json"
+        name = f"initial_state_pool_task_{task_id}.json" if self.all_spatial_tasks else "initial_state_pool.json"
+        pool_path = self.worker_dir / name
         if pool_path.is_symlink():
             raise ValueError("Worker initial-state pool file must not be a symlink")
         if pool_path.exists() and json.loads(pool_path.read_text(encoding="utf-8")) != pool:
             raise ValueError("Initial-state pool changed across worker resume")
         atomic_worker_json(self.base, pool_path, pool)
+        self.active_task = task_id
 
     def load(self, checkpoint, deadline):
         if self.model is not None:
@@ -356,6 +380,8 @@ class Runtime:
         self.model, self.cfg, self.dtype = self.base.restore_policy(self.payloads[checkpoint["name"]], deadline)
 
     def run_case(self, case, checkpoint, plan, deadline):
+        if "task_id" in case:
+            self._select_task(case["task_id"])
         return self.base.run_episode(self.model, self.cfg, self.dtype, self.env,
                                      case, checkpoint, plan, deadline)
 

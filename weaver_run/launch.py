@@ -160,15 +160,17 @@ def fixed_validation_overrides(args):
             if (value := getattr(args,'fixed_validation_'+key,None)) is not None}
 
 
-def fixed_validation_options(model_free=False, num_eval_workers=None, overrides=None, *, real_sampling='chunks'):
+def fixed_validation_options(model_free=False, num_eval_workers=None, overrides=None, *, real_sampling='chunks', all_spatial_tasks=False):
     overrides = dict(overrides or {})
     require(not set(overrides)-set(FIXED_VALIDATION_DEFAULTS), 'Unknown fixed validation options')
     require(model_free or not overrides, 'Fixed validation options require --model-free')
     if not model_free:
         return None
     count=mode_options(model_free,num_eval_workers)['num_eval_workers']
-    selected=dict(FIXED_VALIDATION_DEFAULTS,interval_env_steps=0 if count or real_sampling != 'chunks' else 100000)
+    selected=dict(FIXED_VALIDATION_DEFAULTS,interval_env_steps=0 if count or all_spatial_tasks or real_sampling != 'chunks' else 100000)
     selected.update(overrides)
+    require(not all_spatial_tasks or (count == 0 and selected['interval_env_steps'] == 0),
+            'All-Spatial training uses the ten-task frozen final evaluation; online and periodic evaluation must be disabled')
     require(real_sampling == 'chunks' or selected['interval_env_steps'] == 0,
             'Trajectory JIT episode sampling requires fixed validation interval 0')
     require(all(type(value) is int and value >= (1 if key in ('patience','min_delta_successes') else 0)
@@ -184,10 +186,10 @@ def fixed_validation_arguments(config):
             for part in ('--fixed-validation-'+key.replace('_','-'),str(value))]
 
 
-def training_arguments(values, *, model_free=False, num_eval_workers=None, template=None, fixed_validation=None, batch_autotune=False, real_sampling='chunks', real_workers=4):
+def training_arguments(values, *, model_free=False, num_eval_workers=None, template=None, fixed_validation=None, batch_autotune=False, real_sampling='chunks', real_workers=4, all_spatial_tasks=False):
     options = mode_options(model_free, num_eval_workers)
     batch_autotune_options(model_free, num_eval_workers, batch_autotune)
-    validation = fixed_validation_options(model_free,num_eval_workers,fixed_validation,real_sampling=real_sampling)
+    validation = fixed_validation_options(model_free,num_eval_workers,fixed_validation,all_spatial_tasks=all_spatial_tasks,real_sampling=real_sampling)
     argv = expand(read(RECIPE/'argv.json') if template is None else template, values)
     changes = {}
     if model_free or num_eval_workers is not None:
@@ -242,6 +244,8 @@ def real_sampling_arguments(real_sampling):
 
 
 def add_rollout_arguments(parser):
+    parser.add_argument('--all-spatial-tasks', action='store_true',
+                        help='Train one model-free Policy on all ten LIBERO-Spatial tasks.')
     parser.add_argument('--trainer-mps-percent', type=int, default=100,
                         help='Active-thread cap for each model-free policy trainer MPS client (1–100).')
     parser.add_argument('--trainer-compile', choices=('auto','on','off'), default='auto',
@@ -257,7 +261,9 @@ def add_rollout_arguments(parser):
 
 
 def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False,
-                    *, trajectory_jit=False, real_sampling='chunks', compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
+                    *, trajectory_jit=False, real_sampling='chunks', compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto', all_spatial_tasks=False):
+    require(type(all_spatial_tasks) is bool and (not all_spatial_tasks or model_free),
+            '--all-spatial-tasks requires --model-free')
     require(type(trainer_mps_percent) is int and 1 <= trainer_mps_percent <= 100,
             'Trainer MPS percentage must be an integer from 1 to 100')
     require(model_free or trainer_mps_percent == 100,
@@ -282,12 +288,16 @@ def rollout_options(model_free, real_workers=4, no_micro_cache_trim=False, rollo
             and (trainer_compile == 'auto' or (model_free and trajectory_jit)),
             '--trainer-compile requires model-free trajectory JIT with a valid mode')
     explicit = {} if trainer_compile == 'auto' else {'trainer_compile': trainer_compile}
+    if all_spatial_tasks:
+        explicit['all_spatial_tasks'] = True
     return dict(**explicit, real_workers=real_workers, no_micro_cache_trim=no_micro_cache_trim,
                 rollout_inventory_gate=rollout_inventory_gate, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, compile_action_inference=compile_action_inference)
 
 
-def rollout_arguments(real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
+def rollout_arguments(real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto', all_spatial_tasks=False):
     args = [] if real_workers == 4 else ['--real-workers', str(real_workers)]
+    if all_spatial_tasks:
+        args.append('--all-spatial-tasks')
     if trainer_compile != 'auto':
         args.extend(['--trainer-compile', trainer_compile])
     if trainer_mps_percent != 100:
@@ -315,14 +325,14 @@ def trainer_cache_environment(trajectory_jit, no_micro_cache_trim, env):
     }
 
 
-def effective_pipeline(model_free=False, real_workers=4):
+def effective_pipeline(model_free=False, real_workers=4, *, all_spatial_tasks=False):
     if not model_free:
         return read(RECIPE/'pipeline_config.json')
     sys.path.insert(0,str(ENGINE))
     from types import SimpleNamespace
     from model_free_mode import pipeline_configuration
     return pipeline_configuration(SimpleNamespace(model_free=True,pipeline_config=RECIPE/'pipeline_config.json'),
-                                  real_workers=real_workers).to_dict()
+                                  real_workers=real_workers, all_spatial_tasks=all_spatial_tasks).to_dict()
 
 
 def exec_managed_driver(overrides=()):
@@ -337,7 +347,7 @@ def exec_managed_driver(overrides=()):
     add_fixed_validation_arguments(options)
     selected,other=options.parse_known_args(overrides)
     rollout_options(selected.model_free, selected.real_workers, selected.no_micro_cache_trim,
-                    selected.rollout_inventory_gate, real_episodes_per_minute=selected.real_episodes_per_minute, trainer_mps_percent=selected.trainer_mps_percent, trainer_compile=selected.trainer_compile, compile_action_inference=selected.compile_action_inference,
+                    selected.rollout_inventory_gate, real_episodes_per_minute=selected.real_episodes_per_minute, trainer_mps_percent=selected.trainer_mps_percent, all_spatial_tasks=selected.all_spatial_tasks, trainer_compile=selected.trainer_compile, compile_action_inference=selected.compile_action_inference,
                     trajectory_jit=selected.trajectory_jit,
                     real_sampling=selected.real_sampling)
     workers = selected.real_workers
@@ -351,12 +361,13 @@ def exec_managed_driver(overrides=()):
                 pipeline=os.environ["ACCERL_PIPELINE_CONFIG"], checkpoints=os.environ["ACCERL_FINAL_CHECKPOINT"],
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
     argv=training_arguments(values,model_free=selected.model_free,num_eval_workers=selected.num_eval_workers,
-                            fixed_validation=fixed_validation_overrides(selected),batch_autotune=selected.batch_autotune,real_sampling=selected.real_sampling,real_workers=workers) + other
+                            fixed_validation=fixed_validation_overrides(selected),batch_autotune=selected.batch_autotune,real_sampling=selected.real_sampling,real_workers=workers,all_spatial_tasks=selected.all_spatial_tasks) + other
     env=dict(os.environ)
     env.update(read(RECIPE/"env.json"))
     env.update(ACCERL_BATCH_AUTOTUNE=str(int(selected.batch_autotune)),ACCERL_MODEL_FREE=str(int(selected.model_free)),
                ACCERL_NUM_EVAL_WORKERS=str(mode_options(selected.model_free,selected.num_eval_workers)['num_eval_workers']))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(selected.model_free, selected.num_eval_workers, selected.batch_autotune, selected.trajectory_jit)))
+    env['ACCERL_ALL_SPATIAL_TASKS'] = str(int(selected.all_spatial_tasks))
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(selected.trajectory_jit, selected.real_sampling)
     if selected.trainer_compile != 'auto':
         env['ACCERL_COMPILE_TRAINER'] = str(int(selected.trainer_compile == 'on'))
@@ -378,9 +389,9 @@ def exec_managed_driver(overrides=()):
     os.execve(sys.executable,[sys.executable,str(ENGINE/"train.py"),*argv],env)
 
 
-def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto'):
+def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed_validation=None, batch_autotune=False, trajectory_jit=False, real_sampling='chunks', real_workers=4, no_micro_cache_trim=False, rollout_inventory_gate=False, compile_action_inference=False, real_episodes_per_minute=0.0, trainer_mps_percent=100, trainer_compile='auto', all_spatial_tasks=False):
     rollout_options(model_free, real_workers, no_micro_cache_trim, rollout_inventory_gate,
-                    trajectory_jit=trajectory_jit, real_sampling=real_sampling, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference)
+                    trajectory_jit=trajectory_jit, real_sampling=real_sampling, real_episodes_per_minute=real_episodes_per_minute, trainer_mps_percent=trainer_mps_percent, all_spatial_tasks=all_spatial_tasks, trainer_compile=trainer_compile, compile_action_inference=compile_action_inference)
     batch_autotune_options(model_free,num_eval_workers,batch_autotune)
     put(work/'visualization_config.json',read(RECIPE/'visualization.json'))
     host=settings()
@@ -394,10 +405,10 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
                 agent=str(ROOT/"envs/config/agent.yaml"),trainer=str(ROOT/"envs/config/trainer.yaml"))
     if model_free:
         values['pipeline']=str(work/'pipeline_config.json')
-        put(Path(values['pipeline']),effective_pipeline(True, real_workers=real_workers))
+        put(Path(values['pipeline']),effective_pipeline(True, real_workers=real_workers, all_spatial_tasks=all_spatial_tasks))
     else:
         put(work/"world.json", expand(read(RECIPE/"world_backend_config.json"),values))
-    argv=training_arguments(values,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,real_sampling=real_sampling,real_workers=real_workers)
+    argv=training_arguments(values,model_free=model_free,num_eval_workers=num_eval_workers,fixed_validation=fixed_validation,batch_autotune=batch_autotune,real_sampling=real_sampling,real_workers=real_workers,all_spatial_tasks=all_spatial_tasks)
     env={k:v for k,v in os.environ.items() if not k.startswith(("ACCERL_","ACCE_CAPTURE_","NSYS_","CUDA_INJECTION","NVTX_INJECTION","EXPERIMENT_QUEUE_"))}
     for key in ("RAY_ADDRESS","SOFT_STOP_AT","MEASURE_STOP_AFTER_EPOCHS","SHORT_TEST_DEADLINE",
                 "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE","CUDA_MPS_PINNED_DEVICE_MEM_LIMIT","CUDA_MPS_CLIENT_PRIORITY"):
@@ -426,6 +437,7 @@ def prepare(work, ids, run_id, *, model_free=False, num_eval_workers=None, fixed
                ACCERL_COST_SCHEDULER_CONFIG=str(RECIPE/"cost_scheduler_config.json"),
                ACCERL_RAY_TMP=f"/dev/shm/wr_{os.getuid()}_{uuid.uuid4().hex[:10]}",ACCERL_RAY_SPILL=str(work/"ray_spill"))
     env['ACCERL_TRAJECTORY_JIT']=str(int(trajectory_jit_options(model_free,num_eval_workers,batch_autotune,trajectory_jit)))
+    env['ACCERL_ALL_SPATIAL_TASKS'] = str(int(all_spatial_tasks))
     env['ACCERL_REAL_SAMPLING'] = real_sampling_options(trajectory_jit, real_sampling)
     if trainer_compile != 'auto':
         env['ACCERL_COMPILE_TRAINER'] = str(int(trainer_compile == 'on'))
@@ -458,7 +470,8 @@ def check(work, cmd, env, host):
         result=subprocess.run([sys.executable,str(ENGINE/"inspect_world_backend.py"),"--config",str(work/"world.json"),"--check-local"],
                           cwd=work,env=safe,text=True,capture_output=True,timeout=150)
         require(result.returncode==0,"Native WEAVER admission failed: "+(result.stdout+result.stderr)[-2000:])
-    subprocess.run([sys.executable,str(HERE/"check_runtime.py"),*cmd[2:]],cwd=work,env=safe,check=True,timeout=180)
+    reset_timeout = 600 if safe.get('ACCERL_ALL_SPATIAL_TASKS') == '1' else 180
+    subprocess.run([sys.executable,str(HERE/"check_runtime.py"),*cmd[2:]],cwd=work,env=safe,check=True,timeout=reset_timeout)
     if not model_free:
         subprocess.run([host["native"],"-c","import sys;sys.path.insert(0,sys.argv[1]);from weaver.wm import model,encoders;import torch;assert not torch.cuda.is_initialized()",
                     str(HERE/"vendor/weaver")],cwd=work,env=safe,check=True,timeout=90)
@@ -572,14 +585,14 @@ def main():
     args=parser.parse_args()
     selected=mode_options(args.model_free,args.num_eval_workers)
     rollout = rollout_options(args.model_free, args.real_workers, args.no_micro_cache_trim,
-                              args.rollout_inventory_gate, real_episodes_per_minute=args.real_episodes_per_minute, trainer_mps_percent=args.trainer_mps_percent, trainer_compile=args.trainer_compile, compile_action_inference=args.compile_action_inference,
+                              args.rollout_inventory_gate, real_episodes_per_minute=args.real_episodes_per_minute, trainer_mps_percent=args.trainer_mps_percent, all_spatial_tasks=args.all_spatial_tasks, trainer_compile=args.trainer_compile, compile_action_inference=args.compile_action_inference,
                               trajectory_jit=args.trajectory_jit,
                               real_sampling=args.real_sampling)
     selected.update(rollout)
     selected['batch_autotune']=batch_autotune_options(args.model_free,args.num_eval_workers,args.batch_autotune)
     selected['trajectory_jit']=trajectory_jit_options(args.model_free,args.num_eval_workers,args.batch_autotune,args.trajectory_jit)
     selected['real_sampling'] = real_sampling_options(args.trajectory_jit, args.real_sampling)
-    validation=fixed_validation_options(args.model_free,args.num_eval_workers,fixed_validation_overrides(args),real_sampling=args.real_sampling)
+    validation=fixed_validation_options(args.model_free,args.num_eval_workers,fixed_validation_overrides(args),all_spatial_tasks=args.all_spatial_tasks,real_sampling=args.real_sampling)
     require(args.action in ("original","restore","start","check") or (not args.model_free and args.num_eval_workers is None and not args.batch_autotune),"Training mode options are only for start/check")
     host=socket.gethostname()==REFERENCE_SERVER
     if args.action=='view':
@@ -640,7 +653,7 @@ def main():
             mps_preflight(env.get("CUDA_MPS_PIPE_DIRECTORY"),cards)
             env["CUDA_VISIBLE_DEVICES"]=",".join(cards)
             require(published(ROOT)==git_commit,"Revision changed during admission")
-            put(work/"command.json",dict(git_branch=BRANCH,git_commit=git_commit,argv=cmd,gpus=cards,run_id=run_id,recipe="model_free" if args.model_free else "original95",weights_only=True,**selected, pipeline=effective_pipeline(args.model_free, real_workers=args.real_workers),fixed_validation_config=validation))
+            put(work/"command.json",dict(git_branch=BRANCH,git_commit=git_commit,argv=cmd,gpus=cards,run_id=run_id,recipe="model_free" if args.model_free else "original95",weights_only=True,**selected, pipeline=effective_pipeline(args.model_free, real_workers=args.real_workers, all_spatial_tasks=args.all_spatial_tasks),fixed_validation_config=validation))
             put(outputs/"last.json",label)
             print(f"Starting {run_id}; log: {work/'train.log'}",flush=True)
             with (work/"train.log").open("xb") as log:

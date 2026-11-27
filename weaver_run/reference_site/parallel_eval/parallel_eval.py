@@ -124,10 +124,11 @@ def stopped_admission(adapter,master,source,run_id,git_commit):
 
 
 def prepare_plan(base,args,deadline):
+    task_options = {'all_spatial_tasks': True} if getattr(args, 'all_spatial_tasks', False) else {}
     if args.plan is not None:
         plan=json.loads(args.plan.read_text(encoding='utf-8'))
         if plan!=base.make_plan(plan['checkpoints'],initial_state_count=50,seed=plan['seed'],
-                                modes=plan['modes'],repeats=plan['repeats']):
+                                modes=plan['modes'],repeats=plan['repeats'],**task_options):
             raise ValueError('Supplied global plan differs from the reference protocol')
     else:
         checkpoints=[]
@@ -137,7 +138,7 @@ def prepare_plan(base,args,deadline):
             checkpoints.append(dict(item,name=name))
             del payload
             gc.collect()
-        plan=base.make_plan(checkpoints,modes=args.modes.split(','),seed=args.seed,repeats=args.repeats)
+        plan=base.make_plan(checkpoints,modes=args.modes.split(','),seed=args.seed,repeats=args.repeats,**task_options)
     recipes=[c['metadata']['args'] for c in plan['checkpoints']]
     if recipes[0]!=recipes[1] or recipes[0]['benchmark']!='libero_spatial':
         raise ValueError('Paired Policy recipes differ')
@@ -229,6 +230,7 @@ def main(argv=None):
     parser.add_argument('--run-id',required=True)
     parser.add_argument('--git-commit',required=True)
     parser.add_argument('--reference-source',type=Path)
+    parser.add_argument('--all-spatial-tasks',action='store_true')
     parser.add_argument('--baseline-checkpoint',type=Path)
     parser.add_argument('--final-checkpoint',type=Path)
     parser.add_argument('--plan',type=Path)
@@ -256,7 +258,7 @@ def main(argv=None):
         if prior is not None and not args.resume:raise ValueError('Existing evaluation requires explicit --resume')
         if prior is None and any((output/name).exists() for name in ('workers','episodes.jsonl','completed.json')):
             raise ValueError('Existing results have no execution identity')
-        deadline=choose_deadline(time.time(),args.max_seconds,args.deadline_unix,prior)
+        deadline=choose_deadline(time.time(),args.max_seconds,args.deadline_unix,prior,all_spatial_tasks=args.all_spatial_tasks)
         adapter=load_adapter(args.queue_wrapper,args.source,args.git_commit)
         env=None if args.validate_only else stopped_admission(
             adapter,args.master,args.source,args.run_id,args.git_commit)

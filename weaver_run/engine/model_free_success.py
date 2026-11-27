@@ -5,6 +5,7 @@ counts executed actions in those episodes only, excluding reset/settling steps.
 Timestamps are StatsActor observation times; elapsed_seconds starts at run launch.
 """
 from collections import deque
+from copy import deepcopy
 import math
 
 
@@ -20,19 +21,26 @@ class ModelFreeSuccess:
         self.run_started_ns = run_started_ns
         self.observed_ns = run_started_ns
         self.outcomes = deque(maxlen=WINDOW_SIZE)
+        self.task_ids = deque(maxlen=WINDOW_SIZE)
         self.successes = 0
         self.episodes = 0
         self.actions = 0
         self.crossings = {}
 
-    def observe(self, success, actions, observed_ns):
+    def observe(self, success, actions, observed_ns, task_id=None):
         if success not in (0, 1) or type(actions) is not int or actions < 1:
             raise ValueError('Expected a binary real episode outcome and a positive action count')
         if type(observed_ns) is not int or observed_ns < self.observed_ns:
             raise ValueError('Episode observation clock moved backwards')
+        if task_id is not None and (type(task_id) is not int or not 0 <= task_id < 10):
+            raise ValueError('Spatial task ID must be in 0..9')
+        if self.episodes and (task_id is not None) != bool(self.task_ids):
+            raise ValueError('The task coverage of the rollout stream changed')
         if len(self.outcomes) == WINDOW_SIZE:
             self.successes -= self.outcomes[0]
         self.outcomes.append(int(success))
+        if task_id is not None:
+            self.task_ids.append(task_id)
         self.successes += self.outcomes[-1]
         self.episodes += 1
         self.actions += actions
@@ -45,14 +53,22 @@ class ModelFreeSuccess:
 
     def _row(self):
         count = len(self.outcomes)
-        return dict(window_size=WINDOW_SIZE, window_episodes=count, window_successes=self.successes,
+        result = dict(window_size=WINDOW_SIZE, window_episodes=count, window_successes=self.successes,
                     success_rate=self.successes / count if count else 0.,
                     total_episodes_processed=self.episodes, total_env_steps=self.actions,
                     observed_ns=self.observed_ns, run_started_ns=self.run_started_ns,
                     elapsed_seconds=(self.observed_ns - self.run_started_ns) / 1e9)
+        if self.task_ids:
+            tasks = {str(i): dict(episodes=0, successes=0) for i in range(10)}
+            for task_id, outcome in zip(self.task_ids, self.outcomes, strict=True):
+                task = tasks[str(task_id)]
+                task['episodes'] += 1
+                task['successes'] += outcome
+            result['window_by_task'] = tasks
+        return result
 
     def snapshot(self):
-        return dict(self._row(), crossings={key: dict(row) for key, row in self.crossings.items()})
+        return dict(self._row(), crossings=deepcopy(self.crossings))
 
 
 def _validate_row(row):
@@ -69,6 +85,15 @@ def _validate_row(row):
             or (episodes == 0 and row['total_env_steps'] != 0)
             or row['observed_ns'] < row['run_started_ns']):
         raise ValueError('Inconsistent model-free success counters or timestamps')
+    if 'window_by_task' in row:
+        tasks = row['window_by_task']
+        if (not isinstance(tasks, dict) or set(tasks) != {str(i) for i in range(10)}
+                or any(not isinstance(v, dict) or type(v.get('episodes')) is not int
+                       or type(v.get('successes')) is not int or not 0 <= v['successes'] <= v['episodes']
+                       for v in tasks.values())
+                or sum(v['episodes'] for v in tasks.values()) != episodes
+                or sum(v['successes'] for v in tasks.values()) != successes):
+            raise ValueError('Per-task episode counts disagree with the pooled rollout window')
     for key, expected in (('success_rate', successes / episodes if episodes else 0.),
                           ('elapsed_seconds', (row['observed_ns'] - row['run_started_ns']) / 1e9)):
         if type(row.get(key)) not in (int, float) or not math.isfinite(row[key]) or row[key] != expected:

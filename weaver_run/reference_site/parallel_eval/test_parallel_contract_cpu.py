@@ -73,6 +73,26 @@ def rehash(value):
     return value
 
 
+class SpatialSuiteTests(unittest.TestCase):
+    def test_same_local_state_ids_across_tasks_remain_independent_pairs(self):
+        plan = make_plan(all_spatial_tasks=True)
+        self.assertEqual(plan['expected_episode_records'], 2000)
+        self.assertEqual(plan['task_ids'], list(range(10)))
+        self.assertEqual(len({(r['task_id'], r['initial_state_id']) for r in plan['cases']}), 500)
+        shards = contract.make_shards(plan)
+        self.assertEqual([w['expected_episode_records'] for w in shards['workers']], [500]*4)
+        ledgers = worker_ledgers(plan, shards)
+        rows = contract.merge_rows(plan, shards, ledgers, TOKEN, BASE)
+        summary = BASE.summarize(plan, rows)
+        self.assertTrue(summary['complete'])
+        self.assertEqual(summary['groups']['final:greedy']['episodes'], 500)
+        for t in range(10):
+            self.assertEqual(summary['per_task'][str(t)]['groups']['final:stochastic']['episodes'], 50)
+        self.assertEqual(summary['paired']['greedy']['expected_pairs'], 500)
+        row = dict(rows[0], task_id=9)
+        with self.assertRaises(ValueError):
+            BASE.validate_row(row, plan)
+
 class ShardContractTests(unittest.TestCase):
     def setUp(self):
         self.plan = make_plan()

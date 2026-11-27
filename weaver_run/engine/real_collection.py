@@ -76,6 +76,11 @@ class RealCollectionCoordinator:
         if self.initial_state_pool is not None and pool != self.initial_state_pool:
             raise ValueError('Real workers loaded different initial-state pools or horizons')
         if self.initial_state_scheduler is None:
+            if pool['count'] == 500:
+                from initial_state_env import spatial_pool_digest
+                if (pool.get('task_suite') != 'libero_spatial' or
+                        spatial_pool_digest(pool.get('task_names'), pool.get('task_pools')) != pool['sha256']):
+                    raise ValueError('Spatial collection requires its task-indexed initial-state registry')
             # JSON metadata is the only pool material admitted; state arrays stay
             # in each simulator, and the asset digest identifies their contents.
             copied_pool = json.loads(json.dumps(pool, allow_nan=False))
@@ -195,6 +200,16 @@ class RealCollectionCoordinator:
                                 ('reset_env_steps', 'reset_steps')):
                 if type(metadata.get(name)) is not int or metadata[name] != assigned[field]:
                     raise ValueError('Collected %s does not match its global assignment' % name)
+            task_metadata = {}
+            if self.initial_state_pool.get('task_suite') == 'libero_spatial':
+                from initial_state_env import spatial_task_state
+                task, local = spatial_task_state(assigned['initial_state_id'])
+                if (metadata.get('task_suite') != 'libero_spatial'
+                        or type(metadata.get('task_id')) is not int or metadata['task_id'] != task
+                        or type(metadata.get('task_initial_state_id')) is not int
+                        or metadata['task_initial_state_id'] != local):
+                    raise ValueError('Collected task or local initial state does not match its global lease')
+                task_metadata = dict(task_suite='libero_spatial', task_id=task, task_initial_state_id=local)
             # Whitelist the same small completion evidence as EpisodeReplayMixin.
             # The scheduler validates measured consumption before any lease is freed.
             self.initial_state_scheduler.finish(assigned['token'],
@@ -202,7 +217,7 @@ class RealCollectionCoordinator:
                 success=metadata['success'], episode_id=episode_id,
                 initial_state_hash=metadata['initial_state_hash'],
                 termination_reason=metadata['termination_reason'],
-                policy_versions=metadata.get('policy_versions', []))
+                policy_versions=metadata.get('policy_versions', []), **task_metadata)
         del self._leases[token]
         self._completed_ids.add(episode_id)
         self._counts['real_completed'] += 1

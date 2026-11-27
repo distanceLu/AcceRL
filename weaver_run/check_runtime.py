@@ -1,4 +1,4 @@
-"""Run the real parser, host-specific checks and one simulator reset on CPU."""
+"""Run the real parser, host-specific checks and a CPU reset for each requested task."""
 import hashlib
 import json
 import os
@@ -67,16 +67,25 @@ def main():
         assert load_settings()['enabled'] is False
     else:
         assert load_settings()["training_gangs"]==1
-    env=LiberoEnvWrapper(benchmark_name="libero_spatial",task_id=0,image_size=224,render_mode="rgb_array")
-    try:
-        assert len(env.initial_states)==50
-        obs,info=reset_with_initial_state(env,41,1997714015,220)
-        assert info["initial_state_hash"]=="059790d8e9594cc2ca835e58010a4eb0ce4130ae459511df4162e5dcbc52f7f3"
-        assert obs["full_image"].shape==obs["wrist_image"].shape==(224,224,3)
-    finally:
-        env.close()
+    all_spatial_tasks = os.environ.get('ACCERL_ALL_SPATIAL_TASKS','0')
+    if all_spatial_tasks not in ('0','1') or (all_spatial_tasks=='1' and not args.model_free):
+        raise ValueError('Unexpected LIBERO-Spatial task scope')
+    task_ids = list(range(10)) if all_spatial_tasks=='1' else [0]
+    if all_spatial_tasks=='1':
+        assert benchmark.get_benchmark_dict()['libero_spatial']().n_tasks == len(task_ids)
+    for task_id in task_ids:
+        env=LiberoEnvWrapper(benchmark_name="libero_spatial",task_id=task_id,image_size=224,render_mode="rgb_array")
+        try:
+            assert len(env.initial_states)==50
+            obs,info=reset_with_initial_state(env,41,1997714015,220)
+            if task_id == 0:
+                assert info["initial_state_hash"]=="059790d8e9594cc2ca835e58010a4eb0ce4130ae459511df4162e5dcbc52f7f3"
+            assert obs["full_image"].shape==obs["wrist_image"].shape==(224,224,3)
+        finally:
+            env.close()
     assert not torch.cuda.is_initialized()
-    print(json.dumps({"parsed_arguments_matched":len(expected),"libero_initial_states":50,
+    print(json.dumps({"parsed_arguments_matched":len(expected),"libero_initial_states":50*len(task_ids),
+                      "libero_task_ids":task_ids,
                       "cuda_initialized":False,"online_evaluation":online_eval}))
 
 

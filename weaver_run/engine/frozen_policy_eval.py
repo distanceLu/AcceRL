@@ -110,7 +110,7 @@ def validate_checkpoint_payload(payload):
 
 
 def make_plan(checkpoints, *, initial_state_count=50, seed=20261026,
-              modes=("greedy", "stochastic"), repeats=1):
+              modes=("greedy", "stochastic"), repeats=1, all_spatial_tasks=False):
     if initial_state_count != 50:
         raise ValueError("Formal evaluation requires all 50 initial states")
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**31:
@@ -132,20 +132,31 @@ def make_plan(checkpoints, *, initial_state_count=50, seed=20261026,
     for repeat in range(repeats):
         order = list(range(initial_state_count))
         random.Random(seed + repeat).shuffle(order)
-        for initial_id in order:
-            pair_seed = int(digest([seed, repeat, initial_id, "environment"])[:8], 16) % (2**31)
-            action_seed = int(digest([seed, repeat, initial_id, "actions"])[:8], 16) % (2**31)
-            for mode in modes:
-                cases.append({"pair_id": f"r{repeat}:s{initial_id}:{mode}", "repeat": repeat,
-                              "initial_state_id": initial_id, "env_seed": pair_seed,
-                              "action_seed": action_seed, "mode": mode,
-                              "deterministic": mode == "greedy"})
+        for task in range(10 if all_spatial_tasks else 1):
+            for initial_id in order:
+                identity = [seed, repeat, initial_id]
+                prefix = f"r{repeat}:s{initial_id}"
+                fields = {}
+                if all_spatial_tasks:
+                    identity = [seed, repeat, task, initial_id]
+                    prefix = f"r{repeat}:t{task}:s{initial_id}"
+                    fields = {"task_id": task}
+                pair_seed = int(digest([*identity, "environment"])[:8], 16) % (2**31)
+                action_seed = int(digest([*identity, "actions"])[:8], 16) % (2**31)
+                for mode in modes:
+                    cases.append({"pair_id": f"{prefix}:{mode}", "repeat": repeat,
+                                  "initial_state_id": initial_id, "env_seed": pair_seed,
+                                  "action_seed": action_seed, "mode": mode, **fields,
+                                  "deterministic": mode == "greedy"})
     plan = {"protocol": PROTOCOL, "checkpoints": checkpoints, "seed": seed,
             "initial_state_count": initial_state_count, "task_id": 0,
             "modes": modes, "repeats": repeats, "cases": cases,
             "horizon_action_steps": 220, "reset_settling_steps": 10,
             "policy_updates_during_evaluation": False, "inference_batch_size": 1,
             "expected_episode_records": len(cases) * len(checkpoints)}
+    if all_spatial_tasks:
+        plan.pop("task_id")
+        plan.update(task_suite="libero_spatial", task_ids=list(range(10)))
     plan["sha256"] = digest(plan)
     return plan
 
@@ -161,6 +172,8 @@ def validate_row(row, plan):
             or row.get("checkpoint") not in checkpoints or row.get("pair_id") not in cases):
         raise ValueError("Episode does not belong to this immutable paired plan")
     case, checkpoint = cases[row["pair_id"]], checkpoints[row["checkpoint"]]
+    if "task_ids" in plan and (type(row.get("task_id")) is not int or row["task_id"] != case["task_id"]):
+        raise ValueError("Episode pairing differs: task_id")
     if row.get("checkpoint_sha256") != checkpoint["sha256"]:
         raise ValueError("Episode checkpoint fingerprint differs")
     for field in ("initial_state_id", "repeat", "env_seed", "action_seed", "mode", "deterministic"):
@@ -233,20 +246,45 @@ def summarize(plan, rows, *, errors=(), finished_ns=None):
         if row_key(row) in keys:
             raise ValueError("Duplicate result in summary")
         keys.add(row_key(row))
+    per_mode = 50 * plan["repeats"]
+    tasks = plan.get("task_ids")
+    groups, paired = _episode_metrics(plan, rows, per_mode * (len(tasks) if tasks else 1), bool(tasks))
+    task_reports = {}
+    if tasks:
+        for task_id in tasks:
+            selected = [r for r in rows if r["task_id"] == task_id]
+            subgroup, subpairs = _episode_metrics(plan, selected, per_mode)
+            task_reports[str(task_id)] = {"groups": subgroup, "paired": subpairs}
+    complete = len(keys) == plan["expected_episode_records"] and not errors
+    return {"protocol": PROTOCOL, "plan_sha256": plan["sha256"], "complete": complete,
+            "finished_ns": finished_ns or time.time_ns(), "completed_episode_records": len(keys),
+            "expected_episode_records": plan["expected_episode_records"], "checkpoints": plan["checkpoints"],
+            "groups": groups, "paired": paired, "errors": list(errors),
+            **({"per_task": task_reports} if tasks else {}),
+            "limitations": ["Each task uses its own 50 training initial states." if tasks else
+                            "All 50 states belong to training task 0; this is not an unseen-task test.",
+                            "One stochastic repeat per state is the default; uncertainty needs more repeats.",
+                            "Identical seeds do not guarantee bitwise identical GPU kernels across hardware/software.",
+                            "Partial results compare only matched completed pairs and report missing coverage."]}
+
+
+def _episode_metrics(plan, rows, expected_per_mode, multi_task_group=False):
     groups, paired = {}, {}
     for checkpoint in plan["checkpoints"]:
         for mode in plan["modes"]:
             selected = [row for row in rows if row["checkpoint"] == checkpoint["name"] and row["mode"] == mode]
             covered = sorted({row["initial_state_id"] for row in selected})
             n = len(selected)
-            groups[checkpoint["name"] + ":" + mode] = {
-                "episodes": n, "expected_episodes": 50 * plan["repeats"],
+            group = {
+                "episodes": n, "expected_episodes": expected_per_mode,
                 "successes": sum(row["success"] for row in selected),
                 "success_rate": sum(row["success"] for row in selected) / n if n else None,
                 "mean_steps": sum(row["steps"] for row in selected) / n if n else None,
                 "mean_return": sum(row["episode_return"] for row in selected) / n if n else None,
-                "initial_state_ids": covered, "missing_initial_state_ids": sorted(set(range(50)) - set(covered)),
             }
+            if not multi_task_group:
+                group.update(initial_state_ids=covered, missing_initial_state_ids=sorted(set(range(50)) - set(covered)))
+            groups[checkpoint["name"] + ":" + mode] = group
     for mode in plan["modes"]:
         left = {r["pair_id"]: r for r in rows if r["checkpoint"] == "baseline" and r["mode"] == mode}
         right = {r["pair_id"]: r for r in rows if r["checkpoint"] == "final" and r["mode"] == mode}
@@ -255,7 +293,7 @@ def summarize(plan, rows, *, errors=(), finished_ns=None):
             if left[key]["initial_state_hash"] != right[key]["initial_state_hash"]:
                 raise ValueError("Paired episodes refer to different serialized initial states")
         changes = [int(right[key]["success"]) - int(left[key]["success"]) for key in matching]
-        paired[mode] = {"paired_episodes": len(matching), "expected_pairs": 50 * plan["repeats"],
+        paired[mode] = {"paired_episodes": len(matching), "expected_pairs": expected_per_mode,
                         "final_minus_baseline_success_rate": sum(changes) / len(changes) if changes else None,
                         "final_only_successes": sum(value == 1 for value in changes),
                         "baseline_only_successes": sum(value == -1 for value in changes),
@@ -263,15 +301,7 @@ def summarize(plan, rows, *, errors=(), finished_ns=None):
                         "both_failures": sum(not left[key]["success"] and not right[key]["success"] for key in matching),
                         "unpaired_baseline_episodes": len(left) - len(matching),
                         "unpaired_final_episodes": len(right) - len(matching)}
-    complete = len(keys) == plan["expected_episode_records"] and not errors
-    return {"protocol": PROTOCOL, "plan_sha256": plan["sha256"], "complete": complete,
-            "finished_ns": finished_ns or time.time_ns(), "completed_episode_records": len(keys),
-            "expected_episode_records": plan["expected_episode_records"], "checkpoints": plan["checkpoints"],
-            "groups": groups, "paired": paired, "errors": list(errors),
-            "limitations": ["All 50 states belong to training task 0; this is not an unseen-task test.",
-                            "One stochastic repeat per state is the default; uncertainty needs more repeats.",
-                            "Identical seeds do not guarantee bitwise identical GPU kernels across hardware/software.",
-                            "Partial results compare only matched completed pairs and report missing coverage."]}
+    return groups, paired
 
 
 def load_snapshot(path, deadline):
@@ -363,9 +393,11 @@ def run_episode(model, cfg, dtype, env, case, checkpoint, plan, deadline):
     from initial_state_env import reset_with_initial_state
     from rl.utils import prepare_one_obs
     started_ns = time.time_ns()
+    if "task_id" in case and (env.task_id != case["task_id"] or env.benchmark_name != "libero_spatial"):
+        raise ValueError("Case and simulator task differ")
     observation, initial_info = reset_with_initial_state(env, case["initial_state_id"], case["env_seed"])
     if env.max_episode_steps != 220 or env.num_steps_wait != 10:
-        raise ValueError("Formal task-0 evaluation horizon/reset protocol differs")
+        raise ValueError("Formal Spatial evaluation horizon/reset protocol differs")
     # Action sampling only uses torch. Do not overwrite the simulator's NumPy
     # state with the action seed after its explicitly seeded reset.
     torch.manual_seed(case["action_seed"])

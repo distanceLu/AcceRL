@@ -43,14 +43,18 @@ def set_real_training_action_horizon(env, action_horizon):
     env.max_episode_steps = action_horizon
 
 
-def initial_state_pool_metadata(env):
-    states = _state_array(env.initial_states)
+def _pool_content(states):
+    states = _state_array(states)
     if states.ndim != 2 or not len(states):
         raise ValueError('Expected a nonempty [initial_state, state_dimension] pool')
-    result = {'count': len(states), 'shape': list(states.shape), 'sha256': _digest(states),
-            'hash_semantics': 'canonical_array_shape_dtype_bytes',
-            'max_action_steps': int(getattr(env, '_unbounded_episode_steps', env.max_episode_steps)),
-            'reset_steps': int(env.num_steps_wait)}
+    return {'count': len(states), 'shape': list(states.shape), 'sha256': _digest(states),
+            'hash_semantics': 'canonical_array_shape_dtype_bytes'}
+
+
+def initial_state_pool_metadata(env):
+    result = dict(_pool_content(env.initial_states),
+                  max_action_steps=int(getattr(env, '_unbounded_episode_steps', env.max_episode_steps)),
+                  reset_steps=int(env.num_steps_wait))
     if hasattr(env, '_benchmark_episode_steps'):
         result['benchmark_action_horizon'] = int(env._benchmark_episode_steps)
     return result
@@ -82,3 +86,66 @@ def reset_with_initial_state(env, initial_state_id, env_seed, max_action_steps=N
 
 
 reset_explicit = reset_with_initial_state
+
+
+def spatial_task_state(global_id):
+    if type(global_id) is not int or not 0 <= global_id < 500:
+        raise ValueError('Spatial task assignment must index one of 500 task/state pairs')
+    return divmod(global_id, 50)
+
+
+def spatial_pool_digest(names, tasks):
+    if (not isinstance(names, list) or len(names) != 10 or not all(isinstance(n, str) and n for n in names)
+            or len(set(names)) != 10 or not isinstance(tasks, dict) or set(tasks) != {str(i) for i in range(10)}):
+        raise ValueError('Spatial pool must name all ten registered tasks')
+    identity = []
+    for task, name in enumerate(names):
+        pool = tasks[str(task)]
+        if pool['count'] != 50 or len(pool['shape']) != 2 or pool['shape'][0] != 50:
+            raise ValueError(f'Spatial task {task} must have 50 initial states')
+        identity.append(('libero_spatial', task, name, pool['sha256']))
+    return hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
+
+
+class SpatialTrainingEnvs:
+    """Resolve a globally leased Spatial state, keeping one EGL scene per worker."""
+
+    def __init__(self, first_env, suite, create_env):
+        if first_env.benchmark_name != 'libero_spatial' or first_env.task_id != 0 or suite.n_tasks != 10:
+            raise ValueError('Expected all ten LIBERO-Spatial tasks in suite order')
+        self.env = first_env
+        self.create_env = create_env
+        first_pool = initial_state_pool_metadata(first_env)
+        limits = {k: first_pool[k] for k in ('reset_steps', 'max_action_steps', 'benchmark_action_horizon')}
+        tasks = {}
+        names = []
+        for task in range(10):
+            content = _pool_content(suite.get_task_init_states(task))
+            tasks[str(task)] = dict(content, **limits)
+            names.append(suite.get_task(task).name)
+        if tasks['0'] != first_pool or first_env.task.name != names[0]:
+            raise ValueError('Simulator task or pool differs from the LIBERO-Spatial registry')
+        digest = spatial_pool_digest(names, tasks)
+        self.pool = dict(count=500, sha256=digest, task_suite='libero_spatial', task_names=names,
+                         task_pools=tasks, hash_semantics='ordered_suite_task_name_and_pool_sha256', **limits)
+
+    def reset(self, assigned):
+        global_id = assigned['initial_state_id']
+        task, local = spatial_task_state(global_id)
+        if task != self.env.task_id:
+            self.env.close()
+            env = self.create_env(task)
+            try:
+                set_real_training_action_horizon(env, self.pool['max_action_steps'])
+                if (env.benchmark_name != self.pool['task_suite'] or env.task_id != task
+                        or env.task.name != self.pool['task_names'][task]
+                        or initial_state_pool_metadata(env) != self.pool['task_pools'][str(task)]):
+                    raise ValueError(f'Spatial task {task} simulator or initial-state pool differs from registry')
+            except BaseException:
+                env.close()
+                raise
+            self.env = env
+        obs, info = reset_with_initial_state(self.env, local, assigned['env_seed'], assigned['max_action_steps'])
+        info.update(initial_state_id=global_id, task_suite='libero_spatial', task_id=task,
+                    task_initial_state_id=local)
+        return obs, info

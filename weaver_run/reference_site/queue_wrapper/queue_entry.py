@@ -26,9 +26,10 @@ def validate_budgets(args):
     if getattr(args,'stop_control',None) is not None or getattr(args,'measurement_seconds',None) is not None:
         raise ValueError('JIT deployment is manual-stop only')
     budgets.update(stop_at_ns=None, four_hour_cutoff_enabled=False)
+    maximum = DEFAULT_EVAL_SECONDS * (10 if getattr(args, "all_spatial_tasks", False) else 1)
     if (type(args.evaluation_seconds) is not int or args.evaluation_seconds < 60
-            or args.evaluation_seconds > DEFAULT_EVAL_SECONDS):
-        raise ValueError('Evaluation phase must be independently bounded to 60..7200 seconds')
+            or args.evaluation_seconds > maximum):
+        raise ValueError(f'Evaluation phase must be independently bounded to 60..{maximum} seconds')
     budgets.update(evaluation_seconds=args.evaluation_seconds,
                    final_cleanup_reserve_seconds=FINAL_CLEANUP_SECONDS,
                    ordered_phases=['training', 'final_checkpoint_cpu_audit',
@@ -44,6 +45,8 @@ def evaluation_command(args, seconds, *, run_id='weaverintegrated_plan_only', de
                '--max-seconds', str(seconds),
                '--modes', args.evaluation_modes, '--seed', str(args.evaluation_seed),
                '--repeats', str(args.evaluation_repeats)]
+    if getattr(args, 'all_spatial_tasks', False):
+        command += ['--all-spatial-tasks']
     if deadline_unix is not None:
         command += ['--deadline-unix', str(deadline_unix)]
     if args.baseline_checkpoint is not None:
@@ -51,7 +54,7 @@ def evaluation_command(args, seconds, *, run_id='weaverintegrated_plan_only', de
     return command
 
 
-def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochastic', repeats=1):
+def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochastic', repeats=1, all_spatial_tasks=False):
     path = root / 'policy_eval/completed.json'
     reasons = []
     if exit_code != 0:
@@ -65,7 +68,7 @@ def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochasti
         if (complete.get('errors') != [] or complete.get('cleanup',{}).get('survivors') != []
                 or complete.get('cleanup',{}).get('errors') != []):
             reasons.append('parallel_worker_errors_or_cleanup_unconfirmed')
-        expected = 2 * 50 * len(modes.split(',')) * repeats
+        expected = 2 * 50 * (10 if all_spatial_tasks else 1) * len(modes.split(',')) * repeats
         if (complete.get('initial_state_count') != 50
                 or complete.get('modes') != modes.split(',')
                 or complete.get('expected_episode_records') != expected
@@ -96,10 +99,11 @@ def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochasti
         checked_rows = plan_contract.merge_rows(plan, shards, by_worker, complete.get('run_token'), base)
         reconstructed = base.summarize(plan, checked_rows)
         if (len(checked_rows) != len(rows) or not reconstructed['complete']
-                or any(complete.get(key) != reconstructed[key] for key in ('groups', 'paired'))):
+                or any(complete.get(key) != reconstructed.get(key) for key in ('groups', 'paired', 'per_task'))):
             reasons.append('parallel_episode_ledger_coverage_or_summary_mismatch')
         workers = shards.get('workers', [])
-        if (plan.get('horizon_action_steps') != 220 or plan.get('task_id') != 0
+        if (plan.get('horizon_action_steps') != 220
+                or plan.get('task_ids', [plan.get('task_id')]) != (list(range(10)) if all_spatial_tasks else [0])
                 or len(workers) != 4 or [w.get('gpu_uuid') for w in workers] != list(training.GPUS)
                 or complete.get('shards_sha256') != shards.get('sha256')):
             reasons.append('four_gpu_220_step_protocol_mismatch')
@@ -117,7 +121,7 @@ def evaluation_acceptance(root, exit_code, remaining, *, modes='greedy,stochasti
         reasons.append('parallel_evaluation_evidence_unavailable:' + str(exc))
     return {'passed': not reasons, 'reasons': reasons,
             'completion_receipt': complete, 'exit_code': exit_code,
-            'scope': 'frozen checkpoints, paired complete 50-state pool; '
+            'scope': 'frozen checkpoints, paired full 50-state pool per selected task; '
                      'not an assertion of model improvement'}
 
 
@@ -153,7 +157,8 @@ def run(args):
     if getattr(args, 'skip_final_evaluation', False):
         receipt.update(state='succeeded', all_owned_exited=True,
             evaluation={'skipped':True,'reason':'user_requested_no_final_evaluation_for_infra_trials',
-                        'expected_episode_records':200,'completed_episode_records':0})
+                        'expected_episode_records':(500 if getattr(args, 'all_spatial_tasks', False) else 50)
+                        *2*len(args.evaluation_modes.split(','))*args.evaluation_repeats,'completed_episode_records':0})
         training.atomic_json(receipt_path, receipt)
         return 0
 
@@ -228,7 +233,8 @@ def run(args):
                 failure = failure or 'evaluator still alive after cleanup'
         evaluation = evaluation_acceptance(args.root,
                      child.returncode if child is not None else None, remaining,
-                     modes=args.evaluation_modes, repeats=args.evaluation_repeats)
+                     modes=args.evaluation_modes, repeats=args.evaluation_repeats,
+                     all_spatial_tasks=getattr(args, 'all_spatial_tasks', False))
         if failure:
             evaluation['passed'] = False
             evaluation['wrapper_error'] = failure
@@ -253,7 +259,7 @@ def main():
     parser.add_argument('--git-commit', required=True)
     parser.add_argument('--post-stop-grace-seconds', type=int, default=1800)
     parser.add_argument('--native-gpu-preflight', action='store_true')
-    parser.add_argument('--evaluation-seconds', type=int, default=DEFAULT_EVAL_SECONDS)
+    parser.add_argument('--evaluation-seconds', type=int)
     parser.add_argument('--evaluation-modes', choices=('greedy', 'greedy,stochastic'), default='greedy,stochastic')
     parser.add_argument('--evaluation-seed', type=int, default=20261026)
     parser.add_argument('--evaluation-repeats', type=int, default=1)
@@ -269,6 +275,8 @@ def main():
     add_fixed_validation_arguments(parser)
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
+    if args.evaluation_seconds is None:
+        args.evaluation_seconds = DEFAULT_EVAL_SECONDS * (10 if args.all_spatial_tasks else 1)
     if args.evaluation_repeats < 1:
         parser.error('evaluation repeats must be positive')
     try:

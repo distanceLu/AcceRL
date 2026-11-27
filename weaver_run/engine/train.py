@@ -600,9 +600,10 @@ class StatsActor:
                 "total_episodes_processed": 0, "total_env_steps": 0}
 
     def add_episode_return(self, env_name, ep_return, step_time, ep_length, success,
-                           actor_id=None, step_num=0, completed_ns=None, evaluation_versions=None):
+                           actor_id=None, step_num=0, completed_ns=None, evaluation_versions=None,
+                           task_id=None):
         if self.model_free_success is not None and not env_name.startswith("eval_"):
-            self.model_free_success.observe(success, ep_length, now_ns())
+            self.model_free_success.observe(success, ep_length, now_ns(), task_id=task_id)
         if env_name.startswith("eval_") and env_name not in self.stats:
             self.stats[env_name] = self._episode_stats(self.eval_window_size)
         env_stats = self.stats[env_name]
@@ -1273,6 +1274,7 @@ class RolloutWorkerActor(BaseWorkerActor):
             raise ValueError('Model-free mode cannot construct imagination workers')
         pipeline = PipelineBudgetConfig.from_json(pipeline_config)
         self.initial_state_enabled = pipeline.initial_state_enabled
+        self.spatial_tasks = None
         self.pipeline_poll_seconds = pipeline.poll_seconds
         self.pipeline_max_episode_frames = pipeline.max_episode_frames
         if worker_mode == "real":
@@ -1289,9 +1291,20 @@ class RolloutWorkerActor(BaseWorkerActor):
                 raise ValueError("Episode frame budget is smaller than the environment horizon")
             if self.initial_state_enabled:
                 from initial_state_env import initial_state_pool_metadata
-                if len(self.envs) != 1:
-                    raise ValueError('Initial-state allocator requires one explicitly identified task')
-                self.initial_state_pool = initial_state_pool_metadata(self.envs[0])
+                if self.model_free and pipeline.initial_state_count == 500:
+                    from functools import partial
+                    from initial_state_env import SpatialTrainingEnvs
+                    from libero.libero import benchmark
+                    from rl.libero_env import LiberoEnvWrapper
+                    suite = benchmark.get_benchmark_dict()[benchmark_name]()
+                    create_env = partial(LiberoEnvWrapper, benchmark_name, image_size=224, render_mode='rgb_array')
+                    self.spatial_tasks = SpatialTrainingEnvs(self.envs.pop(), suite, create_env)
+                    self.num_tasks = suite.n_tasks
+                    self.initial_state_pool = self.spatial_tasks.pool
+                else:
+                    if len(self.envs) != 1:
+                        raise ValueError('Initial-state allocator requires one explicitly identified task')
+                    self.initial_state_pool = initial_state_pool_metadata(self.envs[0])
         else:
             # Imagination workers own no simulator and no GPU model.
             self.infer, self.replay, self.wid = infer, replay, wid
@@ -1346,17 +1359,24 @@ class RolloutWorkerActor(BaseWorkerActor):
         self.real_traj_collect_interval = real_traj_collect_interval
 
     def _reset_and_select_env(self, seed=None, initial_state=None):
-        failure_counts = np.array([sum(history) for history in self.env_outcome])
-        env_weights = failure_counts + 1
-        probabilities = env_weights / np.sum(env_weights)
-        self.current_env_idx = np.random.choice(self.num_tasks, p=probabilities)
-        self.env = self.envs[self.current_env_idx]
-        if initial_state is None:
-            obs, info = self.env.reset(seed=seed)
+        if getattr(self, 'spatial_tasks', None) is not None:
+            if initial_state is None:
+                raise ValueError('Ten-task collection requires a global task/state assignment')
+            obs, info = self.spatial_tasks.reset(initial_state)
+            self.env = self.spatial_tasks.env
+            self.current_env_idx = self.env.task_id
         else:
-            from initial_state_env import reset_with_initial_state
-            obs, info = reset_with_initial_state(self.env, initial_state['initial_state_id'],
-                initial_state['env_seed'], initial_state['max_action_steps'])
+            failure_counts = np.array([sum(history) for history in self.env_outcome])
+            env_weights = failure_counts + 1
+            probabilities = env_weights / np.sum(env_weights)
+            self.current_env_idx = np.random.choice(self.num_tasks, p=probabilities)
+            self.env = self.envs[self.current_env_idx]
+            if initial_state is None:
+                obs, info = self.env.reset(seed=seed)
+            else:
+                from initial_state_env import reset_with_initial_state
+                obs, info = reset_with_initial_state(self.env, initial_state['initial_state_id'],
+                    initial_state['env_seed'], initial_state['max_action_steps'])
         self.task_description = self.env.task_description
         self.current_env_name = self.env.get_name()
         return obs, info
@@ -1465,7 +1485,8 @@ class RolloutWorkerActor(BaseWorkerActor):
                 if not budget_cut:
                     stats_ref = self.stats_actor.add_episode_return.remote(
                         self.current_env_name, reward_sum, step_time,
-                        step_count_total, success, actor_id=self.wid, step_num=step_count)
+                        step_count_total, success, actor_id=self.wid, step_num=step_count,
+                        **({'task_id': self.current_env_idx} if getattr(self, 'spatial_tasks', None) is not None else {}))
                     if self.model_free:
                         # 先确认回合已计数，再释放采集配额，避免排空时漏判达标。
                         ray.get(stats_ref)
@@ -4520,6 +4541,11 @@ def main(args):
     online_weaver = isolated_online_weaver(world_config)
     validate_online_runtime_arguments(world_config, args)
     pipeline_config = pipeline_configuration(args)
+    all_spatial = os.environ.get('ACCERL_ALL_SPATIAL_TASKS') == '1'
+    if model_free and (pipeline_config.initial_state_count == 500) != all_spatial:
+        raise ValueError('Ten-task Spatial training requires its 500-state allocation pool')
+    if all_spatial and (not model_free or args.benchmark != 'libero_spatial' or not pipeline_config.initial_state_enabled):
+        raise ValueError('All Spatial tasks require model-free LIBERO-Spatial with explicit initial-state allocation')
     rollout_inventory_gate = os.environ.get('ACCERL_ROLLOUT_INVENTORY_GATE') == '1'
     from real_collection import configured_episode_rate
     real_episode_rate = configured_episode_rate(os.environ.get('ACCERL_REAL_EPISODES_PER_MINUTE', '0'),
@@ -4653,7 +4679,12 @@ def main(args):
 
     print(f"Ray 初始化完成，对象存储分配 {object_store_size_gb} GB 内存。")
     runs_dir = os.environ.get("ACCERL_TENSORBOARD_RUNS", "runs")
-    log_dir = f"{runs_dir}/Libero/{args.benchmark}/{int(time.time())}_{args.exp_name}"
+    if all_spatial:
+        # The experiment label also identifies this run in the queue and on disk.
+        run_name = Path(os.environ["ACCERL_EXPERIMENT_ROOT"]).name
+    else:
+        run_name = f"{int(time.time())}_{args.exp_name}"
+    log_dir = f"{runs_dir}/Libero/{args.benchmark}/{run_name}"
     writer = CaptureSummaryWriter(log_dir, tensorboard=(
         os.environ.get("ACCERL_CAPTURE_ONLY") != "1" or os.environ.get("ACCERL_TENSORBOARD") == "1"))
     writer.model_free = model_free
@@ -5665,8 +5696,13 @@ def main(args):
 
             writer.add_scalar('Rollout/_Global/Average_Return', avg_return, global_step)
             if model_free:
-                writer.add_scalar('Rollout/_Global/Success_Rate',
-                    model_free_runtime.rollout_success()['success_rate'], global_step)
+                rollout_window = model_free_runtime.rollout_success()
+                writer.add_scalar('Rollout/_Global/Success_Rate', rollout_window['success_rate'], global_step)
+                for task_id, row in rollout_window.get('window_by_task', {}).items():
+                    prefix = f'Rollout/Spatial_Task_{task_id}/'
+                    writer.add_scalar(prefix + 'Window_Episodes', row['episodes'], global_step)
+                    if row['episodes']:
+                        writer.add_scalar(prefix + 'Success_Rate', row['successes']/row['episodes'], global_step)
                 if last_log_real_steps is not None:
                     writer.add_scalar('Rollout/_Global/Completed_Episode_Env_Steps_Per_Sec',
                         (total_env_steps-last_log_real_steps)/max(current_time-last_log_time, 1e-9), global_step)
@@ -5780,7 +5816,8 @@ class CaptureSummaryWriter:
             'Metrics/Training_Speed_Steps_per_Sec', 'Train/Learning_Rate/Policy',
             'Train/Learning_Rate/Value', 'System/Total_Env_Steps', 'System/Total_Episodes_Processed')
         if self.tensorboard is not None and (tag in self.TENSORBOARD_TAGS or tag in (world_tag, reward_tag)
-                or (getattr(self, 'model_free', False) and tag in model_free_tags)):
+                or (getattr(self, 'model_free', False) and
+                    (tag in model_free_tags or tag.startswith('Rollout/Spatial_Task_')))):
             self.tensorboard.add_scalar(tag, value, step, walltime=walltime,
                                         new_style=double_precision, double_precision=double_precision)
     def flush(self):
