@@ -2,6 +2,8 @@
 
 这个分支运行 OpenVLA Policy 与 WEAVER World/Reward Model 在 LIBERO Spatial task 0 上的联合训练。入口是仓库根目录的 `./run.sh`。当前代码采用用户选定的橙线 `1793355532` 算法，从原始 OpenVLA、蒸馏 Policy 和 native3200 World 权重开始，重新建立 optimizer 和 Replay。新实验规则把真实训练任务上限设为150动作：达到上限仍未成功记为正式失败，RM使用有效零标签，Policy按终止处理且不bootstrap；正式评估仍为220动作。代码配置不代表新进程已启动，实际运行以队列回执中的Git提交号为准。训练等待用户明确停止，不设次日自动截止；原1M模拟调用预算和故障保护保留。
 
+LIBERO-Spatial Task 0 的四卡 Model-free 训练已有两条实测基线。追求首次在线 990/1,000 的墙钟纪录，可复现 `mf8-compile-sat-1126-a`；需要每秒至少 50 个真实环境动作时，可用 `mf8-compile90-whole-1127-a`。实测条件和启动命令见下文的[四卡训练基准](#四卡训练基准)。
+
 ## 在另一台服务器上启动
 
 ```bash
@@ -43,9 +45,9 @@ cp .weaver.env.example .weaver.env
 
 ## 可选 Model-free 模式
 
-`--model-free` 从四个真实采集 worker 最近完成的 1,000 个有效训练回合计算成功率。首次达到 980 次成功时记录时间，首次达到 990 次成功时在安全更新边界保存权重并停止训练。固定 50 初态评测继续记录冻结策略的表现。
+`--model-free` 汇总所有真实采集 worker 最近完成的 1,000 个有效训练回合。首次达到 980 次成功时记录时间，首次达到 990 次成功时在安全更新边界保存权重并停止训练。固定 50 初态评测继续记录冻结策略的表现。
 
-`--model-free` 默认关闭，完整设置与验证边界见[Model-free 模式说明](docs/model-free.md)。启用后只创建四个 Policy trainer 和四个推理副本，四个真实采集 worker 各绑定一张卡的 EGL renderer。在线 Eval 默认关闭；显式 `--num-eval-workers 4` 时连接副本0、1、2、3。训练仍使用 task0、双图像、无 proprio、原 pretrained + distilled Policy 初始化、GIPO 和当前 Value 重算 GAE。真实预算1M步、训练150动作及固定评测220动作保持。
+`--model-free` 默认关闭，完整设置与验证边界见[Model-free 模式说明](docs/model-free.md)。启用后创建四个 Policy trainer 和四个推理副本。默认四个真实采集 worker 各绑定一张卡的 EGL renderer，下面的训练基准显式设为八个 worker。在线 Eval 默认关闭；显式 `--num-eval-workers 4` 时连接副本0、1、2、3。训练仍使用 task0、双图像、无 proprio、原 pretrained + distilled Policy 初始化、GIPO 和当前 Value 重算 GAE。真实预算1M步、训练150动作及固定评测220动作保持。
 
 ```bash
 ./run.sh check --model-free                       # CPU验收，无训练
@@ -56,6 +58,35 @@ cp .weaver.env.example .weaver.env
 原站仍从 `/mnt/data/lcx1/dong/WEAVER/run.sh` 提交，入队前同步并核对同一 Git 分支。模式、有效 pipeline、Eval 数及 `git_commit` 写入实验记录。Model-free 不检查或加载 World/Reward 权重、编码器和独立 native Python，不生成想象数据或 WM replay；当前版本关闭 cost scheduler 与库存补货。仅需原 Policy 资源及控制环境/LIBERO 资源。
 
 TensorBoard 使用含 `ModelFree_Real4_Imag0_Eval0`（或 `Eval4`）的实验名，原站继续写入现有 `AcceRL-scheduler/runs/Libero/` 监控目录。真实采集、Policy/Value 更新与资源曲线保留；不存在的 World/Reward/Imag 和关闭的在线 Eval 不写伪零曲线。固定 checkpoint 评测保持原有独立流程；在线 Eval0 不关闭训练结束后的固定评测。
+
+### 四卡训练基准
+
+2026-11-24 至 11-27，原站 GPU 4–7 共完成 14 场可比的 Model-free 正式训练，均为 4× H20-3e、LIBERO-Spatial Task 0、同一 P0 和 8 个 rollout worker。下表四场均使用提交 `af68a45`、全局每步 576 个 chunk（每卡 `16×9`）和 rollout CUDA Graph。「编译」指 Trainer 的 Inductor 开关。MPS 百分比是 Trainer 客户端的配置。
+
+| 实验 | 编译 / MPS / 采样 | 秒/步 ↓ | 环境动作/s ↑ | 推理 P95，服务 / 客户端（ms）↓ | 首次在线 990 ↓ | 触发时已发布 → 终评版本 | 冻结终评，贪心 / 随机 |
+|---|---|---:|---:|---:|---:|---|---|
+| `mf8-compile-sat-1126-a` | 开 / 100% / `uniform_blocks` | **26.94** | 40.90 | 1,291 / 1,980 | **1:38:06** | P209 → P210 | 49/50 · 50/50 |
+| `mf8-compile90-whole-1127-a` | 开 / 90% / `whole_episodes` | **28.89** | **55.87** | 694 / 1,051 | **2:00:01** | P237 → P238 | 50/50 · 50/50 |
+| `mf8-eager-sat-1126-a` | 关 / 100% / `uniform_blocks` | 31.31 | 47.70 | 1,020 / 1,391 | 2:12:16 | P244 → P244 | 50/50 · 50/50 |
+| `mf8-compile90-1127-r1` | 开 / 90% / `uniform_blocks` | 30.14 | 56.73 | 692 / 1,044 | 2:27:41 | P279 → P280 | 50/50 · 49/50 |
+
+**选配方。** 100% MPS 编译组保持这 14 场的步时与在线达标双纪录。若要求 ≤32 秒/步且 ≥50 动作/s，90% MPS 整回合组是已测配置中步时最短的一组。与同 MPS 的 `uniform_blocks` 相比，它的 238 次采样均成功按完整回合装批，稳态无梯度后缀前向从 0.468 降到 0 秒/rank/步，反向耗时维持约 14.75 秒/rank/步。四组分别只有一次达标观测，冻结终评每种解码方式各 50 回合，跨种子的平均达标时间与策略质量排序仍待验证。
+
+**计量口径。** 稳态取 P20 至 P88 四卡权重发布 ACK 之间的 68 个更新间隔，服务 P95 取 `policy_infer_gpu_forward_and_copy`，客户端 P95 取 `policy_infer` 的等待。首次在线 990 从 GPU 队列实际启动作业算到最近 1,000 个有效回合首次出现 990 个成功，排队和冻结终评均在该区间之外。每场的原始记录位于原站 `experiments/<实验名>/` 下的 `experiment.json`、`formal_v3/training/collection.sqlite` 和 `policy_eval/summary.json`。
+
+**微批仍用 `16×9`。** 固定 P189 权重的四卡短测 `mf8-micro16-24-p189-1127-b`（`aaf41eb`）在同一批 576 个样本上核对了 `24×6`。GAE advantage 和 value target 的最大绝对差分别为 0.00854 和 0.00109，均通过预设容差。裁剪前的完整 ZeRO-2 累积梯度相对 L2 误差为 **11.46%**，余弦相似度为 **0.99342**，超出验收范围（相对 L2 ≤2%，余弦 ≥0.999）。短测在正式计时前结束，`24×6` 的稳态显存、步时和推理 P95 仍无配对测量。完整误差在该实验的 `result.json`，方法见[配对短测协议](docs/model-free.md#p189-四卡微批配对短测)。
+
+复现速度纪录时，在原站使用新实验名并固定实际训练提交。复现 90% MPS 整回合组时，将下面的 `--trainer-mps-percent` 改为 `90`、`--real-sampling` 改为 `whole_episodes`，另取新实验名。
+
+```bash
+cd /mnt/data/lcx1/dong/WEAVER
+./run.sh start restore --id mf8-compile100-record-repeat \
+  --source-commit af68a4541a844dead9be02b874b4bc8da1a0596e \
+  --model-free --num-eval-workers 0 --fixed-validation-interval-env-steps 0 \
+  --batch-autotune --trajectory-jit --real-workers 8 --no-micro-cache-trim \
+  --compile-action-inference --trainer-compile on \
+  --trainer-mps-percent 100 --real-sampling uniform_blocks
+```
 
 ## 训练仿真、想象轨迹与评估回放
 
