@@ -304,8 +304,10 @@ def rollout_arguments(real_workers=4, no_micro_cache_trim=False, rollout_invento
 
 
 def trainer_cache_environment(trajectory_jit, no_micro_cache_trim, env):
-    # Frozen diagnostic runs compare against the original allocator and IPC path.
-    fast = trajectory_jit and no_micro_cache_trim and not env.get('ACCERL_JIT_BENCH_PLAN')
+    # The shape comparison benchmarks the production allocator/IPC path.
+    bench = env.get('ACCERL_JIT_BENCH_PLAN')
+    fast = trajectory_jit and no_micro_cache_trim and (
+        not bench or (Path(bench).is_file() and read(Path(bench)).get('comparison') == 'micro_shapes'))
     return {
         'ACCERL_TRIM_MICRO_CACHE': '0' if no_micro_cache_trim else '1',
         'ACCERL_TRIM_IDLE_CACHE': '0' if fast else '1',
@@ -550,12 +552,13 @@ def main():
         from weaver_run.reference_site.legacy_baseline import main as legacy_main
         legacy_main(sys.argv[2:])
         return
-    if sys.argv[1:2] == ['bench-admission-pulse'] and socket.gethostname() == REFERENCE_SERVER:
+    if (len(sys.argv)>1 and sys.argv[1] in ('bench-admission-pulse','bench-micro-shapes','bench-micro-shapes-status')
+            and socket.gethostname() == REFERENCE_SERVER):
         # 短测的参数在原站队列入口统一解析。
         cli = HERE/'reference_site/cli.py'
         os.execv(sys.executable, [sys.executable, '-I', '-B', str(cli), *sys.argv[1:]])
     parser=argparse.ArgumentParser(prog="./run.sh")
-    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","bench-episode-sampling","bench-episode-sampling-status","bench-trajectory-layout","bench-trajectory-layout-status","bench-admission-pulse","bench-admission-pulse-status","bench-critical-jit","bench-critical-jit-status","view"],default="original",nargs="?")
+    parser.add_argument("action",choices=["original","restore","start","check","status","stop","diagnose","diagnose-status","diagnose-rm","diagnose-rm-status","bench-jit","bench-jit-status","bench-episode-sampling","bench-episode-sampling-status","bench-trajectory-layout","bench-trajectory-layout-status","bench-admission-pulse","bench-admission-pulse-status","bench-critical-jit","bench-critical-jit-status","bench-micro-shapes","bench-micro-shapes-status","view"],default="original",nargs="?")
     parser.add_argument("--id",help="Run label. Use the same label to check or stop the run.")
     parser.add_argument("--root",type=Path,help="Existing output directory (view only)")
     parser.add_argument("--port",type=int,default=8765,help="Loopback viewer port (view only)")

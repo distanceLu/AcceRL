@@ -33,6 +33,7 @@ class MemoryTests(unittest.TestCase):
         meter.end_micro()
         self.assertEqual(meter.report(), dict(total_bytes=1000,
             peak_used_bytes=310, activation_bytes=80))
+        self.assertEqual(meter.sampled_peak_used,240)
 
     def test_rejects_config_drift_before_training(self):
         owner = SimpleNamespace(_batch_autotune_enabled=True, training_role='policy',

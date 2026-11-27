@@ -18,7 +18,7 @@ class DeviceMemoryMeter:
     """
     def __init__(self, cuda):
         self.cuda = cuda
-        self.total = self.peak_used = self.activation = 0
+        self.total = self.peak_used = self.sampled_peak_used = self.activation = 0
 
     def begin_micro(self):
         self.base = int(self.cuda.memory_allocated())
@@ -30,7 +30,9 @@ class DeviceMemoryMeter:
         # Account for our own peak reservations already released at this point.
         released = max(0, int(self.cuda.max_memory_reserved()) - int(self.cuda.memory_reserved()))
         self.total = int(total)
-        self.peak_used = max(self.peak_used, int(total-free) + released)
+        used = int(total-free)
+        self.sampled_peak_used = max(self.sampled_peak_used, used)
+        self.peak_used = max(self.peak_used, used + released)
 
     def end_micro(self):
         self.activation = max(self.activation, int(self.cuda.max_memory_allocated()) - self.base)

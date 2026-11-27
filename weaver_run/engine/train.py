@@ -1910,12 +1910,16 @@ class InferenceActor(ColocatedInferenceMixin, InferenceActorCom):
         from batch_autotune_runtime import refresh_values
         return await refresh_values(self, inputs, expected_version, batch_sizes=batch_sizes)
 
-    def get_batch_autotune_stats(self, policy_step):
+    def get_batch_autotune_stats(self, policy_step, *, include_graph=False):
         from batch_autotune_runtime import inference_report
+        summary = None
         if self.compiled_actions is not None:
             summary = self.compiled_actions.summary()
             self._record_compiled_event('compiled_policy_stats', dict(summary, policy_step=int(policy_step)))
-        return inference_report(self, policy_step)
+        report = inference_report(self, policy_step)
+        if include_graph:
+            report['compiled_policy'] = summary
+        return report
 
     def pulse_action_demand(self):
         # 仅短测首次查询时启用；四个真实采集器是该作业仅有的动作请求来源。

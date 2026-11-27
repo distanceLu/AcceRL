@@ -186,6 +186,14 @@ cd /mnt/data/lcx1/dong/WEAVER
 ./run.sh bench-admission-pulse --id p189-real8-no-micro-trim --normal-only --real-workers 8 --no-micro-cache-trim
 ```
 
+### P189 四卡微批配对短测
+
+在原站运行 `./run.sh bench-micro-shapes --id <实验ID> --check-only` 可校验 P189 checkpoint、正式配方和队列入口。去掉 `--check-only` 即可将短测挂入 GPU 4–7 队列。用 `./run.sh bench-micro-shapes-status --id <实验ID>` 查询。
+
+短测固定 P189 权重、90% Trainer MPS、Inductor、推理 CUDA Graph 和 8 个真实采集进程。Replay 用固定种子从同一次库存快照按 `uniform_blocks` 抽取 576 个样本，两种微批配置共用每个 rank 的 144 个样本、输入顺序和原始有效 token 分母。一次初始化更新后保存 AdamW 与优势 EMA 的数值状态，后续每次对照均从该状态开始，学习率为零。
+
+先逐样本比较 GAE advantage 与 value target，容差为 `0.01 + 0.01 × |参考值|`。在最后一次 backward 完成后、裁剪和 AdamW 前比较四卡 ZeRO-2 累积梯度，全局与各优化器参数组均要求相对 L2 误差不超过 2%、余弦相似度至少 0.999。通过后分别预热，按 `16/24、24/16、24/16、16/24` 做四对计时。切换 GAS 所需的对齐更新单列在 `setup`。实验目录的 `result.json` 保留逐对步时、IPC、显存以及同一训练窗口内推理服务和客户端等待的 P95 与样本数。
+
 ### 固定真实回合的发放速率
 
 8 个真实 worker 的 `uniform_blocks` 和 `first_use_blocks` 轨迹 JIT 作业可加 `--real-episodes-per-minute 22.2`。8 个环境合计每隔至少 2.70 秒开放一个新回合，已有回合继续执行；环境忙时实际发放率可以更低。默认值 0 关闭限速。固定限速与 `--rollout-inventory-gate` 分别用于静态和自适应对照，两者均可搭配 `--compile-action-inference`。实际发放率由初态队列的租约时间戳计算。

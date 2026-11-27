@@ -121,12 +121,18 @@ def run_benchmark(*, ray, args, replay, trainers, inference, collector, workers,
     normal_only = plan.get('normal_only', False)
     expected_workers = plan.get('real_workers', 4)
     critical = plan.get('comparison') == 'critical_jit'
+    shapes = plan.get('comparison') == 'micro_shapes'
     if (normal_only != (os.environ.get('WEAVER_BENCH_NORMAL_ONLY') == '1') or
             normal_only and plan.get('comparison') != 'admission_pulse' or
-            expected_workers not in ((8,) if critical else (4, 8) if normal_only else (4,)) or
+            expected_workers not in ((8,) if critical or shapes else (4, 8) if normal_only else (4,)) or
             len(workers) != expected_workers or len(trainers) != 4 or len(inference) != 4 or
             args.num_eval_workers != 0 or not args.batch_autotune):
         raise ValueError('P189 benchmark topology or normal-only mode differs from the recorded plan')
+    if shapes:
+        from micro_shape_bench import run_micro_shapes
+        return run_micro_shapes(ray=ray, plan=plan, output=output, replay=replay, trainers=trainers,
+            inference=inference, collector=collector, workers=workers, sync_policy=sync_policy,
+            experiment=experiment, stop_requested=stop_requested)
     if critical:
         from critical_jit_bench import run_critical_jit_benchmark
         return run_critical_jit_benchmark(ray=ray, plan=plan, output=output, replay=replay, trainers=trainers,

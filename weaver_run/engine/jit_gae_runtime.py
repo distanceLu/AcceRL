@@ -152,17 +152,19 @@ def _precompute(owner, segments, bundles, device, counters, context_micro):
 
 
 def run_jit_policy_update(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim,
-                          original_denominators=None, context_timer=None, config=None):
+                          original_denominators=None, context_timer=None, config=None,
+                          paired_micro=None, before_optimizer_step=None):
     from cost_scheduler_runtime import scheduled_policy_update
     with scheduled_policy_update(owner):
         return _run(owner, observations, actions_np, old_logits_np,
                     micro_begin=micro_begin, micro_end=micro_end, trim=trim,
                     original_denominators=original_denominators, context_timer=context_timer,
-                    config=owner.fresh_config if config is None else config)
+                    config=owner.fresh_config if config is None else config,
+                    paired_micro=paired_micro, before_optimizer_step=before_optimizer_step)
 
 
 def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_end, trim,
-         original_denominators, context_timer, config):
+         original_denominators, context_timer, config, paired_micro=None, before_optimizer_step=None):
     started = time.monotonic()
     device = next(owner.model.parameters()).device
     version = int(owner.global_step)
@@ -174,6 +176,11 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         'forward_vote_host_wait_s'),0.)
 
     def prepare():
+        if paired_micro is not None and (paired_micro not in (16, 24) or paired_micro != micro
+                or len(observations) != 144 or original_denominators is None):
+            raise ValueError('Paired micro comparison requires 144 ranked chunks and their original weights')
+        if before_optimizer_step is not None and paired_micro is None:
+            raise ValueError('Pre-step gradient inspection is restricted to the paired comparison')
         if config.jit_gae_mode not in ('trainer_separate', 'fused'):
             raise ValueError('Trainer JIT mode is not enabled')
         _deterministic_module(owner.base_model)
@@ -203,15 +210,14 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
             for start in range(0, len(masks), micro):
                 weights[start:start+micro] = 1. / masks[start:start+micro].sum()
         else:
-            # Original autobatch averages the means of two eight-sample groups
-            # before GAS scales a 16-sample backward. Carry that denominator
-            # with each sample even when its rank and training group change.
+            # After DeepSpeed divides by GAS = 144/micro, the multiplier of
+            # each original eight-sample group must stay 1/18 for every shape.
             denominators = np.asarray(original_denominators)
-            if (micro != 16 or denominators.shape != (len(masks),)
+            if (micro != (paired_micro or 16) or denominators.shape != (len(masks),)
                     or denominators.dtype.kind not in 'iu' or (denominators <= 0).any()
                     or (denominators > 8 * masks.shape[1] * masks.shape[2]).any()):
                 raise ValueError('Invalid original eight-sample token denominator')
-            weights = np.float32(.5) / denominators.astype(np.float32)
+            weights = np.float32(8 / micro) / denominators.astype(np.float32)
         tokens = np.asarray(actions_np, dtype=np.int64)
         if fast and (tokens.min() < 0 or tokens.max() >= old_logits_np.shape[-1]):
             raise ValueError('Action token outside categorical support')
@@ -339,6 +345,9 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
             receipt_tensors.append(torch.stack((advantage,target),dim=1))
             receipt_indices.extend(indices)
             backward_start=time.monotonic();owner.model.backward(loss)
+            if before_optimizer_step is not None and number == last_bundle:
+                # ZeRO-2 exposes reduced GAS partitions here and releases them in step().
+                _checked(before_optimizer_step, device)
             if probe is not None:
                 probe.mark('backward_only_done')
             old_steps,old_skips = int(owner.model.global_steps),int(owner.model.skipped_steps)
@@ -410,11 +419,15 @@ def _run(owner, observations, actions_np, old_logits_np, *, micro_begin, micro_e
         auxiliary_transfer_scope='logical selected actions/logits/masks/weights only; excludes images, context, protocol and copies',
         packed_report_d2h_payload_bytes=int(packed.nbytes),**owner._jit_times,**counters))
     keys=('epoch_losses','epoch_p_losses','epoch_v_losses','epoch_e_losses','epoch_kl_losses','epoch_ent','epoch_kl_divs')
-    return dict(zip(keys,metric_rows.T.tolist()),policy_train_time=elapsed)
+    result = dict(zip(keys,metric_rows.T.tolist()),policy_train_time=elapsed)
+    if paired_micro is not None:
+        result['paired_normalization'] = (mean, scale)
+    return result
 
 
 def run_balanced_trajectory_update(owner, observations, actions, old_logits, denominators, *,
-                                   micro_begin, micro_end, trim, context_timer=None):
+                                   micro_begin, micro_end, trim, context_timer=None,
+                                   paired_micro=None, before_optimizer_step=None):
     """The same trajectory-local optimizer window for formal training and paired timing."""
     from batch_autotune_runtime import begin_training_micro, end_training_micro, finish_training
 
@@ -434,6 +447,9 @@ def run_balanced_trajectory_update(owner, observations, actions, old_logits, den
                              advantage_ema_beta=.9, advantage_scale_floor=.001, policy_sampling='chunks')
     result = run_jit_policy_update(owner, observations, actions, old_logits, micro_begin=begin, micro_end=end,
                                    trim=trim, original_denominators=denominators,
-                                   context_timer=context_timer, config=recipe)
+                                   context_timer=context_timer, config=recipe, paired_micro=paired_micro,
+                                   before_optimizer_step=before_optimizer_step)
+    if paired_micro is not None:
+        result['paired_sampled_peak_used_bytes'] = owner._autobatch_train_meter.sampled_peak_used
     finish_training(owner, result['policy_train_time'])
     return result

@@ -135,6 +135,9 @@ def _validate(owner, arm, shard):
 
 
 def run_arm(owner, arm, shard, *, micro_begin, micro_end, trim):
+    if arm.startswith('shape_'):
+        from paired_shape_trainer import run_shape_arm
+        return run_shape_arm(owner, arm, shard, micro_begin=micro_begin, micro_end=micro_end, trim=trim)
     device = next(owner.model.parameters()).device
     actions, old_logits = _checked(lambda: _validate(owner, arm, shard), device)
     version = int(owner.global_step)

@@ -354,10 +354,13 @@ def main():
     if len(sys.argv)>1 and sys.argv[1] in ('bench-jit','bench-jit-status','bench-episode-sampling','bench-episode-sampling-status',
                                            'bench-trajectory-layout','bench-trajectory-layout-status',
                                            'bench-critical-jit','bench-critical-jit-status',
+                                           'bench-micro-shapes','bench-micro-shapes-status',
                                            'bench-admission-pulse','bench-admission-pulse-status'):
         parser=argparse.ArgumentParser(prog='./run.sh '+sys.argv[1])
         parser.add_argument('--id',dest='label',required=True)
-        parser.set_defaults(real_workers=None, normal_only=False, no_micro_cache_trim=False)
+        parser.set_defaults(real_workers=None, normal_only=False, no_micro_cache_trim=False, check_only=False)
+        if sys.argv[1]=='bench-micro-shapes':
+            parser.add_argument('--check-only',action='store_true',help='CPU 准入及隔离队列校验')
         if sys.argv[1]=='bench-admission-pulse':
             parser.add_argument('--real-workers', type=int, choices=(4,8), default=4,
                                 help='真实环境总数，8 个时每个推理副本接两个环境')
@@ -376,6 +379,7 @@ def main():
                                     sampling=sys.argv[1].startswith('bench-episode-sampling'),
                                     layout=sys.argv[1].startswith('bench-trajectory-layout'),
                                     critical=sys.argv[1].startswith('bench-critical-jit'),
+                                    shapes=sys.argv[1].startswith('bench-micro-shapes'),check_only=opts.check_only,
                                     pulse=sys.argv[1].startswith('bench-admission-pulse'),
                                     real_workers=opts.real_workers, normal_only=opts.normal_only,
                                     no_micro_cache_trim=opts.no_micro_cache_trim),indent=2))
