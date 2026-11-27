@@ -52,6 +52,8 @@ def pipeline_configuration(args, *, real_workers=None, all_spatial_tasks=None):
     if all_spatial_tasks is None:
         all_spatial_tasks = os.environ.get('ACCERL_ALL_SPATIAL_TASKS') == '1'
     if all_spatial_tasks:
+        if values.get('initial_state_count') != 500:
+            values['real_training_action_horizons_by_task'] = [150] + [220] * 9
         values['initial_state_count'] = 500
     workers = real_worker_count() if real_workers is None else real_workers
     values.update(model_free=True, real_workers=workers, max_real_in_flight=workers,

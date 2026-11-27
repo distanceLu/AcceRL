@@ -182,6 +182,20 @@ class TrainingActionHorizonCollectorTests(unittest.TestCase):
 
 
 class TrainingActionHorizonPolicyTests(unittest.TestCase):
+    def test_spatial_late_success_full_timeout_and_early_budget_remain_distinct(self):
+        for steps, success, censored, reason in ((180, True, False, 'success'),
+                (220, False, False, 'task_horizon'), (150, False, True, 'real_env_budget')):
+            with self.subTest(reason=reason):
+                segment, _, owner, bootstraps = fresh_runtime.RealCollectorTests().collect(
+                    steps=steps, success=success, budget_cut=censored, task_horizon=220, model_free=True)
+                self.assertEqual(owner.collection_metadata['termination_reason'], reason)
+                self.assertEqual(owner.counted_episodes, [] if censored else [(steps, float(success))])
+                self.assertEqual(len(bootstraps), int(censored))
+                self.assertEqual(bool(segment.terminated[-1]), not censored)
+                self.assertEqual(bool(segment.truncated[-1]), censored)
+                self.assertEqual(float(segment.rewards[-1]), float(success))
+                self.assertEqual(int(segment.action_mask[:, :, 0].sum()), steps)
+
     def test_failure_150_ends_without_bootstrap_and_masks_last_six_actions(self):
         item, observed, owner, calls = fresh_runtime.RealCollectorTests().collect(
             steps=150, success=False, task_horizon=150)

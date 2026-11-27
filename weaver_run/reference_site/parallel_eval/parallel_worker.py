@@ -424,7 +424,8 @@ def main(argv=None):
     validate_visibility(worker, args.run_token)
     # Reproduce the canonical original plan instead of accepting a rehashed edit.
     canonical = base.make_plan(plan["checkpoints"], initial_state_count=plan["initial_state_count"],
-                               seed=plan["seed"], modes=plan["modes"], repeats=plan["repeats"])
+                               seed=plan["seed"], modes=plan["modes"], repeats=plan["repeats"],
+                               all_spatial_tasks="task_ids" in plan)
     if canonical != plan:
         raise ValueError("Global evaluation plan differs from the unchanged reference protocol")
     def interrupted(number, frame):

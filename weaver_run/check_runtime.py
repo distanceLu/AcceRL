@@ -13,7 +13,7 @@ import torch
 from libero.libero import benchmark
 from rl import actor_critic_model_discrete
 from rl.libero_env import LiberoEnvWrapper
-from initial_state_env import reset_with_initial_state
+from initial_state_env import reset_with_initial_state, set_real_training_action_horizon
 from policy_joint_batch_mode import verify_installed_sources
 from cost_scheduler_runtime import load_settings
 from evaluation_threshold import resolve_online_evaluation
@@ -73,11 +73,20 @@ def main():
     task_ids = list(range(10)) if all_spatial_tasks=='1' else [0]
     if all_spatial_tasks=='1':
         assert benchmark.get_benchmark_dict()['libero_spatial']().n_tasks == len(task_ids)
+        horizons = json.loads(Path(os.environ['ACCERL_PIPELINE_CONFIG']).read_bytes())['real_training_action_horizons_by_task']
+        assert horizons == [150] + [220] * 9
     for task_id in task_ids:
         env=LiberoEnvWrapper(benchmark_name="libero_spatial",task_id=task_id,image_size=224,render_mode="rgb_array")
         try:
             assert len(env.initial_states)==50
-            obs,info=reset_with_initial_state(env,41,1997714015,220)
+            limit = 220
+            if all_spatial_tasks=='1':
+                limit = horizons[task_id]
+                set_real_training_action_horizon(env, limit)
+            obs,info=reset_with_initial_state(env,41,1997714015,limit)
+            if all_spatial_tasks=='1':
+                assert info['task_action_horizon'] == info['budget_action_limit'] == limit
+                assert info['benchmark_action_horizon'] == 220
             if task_id == 0:
                 assert info["initial_state_hash"]=="059790d8e9594cc2ca835e58010a4eb0ce4130ae459511df4162e5dcbc52f7f3"
             assert obs["full_image"].shape==obs["wrist_image"].shape==(224,224,3)

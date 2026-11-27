@@ -70,17 +70,28 @@ class RealCollectionCoordinator:
         for name, minimum in (('max_action_steps', 1), ('reset_steps', 0)):
             if type(pool.get(name)) is not int or pool[name] < minimum:
                 raise ValueError('Initial-state pool has invalid ' + name)
-        horizon = self.pipeline_config.real_training_action_horizon
+        horizons = self.pipeline_config.real_training_action_horizons_by_task
+        horizon = max(horizons) if horizons else self.pipeline_config.real_training_action_horizon
         if horizon is not None and pool['max_action_steps'] != horizon:
             raise ValueError('Real workers must apply the configured training horizon before reporting their pool')
         if self.initial_state_pool is not None and pool != self.initial_state_pool:
             raise ValueError('Real workers loaded different initial-state pools or horizons')
         if self.initial_state_scheduler is None:
+            state_horizons = None
             if pool['count'] == 500:
                 from initial_state_env import spatial_pool_digest
                 if (pool.get('task_suite') != 'libero_spatial' or
                         spatial_pool_digest(pool.get('task_names'), pool.get('task_pools')) != pool['sha256']):
                     raise ValueError('Spatial collection requires its task-indexed initial-state registry')
+                if horizons:
+                    state_horizons = []
+                    for task, deadline in enumerate(horizons):
+                        task_pool = pool['task_pools'][str(task)]
+                        if (task_pool.get('max_action_steps') != deadline
+                                or task_pool.get('benchmark_action_horizon') != 220
+                                or task_pool.get('reset_steps') != pool['reset_steps']):
+                            raise ValueError(f'Spatial task {task} horizon or reset differs from configuration')
+                        state_horizons.extend([deadline] * task_pool['count'])
             # JSON metadata is the only pool material admitted; state arrays stay
             # in each simulator, and the asset digest identifies their contents.
             copied_pool = json.loads(json.dumps(pool, allow_nan=False))
@@ -89,7 +100,8 @@ class RealCollectionCoordinator:
             self.initial_state_scheduler = InitialStateScheduler(
                 state_count=pool['count'], seed=self.pipeline_config.initial_state_seed,
                 max_env_steps=self.pipeline_config.real_env_step_budget,
-                checkpoint_path=checkpoint, state_asset_sha256=pool['sha256'])
+                checkpoint_path=checkpoint, state_asset_sha256=pool['sha256'],
+                action_horizons_by_state=state_horizons)
             self.initial_state_pool = copied_pool
         return self.initial_state_scheduler
 
@@ -109,6 +121,13 @@ class RealCollectionCoordinator:
             raise ValueError('Explicit initial-state allocation requires simulator pool metadata')
         training_pool = deepcopy(pool)
         horizon = self.pipeline_config.real_training_action_horizon
+        horizons = self.pipeline_config.real_training_action_horizons_by_task
+        if horizons:
+            horizon = max(horizons)
+            for task, deadline in enumerate(horizons):
+                task_pool = training_pool['task_pools'][str(task)]
+                task_pool.setdefault('benchmark_action_horizon', task_pool['max_action_steps'])
+                task_pool['max_action_steps'] = deadline
         if horizon is not None:
             benchmark_horizon = training_pool.get('benchmark_action_horizon',
                                                  training_pool.get('max_action_steps'))
@@ -210,6 +229,16 @@ class RealCollectionCoordinator:
                         or metadata['task_initial_state_id'] != local):
                     raise ValueError('Collected task or local initial state does not match its global lease')
                 task_metadata = dict(task_suite='libero_spatial', task_id=task, task_initial_state_id=local)
+                if self.pipeline_config.real_training_action_horizons_by_task is not None:
+                    horizon = self.pipeline_config.real_training_action_horizons_by_task[task]
+                    limit = assigned['max_action_steps']
+                    if metadata.get('task_action_horizon') != horizon or metadata.get('budget_action_limit') != limit:
+                        raise ValueError('Collected horizon or budget limit does not match its Spatial assignment')
+                    if reason in ('real_env_budget', 'task_horizon') and (
+                            metadata['action_steps'] != limit or metadata['success']
+                            or (reason == 'real_env_budget') != (limit < horizon)):
+                        raise ValueError('Termination reason disagrees with the Spatial horizon and budget')
+                    task_metadata.update(task_action_horizon=horizon, budget_action_limit=limit)
             # Whitelist the same small completion evidence as EpisodeReplayMixin.
             # The scheduler validates measured consumption before any lease is freed.
             self.initial_state_scheduler.finish(assigned['token'],

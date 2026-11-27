@@ -171,6 +171,27 @@ class FrozenPolicyEvalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize(plan, rows)
 
+    def test_spatial_suite_reports_first_success_at_both_horizons_from_one_trajectory(self):
+        plan = make_plan(checkpoints(), modes=["greedy"], all_spatial_tasks=True)
+        # Task 0, then task 1. A failed 220-step episode must not count at either horizon.
+        rows = [dict(result(plan, "final", i, success=success), steps=steps)
+                for i, steps, success in ((0, 150, True), (1, 151, True), (2, 220, False),
+                                          (50, 150, True), (51, 220, True), (52, 220, False))]
+        summary = summarize(plan, rows)
+        self.assertEqual(plan["horizon_action_steps"], 220)
+        for group, expected in (
+            (summary["groups"]["final:greedy"], (6, 4, 2, 2, 3)),
+            (summary["per_task"]["0"]["groups"]["final:greedy"], (3, 2, 1, 1, 1)),
+            (summary["per_task"]["1"]["groups"]["final:greedy"], (3, 2, 1, 1, 2)),
+            (summary["groups"]["baseline:greedy"], (0, 0, 0, 0, 0)),
+        ):
+            self.assertEqual(tuple(group.get(key) for key in (
+                "episodes", "successes", "successes_by_150_actions", "first_successes_151_to_220",
+                "successes_at_task0_150_others_220")), expected)
+        legacy_plan = make_plan(checkpoints(), modes=["greedy"])
+        legacy_group = summarize(legacy_plan, [result(legacy_plan)])["groups"]["baseline:greedy"]
+        self.assertNotIn("successes_at_task0_150_others_220", legacy_group)
+
     def test_complete_requires_every_expected_record_and_no_errors(self):
         plan = make_plan(checkpoints())
         rows = [result(plan, name, i, success=i % 2 == 0)

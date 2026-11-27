@@ -1298,7 +1298,8 @@ class RolloutWorkerActor(BaseWorkerActor):
                     from rl.libero_env import LiberoEnvWrapper
                     suite = benchmark.get_benchmark_dict()[benchmark_name]()
                     create_env = partial(LiberoEnvWrapper, benchmark_name, image_size=224, render_mode='rgb_array')
-                    self.spatial_tasks = SpatialTrainingEnvs(self.envs.pop(), suite, create_env)
+                    self.spatial_tasks = SpatialTrainingEnvs(self.envs.pop(), suite, create_env,
+                        pipeline.real_training_action_horizons_by_task)
                     self.num_tasks = suite.n_tasks
                     self.initial_state_pool = self.spatial_tasks.pool
                 else:

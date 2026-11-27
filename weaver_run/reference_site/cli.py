@@ -140,6 +140,9 @@ def make_spec(profile, label, root, stage, checkout=RUNTIME, *, model_free=False
                 training_horizon_failure_bootstrap=False,
                 stop_policy="explicit_user_stop_or_existing_budget_or_fault_guard",
                 git_branch=BRANCH,git_commit=commit,job=job)
+    if all_spatial_tasks:
+        record.update(task_action_horizon=None, real_training_action_horizon=None,
+                      real_training_action_horizons_by_task=pipeline['real_training_action_horizons_by_task'])
     if model_free:
         from engine.model_free_success import TARGET_SUCCESSES, WINDOW_SIZE
         record.update(stop_policy="real_rollout_success_or_budget_or_explicit_stop_or_fault",

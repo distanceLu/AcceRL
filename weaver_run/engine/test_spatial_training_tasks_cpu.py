@@ -54,6 +54,51 @@ class Env:
 
 
 class AllSpatialTests(unittest.TestCase):
+    def test_per_task_horizons_follow_shuffled_state_and_refund_only_unused_steps(self):
+        from initial_state_env import SpatialTrainingEnvs
+        from initial_state_scheduler import CheckpointMismatchError, InitialStateScheduler
+        suite = Suite()
+        first = Env(0, suite)
+        set_real_training_action_horizon(first, 150)
+        horizons = [150] + [220] * 9
+        scenes = SpatialTrainingEnvs(first, suite, lambda task: Env(task, suite), horizons)
+        cfg = PipelineBudgetConfig(model_free=True, imagination_workers=0, max_imagine_in_flight=0,
+            initial_state_enabled=True, initial_state_count=500, real_env_step_budget=500,
+            real_training_action_horizon=150, real_training_action_horizons_by_task=horizons)
+        with patch.dict(os.environ, {}, clear=True):
+            owner = RealCollectionCoordinator(cfg)
+            self.assertEqual(scenes.pool['max_action_steps'], 220)
+            self.assertEqual([scenes.pool['task_pools'][str(t)]['max_action_steps'] for t in range(10)], horizons)
+            wrong = dict(scenes.pool, task_pools=dict(scenes.pool['task_pools']))
+            wrong['task_pools']['7'] = dict(wrong['task_pools']['7'], max_action_steps=150)
+            with self.assertRaisesRegex(ValueError, 'horizon'):
+                owner.acquire_real('bad', wrong)
+            a, b = (owner.acquire_real(worker, scenes.pool) for worker in ('a', 'b'))
+            self.assertEqual(owner.acquire_real('a', scenes.pool), a)
+            self.assertEqual((a['initial_state']['initial_state_id'], b['initial_state']['initial_state_id']), (373, 10))
+            self.assertEqual([x['initial_state']['reserved_env_steps'] for x in (a,b)], [230, 160])
+            _, success = scenes.reset(a['initial_state'])
+            self.assertEqual((success['task_action_horizon'], scenes.env.max_episode_steps), (220, 220))
+            owner.finish_real_episode(a['token'], dict(episode_id='late-success',
+                metadata=dict(success, action_steps=180, success=True, termination_reason='success')))
+            c = owner.acquire_real('c', scenes.pool)
+            _, short = scenes.reset(c['initial_state'])
+            self.assertEqual((short['task_id'], short['task_action_horizon'], short['budget_action_limit']), (5, 220, 140))
+            owner.finish_real_episode(c['token'],dict(episode_id='budget-cut',
+                metadata=dict(short, action_steps=140, success=False, termination_reason='real_env_budget')))
+            _, ordinary = scenes.reset(b['initial_state'])
+            self.assertEqual((ordinary['task_id'], ordinary['task_action_horizon'], ordinary['budget_action_limit']), (0,150,150))
+            owner.finish_real_episode(b['token'],dict(episode_id='task-zero-timeout',
+                metadata=dict(ordinary, action_steps=150, success=False, termination_reason='task_horizon')))
+            journal = owner.initial_state_checkpoint()['scheduler']
+            self.assertEqual(journal['counters']['consumed_env_steps'], 500)
+            self.assertEqual(journal['terminal'][c['initial_state']['token']]['metadata']['task_action_horizon'], 220)
+            self.assertTrue(owner.acquire_real('d', scenes.pool)['budget_exhausted'])
+            restored = InitialStateScheduler.from_snapshot(journal)
+            self.assertEqual(restored.status()['consumed_env_steps'], 500)
+            with self.assertRaises(CheckpointMismatchError):
+                InitialStateScheduler.from_snapshot(journal, action_horizons_by_state=[150] * 500)
+
     def test_cpu_telemetry_follows_real_scene_across_switches(self):
         from capture_hooks import _patch_envs
         from initial_state_env import SpatialTrainingEnvs

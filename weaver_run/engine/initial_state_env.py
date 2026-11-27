@@ -110,7 +110,7 @@ def spatial_pool_digest(names, tasks):
 class SpatialTrainingEnvs:
     """Resolve a globally leased Spatial state, keeping one EGL scene per worker."""
 
-    def __init__(self, first_env, suite, create_env):
+    def __init__(self, first_env, suite, create_env, horizons_by_task=None):
         if first_env.benchmark_name != 'libero_spatial' or first_env.task_id != 0 or suite.n_tasks != 10:
             raise ValueError('Expected all ten LIBERO-Spatial tasks in suite order')
         self.env = first_env
@@ -118,15 +118,22 @@ class SpatialTrainingEnvs:
         self._on_scene_open = None
         first_pool = initial_state_pool_metadata(first_env)
         limits = {k: first_pool[k] for k in ('reset_steps', 'max_action_steps', 'benchmark_action_horizon')}
+        if horizons_by_task is None:
+            horizons_by_task = [first_pool['max_action_steps']] * suite.n_tasks
+        if (len(horizons_by_task) != suite.n_tasks or any(type(h) is not int or
+                not 0 < h <= first_pool['benchmark_action_horizon'] for h in horizons_by_task)):
+            raise ValueError('Expected one valid action horizon per Spatial task')
         tasks = {}
         names = []
         for task in range(10):
             content = _pool_content(suite.get_task_init_states(task))
             tasks[str(task)] = dict(content, **limits)
+            tasks[str(task)]['max_action_steps'] = horizons_by_task[task]
             names.append(suite.get_task(task).name)
         if tasks['0'] != first_pool or first_env.task.name != names[0]:
             raise ValueError('Simulator task or pool differs from the LIBERO-Spatial registry')
         digest = spatial_pool_digest(names, tasks)
+        limits['max_action_steps'] = max(horizons_by_task)
         self.pool = dict(count=500, sha256=digest, task_suite='libero_spatial', task_names=names,
                          task_pools=tasks, hash_semantics='ordered_suite_task_name_and_pool_sha256', **limits)
 
@@ -142,7 +149,7 @@ class SpatialTrainingEnvs:
             self.env.close()
             env = self.create_env(task)
             try:
-                set_real_training_action_horizon(env, self.pool['max_action_steps'])
+                set_real_training_action_horizon(env, self.pool['task_pools'][str(task)]['max_action_steps'])
                 if (env.benchmark_name != self.pool['task_suite'] or env.task_id != task
                         or env.task.name != self.pool['task_names'][task]
                         or initial_state_pool_metadata(env) != self.pool['task_pools'][str(task)]):

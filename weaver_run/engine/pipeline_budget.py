@@ -73,6 +73,7 @@ class PipelineBudgetConfig:
     inventory_refill_enabled: bool = False
     seed_reserve_per_bucket: int = 0
     model_free: bool = False
+    real_training_action_horizons_by_task: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if type(self.model_free) is not bool:
@@ -102,6 +103,17 @@ class PipelineBudgetConfig:
             _positive_int("real_training_action_horizon", self.real_training_action_horizon)
             if not self.initial_state_enabled:
                 raise ValueError("real_training_action_horizon requires initial_state_enabled")
+        horizons = self.real_training_action_horizons_by_task
+        if horizons is not None:
+            if not (self.model_free and self.initial_state_enabled and self.initial_state_count == 500):
+                raise ValueError('Per-task horizons require ten-task Spatial model-free collection')
+            if (not isinstance(horizons, (tuple, list)) or len(horizons) != 10
+                    or any(type(h) is not int or not 1 <= h <= 220 for h in horizons)
+                    or horizons[0] != self.real_training_action_horizon):
+                raise ValueError('Expected ten Spatial action horizons within 220, starting with the Task 0 horizon')
+            if max(horizons) + 1 > self.max_episode_frames:
+                raise ValueError('Episode frame budget is smaller than the longest task horizon')
+            object.__setattr__(self, 'real_training_action_horizons_by_task', tuple(horizons))
         _nonnegative_int("policy_low_watermark", self.policy_low_watermark)
         if self.policy_low_watermark >= self.policy_high_watermark:
             raise ValueError("policy_low_watermark must be below policy_high_watermark")
@@ -127,7 +139,12 @@ class PipelineBudgetConfig:
         return self.policy_high_watermark
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        if self.real_training_action_horizons_by_task is not None:
+            result['real_training_action_horizons_by_task'] = list(self.real_training_action_horizons_by_task)
+        else:
+            result.pop('real_training_action_horizons_by_task')
+        return result
 
     @classmethod
     def from_json(cls, source: str | Path | dict[str, Any] | None) -> "PipelineBudgetConfig":

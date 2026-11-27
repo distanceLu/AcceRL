@@ -110,6 +110,24 @@ class ParallelWorkerTests(unittest.TestCase):
     def worker_dir(self, index=0):
         return self.root / "workers" / ("worker_" + str(index))
 
+    def test_worker_cli_reads_ten_task_plan_and_finishes_its_500_paired_episodes(self):
+        plan = BASE.make_plan(self.plan["checkpoints"], all_spatial_tasks=True)
+        shards = make_shards(plan)
+        BASE.atomic_json(self.root / "plan.json", plan)
+        BASE.atomic_json(self.root / "shards.json", shards)
+        runtime = FakeRuntime()
+        with patch.object(worker_module, "Runtime", return_value=runtime), patch.object(worker_module.signal, "signal"):
+            exit_code = worker_module.main([
+                "--source", str(SOURCE), "--plan", str(self.root / "plan.json"),
+                "--shards", str(self.root / "shards.json"), "--worker-index", "0",
+                "--output-root", str(self.root), "--deadline-unix", str(time.time() + 3600),
+                "--run-token", TOKEN])
+        self.assertEqual(exit_code, 0)
+        completion = json.loads((self.worker_dir() / "completed.json").read_text(encoding="utf-8"))
+        self.assertEqual(completion["completed_episode_records"], 500)
+        self.assertEqual(completion["global_expected_episode_records"], 2000)
+        self.assertEqual({case["task_id"] for _, case in runtime.calls}, set(range(10)))
+
     def ledger(self, index=0):
         return read_worker_rows(BASE, self.worker_dir(index) / "episodes.jsonl", self.plan,
                                 self.shards, index, TOKEN)

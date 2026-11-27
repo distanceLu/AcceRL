@@ -481,6 +481,10 @@ class ModelFreeLaunchTests(unittest.TestCase):
                         record = site.make_spec('restore','multi',root,root,checkout=HERE.parent,**options)
                     self.assertTrue(record['all_spatial_tasks'])
                     self.assertEqual(record['pipeline']['initial_state_count'],500)
+                    self.assertEqual(record['real_training_action_horizons_by_task'], [150] + [220] * 9)
+                    self.assertEqual(record['pipeline']['real_training_action_horizons_by_task'],
+                                     record['real_training_action_horizons_by_task'])
+                    self.assertIsNone(record['task_action_horizon'])
                     self.assertIn('--all-spatial-tasks',record['job']['argv'])
                     args = types.SimpleNamespace(source=HERE/'engine',root=root,**options)
                     kwargs = training.mode_kwargs(args)

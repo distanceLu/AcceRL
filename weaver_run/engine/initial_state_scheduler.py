@@ -75,7 +75,8 @@ class InitialStateScheduler:
 
     def __init__(self, state_count: int = 50, seed: int = 20261026,
                  max_env_steps: int = 11000, checkpoint_path: str | Path | None = None,
-                 state_asset_sha256: str | None = None, *, snapshot: dict | None = None):
+                 state_asset_sha256: str | None = None, *, snapshot: dict | None = None,
+                 action_horizons_by_state: list[int] | None = None):
         _integer("state_count", state_count, 1)
         _integer("seed", seed)
         _integer("max_env_steps", max_env_steps, 1)
@@ -85,6 +86,11 @@ class InitialStateScheduler:
                 raise ValueError("state_asset_sha256 must be a lowercase SHA256 hex digest")
         self.config = dict(state_count=state_count, seed=seed, max_env_steps=max_env_steps,
                            state_asset_sha256=state_asset_sha256)
+        if action_horizons_by_state is not None:
+            if (len(action_horizons_by_state) != state_count or
+                    any(type(h) is not int or h < 1 for h in action_horizons_by_state)):
+                raise ValueError('Each initial state requires one positive action horizon')
+            self.config['action_horizons_by_state'] = list(action_horizons_by_state)
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
         self._rng = random.Random(seed)
         env_seed_material = hashlib.sha256(f"initial-state-env-seed:{seed}".encode()).digest()
@@ -208,6 +214,9 @@ class InitialStateScheduler:
         if state_id >= self.config["state_count"]:
             raise ValueError("initial_state_id outside state pool")
         _integer("max_action_steps", lease["max_action_steps"], 1)
+        horizons = self.config.get('action_horizons_by_state')
+        if horizons is not None and lease['max_action_steps'] > horizons[state_id]:
+            raise ValueError('Lease exceeds its assigned state action horizon')
         _integer("reset_steps", lease["reset_steps"])
         _integer("env_seed", lease["env_seed"])
         if lease["reserved_env_steps"] != lease["max_action_steps"] + lease["reset_steps"]:
@@ -253,10 +262,14 @@ class InitialStateScheduler:
             self._cursor = 0
             self._permutation = list(range(self.config["state_count"]))
             self._rng.shuffle(self._permutation)
+        state_id = self._permutation[self._cursor]
+        horizons = self.config.get('action_horizons_by_state')
+        if horizons is not None:
+            action_limit = min(action_limit, horizons[state_id])
         ordinal = len(self._allocations) + 1
         token = f"initial-state:{ordinal:012d}"
         lease = dict(token=token, allocation_id=ordinal, worker_id=worker_id,
-                     initial_state_id=self._permutation[self._cursor],
+                     initial_state_id=state_id,
                      env_seed=self._env_rng.randrange(0, 2**31),
                      max_action_steps=action_limit, reset_steps=reset_steps,
                      reserved_env_steps=action_limit + reset_steps,

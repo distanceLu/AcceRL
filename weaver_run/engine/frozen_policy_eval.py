@@ -282,6 +282,15 @@ def _episode_metrics(plan, rows, expected_per_mode, multi_task_group=False):
                 "mean_steps": sum(row["steps"] for row in selected) / n if n else None,
                 "mean_return": sum(row["episode_return"] for row in selected) / n if n else None,
             }
+            if "task_ids" in plan:
+                # The simulator ends at first success. Score the same frozen trajectories
+                # at the shorter cutoff without changing the paired 220-action benchmark.
+                late = [row for row in selected if row["success"] and row["steps"] > 150]
+                group.update(
+                    successes_by_150_actions=group["successes"] - len(late),
+                    first_successes_151_to_220=len(late),
+                    successes_at_task0_150_others_220=group["successes"] - sum(r["task_id"] == 0 for r in late),
+                )
             if not multi_task_group:
                 group.update(initial_state_ids=covered, missing_initial_state_ids=sorted(set(range(50)) - set(covered)))
             groups[checkpoint["name"] + ":" + mode] = group
